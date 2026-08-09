@@ -392,7 +392,7 @@ fn object_basic() {
             assert_eq!(obj.properties.len(), 2);
             match &obj.properties[0] {
                 ObjectMember::Property(p) => {
-                    assert_eq!(p.name, "name");
+                    assert_eq!(p.string_name().expect("string-key fixture"), "name");
                     assert_eq!(p.ty, TypeExpr::Primitive(PrimitiveName::String));
                     assert!(!p.optional);
                 }
@@ -400,7 +400,7 @@ fn object_basic() {
             }
             match &obj.properties[1] {
                 ObjectMember::Property(p) => {
-                    assert_eq!(p.name, "age");
+                    assert_eq!(p.string_name().expect("string-key fixture"), "age");
                     assert_eq!(p.ty, TypeExpr::Primitive(PrimitiveName::Number));
                     assert!(!p.optional);
                 }
@@ -419,7 +419,7 @@ fn object_optional_property() {
             assert_eq!(obj.properties.len(), 1);
             match &obj.properties[0] {
                 ObjectMember::Property(p) => {
-                    assert_eq!(p.name, "name");
+                    assert_eq!(p.string_name().expect("string-key fixture"), "name");
                     assert!(p.optional);
                 }
                 _ => panic!("expected property"),
@@ -437,7 +437,7 @@ fn object_readonly_property() {
             assert_eq!(obj.properties.len(), 1);
             match &obj.properties[0] {
                 ObjectMember::Property(p) => {
-                    assert_eq!(p.name, "id");
+                    assert_eq!(p.string_name().expect("string-key fixture"), "id");
                     assert!(p.readonly);
                 }
                 _ => panic!("expected property"),
@@ -474,7 +474,7 @@ fn object_method_signature() {
             assert_eq!(obj.properties.len(), 1);
             match &obj.properties[0] {
                 ObjectMember::Method(m) => {
-                    assert_eq!(m.name, "greet");
+                    assert_eq!(m.string_name().expect("string-key fixture"), "greet");
                     assert_eq!(m.function.parameters.len(), 1);
                     assert_eq!(
                         m.function.parameters[0].ty,

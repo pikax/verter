@@ -27,6 +27,7 @@ use verter_semantic::analysis::type_expand::{
 /// | `PathologicalInput`         | `BudgetExceeded`           |
 /// | `UnionArmEmpty`             | `EmptyUnionArm`            |
 /// | `UnresolvedSurfaceArm`      | `UnresolvedReference`      |
+/// | `OpenSpreadProgram`         | `IndeterminateConditional` |
 ///
 /// Variant payload data (node ids, declaration identities, error
 /// details) is preserved through `ExpansionDiagnostic.context` —
@@ -87,6 +88,11 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
         } => ExpansionDiagnostic {
             reason: ExpansionStopReason::EmptyUnionArm,
             context: format!("union-arm-empty@{:?}#{}", union_node, arm_index),
+            property_name: None,
+        },
+        ShallowDiagnostic::OpenSpreadProgram { node } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::IndeterminateConditional,
+            context: format!("open-spread-program@{:?}", node),
             property_name: None,
         },
         ShallowDiagnostic::UnresolvedSurfaceArm {

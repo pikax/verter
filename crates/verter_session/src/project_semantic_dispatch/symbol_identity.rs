@@ -663,6 +663,12 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::RaiseMiss => {
             PropCallableRoleUnresolvedReason::MissingDependency
         }
+        // Non-fault surface signals: like `Miss`, an open surface or an
+        // unmodeled flow position is a well-formed "no resolved role", not
+        // a request fault.
+        QueryError::OpenSurface | QueryError::UnmodeledPosition => {
+            PropCallableRoleUnresolvedReason::MissingDependency
+        }
         QueryError::BudgetExceeded(_) => PropCallableRoleUnresolvedReason::BudgetExceeded,
         QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
@@ -748,7 +754,7 @@ mod tests {
         let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
         let dispatch = ProjectSemanticDispatch::new(&host);
         let raw = dispatch.graph().intern_node(SemanticNodeData::RawFallback {
-            raw: Arc::from("unsupported"),
+            value: verter_type_expr::UnknownValue::wire_opaque("unsupported"),
         });
         assert_eq!(
             dispatch.demand_symbol_identity(raw, &[expected()]),

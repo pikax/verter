@@ -185,8 +185,8 @@ warm-read validator decides how strictly that self-root is checked:
   self-root strictly via `validate_fact_signature_with_self_roots` /
   `ReadSetSignature::validate_with_self_roots`. `get_unvalidated` has no
   production warm-read caller (test/debug only).
-- The **structural carriers** — `materialize_structure_db` and `ref_cycle_db`
-  — validate their self-root **strictly**. Each entry carries an explicit
+- The **structural carrier** — `materialize_structure_db`
+  — validates its self-root **strictly**. Each entry carries an explicit
   `self_root_canonicals` set checked via `ReadSetSignature::validate_with_self_roots`
   on every warm read AND post-compute revalidation. `MaterializeStructureDb`
   self-roots on the materialise SUBJECT's declaration-origin file
@@ -206,20 +206,29 @@ warm-read validator decides how strictly that self-root is checked:
   whose base origin is `Global` (or a route-shaped subject whose extracted
   root has no authoritative content hash) seeds no strict self-root —
   validity then rides on the traced read-set alone; a root-less anonymous
-  subject keys no DB slot (uncached). `RefCycleResultDb` roots the BFS root file plus every visited
-  declaration's file (recorded value-side in `self_root_canonicals`, NOT in the
-  content-free `RefCycleResultKey`). The provenance-pure
-  producers `materialize_structure_read_set` / `ref_cycle_read_set` lead the
-  carrier with one observed-hash `FileWholeHash` per self-root and merge the
+  subject keys no DB slot (uncached). The provenance-pure
+  producer `materialize_structure_read_set` leads the
+  carrier with one observed-hash `FileWholeHash` per self-root and merges the
   traced fact set on top; a fence `RouteGeneration` dependency, or a fence
   `WholeHash` that conflicts with an observed self-root, routes the value
   through `ComputeAdmission::ReturnOnly` (valid result, no shared admission).
-  `RefCycleResultDb` has no generation-equal fast return — every `peek`
-  validates strictly. Its cold path is the transitive-cycle BFS for
-  parameterized generic helpers (`ref_root_reaches_transitive_cycle_node`),
-  gated by `ComputeAdmission` cooperative admission: an overflowed/unrootable
-  signature returns the computed bool through `ComputeAdmission::ReturnOnly`
-  WITHOUT admitting and WITHOUT a second uncached BFS. The BFS dispatches
+  The **materialization cycle gate** — the retired `RefCycleResultDb`'s
+  replacement — is the sealed `ClassifyMaterializationCycleGate`
+  semantic-query family (`project_semantic_dispatch::cycle_gate`), NOT a
+  standalone DB: its producer runs the same ordered bounded walk (FIFO
+  queue, 64-dequeue bound, first-visit-wins signal, empty-args
+  `StructuralTransit`/`Skeleton` `Instantiate` per hop, cycle recognition
+  only `child == root || child == current`) and records EVERY visited
+  non-builtin declaration (root included) as an observed self-root, so the
+  generic finalizer's strict self-root validation covers exactly the files
+  the old DB's `self_root_canonicals` covered. Only the `Decided` outcome
+  admits; a `LegacyFallback` (hop-limit / nested incomplete observation /
+  missing graph data / scanner or root-collector limit / cancellation /
+  unstable generation) always suppresses admission and is partial for
+  every reason except `HopLimit`. The family carries the live-generation
+  gate (`family_requires_live_generation_gate`), closing the
+  bare-generation-bump hole the old DB closed with
+  `validated_at_generation`.
   `Instantiate { base, args: [], context: InstantiateContext {
   projection_reduction, resolve_env_hash } }` with
   `context.projection_reduction.mode = ProjectionMode::Skeleton`
@@ -295,14 +304,14 @@ reintroduced host-side route memo.
   `MemberDisplayFactStore`, `ModuleAugmentationIndex`. Keys include
   `content_hash` or a derived parse-stable hash.
 - **Query-identity caches** — `RouteDb`, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `SemanticGraphStore` query nodes, `ComponentMetaResultDb`.
+  `SemanticGraphStore` query nodes, `ComponentMetaResultDb`.
   Keys exclude version hashes; concurrent variants coexist as candidates inside
   one slot.
 
 Version rooting for query-identity caches lives **inside the cached value**,
 never in the key. The rail per layer:
 
-- The structural carriers (`MaterializeStructureDb`, `RefCycleResultDb`), the
+- The structural carrier (`MaterializeStructureDb`), the
   `SemanticGraphStore` family memo (`Instantiate` / `ResolveMacroPayload` query
   nodes), and `ShapeCacheDb` root via the candidate's `ReadSetSignature.facts` +
   `self_root_canonicals` + `validated_at_generation`, with the live whole-hash
@@ -371,13 +380,21 @@ the live host env); test fixtures use the env-agnostic
 empty global, `<synthetic>`) do NOT fabricate a `FileWholeHash` self-root —
 they root via `args` nodes only. A real-file base whose `ensure_indexed_ready_serve`
 returns `None` is a stale key and returns `cache_suppress = true`. Each
-`(family, slot)` in `FamilySlots` holds a candidate list capped at
-`FAMILY_SLOT_CANDIDATE_CAP = 4` (per-slot multi-candidate); two
+`(family, slot)` in `FamilySlots` holds a candidate list bounded at the family's
+exhaustive, wildcard-free `candidate_cap()` (`U3.ADAPTIVE_FAMILY_RETENTION` —
+floor 4; the inference/substitution-heavy live families `Instantiate` / `TypeOf` /
+`Conditional` / `MappedType` hold 8); two
 content-versions of the same content-free key coexist as distinct candidates
 inside one slot under R20 overlay isolation. Admission identity is the pair
 `(validated_at_generation, ReadSetSignature.facts)` — same exact discriminant
-replaces in place; a different view appends at the back; cap overflow
-FIFO-evicts the oldest. Warm lookup scans every candidate and returns the FIRST
+replaces in place and becomes freshest; a different view is ALWAYS admitted after
+local eviction: at the family cap the publish evicts a candidate INVALID against
+the publishing caller's stable store view FIRST (planned snapshot/validate/
+reacquire OUTSIDE the `entries` mutex, `admission_seq` identity recheck under it),
+then the front of the slot's LRU order (the least-recently validated-hit
+candidate). The process-wide candidate-memory ceiling + typed non-admission are
+deferred full-`U3.CACHE_FACT_MODEL` work — cacheability never depends on memory
+pressure. Warm lookup scans every candidate and returns the FIRST
 that passes BOTH §3.4 gates (below); `validated_at_generation` is LRU-recency
 metadata, NOT a semantic-validity oracle.
 
@@ -601,10 +618,11 @@ slots — the version state lives on each candidate's value-side carrier (per R6
 NOT in the key, so successive content edits co-locate as candidates in ONE slot
 rather than minting fresh top-level keys. The bounded caches:
 `ComponentMetaResultDb` (owner whole-hash candidate discriminant),
-`RefCycleResultDb` (content-free `RefCycleResultKey`; per-version state on the
-value's `self_root_canonicals`), `MaterializeStructureDb` (content-free
+`MaterializeStructureDb` (content-free
 `MaterializationCacheKey`; per-version state on the value's `self_root_canonicals`),
-the `SemanticGraphStore` family memo + relation memo + named-type index
+the `SemanticGraphStore` family memo (which also carries the relation memo's
+entries under its `Relate` family — the retired dedicated `BudgetedRelationMemo`
+folded into the family substrate) + named-type index
 (`ResolvedDeclSlotIdentity` slots; per-version state on the value) + the
 `SemanticGraphStore` derivation/origin store (`DerivationStore` — `edges` keyed by
 `(SemanticNodeId, OriginEdgeKind)`, plus its `signature_pool` fence interner;
@@ -618,13 +636,26 @@ these is retired). Two cooperating pieces, tuned per cache:
 - `GlobalRetentionBudget<K>` — a FIFO insertion-ordered total-size cap. A cache
   records each admitted entry's key from its write-side `post_publish` hook;
   the budget returns the oldest keys to evict once the count exceeds the cap.
-  `MaterializeStructureDb` and `RefCycleResultDb` cap at `MAX_ENTRIES` (2048);
+  `MaterializeStructureDb` caps at `MAX_ENTRIES` (2048);
   the `SemanticGraphStore` family / relation / named-type budgets use
   `DEFAULT_BUDGET_CAP` (4096); the `DerivationStore` bounds its edge-bucket
   count (`DERIVATION_EDGE_BUCKET_CAP` = 4096) and its signature-interning pool
   (`DERIVATION_SIGNATURE_POOL_CAP` = 4096) with two such budgets, evicted
   write-side from `record` / `intern_signature`. The cache's invalidation paths
   call `forget` so the ledger stays consistent with the map.
+  **Group admission with self-exemption** (`record_admissions_exempt`) is the
+  second entry: a publisher writing a set of entries that is only coherent
+  WHOLE — the batched SCC member publish, whose members are readable only while
+  their fenced root stays resident — records the entire set as ONE budget step
+  whose victim selection exempts every key the set needs. Per-entry admission
+  cannot see that constraint: under cap pressure entry *n*'s FIFO victim can be
+  the publisher's own root or an entry `0..n` it already wrote, leaving a
+  torn SUFFIX whose surviving members depend on iteration ORDER. The exemption
+  obliges the caller to REFUSE a group wider than the cap (an exemption set
+  larger than `cap` would pin the ledger above its bound); the store-side entry
+  is `SemanticGraphStore::record_family_admissions_locked`
+  (`semantic_query_memo/family_retention.rs`), and the SCC publish's whole-batch
+  refusal lives in `scc_publish.rs`.
 - `BoundedCandidateMap<K, D, V>` — a content-free-keyed slot map with a bounded
   per-slot candidate list (`DEFAULT_CANDIDATE_CAP` = 4) AND a global budget.
   `ComponentMetaResultDb` is built on it: the slot key drops `owner_whole_hash`,
@@ -653,13 +684,16 @@ continuously-held slot `Mutex` critical section (the `retention_gate` is only a
 reset fence — a shared read guard does not serialise two admits of the same
 content-free slot); global-budget victim eviction runs after that slot lock is
 released (lock order `retention_gate.read → DashMap shard/slot → slot Mutex →
-budget Mutex`, victim slot lock last — no AB-BA). The `SemanticGraphStore`
-relation memo / named-type index (`BudgetedRelationMemo` /
-`BudgetedNamedTypeIndex`) each hold a per-wrapper `admission_lock` across the
-`DashMap::entry` decision + `record_admission` + victim `remove_if` (and, for
-the named-type index, across `retain_for_canonical`'s map removal + `forget_seq`
-loop), making their single-write-domain structural rather than
-"safe-by-construction". The `MaterializeStructureDb` / `RefCycleResultDb`
+budget Mutex`, victim slot lock last — no AB-BA). The named-type index
+(`BudgetedNamedTypeIndex`) holds a per-wrapper `admission_lock` across the
+`DashMap::entry` decision + `record_admission` + victim `remove_if` (and
+across `retain_for_canonical`'s map removal + `forget_seq`
+loop), making its single-write-domain structural rather than
+"safe-by-construction". (The `SemanticGraphStore` relation memo rode the
+same pattern as the retired `BudgetedRelationMemo`; it is now rehomed into
+the family memo's `Relate` family, whose write domain is the single global
+`entries` lock — see `semantic_query_memo/mod.rs`.) The
+`MaterializeStructureDb`'s
 cooperative publish holds the `publish_fence` (the Db's `retention_gate`)
 across `entries.insert` + `post_publish`, and `post_publish` does
 `bump_live_counter` + `record_admission` together — so the map insert, the
@@ -701,7 +735,7 @@ overwrite ever occurs and there is no publisher-vs-publisher to serialize. It
 therefore publishes through `publish_entry_insert_then_post_publish`:
 `map.insert` takes, mutates, and RELEASES the shard guard, then `post_publish`
 runs with NO shard guard held. This is REQUIRED, not merely permitted: the two
-budgeted unified consumers (`MaterializeStructureDb`, `RefCycleResultDb`) run a
+budgeted unified consumers (`MaterializeStructureDb`) run a
 FIFO `register_post_publish` → `evict_budget_victim` →
 `entries.remove_if(victim)` re-entry on the SAME map from inside `post_publish`.
 Were the unified path to hold the shard write guard across `post_publish` (the
@@ -722,8 +756,9 @@ publication completes under a 5s watchdog — it hangs against the linearized
 shape).
 
 `SemanticGraphStore::invalidate_all` (the project-generation bump) clears EVERY
-`SemanticNodeId`-keyed semantic cache on the store — the family memo, the
-in-flight admission table, the relation memo, the named-type index, the
+`SemanticNodeId`-keyed semantic cache on the store — the family memo (whose
+clear also drops the relation memo's `Relate`-family entries), the
+in-flight admission table, the named-type index, the
 `DerivationStore` (edges + signature pool), and the Γ.B reverse index — so no
 stale judgement survives a tsconfig / SDK / workspace-folder change. Each
 cleared `SemanticNodeId`-keyed cache has its retention ledger cleared in
@@ -919,8 +954,9 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    `ReturnOnly`-prone only when it is INPUT-DEGRADED — a §18.4 property routed
    through `admit_decision` once taint producers land (see the `TODO(§18.4)` in
    `absorbed_output`). `error` relates **bidirectionally like `any`** in
-   `relate_nodes` (so a broken sub-result never cascades spurious
-   `NotAssignable`). `QueryError::DeclPlaceholder` is an expandable carrier, NOT
+   the relation authority (`execute_relate` — the wildcard fires in both the
+   O(tag) prefilter and the structural reducer, before the `never` bottom arm,
+   so a broken sub-result never cascades spurious `NotAssignable`). `QueryError::DeclPlaceholder` is an expandable carrier, NOT
    the error type, and is excluded from both the absorption and the relation
    flip.
 
@@ -951,7 +987,7 @@ key only when the cached value depends on lib data:
   `lib_env_hash`. A lib update does not change where `./theme` resolves.
 - `RouteDb` per-name and effective-set caches **DO** include `lib_env_hash`
   because module augmentations stitch into the effective surface.
-- Typed-IR resolve, `MaterializeStructureDb`, `RefCycleResultDb`,
+- Typed-IR resolve, `MaterializeStructureDb`,
   `SemanticGraphStore`, `ComponentMetaResultDb` **DO** include `lib_env_hash`
   because semantic meaning depends on intrinsic types (`Array<T>`,
   `HTMLElement`, etc.).
@@ -1118,12 +1154,17 @@ trait StoreView {
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool;
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool;
     fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool;
+    fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool;
 }
 ```
 
-The dispatch table is bounded by `FactDomain` (3 variants), not by `FactKey`.
+The dispatch table is bounded by `FactDomain` (4 variants), not by `FactKey`.
 Adding a new `FactKey` extends the per-domain `*FactRef` enum but does NOT
-widen the trait.
+widen the trait. The fourth variant, `ProgramAnalysis`, is the whole-function
+`FlowBody` rail: candidates root on
+`ProgramAnalysisFactRef::FlowBody { function, flow_body_stable_hash }` and
+warm validation compares the indexed whole-body hash — it never re-lowers or
+reruns reachability.
 
 The resolve-imports domain is a CLOSED two-arm enum under ONE validator, not
 two rails: `ResolveImportsFactRef::Semantic { .. }` (the session's
@@ -1445,10 +1486,11 @@ composition table. Summary:
 | Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |
 | `MemberSemanticFactStore` | Content-addressed | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space` |
 | `MemberDisplayFactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space` |
+| `BinderIdentityFactsStore` (family A, the binder-identity substrate) | Content-addressed | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate). |
 | `RouteDb` per-name | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (content-free; routes are resolve-domain so no `parse_env`/`type_env`, but `lib_env` enters — augmentations stitch the surface). Value-side `ValidatedFactCache` fact validation. |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }`. Value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature`. |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` — content-free canonical SUBJECT (the slot, NOT a graph-instance `SemanticNodeId`); `normalized_type_args` carries `SemanticNodeId`s exactly as `SemanticQueryKey::Instantiate.args`. The per-thread recursion identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). Root-less anonymous subject ⇒ uncached. Value-side `ReadSetSignature.facts` + `self_root_canonicals` (base node's decl-origin file) + `validated_at_generation`. |
-| `RefCycleResultDb` | Query-identity (multi-candidate) | `RefCycleResultKey { root: ResolvedDeclSlotIdentity, resolve_env_hash, version }` — content-free (NOT the versioned `DeclIdentity`). Value-side `ReadSetSignature.facts` + `self_root_canonicals` (BFS root + every visited decl's file) + `validated_at_generation`. |
+| `ClassifyMaterializationCycleGate` (materialization cycle gate — the retired `RefCycleResultDb`'s replacement) | Semantic-query family over the `SemanticGraphStore` memo | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` — content-free (fixed empty-args / `StructuralTransit` / `Skeleton` axes; no generation, no `DeclIdentity`, no algorithm version). Only `Decided` admits; value-side observed self-roots (walk root + every visited decl's file) + live-generation gate. |
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
 | `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`. |
@@ -1512,7 +1554,29 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
 - `ExportAlias(exported_as, space)` — per `export {X as Y}`.
 - `ModuleAugmentation(specifier, owner, augmented_name, space)` — per augmented binding
   inside each `declare module "X" {…}` / `declare global {…}` block; `owner`
-  is the exact lexical authoring region.
+  is the exact lexical authoring region. `declare global` blocks key on the
+  `$global` sentinel specifier.
+- `AugmentationContributionSet(scope_kind_tag, specifier, owner)` — SET-shape
+  fingerprint of one augmentation target's contribution set in one file (growth
+  or a contribution shape edit moves it). Emitted for EVERY augmentation block,
+  EMPTY ones included, so an empty → first-contribution edit moves it.
+  `scope_kind_tag` (Global vs Module) keeps `declare global {…}` and
+  `declare module "$global" {…}` in distinct target identities.
+- `AugmentationContributionOrder(scope_kind_tag, specifier, owner)` —
+  ORDER-sensitive fingerprint of one augmentation target's authored contribution
+  sequence (ordered by each declaration's own source position; positions never
+  enter the hash). Also emitted for empty blocks.
+- `DeclContributionOrder(name, owner, space)` — ORDER-sensitive fingerprint of one
+  file-surface declaration slot's authored contributor sequence (an overload /
+  declaration swap moves it; comments between declarations do not). The
+  per-contributor shape hashes the comment-stripped, whitespace-dropped
+  declaration slice, so intra-declaration trivia edits stay cosmetic.
+- `AugmentationTargetSet` — whole-file augmentation target set fingerprint
+  (`(scope_kind_tag, specifier, owner)` blocks, EMPTY blocks included; a first
+  `declare module "m" {…}` moves it with an unchanged skeleton, and the tag
+  keeps `declare global` / `declare module "$global"` distinct).
+- `NamespaceScopeSet` — whole-file `namespace N {…}` block set fingerprint
+  (EMPTY blocks included).
 
 Lazy emission (member body, on first member-access query) lives in TWO separate
 stores keyed differently to physically separate semantic vs display:
@@ -1614,7 +1678,17 @@ The discrimination matrix:
   content-free query-identity slot used as `Instantiate.base` /
   `ResolveMacroPayload.owner`; the migration to it has LANDED — the former
   content-free `DeclKey` query-key struct and `to_decl_key()` were deleted in
-  the cutover).
+  the cutover). Also hosts `DeclarationSlotSeed` (the slot's env-free
+  four-field projection the family-A artifact stores), `BinderScopeId` /
+  `BinderScopeKind` (the stable structural lexical-scope id), and the
+  `ScopeId.binder_scope_id` query-identity discriminator.
+- `crates/verter_session/src/binder_identity_facts.rs` —
+  `BinderIdentityFacts` artifact payload, `BinderIdentityFactsStore` (family-A,
+  keyed `(canonical, parse_stable_hash, parse_env_hash)`),
+  `project_binder_identity_facts` (the shallow-inventory projection), and the
+  demand producer `produce_binder_identity_facts` (reached via
+  `for_tests::binder_identity_facts_get_or_compute_for_tests` until the U2
+  reducers consume it).
 
 ## Discriminating tests
 
@@ -1627,6 +1701,11 @@ The discrimination matrix:
   tests.
 - `crates/verter_session/tests/cases/g_misc1/parse_stable_hash_invariance.rs` —
   cosmetic-invariant + decl-shape-discriminating tests.
+- `crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs` — the
+  binder-identity substrate guard set (cosmetic-stable /
+  insertion-non-aliasing scope ids, symbol-space + owner-scoped env-free seeds,
+  slot finalization, cosmetic-warm / semantic-invalidate, authored-order
+  provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
 - `crates/verter_workspace/src/fact_registry.rs` (`registry_tests` inline
@@ -1757,7 +1836,7 @@ is permitted.
 
 The `TypeExpr`→handle migration carries graph handles on the hot path but keeps cache keys content-free (R6). Foundation contracts (additive, dormant):
 
-- **`HotTypeRef`** (the session hot handle around a `SemanticNodeId`) is a content/version-bearing arena ordinal — exactly what R6 bans from a derived-`Hash` query-identity key. It derives neither `Hash` nor `Ord`, so it cannot be a map key nor be embedded in a `#[derive(Hash)]` cache key; the materialised VALUE roots its version through the node's `NodeScopeId` + read-set, never the handle.
+- **`HotTypeRef`** is an opaque session handle around a graph-instance `SemanticNodeId`; R6 does not prohibit such IDs, although this boundary type deliberately omits `Hash`/`Ord`. Any key containing a `SemanticNodeId` must obtain content validity solely from value-side read sets and strict self-roots. Because `HotTypeRef` derives neither `Hash` nor `Ord`, it cannot itself be a map key nor be embedded in a `#[derive(Hash)]` cache key; the materialised VALUE roots its version through the node's `NodeScopeId` + read-set, never the handle.
 - **`SyntheticBindingId`** is the content-free successor to `SyntheticCarrierKey.value_node: u64` — `(scope_canonical_id, surface_kind, slot_name, binding_name)` with NO arena ordinal. It is the identity a future synthetic-deepening key roots on; the `value_node` ordinal is demoted to value-side provenance on the `SemanticNodeData::SyntheticBinding` carrier (re-attached only at the compat materialisation boundary).
 - **`CarrierResolverContext`** is value-side runtime resolution state, never hashed into a `SemanticQueryKey`.
 

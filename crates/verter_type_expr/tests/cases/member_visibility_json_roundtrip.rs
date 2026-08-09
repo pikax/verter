@@ -58,7 +58,7 @@ fn manual_json_roundtrip_preserves_property_visibility() {
         MemberVisibility::Private,
     ] {
         let expr = object(vec![ObjectMember::Property(
-            ObjectProperty::with_visibility(
+            ObjectProperty::with_key_visibility(
                 "x".into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
@@ -84,7 +84,7 @@ fn manual_json_roundtrip_preserves_method_visibility() {
         MemberVisibility::Private,
     ] {
         let expr = object(vec![ObjectMember::Method(
-            MethodSignature::with_visibility(
+            MethodSignature::with_key_visibility(
                 "m".into(),
                 FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
                 false,
@@ -107,7 +107,7 @@ fn manual_json_roundtrip_preserves_method_visibility() {
 #[test]
 fn public_member_json_omits_visibility_key_non_public_includes_it() {
     let public = object(vec![ObjectMember::Property(
-        ObjectProperty::synthetic_public(
+        ObjectProperty::synthetic_public_key(
             "x".into(),
             TypeExpr::Primitive(PrimitiveName::Number),
             false,
@@ -122,7 +122,7 @@ fn public_member_json_omits_visibility_key_non_public_includes_it() {
     );
 
     let private = object(vec![ObjectMember::Property(
-        ObjectProperty::with_visibility(
+        ObjectProperty::with_key_visibility(
             "x".into(),
             TypeExpr::Primitive(PrimitiveName::Number),
             false,
@@ -148,7 +148,7 @@ fn manual_json_missing_visibility_parses_as_public() {
         "kind": "object",
         "properties": [{
             "memberKind": "property",
-            "name": "x",
+            "key": { "kind": "string", "value": "x" },
             "ty": { "kind": "primitive", "name": "string" },
             "optional": false,
             "readonly": false,

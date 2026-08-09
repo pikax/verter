@@ -15,7 +15,7 @@ use oxc_ast::ast::Statement;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{AuthoredPropertyKey, ObjectMember, PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
 
 /// Parse `source` (which MUST declare a `type __T = <annotation>;` alias) and
@@ -77,8 +77,10 @@ fn type_literal_members_lower_in_source_order_and_count() {
         panic!("expected Object, got {lowered:?}");
     };
     assert_eq!(obj.properties.len(), 4);
-    assert!(matches!(&obj.properties[0], ObjectMember::Property(p) if p.name == "a"));
-    assert!(matches!(&obj.properties[1], ObjectMember::Method(m) if m.name == "m"));
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.string_name() == Some("a"))
+    );
+    assert!(matches!(&obj.properties[1], ObjectMember::Method(m) if m.string_name() == Some("m")));
     assert!(matches!(
         &obj.properties[2],
         ObjectMember::IndexSignature(_)
@@ -90,22 +92,57 @@ fn type_literal_members_lower_in_source_order_and_count() {
 }
 
 #[test]
-fn type_literal_drops_unnameable_members_without_padding() {
-    // A computed-symbol key has no static name — `lower_ts_signature`
-    // filters it. The surviving inventory must be EXACTLY the nameable
-    // members (no placeholder / padding slots from the pre-sized buffer).
+fn type_literal_retains_computed_members_in_source_order() {
+    // A computed key remains an authored semantic child; it is never filtered
+    // or replaced with padding in the source-ordered member inventory.
     let lowered = lower_alias("type __T = { a: string; [Symbol.iterator](): void; b: number };");
     let TypeExpr::Object(obj) = &lowered else {
         panic!("expected Object, got {lowered:?}");
     };
     assert_eq!(
         obj.properties.len(),
-        2,
-        "computed-symbol member must be dropped, got {:?}",
+        3,
+        "computed-symbol member must remain in the authored inventory, got {:?}",
         obj.properties
     );
-    assert!(matches!(&obj.properties[0], ObjectMember::Property(p) if p.name == "a"));
-    assert!(matches!(&obj.properties[1], ObjectMember::Property(p) if p.name == "b"));
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.string_name() == Some("a"))
+    );
+    assert!(matches!(
+        &obj.properties[1],
+        ObjectMember::Method(method)
+            if matches!(
+                &method.key,
+                AuthoredPropertyKey::Computed(TypeExpr::TypeOf(value_ref))
+                    if value_ref.path == ["Symbol", "iterator"]
+            )
+    ));
+    assert!(
+        matches!(&obj.properties[2], ObjectMember::Property(p) if p.string_name() == Some("b"))
+    );
+}
+
+#[test]
+fn type_literal_retains_canonical_numeric_key_classes() {
+    let lowered = lower_alias(r#"type __T = { 1: string; "01": number; 1.5: boolean };"#);
+    let TypeExpr::Object(obj) = &lowered else {
+        panic!("expected Object, got {lowered:?}");
+    };
+    assert!(matches!(
+        &obj.properties[0],
+        ObjectMember::Property(property)
+            if matches!(property.key, AuthoredPropertyKey::Number(number) if number.get() == 1)
+    ));
+    assert!(matches!(
+        &obj.properties[1],
+        ObjectMember::Property(property)
+            if property.string_name() == Some("01")
+    ));
+    assert!(matches!(
+        &obj.properties[2],
+        ObjectMember::Property(property)
+            if property.string_name() == Some("1.5")
+    ));
 }
 
 #[test]

@@ -61,6 +61,9 @@ fn outer_query() -> SemanticQueryKey {
             canonical_id: Arc::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("Outer"),
     })

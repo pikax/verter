@@ -105,6 +105,13 @@ pub const EXPECTED_TYPEINFO_GRAPH_DEGRADED: &str =
 pub const EXPECTED_TYPEINFO_GRAPH_CACHE_HIT: &str =
     "TypeInfoGraphCacheHit(typeinfo_graph_session, EvaluateExpression)";
 
+pub const EXPECTED_FLOW_RETURN_STARTED: &str = "FlowReturnStarted(/w/flow.ts::makeThing)";
+
+pub const EXPECTED_FLOW_SLICE_BUDGET_EXCEEDED: &str =
+    "FlowSliceBudgetExceeded(SelectedNodes, limit=4096, observed=4097)";
+
+pub const EXPECTED_FLOW_CYCLE_SENTINEL_HIT: &str = "FlowCycleSentinelHit(cycle=#2, makeThing)";
+
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
 // The DISPLAY_SNAPSHOTS table pairs each fixture with its expected
@@ -468,6 +475,28 @@ pub fn fixture_typeinfo_graph_cache_hit() -> Event {
     }
 }
 
+pub fn fixture_flow_return_started() -> Event {
+    Event::FlowReturnStarted {
+        canonical_id: Arc::from("/w/flow.ts"),
+        function_symbol: Arc::from("makeThing"),
+    }
+}
+
+pub fn fixture_flow_slice_budget_exceeded() -> Event {
+    Event::FlowSliceBudgetExceeded {
+        axis: verter_audit::FlowSliceBudgetAxisTag::SelectedNodes,
+        limit: 4096,
+        observed: 4097,
+    }
+}
+
+pub fn fixture_flow_cycle_sentinel_hit() -> Event {
+    Event::FlowCycleSentinelHit {
+        cycle_id: 2,
+        function_symbol: Arc::from("makeThing"),
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -605,6 +634,15 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_typeinfo_graph_cache_hit(),
             EXPECTED_TYPEINFO_GRAPH_CACHE_HIT,
         ),
+        (fixture_flow_return_started(), EXPECTED_FLOW_RETURN_STARTED),
+        (
+            fixture_flow_slice_budget_exceeded(),
+            EXPECTED_FLOW_SLICE_BUDGET_EXCEEDED,
+        ),
+        (
+            fixture_flow_cycle_sentinel_hit(),
+            EXPECTED_FLOW_CYCLE_SENTINEL_HIT,
+        ),
     ]
 }
 
@@ -667,6 +705,9 @@ mod tests {
             | Event::TypeInfoGraphPublished { .. }
             | Event::TypeInfoGraphDegraded { .. }
             | Event::TypeInfoGraphCacheHit { .. }
+            | Event::FlowReturnStarted { .. }
+            | Event::FlowSliceBudgetExceeded { .. }
+            | Event::FlowCycleSentinelHit { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -708,6 +749,9 @@ mod tests {
             "TypeInfoGraphPublished",
             "TypeInfoGraphDegraded",
             "TypeInfoGraphCacheHit",
+            "FlowReturnStarted",
+            "FlowSliceBudgetExceeded",
+            "FlowCycleSentinelHit",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -752,6 +796,9 @@ mod tests {
                 Event::TypeInfoGraphPublished { .. } => "TypeInfoGraphPublished",
                 Event::TypeInfoGraphDegraded { .. } => "TypeInfoGraphDegraded",
                 Event::TypeInfoGraphCacheHit { .. } => "TypeInfoGraphCacheHit",
+                Event::FlowReturnStarted { .. } => "FlowReturnStarted",
+                Event::FlowSliceBudgetExceeded { .. } => "FlowSliceBudgetExceeded",
+                Event::FlowCycleSentinelHit { .. } => "FlowCycleSentinelHit",
             })
             .collect();
         for v in expected_variants.iter() {

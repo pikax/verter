@@ -98,6 +98,9 @@ pub fn display(
         SemanticQueryValue::TypeNode(id) => {
             display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut Vec::new())
         }
+        SemanticQueryValue::ObjectProjection(_) => unreachable!(
+            "display: ObjectProjection has no producer until witness-gated projection consumers land"
+        ),
         SemanticQueryValue::OverloadSet(sigs) => {
             let rendered: Vec<String> = sigs
                 .iter()
@@ -114,8 +117,28 @@ pub fn display(
                 .collect::<Vec<_>>()
                 .join(" | "),
         ),
+        SemanticQueryValue::MaterializationCycleGate(outcome) => {
+            DisplayString(format!("{outcome:?}"))
+        }
         SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
+        SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
+            "{} (can_fall_through: {})",
+            display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+            result.can_fall_through,
+        )),
+        SemanticQueryValue::ResolveCall(result) => {
+            let return_type = match result.as_ref() {
+                crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
+                | crate::semantic_query::ResolvedCallResult::UnionSelected { return_type, .. }
+                | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
+                    *return_type
+                }
+            };
+            DisplayString(
+                display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+            )
+        }
         // §14.1: the reserved native-checker seam. No producer constructs it,
         // so reaching it here is a logic error. Matched explicitly — NOT via a
         // `_` wildcard — so any future live `SemanticQueryValue` arm forces a
@@ -167,18 +190,25 @@ pub(crate) fn display_type_node(
                 if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
                     s.push_str("readonly ");
                 }
-                s.push_str(&member_name_token(&member.name));
+                s.push_str(&match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(name) => {
+                        member_name_token(name)
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::Number(number) => {
+                        number.to_string()
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        format!("[unique symbol {}]", identity.symbol)
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::Computed(node) => format!(
+                        "[{}]",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                });
                 if member.optional {
                     s.push('?');
                 }
-                if member.is_method && resolves_to_function(store, member.value) {
-                    // Method shorthand `name(params): ret` — the signature is
-                    // rendered in type-literal (colon) position, NOT as a
-                    // property holding an arrow-function type. Only valid when
-                    // the value is actually a `Function`: after intersection
-                    // merging `is_method` can be ORed true over an
-                    // `Intersection` of overloads, which must fall through to
-                    // property style (a colon) below to stay valid TS.
+                if member.method_kind.is_some() && resolves_to_function(store, member.value) {
                     s.push_str(&render_signature_colon(
                         store,
                         member.value,
@@ -232,6 +262,63 @@ pub(crate) fn display_type_node(
             } else {
                 format!("{{ {} }}", parts.join("; "))
             }
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            use crate::semantic_query::{AuthoredPropertyKey, ObjectConstructionEffect};
+            let render_key =
+                |key: &AuthoredPropertyKey, visited: &mut Vec<SemanticNodeId>| match key {
+                    AuthoredPropertyKey::String(name) => member_name_token(name),
+                    AuthoredPropertyKey::Number(number) => number.to_string(),
+                    AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        format!("[unique symbol {}]", identity.symbol)
+                    }
+                    AuthoredPropertyKey::Computed(node) => format!(
+                        "[{}]",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                };
+            let mut parts = Vec::with_capacity(program.effects.len());
+            for effect in program.effects.iter() {
+                let part = match effect {
+                    ObjectConstructionEffect::DirectProperty(effect) => format!(
+                        "{}{}: {}",
+                        render_key(&effect.key, visited),
+                        if effect.optional { "?" } else { "" },
+                        display_type_node(store, effect.value, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectMethod(effect) => format!(
+                        "{}{}: {}",
+                        render_key(&effect.key, visited),
+                        if effect.optional { "?" } else { "" },
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectGet(effect) => format!(
+                        "get {}: {}",
+                        render_key(&effect.key, visited),
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectSet(effect) => format!(
+                        "set {}: {}",
+                        render_key(&effect.key, visited),
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectIndex(effect) => format!(
+                        "[key: {}]: {}",
+                        display_type_node(store, effect.key_type, needs, child_depth, visited).0,
+                        display_type_node(store, effect.value_type, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectCall(node)
+                    | ObjectConstructionEffect::DirectConstruct(node) => {
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    }
+                    ObjectConstructionEffect::Spread(node) => format!(
+                        "...{}",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                };
+                parts.push(part);
+            }
+            format!("{{ {} }}", parts.join("; "))
         }
         SemanticNodeData::Union(arms) => {
             // A union arm only parenthesises a LOOSER binder (Conditional /
@@ -344,7 +431,10 @@ pub(crate) fn display_type_node(
             let key = match index {
                 IndexKey::String(s) => single_quoted(s),
                 IndexKey::Number(n) => n.to_string(),
-                IndexKey::TypeNode(node) => {
+                IndexKey::UniqueSymbol(identity) => {
+                    format!("unique symbol {}", identity.symbol)
+                }
+                IndexKey::Computed(node) => {
                     display_type_node(store, *node, needs, child_depth, visited).0
                 }
             };
@@ -399,7 +489,8 @@ pub(crate) fn display_type_node(
             s
         }
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
-        SemanticNodeData::Infer { name } => format!("infer {name}"),
+        SemanticNodeData::Infer { name, .. } => format!("infer {name}"),
+        SemanticNodeData::InferRef { name, .. } => name.to_string(),
         SemanticNodeData::Conditional {
             check,
             extends,
@@ -429,17 +520,21 @@ pub(crate) fn display_type_node(
             let f = display_type_node(store, *false_branch_ref, needs, child_depth, visited).0;
             format!("{check} extends {extends} ? {t} : {f}")
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params,
             return_type,
             type_parameters,
-            signature_span: _,
-            return_type_span: _,
+            ..
         } => {
+            let new_prefix = match kind {
+                crate::semantic_query::SignatureKind::Call => "",
+                crate::semantic_query::SignatureKind::Construct => "new ",
+            };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
             let rendered_params = render_params(store, params, needs, child_depth, visited);
             let ret = display_type_node(store, *return_type, needs, child_depth, visited).0;
-            format!("{tps}({rendered_params}) => {ret}")
+            format!("{new_prefix}{tps}({rendered_params}) => {ret}")
         }
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
         // materialised body, and display must not re-resolve, so `ExpandAliases`
@@ -503,16 +598,12 @@ pub(crate) fn display_type_node(
             out
         }
         // Raw-fallback carrier renders its preserved text verbatim.
-        SemanticNodeData::RawFallback { raw } => raw.to_string(),
-        // Constructor-type carrier renders `new ` + its function signature.
-        SemanticNodeData::ConstructorType { signature } => {
-            format!(
-                "new {}",
-                display_type_node(store, *signature, needs, child_depth, visited).0
-            )
-        }
+        SemanticNodeData::RawFallback { value } => value.raw().to_string(),
         // Synthetic-binding carrier renders the bound name.
         SemanticNodeData::SyntheticBinding { id, .. } => id.binding_name.to_string(),
+        // The sealed callable carrier has no observable return, so it has
+        // no function-type rendering; it is never part of a displayed type.
+        SemanticNodeData::DeferredCallable(_) => "DeferredCallable".to_string(),
     };
     visited.pop();
     DisplayString(out)
@@ -597,9 +688,9 @@ fn render_merged_decl_member(
     visited: &mut Vec<SemanticNodeId>,
 ) -> String {
     let member = &merged.member;
-    let mut s = member_prefix(member, needs);
+    let mut s = member_prefix(store, member, needs, depth, visited);
     match merged.values.as_slice() {
-        [value] if member.is_method && resolves_to_function(store, *value) => {
+        [value] if member.method_kind.is_some() && resolves_to_function(store, *value) => {
             s.push_str(&render_signature_colon(
                 store, *value, "", needs, depth, visited,
             ));
@@ -626,12 +717,28 @@ fn render_merged_decl_member(
     s
 }
 
-fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {
+fn member_prefix(
+    store: &SemanticGraphStore,
+    member: &ShallowSurfaceMember,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut Vec<SemanticNodeId>,
+) -> String {
     let mut s = String::new();
     if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
         s.push_str("readonly ");
     }
-    s.push_str(&member_name_token(&member.name));
+    s.push_str(&match &member.key {
+        crate::semantic_query::AuthoredPropertyKey::String(name) => member_name_token(name),
+        crate::semantic_query::AuthoredPropertyKey::Number(number) => number.to_string(),
+        crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
+            format!("[unique symbol {}]", identity.symbol)
+        }
+        crate::semantic_query::AuthoredPropertyKey::Computed(node) => format!(
+            "[{}]",
+            display_type_node(store, *node, needs, depth.saturating_sub(1), visited).0
+        ),
+    });
     if member.optional {
         s.push('?');
     }
@@ -639,7 +746,7 @@ fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {
 }
 
 /// Render one overload signature (a graph node, typically a
-/// [`SemanticNodeData::Function`]).
+/// [`SemanticNodeData::Signature`]).
 fn display_signature(
     store: &SemanticGraphStore,
     sig: &SignatureRef,
@@ -870,7 +977,7 @@ fn render_params(
     rendered.join(", ")
 }
 
-/// Render a [`SemanticNodeData::Function`] signature node in object / type-
+/// Render a [`SemanticNodeData::Signature`] signature node in object / type-
 /// literal position, where the return type is introduced by a COLON
 /// (`(params): ret`) — distinct from the standalone arrow form. `prefix` is
 /// `""` for a call signature, `"new "` for a construct signature, or already
@@ -890,7 +997,7 @@ fn render_signature_colon(
     // defensive arm and renders the arrow form, an invalid `name(p) => r` hybrid.
     let resolved = follow_alias_chain(store, sig);
     match store.node_data(resolved).as_deref() {
-        Some(SemanticNodeData::Function {
+        Some(SemanticNodeData::Signature {
             params,
             return_type,
             type_parameters,
@@ -938,11 +1045,12 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         SemanticNodeData::Conditional { .. } => Prec::Loose,
         // A constructor type renders `new (…) => R` — a loose binder like a
         // function type.
-        SemanticNodeData::Function { .. } | SemanticNodeData::ConstructorType { .. } => Prec::Loose,
+        SemanticNodeData::Signature { .. } => Prec::Loose,
         SemanticNodeData::Union(_) => Prec::Union,
         SemanticNodeData::Intersection(_) => Prec::Intersection,
         // Prefix operators (`keyof T`, `infer T`).
         SemanticNodeData::KeyOf { .. } | SemanticNodeData::Infer { .. } => Prec::Prefix,
+        SemanticNodeData::InferRef { .. } => Prec::Atom,
         SemanticNodeData::Array { .. } | SemanticNodeData::IndexedAccess { .. } => Prec::Postfix,
         // `Alias` is transparent (rendered as its target); its precedence is
         // resolved through the chain by `node_precedence`. Reaching it here
@@ -951,6 +1059,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         // which is atomic — see the `display_type_node` MergedDecl arm.
         SemanticNodeData::Alias(_)
         | SemanticNodeData::Object(_)
+        | SemanticNodeData::ObjectSpreadProgram(_)
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
         | SemanticNodeData::Opaque(_)
@@ -967,6 +1076,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::BareRef(_)
         | SemanticNodeData::ImportType(_)
         | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::DeferredCallable(_)
         | SemanticNodeData::SyntheticBinding { .. } => Prec::Atom,
     }
 }
@@ -987,14 +1097,20 @@ fn node_precedence(store: &SemanticGraphStore, id: SemanticNodeId) -> Prec {
 }
 
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
-/// report whether the node ultimately renders as a [`SemanticNodeData::Function`]
+/// report whether the node ultimately renders as a [`SemanticNodeData::Signature`]
 /// — the only shape that may use object method-shorthand. After intersection
 /// merging a member's `is_method` flag can be ORed true over an `Intersection`
 /// of overloads; such a member must render property-style (with a colon).
 fn resolves_to_function(store: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+    // CALL kind only: method shorthand (`name(p): r`) is a call-signature
+    // form — a construct-signature member renders property-style
+    // (`name: new (…) => R`).
     matches!(
         store.node_data(follow_alias_chain(store, id)).as_deref(),
-        Some(SemanticNodeData::Function { .. })
+        Some(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            ..
+        })
     )
 }
 

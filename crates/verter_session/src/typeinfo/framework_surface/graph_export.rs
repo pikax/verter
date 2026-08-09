@@ -74,14 +74,14 @@ pub(crate) struct EncodedFrameworkSurfaces {
 
 /// A growable string-intern table backing the encoded graph's interned ids.
 #[derive(Default)]
-struct StringTableBuilder {
+pub(super) struct StringTableBuilder {
     entries: Vec<String>,
     index: HashMap<String, u32>,
 }
 
 impl StringTableBuilder {
     /// Intern `s`, returning its stable id; identical strings dedup to one id.
-    fn intern(&mut self, s: &str) -> u32 {
+    pub(super) fn intern(&mut self, s: &str) -> u32 {
         if let Some(&id) = self.index.get(s) {
             return id;
         }
@@ -101,10 +101,10 @@ impl StringTableBuilder {
 /// The encode-time arena accumulating nodes + symbols + the string table while
 /// the per-kind members are walked. Carries NO host handle, NO dispatch, NO
 /// store view — encoding is a pure projection of already-resolved data.
-struct GraphArena {
-    nodes: Vec<GraphTypeNode>,
-    symbols: Vec<GraphSymbolNode>,
-    strings: StringTableBuilder,
+pub(super) struct GraphArena {
+    pub(super) nodes: Vec<GraphTypeNode>,
+    pub(super) symbols: Vec<GraphSymbolNode>,
+    pub(super) strings: StringTableBuilder,
     /// Counts `ProjectSemanticDispatch`-class operations the encoder performs.
     /// Encoding is zero-dispatch by construction; the counter exists only so a
     /// test can assert it stays zero (no path increments it).
@@ -115,7 +115,7 @@ struct GraphArena {
 }
 
 impl GraphArena {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             nodes: Vec::new(),
             symbols: Vec::new(),
@@ -126,7 +126,7 @@ impl GraphArena {
     }
 
     /// Push a node, returning its arena id.
-    fn push_node(&mut self, kind: graph_type_node::Kind) -> u32 {
+    pub(super) fn push_node(&mut self, kind: graph_type_node::Kind) -> u32 {
         let id = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
         self.nodes.push(GraphTypeNode { kind: Some(kind) });
         id
@@ -134,7 +134,7 @@ impl GraphArena {
 
     /// Mint (or reuse) a `GraphSymbolNode` for a named alias and return its
     /// symbol id. Identical names dedup to one symbol node.
-    fn intern_symbol(&mut self, name: &str) -> u32 {
+    pub(super) fn intern_symbol(&mut self, name: &str) -> u32 {
         let name_id = self.strings.intern(name);
         if let Some(&sym_id) = self.symbol_index.get(&name_id) {
             return sym_id;
@@ -160,7 +160,7 @@ impl GraphArena {
     /// structural shape outside the shallow vocabulary, or a walk past the
     /// depth budget) degrades to a `GraphOpaque` — NEVER a fabricated ref,
     /// NEVER a recursion into resolution.
-    fn encode_member_value(&mut self, value: Option<&TypeExpr>, depth: u32) -> u32 {
+    pub(super) fn encode_member_value(&mut self, value: Option<&TypeExpr>, depth: u32) -> u32 {
         let Some(value) = value else {
             // A member with no resolved type expression is structurally
             // unencodable here — degrade to opaque, do not fabricate a ref.
@@ -199,6 +199,14 @@ impl GraphArena {
                 // arm — the executor publishes object MEMBERS as
                 // `FrameworkSurfaceMember`s, not as a nested object node.
                 self.push_node(graph_type_node::Kind::Object(GraphObject::default()))
+            }
+            TypeExpr::Object(obj)
+                if obj
+                    .properties
+                    .iter()
+                    .any(|member| matches!(member, verter_type_expr::ObjectMember::Spread(_))) =>
+            {
+                self.encode_object_spread_program(obj, depth)
             }
             // Every other node kind is structural and outside the shallow
             // member-value vocabulary: degrade to opaque, never recurse.
@@ -254,7 +262,7 @@ impl GraphArena {
 
     /// Push a `GraphOpaque` carrying an `Other` query error whose message is
     /// interned into the string table.
-    fn push_opaque(&mut self, message: &str) -> u32 {
+    pub(super) fn push_opaque(&mut self, message: &str) -> u32 {
         let message_name_id = self.strings.intern(message);
         self.push_node(graph_type_node::Kind::Opaque(GraphOpaque {
             error: Some(GraphQueryError {
@@ -474,6 +482,12 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
         node_id_map: Vec::new(),
         symbol_id_map: Vec::new(),
         strings: Some(strings),
+        // The payload-side relation-proof table (schema 5). No live
+        // relation-proof producer exists yet (the relation-inference
+        // reducer populates it when it lands), so the exporter emits the
+        // empty table — the emission seam is wired, the witness stays OFF
+        // the type-values surface.
+        relation_proofs: Vec::new(),
     };
 
     // The encoder performs ZERO dispatch by construction; assert it here so the
@@ -928,12 +942,14 @@ mod tests {
         use std::sync::Arc;
         use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty};
         let obj = ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "inner".into(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "inner".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                ),
+            )],
         };
         let (arena, id) = encode_value(&TypeExpr::Object(Arc::new(obj)));
         let node = &arena.nodes[id as usize];

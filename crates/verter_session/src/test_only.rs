@@ -137,28 +137,6 @@ pub mod mapper_fingerprint {
     }
 }
 
-/// Test-only probe for the budget-exceeded published-surface
-/// recognizer. Integration tests (`tests/cases/defect_b_corpus_prevention_gate.rs`)
-/// scan a published surface for a leaked budget sentinel; this
-/// re-exports the SAME `pub(crate)` recognizer production routing
-/// uses (`type_expr_is_budget_exceeded_sentinel`, which keys on the
-/// `BUDGET_EXCEEDED_SENTINEL_PREFIX` constant `semantic_query_error_raw`
-/// emits) so the test's spelling can NEVER drift from the producer's.
-pub mod budget_sentinel {
-    use verter_type_expr::TypeExpr;
-
-    /// Returns `true` iff `expr` is the budget-exceeded sentinel
-    /// (`TypeExpr::Unknown { raw }` starting with the production
-    /// `budgetExceeded(` prefix). Delegates verbatim to the shared
-    /// `pub(crate)` production recognizer.
-    #[inline]
-    pub fn is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
-        crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel(
-            expr,
-        )
-    }
-}
-
 /// Test-only demand probes for published `SemanticTypeSource` carriers.
 ///
 /// Publication is shallow-by-default; a test asserting the type a consumer
@@ -167,9 +145,17 @@ pub mod budget_sentinel {
 /// materialisation through the ONE shared dispatch (no second engine).
 #[cfg(any(test, feature = "test-support"))]
 pub mod semantic_source_probe {
+    /// Whether a published source's DEMAND-walk (Published(Expanded)) payload
+    /// carries ANY typed degradation — the masking probe over the full
+    /// consumer walk.
+    pub use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_is_degraded as demand_is_degraded;
     /// Demand-materialize a published source under `Published(Expanded)` —
     /// the explicit full consumer walk.
     pub use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr as demand_type_expr;
+    /// Whether a published source's raised payload carries ANY typed
+    /// degradation (the raise-time sidecar, read pre-unwrap) — the typed
+    /// masking probe, independent of `synthesis_should_suppress`.
+    pub use crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_is_degraded as shallow_is_degraded;
     /// Shell-materialize a published source WITHOUT a reduction demand —
     /// the shallow published shape (`Ref` / utility carriers survive).
     pub use crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_type_expr as shallow_type_expr;

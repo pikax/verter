@@ -17,61 +17,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .scope_payload
                 .and_then(|payload| payload.scope_type_bindings().get(name.as_ref()))
             {
-                let mut nested: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                let constraint = binding.constraint.as_ref().map(|constraint| {
-                    self.shallow_lower_type_expr_with_context(
-                        constraint,
-                        inputs.env,
-                        inputs.scope,
-                        inputs.name_resolution,
-                        inputs.scope_payload,
-                        inputs.shadowing,
-                        &mut nested,
-                        context,
-                    )
-                });
-                let default = binding.default.as_ref().map(|default| {
-                    self.shallow_lower_type_expr_with_context(
-                        default,
-                        inputs.env,
-                        inputs.scope,
-                        inputs.name_resolution,
-                        inputs.scope_payload,
-                        inputs.shadowing,
-                        &mut nested,
-                        context,
-                    )
-                });
-                substitutions.extend(nested);
-                let decl = match inputs.scope {
-                    NodeScopeId::Global => DeclIdentity {
-                        canonical_id: Arc::from(""),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        whole_hash,
-                        ..
-                    } => DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
-                        owner: *owner,
-                        whole_hash: *whole_hash,
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                };
-                return ReferenceProjectionPlan::Ready(self.graph().intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl,
-                        param_index: binding.ordinal,
-                        constraint,
-                        default,
-                        display_name: Arc::clone(&binding.name),
-                    },
-                    inputs.scope.clone(),
-                ));
+                // The ONE shared script-setup `TypeParam` construction: the
+                // binding carries the content-free (name, ordinal) facts;
+                // the helper re-borrows the clause lease-only from the
+                // pinned artifact and lowers the selected parameter's
+                // bounds. A missing / stale re-borrow is its typed miss
+                // (Opaque + cache suppression), never a bound-free binder.
+                let node = self.lower_script_setup_type_param_binding(
+                    binding,
+                    inputs.env,
+                    inputs.scope,
+                    inputs.name_resolution,
+                    inputs.scope_payload,
+                    inputs.shadowing,
+                    substitutions,
+                    context,
+                );
+                return ReferenceProjectionPlan::Ready(node);
             }
         }
         let resolver_context = CarrierResolverContext::new(
@@ -272,22 +234,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Object(view) => {
                 let member_context = context.into_structural_provenance();
-                let members: Vec<_> = view
-                    .members
-                    .iter()
-                    .map(|member| SurfaceMember {
-                        name: Arc::clone(&member.name),
-                        value: projected(memo, member.value, member_context),
-                        optional: member.optional,
-                        readonly: member.readonly,
-                        is_method: member.is_method,
-                        visibility: member.visibility,
-                        spans: member.spans,
-                        declaration_origin: member.declaration_origin.clone(),
-                        declared_in_macro_type_arg: context.own_body_stamp(),
-                        merge_role: context.role_stamp(),
-                    })
-                    .collect();
+                let members: Vec<_> =
+                    view.positive_members()
+                        .iter()
+                        .map(|member| SurfaceMember {
+                            key: match &member.key {
+                                verter_type_expr::AuthoredPropertyKey::Computed(computed) => {
+                                    self.unique_symbol_identity_for_typeof_node(*computed)
+                                        .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
+                                        .unwrap_or_else(|| {
+                                            verter_type_expr::AuthoredPropertyKey::Computed(
+                                                projected(memo, *computed, member_context),
+                                            )
+                                        })
+                                }
+                                verter_type_expr::AuthoredPropertyKey::String(value) => {
+                                    verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+                                }
+                                verter_type_expr::AuthoredPropertyKey::Number(value) => {
+                                    verter_type_expr::AuthoredPropertyKey::Number(*value)
+                                }
+                                verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                                    verter_type_expr::AuthoredPropertyKey::UniqueSymbol(
+                                        identity.clone(),
+                                    )
+                                }
+                            },
+                            value: projected(memo, member.value, member_context),
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            method_kind: member.method_kind,
+                            has_implementation_body: member.has_implementation_body,
+                            visibility: member.visibility,
+                            // Projection preserves the member's excess-property
+                            // provenance verbatim (structure-preserving rewrite).
+                            excess_origin: member.excess_origin,
+                            spans: member.spans,
+                            declaration_origin: member.declaration_origin.clone(),
+                            declared_in_macro_type_arg: context.own_body_stamp(),
+                            merge_role: context.role_stamp(),
+                        })
+                        .collect();
                 let call_signatures: Vec<_> = view
                     .call_signatures
                     .iter()
@@ -347,14 +334,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         entries,
                         view.keyspace
                             .map(|keyspace| projected(memo, keyspace, context)),
-                        view.has_index_signature,
+                        view.has_known_index_signature(),
                     )),
                 )
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let projected = program.map_child_nodes(|child| projected(memo, child, context));
+                if projected == *program {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(projected),
+                    )
+                }
+            }
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
@@ -372,26 +373,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|parameter| TypeParamDecl {
                         name: Arc::clone(&parameter.name),
+                        param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint
                             .map(|value| projected(memo, value, context)),
                         default: parameter
                             .default
                             .map(|value| projected(memo, value, context)),
+                        is_const: parameter.is_const,
                     })
                     .collect();
                 graph.intern_preserving_scope(
                     node,
-                    SemanticNodeData::Function {
+                    SemanticNodeData::Signature {
+                        kind: *kind,
                         params: Arc::from(params.into_boxed_slice()),
                         return_type: projected(memo, *return_type, context),
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                        // Projection preserves the occurrence; a declared
+                        // carrier retargets the projected return.
+                        occurrence: occurrence.clone(),
+                        return_carrier: match return_carrier {
+                            crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                                crate::semantic_query::SignatureReturnCarrier::Declared(projected(
+                                    memo,
+                                    *return_type,
+                                    context,
+                                ))
+                            }
+                            crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                                crate::semantic_query::SignatureReturnCarrier::Function(
+                                    source.clone(),
+                                )
+                            }
+                        },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
                     },
                 )
             }
-            SemanticNodeData::ConstructorType { signature } => projected(memo, *signature, context),
             SemanticNodeData::KeyOf { base } => {
                 let base_id = projected(memo, *base, context);
                 if may_reduce_operator(context) {
@@ -426,11 +446,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let index = match index {
                     IndexKey::String(value) => IndexKey::String(Arc::clone(value)),
                     IndexKey::Number(value) => IndexKey::Number(*value),
-                    IndexKey::TypeNode(value) => {
-                        self.normalized_index_key_node(projected(memo, *value, context))
-                    }
+                    IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+                    IndexKey::Computed(value) => self
+                        .unique_symbol_identity_for_typeof_node(*value)
+                        .map(IndexKey::UniqueSymbol)
+                        .unwrap_or_else(|| {
+                            self.normalized_index_key_node(projected(memo, *value, context))
+                        }),
                 };
-                let should_defer = matches!(index, IndexKey::TypeNode(_))
+                let should_defer = matches!(index, IndexKey::Computed(_))
                     || !matches!(
                         graph.node_data(object_id).as_deref(),
                         Some(SemanticNodeData::Object(_))
@@ -542,7 +566,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)

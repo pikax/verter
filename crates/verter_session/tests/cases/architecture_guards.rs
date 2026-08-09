@@ -2921,10 +2921,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
-        (
-            "registered_envelope_ingest",
-            "T-B R5 §2: one-shot validated cross-host envelope handoff into the scheduled Source stage. NOT a cache; entries are removed on intake.",
-        ),
         // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
         // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
         // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
@@ -3087,14 +3083,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
         (
             "typeinfo_scratch_cache",
             "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
-        ),
-        (
-            "block_content_admission_fence",
-            "docs/arch/scanners-replacement-preprocessor-interim.md §Sealed handoff: a mutex serializes validation and atomic admission after asynchronous provider work. NOT a cache; admitted artifacts live in block_content_state.",
-        ),
-        (
-            "block_content_admission_seam_hook",
-            "Block-content admission-fence regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after validation and before publication for deterministic owner-publication races. Compiled out in production builds. NOT a cache.",
         ),
     ]
     .into_iter()
@@ -4971,7 +4959,7 @@ mod cosmetic_reprinter_guard {
 // exercise the predicate against fabricated fixtures without writing a
 // real violation into the production tree.
 
-mod foundations_guards {
+pub(crate) mod foundations_guards {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -5486,7 +5474,7 @@ mod foundations_guards {
     }
 
     #[test]
-    fn external_corpus_paths_not_present_outside_gated_tests() {
+    pub(crate) fn external_corpus_paths_not_present_outside_gated_tests() {
         let violations = guard4_violations();
         assert!(
             violations.is_empty(),
@@ -5643,6 +5631,11 @@ mod foundations_guards {
         // ─── public modules: cited consumers ────────────────────────
         // tests/cases/g_misc0/audited_request_e2e.rs
         "pub mod audited_request",
+        // Family-A `BinderIdentityFacts` substrate (scope tree /
+        // `DeclarationSlotSeed`s / provenance + the artifact store).
+        // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
+        // drive the demand producer + read the artifact payload.
+        "pub mod binder_identity_facts",
         // Frozen eight-field carrier-owned compatibility cohort consumed by
         // B2 persistence/adoption and exercised by its owning module tests.
         "pub mod carrier_artifact_cohort",
@@ -5683,6 +5676,16 @@ mod foundations_guards {
         // for type-resolution requests. Producer side of the
         // `RequestKind::TypeResolution` audit kind.
         "pub mod host_resolve_type_audit",
+        // Flow-return audit substrate: the per-request TLS emission
+        // helpers (`FlowReturnStarted` / budget / cycle events and the
+        // per-request counters) the cold flow path records through.
+        "pub mod flow_return_audit",
+        // Public audited entry-point that wires
+        // `VerterHost::get_flow_return_type_with_audit` (the single
+        // public flow-return seam) and its typed `FlowReturnError`.
+        // Producer side of the `RequestKind::FlowReturnInference`
+        // audit kind.
+        "pub mod host_flow_return_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
         // Project-bound external-TypeScript-engine contract: the
@@ -5854,6 +5857,13 @@ mod foundations_guards {
         // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",
+        // `#[cfg(test)]`-only acceptance suite for the flow-return
+        // projector admission (`ReturnType<typeof callee>` published
+        // member demand). `pub(crate)` so the typed guard-registry
+        // lib binding table (`typeinfo_guard_bindings_tests.rs`) can
+        // bind `no_flow_slot_in_published_type_surface` by fn path;
+        // never compiled into the production lib (cfg(test)-gated).
+        "pub(crate) mod component_meta_flow_return_admission_tests",
         // R3/R26/R28 compile-tier fact-observation helper module.
         // Wraps the compile cold-compute pass in
         // `with_fact_tracer` and emits per-`Member`/`MemberPresence`,
@@ -5889,6 +5899,11 @@ mod foundations_guards {
         // reach it via `ShallowFileState::decl_bodies()` /
         // `IndexedReady.decl_bodies`; no downstream crate touches it.
         "pub(crate) mod decl_body_memo",
+        // Demand-sliced flow content — the owned, arena-free
+        // `SliceContent` slice-gated body lowering the `FlowReturn`
+        // family evaluates. Crate-private: the flow-return producer is
+        // its only consumer (via `DeclBodyMemo::flow_slice_content`).
+        "pub(crate) mod flow_slice_content",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).
         // Crate-private: the materialise closure and the memo are its
@@ -6045,11 +6060,13 @@ mod foundations_guards {
         // `ProjectionReductionContext`, so the reducing lowering entry is
         // unreachable from the locator path by type.
         "pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx",
-        // TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
+        // TS7 oracle harness snapshot GENERATOR entries — `pub` ONLY under the
         // `oracle-gen` feature (off the default closure), so the
-        // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
-        // `pub` lib items) can invoke it. The default build never compiles it.
-        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v3, GenError}",
+        // `src/bin/oracle_gen` + `src/bin/oracle_upgrade` binaries (separate
+        // crates that see only non-test `pub` lib items) can invoke them. The
+        // default build never compiles them. `upgrade_snapshots_to_v4` is the
+        // schema-v4 tsgo-free re-key (supersedes the v2→v3 re-key export).
+        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v4, GenError}",
         // Env-gated declaration-lowering rendezvous instrumentation. The
         // audit/profile examples consume this narrow snapshot API across the
         // crate boundary; ordinary runtime code never consults it, and the
@@ -8667,9 +8684,9 @@ mod foundations_guards {
     //
     // B4.5 makes silent-Public member construction IMPOSSIBLE in production:
     // the implicit-Public `ObjectProperty`/`MethodSignature` constructors were
-    // split into intent-explicit names (`synthetic_public` / `with_spans_public`
-    // for genuinely source-less public origins; `synthetic_with_visibility` /
-    // `with_visibility` for source-derived reconstruction that threads the
+    // split into intent-explicit names (`synthetic_public_key` / `with_key_spans_public`
+    // for genuinely source-less public origins; `synthetic_key_with_visibility` /
+    // `with_key_visibility` for source-derived reconstruction that threads the
     // member's declared accessibility). This guard pins that split: a bare
     // `ObjectProperty::synthetic(` / `MethodSignature::synthetic(` /
     // `ObjectProperty::with_spans(` / `MethodSignature::with_spans(` in any
@@ -8680,10 +8697,10 @@ mod foundations_guards {
 
     /// Predicate: returns `true` when `line` references one of the four banned
     /// implicit-Public member constructors. The explicit `_public` /
-    /// `_with_visibility` suffixed forms are allowed (the needle `synthetic(`
-    /// does not substring-match `synthetic_public(`, because the byte after
+    /// `_with_key_visibility` suffixed forms are allowed (the needle `synthetic(`
+    /// does not substring-match `synthetic_public_key(`, because the byte after
     /// `synthetic` is `_`, not `(`; likewise `with_spans(` vs
-    /// `with_spans_public(`). `with_visibility(` shares no banned needle.
+    /// `with_key_spans_public(`). `with_key_visibility(` shares no banned needle.
     pub fn line_has_banned_visibility_constructor(line: &str) -> bool {
         const BANNED: &[&str] = &[
             "ObjectProperty::synthetic(",
@@ -8741,11 +8758,11 @@ mod foundations_guards {
              which is the recurring non-public-member leak class. Use the\n\
              intent-explicit constructors instead:\n\
              - source-LESS public origin (interface / type-literal /\n\
-               object-literal / enum / framework member): `synthetic_public` /\n\
-               `with_spans_public`.\n\
+               object-literal / enum / framework member): `synthetic_public_key` /\n\
+               `with_key_spans_public`.\n\
              - source-DERIVED reconstruction (member already carries a\n\
                visibility — member-path / Pick / indexed-access):\n\
-               `synthetic_with_visibility` / `with_visibility`.\n\n\
+               `synthetic_key_with_visibility` / `with_key_visibility`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -8776,17 +8793,17 @@ mod foundations_guards {
         // ALLOWED — the explicit replacements, `IndexSignature` (no
         // accessibility concept), and prose that merely names the methods.
         let allowed = [
-            "ObjectProperty::synthetic_public(\"a\".into(), ty, false, false)",
-            "MethodSignature::synthetic_public(\"m\".into(), f, false)",
-            "ObjectProperty::with_spans_public(name, ty, false, false, spans)",
-            "MethodSignature::with_spans_public(n, f, false, spans)",
-            "ObjectProperty::synthetic_with_visibility(name, ty, false, false, vis)",
-            "MethodSignature::synthetic_with_visibility(n, f, false, vis)",
-            "ObjectProperty::with_visibility(name, ty, false, false, vis, spans)",
-            "MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "ObjectProperty::synthetic_public_key(\"a\".into(), ty, false, false)",
+            "MethodSignature::synthetic_public_key(\"m\".into(), f, false)",
+            "ObjectProperty::with_key_spans_public(name, ty, false, false, spans)",
+            "MethodSignature::with_key_spans_public(n, f, false, spans)",
+            "ObjectProperty::synthetic_key_with_visibility(name, ty, false, false, vis)",
+            "MethodSignature::synthetic_key_with_visibility(n, f, false, vis)",
+            "ObjectProperty::with_key_visibility(name, ty, false, false, vis, spans)",
+            "MethodSignature::with_key_visibility(n, f, false, vis, spans)",
             "IndexSignature::synthetic(key, kty, vty, false)",
             "IndexSignature::with_spans(key, kty, vty, false, spans)",
-            "/// Source-DERIVED reconstructions MUST use `Self::with_visibility`.",
+            "/// Source-DERIVED reconstructions MUST use `Self::with_key_visibility`.",
         ];
         for line in allowed {
             assert!(
@@ -8801,8 +8818,8 @@ mod foundations_guards {
     // `ObjectProperty` / `MethodSignature` are `#[non_exhaustive]` and carry a
     // mandatory `visibility` field with no `Default`, so DOWNSTREAM crates
     // cannot construct them with a struct literal (they must route through the
-    // visibility-threading constructors `synthetic_public` /
-    // `synthetic_with_visibility` / `with_spans_public` / `with_visibility`).
+    // visibility-threading constructors `synthetic_public_key` /
+    // `synthetic_key_with_visibility` / `with_key_spans_public` / `with_key_visibility`).
     // `#[non_exhaustive]` does NOT apply WITHIN the defining crate, so a future
     // SAME-CRATE site in `verter_type_expr` could still write
     // `ObjectProperty { .. }` / `MethodSignature { .. }` directly and silently
@@ -8886,9 +8903,9 @@ mod foundations_guards {
              does not block same-crate struct literals, so this would let a\n\
              member be minted with an unconsidered `visibility` — the recurring\n\
              non-public-member leak class. Construct through the\n\
-             visibility-threading constructors instead (`synthetic_public` /\n\
-             `synthetic_with_visibility` / `with_spans_public` /\n\
-             `with_visibility`), whose bodies use `Self {{ .. }}`.\n\n\
+             visibility-threading constructors instead (`synthetic_public_key` /\n\
+             `synthetic_key_with_visibility` / `with_key_spans_public` /\n\
+             `with_key_visibility`), whose bodies use `Self {{ .. }}`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -8923,8 +8940,8 @@ mod foundations_guards {
             "impl ObjectProperty {",
             "impl MethodSignature {",
             "        Self {",
-            "        ObjectProperty::synthetic_public(name, ty, false, false)",
-            "        MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "        ObjectProperty::synthetic_public_key(name, ty, false, false)",
+            "        MethodSignature::with_key_visibility(n, f, false, vis, spans)",
             "    pub visibility: MemberVisibility,",
             "/// Construct an `ObjectProperty` carrying its declared visibility.",
             "let names: Vec<ObjectProperty> = members.clone();",
@@ -9158,8 +9175,20 @@ mod foundations_guards {
             "TS7 oracle harness §4 GENERATION SPIKE (`#[cfg(all(test, feature = \"oracle-gen\"))]`, excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
+            "crates/verter_session/src/bin/oracle_lift.rs",
+            "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (docs/arch/u0-oracle-harness-design.md §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
             "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
             "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
+            "TS7 oracle harness v4 `relation_verdict` consumption driver (`#[cfg(test)]` in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read`, the same design-mandated mechanism (docs/arch/u0-oracle-harness-design.md §Q1) the v3 consumption driver above is listed for. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
+            "TS7 oracle harness v4 `relation_verdict` rows (`#[cfg(test)]` typeinfo tests) — load checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read` for the capture-backed assertions (one true/false wire shape, ordered bindings), the same runtime-fs mechanism the design mandates. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
         ),
         (
             "crates/verter_lsp/src/audit_harness.rs",
@@ -10433,7 +10462,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // Rows that stop matching any live OXC `Parser::new` site must be
     // DELETED, not kept as pre-authorization for future uncounted
     // parses (the anti-vacuity check below enforces this).
-    let allow_list: [(&str, usize); 8] = [
+    let allow_list: [(&str, usize); 9] = [
         // The `ParsedEvalProgram::parse` constructor IS the
         // scheduler-bound parse entry — the single eval-program parse
         // funnel; `host_manage::eval_program::parse_eval_program` is
@@ -10505,6 +10534,16 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         (
             "crates/verter_session/src/typeinfo/oracle_core/admission.rs",
             2,
+        ),
+        // The v4 relation tuple-wire probe (same oracle-core category as the
+        // rows above): parses SMALL synthetic probe texts — the operand
+        // canonicalization wrapper (`type __oracle_operand__ = …`), the
+        // strict probe-header inverse, and the strict tuple-wire decode
+        // wrapper — each constructing and dropping a local `Allocator` within
+        // one function, none populating a host cache.
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/relation_probe.rs",
+            3,
         ),
     ];
 
@@ -11548,11 +11587,17 @@ fn tier_2_split_preserves_semantic_query_key_hashes() {
         canonical_id: Arc::from("/test/scope-a.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
+        binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            verter_type_expr::TopLevelOwnerId::instance(0),
+        ),
     };
     let scope_b = ScopeId {
         canonical_id: Arc::from("/test/scope-b.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
+        binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            verter_type_expr::TopLevelOwnerId::instance(0),
+        ),
     };
 
     let key_a1 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -12726,6 +12771,19 @@ fn wave_3_entry_points_propagate_tls() {
         (
             "audit_mcp_tool_call",
             &["crates/verter_session/tests/cases/g_misc0/mcp_audit_tls_propagation.rs"],
+        ),
+        // FlowReturnInference producer.
+        // `get_flow_return_type_with_audit` (verter_session) drives
+        // the `RequestKind::FlowReturnInference` audit producer. The
+        // TLS driver asserts the cold flow evaluation's
+        // `cold_computes` counter increments (proving the request
+        // context installed by the entry-point's guard was reachable
+        // at the `FlowReturnStarted` emission site) and that the
+        // harness's outer guard remains visible after the
+        // entry-point's nested guard drops.
+        (
+            "get_flow_return_type_with_audit",
+            &["crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs"],
         ),
     ];
 
@@ -16337,6 +16395,13 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // both the `oracle-gen` generator and the consumption guard
     // `source_admission_digest_consistent`.
     "crates/verter_session/src/typeinfo/oracle_core/source_digest.rs",
+    // The v4 `relation_verdict` consumption driver (`#[cfg(test)]` only —
+    // never on the production resolver path): builds the SAME quiescent owned
+    // view over a freshly-constructed standalone host to observe the engine's
+    // live `relate_nodes` answer for a registry relation spec, mirroring the
+    // `support.rs` shallow-surface pattern. The raw-text scan cannot see the
+    // cfg(test) boundary.
+    "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
     // Inline `#[cfg(test)]` proof only (the input-side no-poison gate test
     // builds a quiescent bare-host owned view over a standalone host); no
     // production code path in this file touches the raw view — the raw-text
@@ -21072,16 +21137,15 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
 
 /// PARENT-SHAPE guard (load-bearing): the `structural_carrier_producer/`
 /// owner directory contains ONLY the sanctioned members — the single producer
-/// module (`macro_arg_producer.rs`), the module root (`mod.rs`), and test
-/// modules (`*_tests.rs`). This stops the owner module's boundary silently
-/// growing a SECOND producer surface (a new non-test, non-sanctioned `.rs`
-/// module that could open another path to the module-private lowerer). The
-/// collapse to ONE producer module is what makes a third caller a compile
-/// error — there is no other file that could name the private lowerer.
+/// module (`macro_arg_producer.rs`), the typed-IR-only binder walker
+/// (`infer_binder_names.rs`), the module root (`mod.rs`), and test modules
+/// (`*_tests.rs`). This stops the owner module's boundary silently growing a
+/// SECOND producer surface. The binder walker has no producer inputs and, as a
+/// sibling, cannot name the child-private lowering builders.
 #[test]
 fn structural_carrier_producer_module_is_narrow() {
     let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
-    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs", "infer_binder_names.rs"];
     let mut found_modules: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
         let path = entry.expect("dir entry").path();
@@ -21120,9 +21184,9 @@ fn structural_carrier_producer_module_is_narrow() {
     assert!(
         extra.is_empty(),
         "owner-module narrowness violation: `structural_carrier_producer/` may contain ONLY the \
-         single producer module (`macro_arg_producer.rs`), `mod.rs`, and test modules \
-         (`*_tests.rs`). A new non-test module here could open a SECOND producer surface or name \
-         the module-private lowerer. Found extra modules: {extra:#?}"
+         single producer module (`macro_arg_producer.rs`), the typed-IR-only binder walker \
+         (`infer_binder_names.rs`), `mod.rs`, and test modules (`*_tests.rs`). A new non-test \
+         module here could open a SECOND producer surface. Found extra modules: {extra:#?}"
     );
 }
 
@@ -21134,7 +21198,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     // Reuse the SAME sanctioned-set membership predicate the live guard uses by
     // re-stating it here over an in-memory file list, so a divergence in the
     // allowlist reddens.
-    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs", "infer_binder_names.rs"];
     let classify = |names: &[&str]| -> Vec<String> {
         names
             .iter()
@@ -21147,6 +21211,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     let genuine = [
         "mod.rs",
         "macro_arg_producer.rs",
+        "infer_binder_names.rs",
         "structural_lower_tests.rs",
         "macro_hot_mirror_tests.rs",
         "script_setup_binder_tests.rs",
@@ -21156,7 +21221,12 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
         "the genuine owner member set (sanctioned production + `*_tests.rs`) must have NO extras"
     );
     // A planted extra non-test module IS reported.
-    let with_extra = ["mod.rs", "macro_arg_producer.rs", "second_producer.rs"];
+    let with_extra = [
+        "mod.rs",
+        "macro_arg_producer.rs",
+        "infer_binder_names.rs",
+        "second_producer.rs",
+    ];
     assert_eq!(
         classify(&with_extra),
         vec!["second_producer.rs".to_string()],
@@ -21166,6 +21236,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     let only_test = [
         "mod.rs",
         "macro_arg_producer.rs",
+        "infer_binder_names.rs",
         "extra_invariant_tests.rs",
     ];
     assert!(
@@ -22624,23 +22695,52 @@ fn type_path_last_segment(ty: &syn::Type) -> Option<String> {
 }
 
 /// The EXACT sanctioned shape of `structural_carrier_producer/mod.rs`: it must
-/// declare the producer module as a PRIVATE `mod macro_arg_producer;` (no
-/// visibility) and re-export EXACTLY
+/// declare the typed-IR helper as a PRIVATE `mod infer_binder_names;`, declare
+/// the producer module as a PRIVATE `mod macro_arg_producer;` (no visibility),
+/// and re-export EXACTLY
 /// `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
 /// — no aliases, no globs, no extra leaves, no re-exported restricted
-/// helpers/traits/consts, no `pub`-widened module decl. Returns the list of
-/// violations (empty on the genuine `mod.rs`). A `syn` walk over the file's items
-/// enforces the shape structurally (not a substring scan).
+/// helpers/traits/consts, no `pub`-widened module decl. The helper is a sibling,
+/// so it cannot name the producer child's private builders. Returns the list of
+/// violations (empty on the genuine `mod.rs`). A `syn` walk over the file's
+/// items enforces the shape structurally (not a substring scan).
 fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
     let file = match syn::parse_file(src) {
         Ok(f) => f,
         Err(e) => return vec![format!("parse error: {e}")],
     };
     let mut out: Vec<String> = Vec::new();
+    let mut saw_helper_decl = false;
     let mut saw_mod_decl = false;
     let mut saw_sanctioned_reexport = false;
     for item in &file.items {
         match item {
+            // The typed-IR walker is the one sanctioned non-producer sibling.
+            // It must stay private, attribute-free, and out-of-line.
+            syn::Item::Mod(m) if m.ident == "infer_binder_names" => {
+                saw_helper_decl = true;
+                if !matches!(m.vis, syn::Visibility::Inherited) {
+                    out.push(
+                        "`mod infer_binder_names;` must be PRIVATE — widening it is outside the \
+                         sanctioned typed-IR helper boundary"
+                            .to_string(),
+                    );
+                }
+                if !m.attrs.is_empty() {
+                    out.push(
+                        "`mod infer_binder_names;` must carry no attributes — `#[path]` or an \
+                         attribute macro could substitute a producer-capable implementation"
+                            .to_string(),
+                    );
+                }
+                if m.content.is_some() {
+                    out.push(
+                        "`mod infer_binder_names` must be an out-of-line declaration \
+                         (`mod infer_binder_names;`)"
+                            .to_string(),
+                    );
+                }
+            }
             // The `mod macro_arg_producer;` declaration must be PRIVATE and
             // body-less (out-of-line into the sibling file).
             syn::Item::Mod(m) if m.ident == "macro_arg_producer" => {
@@ -22692,7 +22792,7 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             syn::Item::Mod(m) => {
                 out.push(format!(
                     "mod.rs declares an unexpected module `mod {}` — the owner root must declare \
-                     ONLY the private `mod macro_arg_producer;`",
+                     ONLY the private typed-IR helper and producer modules",
                     m.ident
                 ));
             }
@@ -22710,12 +22810,15 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             other => {
                 out.push(format!(
                     "mod.rs contains an unexpected item ({}) — the owner root must hold ONLY the \
-                     private `mod macro_arg_producer;` declaration and the one sanctioned \
-                     `pub(crate) use macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};`",
+                     private helper/producer module declarations and the one sanctioned \
+                     producer re-export",
                     describe_item_kind(other)
                 ));
             }
         }
+    }
+    if !saw_helper_decl {
+        out.push("mod.rs must declare `mod infer_binder_names;`".to_string());
     }
     if !saw_mod_decl {
         out.push("mod.rs must declare `mod macro_arg_producer;`".to_string());
@@ -22904,12 +23007,13 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     }
     // Anti-vacuity: the module must exist and the scan must have found the
     // sanctioned entry — its absence means the producer-entry move regressed. The
-    // owner module is now narrow (`mod.rs` + `macro_arg_producer.rs`), so at least
-    // one production file is scanned.
+    // owner module is narrow (`mod.rs` + producer + typed-IR helper), so at
+    // least one production file is scanned.
     assert!(
         scanned_mirror_files >= 1,
         "anti-vacuity: expected at least the owner module's production files \
-         (`mod.rs` + `macro_arg_producer.rs`), found {scanned_mirror_files}"
+         (`mod.rs` + `macro_arg_producer.rs` + `infer_binder_names.rs`), found \
+         {scanned_mirror_files}"
     );
     for sanctioned in MIRROR_SANCTIONED_PRODUCER_ENTRIES {
         assert!(
@@ -22968,18 +23072,16 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         trait_violations.join("\n  ")
     );
 
-    // PIN mod.rs EXACTLY — a PRIVATE `mod macro_arg_producer;` plus EXACTLY
-    // `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
-    // (no aliases, globs, extra leaves, re-exported restricted helpers, or a
-    // `pub`-widened module decl).
+    // PIN mod.rs EXACTLY — PRIVATE typed-IR-helper and producer module
+    // declarations plus EXACTLY the sanctioned producer re-export.
     let mod_rel = "crates/verter_session/src/structural_carrier_producer/mod.rs";
     let mod_src = std::fs::read_to_string(workspace_path(mod_rel))
         .unwrap_or_else(|e| panic!("guard could not read {mod_rel}: {e}"));
     let mod_violations = mod_rs_reexport_shape_violations(&mod_src);
     assert!(
         mod_violations.is_empty(),
-        "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare a PRIVATE \
-         `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
+        "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare PRIVATE \
+         `mod infer_binder_names;` + `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
          macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};` — no aliases, globs, \
          extra leaves, re-exported restricted helpers, or a `pub`-widened module decl. \
          Violations:\n  {}",
@@ -23253,21 +23355,19 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg_attr(feature = \"x\", inline)] pub(crate) fn` is compiled in every build and MUST \
          be counted — cfg_attr never gates the item out"
     );
-    // CONVERSELY, the strict `#[cfg(test)]` item gate is UNAFFECTED by the fix: a
-    // genuine `#[cfg(test)] pub(crate) fn` is still EXCLUDED (test-only). This
-    // confirms the cfg_attr split did not regress real test-wiring exclusion.
+    // The strict `#[cfg(test)]` item gate excludes a genuine test-only entry.
     assert!(
         crate_visible_producer_fn_names("#[cfg(test)]\npub(crate) fn test_wired() {}\n").is_empty(),
         "a genuine `#[cfg(test)] pub(crate) fn` stays EXCLUDED after the cfg_attr split — the \
          `cfg(test)` item gate is unaffected"
     );
-    // The REAL owner source exposes EXACTLY the single sanctioned producer entry
-    // (revert proof: the production tree is pristine — free + associated coverage
-    // across the owner module's two production files).
+    // The real owner source exposes exactly the single sanctioned producer
+    // entry, with free + associated coverage across every production file.
     let mut real: Vec<String> = Vec::new();
     for rel in [
         "crates/verter_session/src/structural_carrier_producer/mod.rs",
         "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_session/src/structural_carrier_producer/infer_binder_names.rs",
     ] {
         let src = std::fs::read_to_string(workspace_path(rel))
             .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
@@ -23287,9 +23387,9 @@ fn mirror_entry_surface_classifier_discriminates() {
     );
 }
 
-/// Self-test for the FIX-B value-exposure / trait-exposure / mod.rs-pin
-/// collectors: the genuine `macro_arg_producer.rs` + `mod.rs` pass; a planted
-/// crate-visible const/static fn-pointer of a builder, a non-allowlisted trait
+/// Self-test for the value-exposure / trait-exposure / mod.rs-pin collectors:
+/// the genuine producer, helper, and `mod.rs` pass; a planted crate-visible
+/// const/static fn-pointer of a builder, a non-allowlisted trait
 /// impl, a trait def, an allowlisted impl naming a builder, and a deviating
 /// mod.rs re-export (extra leaf / alias / glob / `pub` module decl) each redden;
 /// `#[cfg(test)]`-gated shapes do not.
@@ -23427,43 +23527,44 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
 
     // ── mod.rs PIN ─────────────────────────────────────────────────────────
     // The EXACT sanctioned shape passes.
-    let ok_mod = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let ok_mod = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         mod_rs_reexport_shape_violations(ok_mod).is_empty(),
         "the exact sanctioned mod.rs shape must pass"
     );
     // An EXTRA re-exported leaf reddens.
-    let extra_leaf = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";
+    let extra_leaf = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";
     assert!(
         !mod_rs_reexport_shape_violations(extra_leaf).is_empty(),
         "an extra re-exported leaf (`lower_type_expr_structural`) in mod.rs must redden"
     );
     // A SECOND `pub(crate) use` re-exporting a restricted helper reddens.
-    let extra_use = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\npub(crate) use macro_arg_producer::rogue;\n";
+    let extra_use = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\npub(crate) use macro_arg_producer::rogue;\n";
     assert!(
         !mod_rs_reexport_shape_violations(extra_use).is_empty(),
         "a second `pub(crate) use macro_arg_producer::rogue;` in mod.rs must redden"
     );
     // An ALIAS reddens.
-    let aliased = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref as hot, MacroHotMirror};\n";
+    let aliased = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref as hot, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(aliased).is_empty(),
         "an aliased re-export leaf in mod.rs must redden"
     );
     // A GLOB reddens.
-    let glob = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::*;\n";
+    let glob =
+        "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::*;\n";
     assert!(
         !mod_rs_reexport_shape_violations(glob).is_empty(),
         "a glob re-export in mod.rs must redden"
     );
     // A `pub` (not `pub(crate)`) module decl reddens (foreign-nameable).
-    let pub_mod = "pub mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let pub_mod = "mod infer_binder_names;\npub mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(pub_mod).is_empty(),
         "a `pub mod macro_arg_producer;` decl in mod.rs must redden (foreign-nameable)"
     );
     // A `pub` (not `pub(crate)`) re-export visibility reddens.
-    let pub_use = "mod macro_arg_producer;\npub use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let pub_use = "mod infer_binder_names;\nmod macro_arg_producer;\npub use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(pub_use).is_empty(),
         "a `pub use` (wider than `pub(crate)`) re-export in mod.rs must redden"
@@ -23473,7 +23574,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     // build-substitution route) while keeping the inherited visibility +
     // out-of-line shape — it MUST redden. The decl must carry NO attribute other
     // than a strict `#[cfg(test)]`.
-    let path_attr = "#[path = \"../evil.rs\"]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let path_attr = "mod infer_binder_names;\n#[path = \"../evil.rs\"]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(path_attr).is_empty(),
         "a `#[path = \"../evil.rs\"] mod macro_arg_producer;` must redden — a `#[path]` re-roots the \
@@ -23481,7 +23582,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     );
     // A proc-macro / non-inert ATTRIBUTE on the decl likewise reddens (it could
     // rewrite the module).
-    let proc_attr = "#[some_proc_macro]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let proc_attr = "mod infer_binder_names;\n#[some_proc_macro]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(proc_attr).is_empty(),
         "a `#[some_proc_macro] mod macro_arg_producer;` decl must redden — a non-cfg-test attribute \

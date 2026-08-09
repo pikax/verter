@@ -150,8 +150,11 @@ impl AuthoredResolutionDebtFrame {
     /// Finalize this call-owned frame and report whether unresolved-owner debt
     /// remains after normal reference resolution.
     pub(super) fn finish(&self) -> bool {
+        // The latch flips in EVERY build so the frame's finalization state
+        // is configuration-independent; only its prior value is asserted.
+        let was_finished = self.finished.replace(true);
         debug_assert!(
-            !self.finished.replace(true),
+            !was_finished,
             "authored resolution debt must be finalized exactly once"
         );
         self.outstanding.get()
@@ -321,7 +324,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ) && type_args.iter().any(|arg| {
                         crate::project_semantic_dispatch::raise::
                             builtin_lowering_argument_is_open(self, *arg)
-                    }));
+                    }))
+                    // `ReturnType<typeof callee>` over a BODY-DERIVED
+                    // (flow-return) function value stays a carrier under
+                    // the carrier-preserving modes: executing it here
+                    // would evaluate the callee's WHOLE body at a
+                    // head-normalization site that carries no projection
+                    // demand. Materialisation enters at the demand
+                    // points — the PathWalker's member hop dispatches
+                    // `FlowReturn` with the single-member demand
+                    // (path-precise; siblings stay cold), and a terminal
+                    // whole-surface demand executes through the direct
+                    // `Instantiate` unwrap. Declared-return callees keep
+                    // executing eagerly (annotation-only, no body
+                    // evaluation).
+                    || (matches!(
+                        context.mode,
+                        ProjectionMode::Navigate | ProjectionMode::Skeleton
+                    ) && name.as_ref() == "ReturnType"
+                        && type_args.len() == 1
+                        && self
+                            .flow_return_callee_for_typeof_arg(type_args[0])
+                            .is_some());
                 if build_carrier {
                     return self.intern_ref_head_carrier(
                         RefHeadResolution::Builtin(identity),
@@ -687,6 +711,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // being materialised by an enclosing `build_instantiate` frame mints
         // `Opaque(RecursiveRef)` — the dispatcher-local `instantiate_active`
         // stack is the single source of truth (never copied into the context).
+        // The sentinel interns under the DECLARING file's scope: the name
+        // alone does not identify the declaration, so the relation engine's
+        // carrier unwrap re-resolves the back-edge through the shared
+        // `Instantiate` dispatch from the scope sidecar (an interface's own
+        // body referencing itself relates exactly like the `DeclRef` the
+        // same reference lowers to at any other position).
         if arg_count == 0
             && self.is_instantiate_active(
                 resolved_root.canonical_id.as_ref(),
@@ -694,8 +724,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 resolved_root.symbol_name.as_ref(),
             )
         {
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&resolved_root.symbol_name),
+            let whole_hash = self
+                .ctx
+                .shallow_file_state(resolved_root.canonical_id.as_ref())
+                .map_or(HashValue::default(), |s| s.whole_hash);
+            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(&DeclIdentity {
+                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                owner: resolved_root.owner,
+                whole_hash,
+                decl_name: Arc::clone(&resolved_root.symbol_name),
             }));
         }
 
@@ -742,6 +779,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 canonical_id: Arc::clone(&resolved_root.canonical_id),
                 owner: resolved_root.owner,
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    resolved_root.owner,
+                ),
             },
             name: Arc::clone(&resolved_root.symbol_name),
         })) {
@@ -860,7 +900,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let path: Arc<[PathSegment]> = Arc::from(
                     qualifier
                         .iter()
-                        .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                        .map(|seg| {
+                            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                Arc::clone(seg),
+                            ))
+                        })
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 );
@@ -937,7 +981,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let path: Arc<[PathSegment]> = Arc::from(
             rest.iter()
-                .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                .map(|seg| {
+                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(Arc::clone(
+                        seg,
+                    )))
+                })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
@@ -998,7 +1046,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
         let resolved = self.resolve_carrier_subject_node_inner(node, context);
         let observed = observation.finish();
-        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        self.fold_into_top_build_local_taint_with(
+            observed.result_is_partial,
+            observed.cache_suppress,
+            observed.partial_reasons,
+        );
         resolved
     }
 
@@ -1079,7 +1131,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let completeness = crate::request_context::current_cold_compute_completeness();
         completeness_scope.discard();
         crate::request_context::fold_result_completeness(completeness);
-        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        self.fold_into_top_build_local_taint_with(
+            observed.result_is_partial,
+            observed.cache_suppress,
+            observed.partial_reasons,
+        );
         (resolved, observed, completeness)
     }
 
@@ -1162,7 +1218,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let projection_path: Arc<[PathSegment]> = Arc::from(
                     typeof_path
                         .iter()
-                        .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                        .map(|seg| {
+                            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                Arc::clone(seg),
+                            ))
+                        })
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 );
@@ -1452,46 +1512,5 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn carrier_resolver_context_bundles_resolution_inputs() {
-        // Construct from the same read-only inputs the eager `Ref` path uses,
-        // and assert every accessor returns the wired value.
-        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-        env.insert("T".to_string(), SemanticNodeId(11));
-        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
-            FxHashMap::default();
-        name_resolution.insert(
-            Arc::from("Foo"),
-            ResolvedRootIdentity::new("/foo.ts", "Foo"),
-        );
-        let scope = NodeScopeId::Global;
-        let shadowing = ScopeShadowing::empty();
-        let reduction = ProjectionReductionContext::published(ProjectionMode::Navigate);
-
-        let ctx = CarrierResolverContext::new(
-            &env,
-            &scope,
-            &name_resolution,
-            None,
-            &shadowing,
-            reduction,
-        );
-
-        assert_eq!(ctx.env().get("T"), Some(&SemanticNodeId(11)));
-        assert!(matches!(ctx.scope(), NodeScopeId::Global));
-        assert_eq!(
-            ctx.name_resolution()
-                .get("Foo")
-                .map(|r| r.symbol_name.as_ref()),
-            Some("Foo")
-        );
-        assert!(ctx.scope_payload().is_none());
-        // The shadow set is the empty set here (no userland shadow).
-        let _ = ctx.shadowing();
-        assert_eq!(ctx.mode(), ProjectionMode::Navigate);
-        assert_eq!(ctx.reduction_context().mode, ProjectionMode::Navigate);
-    }
-}
+#[path = "carrier_tests.rs"]
+mod tests;

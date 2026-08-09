@@ -719,6 +719,12 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
                             return v;
                         }
                     }
+                    ObjectMember::Spread(spread) => {
+                        let v = admit_type_expr(&spread.ty);
+                        if !v.is_admit() {
+                            return v;
+                        }
+                    }
                     // E3 (loss-based, per-signature): callable members admit
                     // when EVERY param type and the return type walk the
                     // allowlist clean — including overload groups (multiple

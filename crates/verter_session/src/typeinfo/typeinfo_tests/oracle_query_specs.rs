@@ -21,7 +21,7 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 46 lifted rows; the authoritative enumeration lives
+// The registry seats the lifted rows; the authoritative enumeration lives
 // on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 // `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`. The
 // types + validation are additionally exercised with synthetic specs by the
@@ -1007,7 +1007,152 @@ const TEMPLATE_LITERAL_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSp
     source: TEMPLATE_LITERAL_INFERENCE_SOURCE,
 }];
 
-/// The closed registry table. Holds the 46 lifted rows — the two
+/// Vendored source bytes of the value-inference fixture (the registry is the
+/// source-byte authority). Inlined verbatim (PURE owned `&'static str`); the
+/// guard `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+/// byte-identity with `fixtures/value_inference.ts`. The on-disk fixture name
+/// uses an underscore but the rows upsert it at the hyphenated canonical path
+/// `/fixtures/value-inference.ts`.
+#[allow(dead_code)]
+pub(crate) const VALUE_INFERENCE_SOURCE: &str = r#"// @ai-generated - Synthetic value-level type inference fixture.
+
+export const literalConst = "ready";
+export const numberConst = 42;
+export let mutableLabel = "draft";
+export var mutableCount = 1;
+
+export const objectConst = {
+  id: "item",
+  nested: {
+    value: 7,
+    flag: true,
+  },
+  list: [1, 2, 3],
+} as const;
+
+export const derivedValue = objectConst.nested.value;
+
+export const directArrow = (input: string, count?: number) => ({
+  input,
+  count,
+  ok: true,
+});
+
+export function bodyReturn(flag: boolean) {
+  if (flag) {
+    return {
+      state: "on" as const,
+      value: 1,
+    };
+  }
+  return {
+    state: "off" as const,
+    value: 0,
+  };
+}
+
+export function flowReturn(input: string | number) {
+  let current = input;
+  if (typeof current === "string") {
+    return {
+      kind: "text" as const,
+      value: current,
+    };
+  }
+  return {
+    kind: "number" as const,
+    value: current,
+  };
+}
+
+export type ComputedRef<T> = {
+  readonly value: T;
+};
+
+export function computed<T>(getter: () => T): ComputedRef<T> {
+  return {
+    value: getter(),
+  };
+}
+
+export const computedObject = computed(() => ({
+  id: "computed" as const,
+  count: 2,
+  nested: {
+    ready: true,
+  },
+}));
+
+export const computedBlock = computed(() => {
+  const local = {
+    ready: true as const,
+    count: 3,
+  };
+  return {
+    state: local.ready,
+    count: local.count,
+  };
+});
+
+export type LiteralConstType = typeof literalConst;
+export type NumberConstType = typeof numberConst;
+export type MutableLabelType = typeof mutableLabel;
+export type MutableCountType = typeof mutableCount;
+export type ObjectConstType = typeof objectConst;
+export type ObjectNestedType = typeof objectConst.nested;
+export type DerivedValueType = typeof derivedValue;
+export type DirectArrowReturn = ReturnType<typeof directArrow>;
+export type BodyReturnType = ReturnType<typeof bodyReturn>;
+export type FlowReturnType = ReturnType<typeof flowReturn>;
+export type ComputedObjectType = typeof computedObject;
+export type ComputedObjectValue = typeof computedObject.value;
+export type ComputedBlockValue = typeof computedBlock.value;
+"#;
+
+/// The single-file workspace the `value_inference.rs` lift rows upsert.
+#[allow(dead_code)]
+const VALUE_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/value-inference.ts",
+    source: VALUE_INFERENCE_SOURCE,
+}];
+
+/// One `ResolveExpr`/`Expanded` query spec for a `value_inference.rs`
+/// U6.FLOW_RETURN_SUBSTRATE lift row. Every queried alias is a same-file
+/// source-walk carve-out shape: `ReturnType<typeof bodyReturn>` /
+/// `ReturnType<typeof directArrow>` are `BuiltinUtilityCarveOutArg` roots
+/// whose returns Verter solves through the demand-sliced `FlowReturn`
+/// substrate (return-position literal widening, `as const` preservation,
+/// per-return-site union) — tsgo expands the same alias.
+const fn value_inference_spec(row_function: &'static str, symbol: &'static str) -> QuerySpec {
+    QuerySpec {
+        row_file: "value_inference.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "value_inference",
+        workspace_files: VALUE_INFERENCE_FILES,
+        primary_canonical: "/fixtures/value-inference.ts",
+        host_project: HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: HostSetupKindSpec::Standalone,
+        },
+        query_helper: QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args: &[],
+            projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
+        },
+        source_locator: SourceLocatorSpec {
+            reference_canonical: "/fixtures/value-inference.ts",
+            reference_name: symbol,
+            symbol_space: SymbolSpace::Type,
+        },
+        oracle_value_kind: OracleValueKindSpec::StructuredTypeExpr,
+    }
+}
+
+/// The closed registry table. Holds the lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
@@ -1030,7 +1175,15 @@ const TEMPLATE_LITERAL_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSp
 /// two U2.MAPPED_TEMPLATE-era queries (the `RecordTemplateRootSlot` same-file
 /// string-literal index-chain row + the `CounterHandlers` `Capitalize` key-remap
 /// mapped-type row, both terminating at `MappedTemplateRemap` under
-/// `U2.MAPPED_TEMPLATE`)
+/// `U2.MAPPED_TEMPLATE`), and the three `U6.FLOW_RETURN_SUBSTRATE`-era
+/// value-inference queries (the `ReturnType<typeof bodyReturn>`
+/// per-return-site union row + the two `ReturnType<typeof directArrow>`
+/// arrow-body rows, all solved through the demand-sliced `FlowReturn`
+/// substrate), and the eighteen `U6.CALL_RESOLVE`-era queries (the ten
+/// `call_resolution.rs` overload-picking / generic-inference /
+/// `this`-receiver rows, the `U6.FLOW_RETURN_SUBSTRATE` block-callback
+/// `ComputedBlockValue` value-inference lift, and the seven sibling
+/// call-site lifts in `function_advanced.rs` / `const_type_param.rs`)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1414,7 +1567,159 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         "/fixtures/template_literal_inference.ts",
         "CounterHandlers",
     ),
+    // U6.FLOW_RETURN_SUBSTRATE lifts: the pure value-inference rows whose
+    // mechanism is the bare `FlowReturn` slice + return-position widening.
+    // `ReturnType<typeof bodyReturn>` / `ReturnType<typeof directArrow>` are
+    // `BuiltinUtilityCarveOutArg` roots solved through the demand-sliced flow
+    // substrate (per-return-site union with `as const` discriminants;
+    // return-position literal widening + optional-parameter `undefined`
+    // injection). The sibling const-object row stays running-unratified: its
+    // ORIGINAL two-query body carries control flow around the second query,
+    // which the closed migration extractor rejects (`ControlFlowAroundQuery`),
+    // and a rewritten-to-extract body would not be the frozen original the
+    // provenance rail anchors on.
+    value_inference_spec(
+        "value_inference_function_body_return_union_from_return_statements",
+        "BodyReturnType",
+    ),
+    value_inference_spec(
+        "value_inference_arrow_expression_body_publishes_return_shape",
+        "DirectArrowReturn",
+    ),
+    value_inference_spec(
+        "value_inference_arrow_expression_body_substitutes_parameter_references",
+        "DirectArrowReturn",
+    ),
+    // U6.CALL_RESOLVE-era lifts. Every row's probe surface is the same shape —
+    // `ReturnType<typeof <wrapper>>` over a same-file wrapper whose body issues
+    // ONE call — so each one is the `Util<typeof root>` carve-out the source-side
+    // walk admits as a single contributor, and tsgo prints the wrapper's inferred
+    // return. The rows cover overload picking by arity / literal specificity /
+    // union compatibility, generic inference from a positional argument and from
+    // a callback return, object-literal inference including excess properties,
+    // and `this`-receiver binding at a method-access call site.
+    call_resolution_spec(
+        "call_resolution_optional_overload_picks_first_arity_matching_signature",
+        "CallOptional1Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_optional_overload_picks_two_arg_signature_when_required",
+        "CallOptional2Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_rest_overload_picks_rest_signature_when_required",
+        "CallOptional3Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_union_argument_picks_union_compatible_overload",
+        "LookupUnionResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_specific_literal_argument_picks_matching_overload_first",
+        "LookupSpecificAResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
+        "LookupSpecificBResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
+        "CallbackParamInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_from_callback_return_type",
+        "CallbackReturnInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_object_literal_including_excess_properties",
+        "ObjectLiteralInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_this_receiver_method_call_returns_declared_return",
+        "ThisReceiverResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_extracted_prototype_method_call_returns_declared_return",
+        "ExtractedMethodResult",
+    ),
+    // U6.CALL_RESOLVE-era call-site lifts in the sibling function-shape and
+    // const-type-parameter families: overload picking at a concrete call site,
+    // the `this`-parameter utilities over a declared receiver annotation, the
+    // declared `void` callback return, generic-first overload ordering with and
+    // without `as const`, and the `<const T>` modifier preserving readonly
+    // literal tuples inferred from a call-site array.
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_call_picks_matching_signature_return",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "LookupCountResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_void_callback_return_preserves_void",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "VoidCallbackReturn",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_generic_first_binds_to_literal_argument",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "OverloadedGenericResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "OverloadedStringResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_constrained_generic_infers_literal_under_as_const",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "ConstrainedIdentityResult",
+    ),
+    carve_out_spec(
+        "const_type_param.rs",
+        "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+        "const_type_param",
+        CONST_TYPE_PARAM_FILES,
+        "/fixtures/const_type_param.ts",
+        "ConstRouteResult",
+    ),
+    carve_out_spec(
+        "const_type_param.rs",
+        "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+        "const_type_param",
+        CONST_TYPE_PARAM_FILES,
+        "/fixtures/const_type_param.ts",
+        "ConstStringsResult",
+    ),
 ];
+
+/// One `ResolveExpr`/`Expanded` query spec for a `call_resolution.rs` row. Every
+/// row in the family shares the single `/fixtures/call_resolution.ts` workspace
+/// and resolves one `ReturnType<typeof …>` alias in the row's original
+/// `Expanded` projection mode.
+const fn call_resolution_spec(row_function: &'static str, symbol: &'static str) -> QuerySpec {
+    carve_out_spec(
+        "call_resolution.rs",
+        row_function,
+        "call_resolution",
+        CALL_RESOLUTION_FILES,
+        "/fixtures/call_resolution.ts",
+        symbol,
+    )
+}
 
 /// Why the registry is malformed. Pure value type (no external dependency) so
 /// the validation is shareable into both consumers.
@@ -1497,7 +1802,10 @@ pub(crate) fn registry_well_formed(specs: &[QuerySpec]) -> Result<(), RegistryEr
 // comment-free, path-const-folded) `syn::Block` token stream — the EXACT bytes
 // the extractor reads — so `original_extraction_input_auditable` re-derives the
 // fingerprint from this table alone, with NO VCS archaeology. NOT a `snapshot_id`
-// input. Generated by the audited lift command; never hand-edited.
+// input. Generated by the audited lift command (`cargo run -p verter_session
+// --features oracle-lift --bin oracle_lift -- --row <file.rs>::<fn>`, whose
+// `--check` mode re-validates every row and the table's byte-stability); never
+// hand-edited.
 
 /// One lifted row's retained migration provenance.
 #[allow(dead_code)]
@@ -1547,6 +1855,105 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/branded_types.ts\" , \"UserIdBrandTag\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"UserId\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_extracted_prototype_method_call_returns_declared_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:95f572f2196a1cefedd1ce697e49f82b2e77faebf2204c8b052f98ddcbf8e61e",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ExtractedMethodResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_from_callback_return_type",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:70aae868023c2f1b221b02e0073c3b2a0dfefd2743d4239f6374a09544385c88",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallbackReturnInfer\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"value\"]) ; assert_number_literal (& props [\"value\"] . ty , 42.0) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:b9e8fd6e8d584ccce4713cdc6da4bb1a1368bfebbf71931cde16cd1070a10f44",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallbackParamInfer\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"literal\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_object_literal_including_excess_properties",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:99bc85ddcacdfb75af4c61a2dd6236ba6c89113bcb5edee8226cab627473a215",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ObjectLiteralInfer\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"debug\" , \"mode\"]) ; assert_primitive (& props [\"mode\"] . ty , PrimitiveName :: String) ; assert_primitive (& props [\"debug\"] . ty , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_optional_overload_picks_first_arity_matching_signature",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:18df9e2a64276ee3a4a0e3c897844ad577d764855c3186feec27e19af11c1adc",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional1Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"with-a\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_optional_overload_picks_two_arg_signature_when_required",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:ca5793d611eebbf76760945f7fef2a9c9014f79ebc1f999b45d161095eb441db",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional2Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"with-b\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_rest_overload_picks_rest_signature_when_required",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:8e21830e13446fd0f0b8f33ad4eed3ab390bcbe9d371d045d5372f7c76e45ac9",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional3Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"rest\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_specific_literal_argument_picks_matching_overload_first",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:64b48c78b35c1c1721c0323a012642725070f73a228d845dd761408c9c3d000b",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupSpecificAResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"value-a\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:99634bcb937cb1d35072dbfa8c0f8caa19f327119ff082d38e0c74f19f6249b2",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupSpecificBResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"value-b\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_this_receiver_method_call_returns_declared_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:54bb842569b43584be336279a8092ed4bf7d28894ba977a8df52fd360ebe24fb",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ThisReceiverResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_union_argument_picks_union_compatible_overload",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:913a7833532dd3e8bcf77c617f433739a522eda447bd48b27957dc1ea1967554",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupUnionResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_literal_union (& expr , & [\"value-a\" , \"value-b\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
         row_file: "class_features.rs",
         row_function: "class_features_static_generic_method_instantiation_projects_return_with_substitution",
         oracle_query_ordinals: 1,
@@ -1572,6 +1979,24 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:fe1ccef3736d08d80d7b87ec40d262694fe53f28b6cd8c58a76252fcd3921a61",
         workspace_files: &[("/fixtures/class_features.ts", "sha256:72b7927d9a0d5c3d197227b5bf874a6a8594963ccab65fd8531ad0e8c4554ebb")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/class_features.ts\" , \"StepCounterDescribeReturn\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "const_type_param.rs",
+        row_function: "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:c4922f1aaaef6e8d7490bb1bd8e7ba17a73e43f049bd2393c3897ac0981f51ba",
+        workspace_files: &[("/fixtures/const_type_param.ts", "sha256:dea67e539c1ad868c8bc030b3b6d146cf8df99e33bf25abf1487058c8d2d25ea")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/const_type_param.ts\" , \"ConstRouteResult\" , & [] , ProjectionMode :: Expanded ,) ; let TypeExpr :: Tuple { elements , readonly } = & expr else { panic ! (\"expected readonly tuple, got {expr:?}\") ; } ; assert ! (readonly) ; assert_eq ! (elements . len () , 2) ; let first = object_props (& elements [0] . ty) ; assert_eq ! (prop_names (& first) , vec ! [\"path\"]) ; assert ! (first [\"path\"] . readonly) ; assert_string_literal (& first [\"path\"] . ty , \"/home\") ; let second = object_props (& elements [1] . ty) ; assert_eq ! (prop_names (& second) , vec ! [\"path\"]) ; assert ! (second [\"path\"] . readonly) ; assert_string_literal (& second [\"path\"] . ty , \"/about\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "const_type_param.rs",
+        row_function: "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:eefbd7098393320ccd6b79a1035d8848fb46b444d0bcf2718023807fcaf9ecf5",
+        workspace_files: &[("/fixtures/const_type_param.ts", "sha256:dea67e539c1ad868c8bc030b3b6d146cf8df99e33bf25abf1487058c8d2d25ea")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/const_type_param.ts\" , \"ConstStringsResult\" , & [] , ProjectionMode :: Expanded ,) ; let TypeExpr :: Tuple { elements , readonly } = & expr else { panic ! (\"expected readonly tuple, got {expr:?}\") ; } ; assert ! (readonly) ; assert_eq ! (elements . len () , 3) ; assert_string_literal (& elements [0] . ty , \"a\") ; assert_string_literal (& elements [1] . ty , \"b\") ; assert_string_literal (& elements [2] . ty , \"c\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "decorators.rs",
@@ -1656,6 +2081,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
     },
     LiftMigrationProvenance {
         row_file: "function_advanced.rs",
+        row_function: "function_advanced_constrained_generic_infers_literal_under_as_const",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:fb5c7bc1925f2ce6e116b21b33b5cbfb94dddec4da022368332d19c832e3ec53",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"ConstrainedIdentityResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"constrained\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
         row_function: "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
         oracle_query_ordinals: 1,
         migration_fingerprint_version: 1,
@@ -1674,12 +2108,48 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
     },
     LiftMigrationProvenance {
         row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_call_picks_matching_signature_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:9bf2e3773ce4c72fba3d5bd7e1fdf8abdfce2a1f9e3a310af5eb0ed2a3c6f02c",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"LookupCountResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Number) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_generic_first_binds_to_literal_argument",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:d1916beb45eb8fdfb63d30763bd72369d568c012609376ce591e1824b16e965d",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"OverloadedGenericResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_number_literal (& expr , 42.0) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:afec540a147a3b4769feb9b965a4523de6b7dcb07c65fb7435340417fedfd114",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"OverloadedStringResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
         row_function: "function_advanced_return_type_of_overloaded_function_uses_last_overload",
         oracle_query_ordinals: 1,
         migration_fingerprint_version: 1,
         migration_fingerprint: "blake3:e05273507835885d31a4f2d86e59ed363f26e79f86d68f61b34eaefb6402c56f",
         workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"LookupReturnType\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_void_callback_return_preserves_void",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:757836ce59a732c1cc2ba663297741243212ea84846e7b89ef4b7d8aabdbe5f5",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"VoidCallbackReturn\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Void) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "index_signatures.rs",
@@ -1725,6 +2195,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:53f7f3d3041b9a920fc879ff726709a2a09393b9a21bb3a25c2a3601d135fb6e",
         workspace_files: &[("/fixtures/mapped_modifiers.ts", "sha256:a82df02cf44225bfe2b470ac7d6ad401eebca75e32a00033fc7855d054314b1b")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/mapped_modifiers.ts\" , \"RemoveOptionalResult\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"a\" , \"b\"]) ; assert ! (! props [\"a\"] . optional) ; assert ! (! props [\"b\"] . optional) ; assert_primitive (& props [\"a\"] . ty , PrimitiveName :: String) ; assert_primitive (& props [\"b\"] . ty , PrimitiveName :: Number) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "mapped_template.rs",
+        row_function: "record_with_template_literal_key_union_projects_root_slot",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:f8c259acdc518799ba6dfdbf6598ac3a9e3fac3dab7c265d22d4d0ef9d3c1d47",
+        workspace_files: &[("/fixtures/mapped-template.ts", "sha256:68b1c5433dd696540382c2d22f1a491e6bc355c9a73652eb6bc7ebc8923c65cf")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_ts (& host , \"/fixtures/mapped-template.ts\" , MAPPED_TEMPLATE) ; let (expr , record) = resolve_expr (& host , \"/fixtures/mapped-template.ts\" , \"RecordTemplateRootSlot\" , & [] , ProjectionMode :: Expanded ,) ; let slot = function_type (& expr) ; assert_eq ! (slot . parameters . len () , 1) ; let payload = object_props (& slot . parameters [0] . ty) ; assert_literal_union (& payload [\"name\"] . ty , & [\"item\" , \"root\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "mode_boundary_invariants.rs",
@@ -1779,6 +2258,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:3f8399fadab2394c803926fa5b0db6dd0411265d3410e694fd5b58b28bbad46e",
         workspace_files: &[("/fixtures/substitution_types.ts", "sha256:41a41aabe8dc03c8de662058d952b7e131b42f59ca0cb23fd4a17f6ef634cb4b")],
         original_body_tokens: "{ let expr = { let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/substitution_types.ts\" , \"Sb15Result\" , & [] , ProjectionMode :: Expanded) ; expr } ; assert_primitive (& expr , PrimitiveName :: Unknown) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "template_literal_inference.rs",
+        row_function: "template_literal_key_remap_capitalises_each_event_key",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:4376ec8e27b02314d0af94a7d6de18c2a6a468d1090dc236b2216096c43305bc",
+        workspace_files: &[("/fixtures/template_literal_inference.ts", "sha256:383c4fdd04efadb1f7344d3b8518313172211f86e2e712e570e82d25d8b8fb44")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "typescript_rules.rs",
@@ -1947,4 +2435,570 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         workspace_files: &[("/fixtures/template_literal_inference.ts", "sha256:383c4fdd04efadb1f7344d3b8518313172211f86e2e712e570e82d25d8b8fb44")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
+    // U6.FLOW_RETURN_SUBSTRATE lifts (tsgo-available oracle lift). Provenance
+    // emitted by the audited `emit_lifted_row_migrations` lift-capture (the
+    // closed `syn` extractor over the original body); the body-extracted
+    // fingerprint matched the registry-projected fingerprint, so the registry
+    // faithfully reproduces each original query.
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_function_body_return_union_from_return_statements",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:efacc4c25220407183ced69188ccb01a916326ca188f49b13df5a02eb8199f01",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"BodyReturnType\" , & [] , ProjectionMode :: Expanded ,) ; assert_union_arm_state_with_number_value (& expr , \"on\") ; assert_union_arm_state_with_number_value (& expr , \"off\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_arrow_expression_body_publishes_return_shape",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:29e62a7df980ec44e55894d9eb2279778aebb2be6ffa541e8b518d4cce65ebc0",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"DirectArrowReturn\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"count\" , \"input\" , \"ok\"]) ; assert ! (! props [\"input\"] . optional) ; assert_primitive (& props [\"input\"] . ty , PrimitiveName :: String) ; assert_union_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Number) ; assert_union_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Undefined) ; assert ! (! props [\"ok\"] . optional) ; assert_primitive (& props [\"ok\"] . ty , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_arrow_expression_body_substitutes_parameter_references",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:8bea37884f3e108fda9b4061524254f6dbe2a5feeebdf8acd98224fa897d98e0",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"DirectArrowReturn\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_primitive (& props [\"input\"] . ty , PrimitiveName :: String) ; assert_expr_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Number) ; assert_expr_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Undefined) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
 ];
+
+// ---------------------------------------------------------------------------
+// The v4 `relation_verdict` query-spec registry (the relation-tuple-wire
+// capture family — `docs/arch/ri0-relation-verdict-oracle-addendum.md` §4)
+// ---------------------------------------------------------------------------
+//
+// The SECOND closed value family's registry. Relation rows are CAPTURE-ONLY NEW
+// rows — never lifts — so they carry no retained-lift provenance and seat in
+// their OWN spec shape (the `relation_verdict` kind's registry half of the
+// closed kind-set addition; `QuerySpec` stays the `structured_type_expr`
+// shape). PURE data under the same purity contract as the v3 table above: the
+// `include!`d `tests/` guard compiles this exact file, so no spec may reference
+// a crate-internal helper. Every derived artifact (the synthesized probe file,
+// the canonical operand ASTs, the `snapshot_id`) is produced by the shared pure
+// derivation in `oracle_core::relation_probe`, NEVER stored here — the registry
+// holds only the operand texts + the binder layout + the contract mapping + the
+// known-mismatch ledger pins.
+
+/// One binder of the target-pattern binder layout, in target-pattern PREORDER
+/// (NOT name sort). `ordinal` must equal the entry's position (`0..n-1`); names
+/// must be unique and set-match the `infer X` positions of `target_text` (the
+/// src-side guard proves this through the shared canonical-operand derivation).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationBinderSpec {
+    pub(crate) ordinal: u16,
+    pub(crate) name: &'static str,
+    /// The binder's `infer X extends <constraint>` constraint text, when the
+    /// target pattern declares one (`None` for a bare `infer X`). The
+    /// constraint is an identity-carrying axis: an `infer V extends string`
+    /// and a bare `infer V` MUST derive DISTINCT identities (the derivation
+    /// canonicalizes it into the binder layout entry and rejects a declared
+    /// constraint that does not match the target pattern's).
+    pub(crate) constraint: Option<&'static str>,
+}
+
+/// A verdict the ENGINE produces today (the ledger pin's payload). Closed set —
+/// `Unknown` / `Miss` / `BudgetExceeded` are engine failures, never pinnable
+/// verdicts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationEngineVerdict {
+    Assignable,
+    NotAssignable,
+}
+
+/// The known-mismatch ledger, first-class data (addendum §5). A row WITHOUT a
+/// pin is parity-enforced against its captured snapshot; a pinned row has its
+/// engine observation asserted against the PIN instead (parity DISABLED), so a
+/// future engine fix flips the row loudly. CAPTURE-ONLY honesty: no pin is an
+/// M=0 claim — the ledger records rows the engine gets wrong (or cannot answer)
+/// today.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineObservationPin {
+    /// The observation adapter REJECTS the key: the target pattern carries
+    /// `infer` binders (an inference context), which the engine's
+    /// `execute(SemanticQueryKey::Relate)` identity (assignable, default policy, regular source, no
+    /// inference context) does not support this block. The engine can produce
+    /// NO verdict for the row — a direct inference target returns `Unknown`
+    /// today, which is an engine failure, never an oracle verdict.
+    UnsupportedKey,
+    /// The engine answers with THIS verdict today and it DIVERGES from the
+    /// captured oracle verdict (a source-proven mismatch — the projection
+    /// contract's `#[ignore]` comment proves the engine's live answer).
+    MismatchedVerdict(RelationEngineVerdict),
+}
+
+/// One `(row_file, row_function, query_ordinal)` relation registry entry — the
+/// full capture spec for one RAW relation identity (addendum §4). PURE data:
+/// closed enums + owned `&'static str` / static slices. `oracle_family` is the
+/// directory/presentation key (`relation_verdict`). `contract_rows` names the
+/// `relation_semantics.rs` projection-contract test(s) whose RAW relation
+/// identity this spec captures — the 28→26 mapping is first-class data, pinned
+/// exactly by the src-side registry guard.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationQuerySpec {
+    pub(crate) row_file: &'static str,
+    pub(crate) row_function: &'static str,
+    pub(crate) query_ordinal: u16,
+    pub(crate) oracle_family: &'static str,
+    pub(crate) host_project: HostProjectSpec,
+    /// The SOURCE operand's TS type text (never carries `infer`).
+    pub(crate) source_text: &'static str,
+    /// The TARGET operand's TS type text; `infer X` positions are the binder
+    /// layout's names.
+    pub(crate) target_text: &'static str,
+    /// The target-pattern binder layout in binder preorder (empty ⇔
+    /// `inference_mode: "none"`).
+    pub(crate) binder_layout: &'static [RelationBinderSpec],
+    /// The `relation_semantics.rs` projection-contract row(s) this raw relation
+    /// identity covers (exactly one spec covers TWO rows per collapse: the
+    /// `never`→`string` and `string|number`→`string` pairs).
+    pub(crate) contract_rows: &'static [&'static str],
+    /// The known-mismatch ledger pin (`None` = parity-enforced row).
+    pub(crate) engine_pin: Option<EngineObservationPin>,
+}
+
+/// The standalone host/project axes every relation spec shares (the only
+/// admissible host class this block, same as the v3 table).
+const RELATION_HOST_PROJECT: HostProjectSpec = HostProjectSpec {
+    project_root: "/",
+    workspace_root: "/",
+    tsconfig_path: "/oracle.tsconfig.json",
+    host_setup_kind: HostSetupKindSpec::Standalone,
+};
+
+/// One binder-free relation spec (the 20 non-infer rows).
+const fn relation_spec(
+    row_function: &'static str,
+    source_text: &'static str,
+    target_text: &'static str,
+    contract_rows: &'static [&'static str],
+    engine_pin: Option<EngineObservationPin>,
+) -> RelationQuerySpec {
+    RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: RELATION_HOST_PROJECT,
+        source_text,
+        target_text,
+        binder_layout: &[],
+        contract_rows,
+        engine_pin,
+    }
+}
+
+/// One single-binder relation spec (the 6 `infer` rows — all carry the
+/// `UnsupportedKey` pin: a direct inference target is outside the engine's
+/// supported relation identity this block). The layout is a named `&'static`
+/// slice (a `const fn` argument cannot promote a temporary).
+const fn relation_infer_spec(
+    row_function: &'static str,
+    source_text: &'static str,
+    target_text: &'static str,
+    binder_layout: &'static [RelationBinderSpec],
+    contract_rows: &'static [&'static str],
+) -> RelationQuerySpec {
+    RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: RELATION_HOST_PROJECT,
+        source_text,
+        target_text,
+        binder_layout,
+        contract_rows,
+        engine_pin: Some(EngineObservationPin::UnsupportedKey),
+    }
+}
+
+/// The single-binder layouts (target-pattern preorder, ordinal 0) for the 6
+/// `infer` rows.
+const BINDER_V: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "V",
+    constraint: None,
+}];
+const BINDER_H: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "H",
+    constraint: None,
+}];
+const BINDER_R: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "R",
+    constraint: None,
+}];
+const BINDER_A: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "A",
+    constraint: None,
+}];
+const BINDER_X: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "X",
+    constraint: None,
+}];
+
+/// The 26 relation identities the v4 family captures (addendum §4): the 28
+/// `relation_semantics.rs` projection contracts minus the two collapse pairs
+/// (`never`→`string` direct + via-generic; `string|number`→`string`
+/// distributive + tuple-wrapped — the distribution scaffold is
+/// projection-level, not relation identity). Coverage by family:
+/// top/bottom/unknown ×6, optional properties ×3, readonly ×2, function
+/// variance ×2, tuple/rest ×4, whole-union ×1, intersections ×2, infer
+/// bindings ×6. NO strict-axis multiplication (no ON/OFF pairs — no verdict
+/// flips on the live config surface). Pinned exactly by
+/// `relation_registry_holds_the_26_identities_and_maps_the_28_contracts`.
+#[allow(dead_code)]
+pub(crate) const RELATION_QUERY_SPECS: &[RelationQuerySpec] = &[
+    // -- Row 1: top / bottom / unknown (×6) ---------------------------------
+    relation_spec(
+        "relation_any_extends_string",
+        "any",
+        "string",
+        &["relation_any_extends_string_distributes_both_branches"],
+        None,
+    ),
+    relation_spec(
+        "relation_unknown_extends_string",
+        "unknown",
+        "string",
+        &["relation_unknown_extends_string_selects_false_branch"],
+        None,
+    ),
+    // COLLAPSE 1 of 2: the DIRECT `never extends string` and the via-generic
+    // `IsStringDistributive<never>` contracts share the raw relation identity
+    // `never`→`string` (the via-generic distribution collapse is
+    // projection-level).
+    relation_spec(
+        "relation_never_extends_string",
+        "never",
+        "string",
+        &[
+            "relation_never_extends_string_directly_selects_true_branch",
+            "relation_never_via_generic_helper_collapses_to_never",
+        ],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_any",
+        "string",
+        "any",
+        &["relation_string_extends_any_selects_true_branch"],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_unknown",
+        "string",
+        "unknown",
+        &["relation_string_extends_unknown_selects_true_branch"],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_never",
+        "string",
+        "never",
+        &["relation_string_extends_never_selects_false_branch"],
+        None,
+    ),
+    // -- Row 2: optional properties (×3) ------------------------------------
+    relation_spec(
+        "relation_required_to_optional",
+        "{ a: string }",
+        "{ a?: string }",
+        &["relation_required_property_assignable_to_optional"],
+        None,
+    ),
+    // Parity-enforced: the relation authority rejects optional-to-required
+    // under `strictNullChecks` (the optional slot may be absent), matching
+    // the oracle's captured `not_assignable`.
+    relation_spec(
+        "relation_optional_to_required",
+        "{ a?: string }",
+        "{ a: string }",
+        &["relation_optional_property_not_assignable_to_required"],
+        None,
+    ),
+    relation_spec(
+        "relation_empty_to_all_optional",
+        "{}",
+        "{ a?: string }",
+        &["relation_empty_object_assignable_to_all_optional"],
+        None,
+    ),
+    // -- Row 3: readonly (×2) -----------------------------------------------
+    relation_spec(
+        "relation_mutable_to_readonly",
+        "{ a: string }",
+        "{ readonly a: string }",
+        &["relation_mutable_property_assignable_to_readonly"],
+        None,
+    ),
+    // Parity-enforced: a property `readonly` modifier is not part of
+    // assignability in either direction, so the relation authority answers
+    // `assignable`, matching the oracle.
+    relation_spec(
+        "relation_readonly_to_mutable",
+        "{ readonly a: string }",
+        "{ a: string }",
+        &["relation_readonly_property_assignable_to_mutable"],
+        None,
+    ),
+    // -- Row 4: function variance (×2) ---------------------------------------
+    relation_spec(
+        "relation_wider_param_to_narrower",
+        "((x: \"a\" | \"b\") => void)",
+        "((x: \"a\") => void)",
+        &["relation_function_with_wider_param_assignable_to_narrower_target"],
+        None,
+    ),
+    relation_spec(
+        "relation_narrower_param_to_wider",
+        "((x: \"a\") => void)",
+        "((x: \"a\" | \"b\") => void)",
+        &["relation_function_with_narrower_param_not_assignable_to_wider_target"],
+        None,
+    ),
+    // -- Row 5: tuple / rest (×4) --------------------------------------------
+    // LEDGER (source-proven): the engine answers `not_assignable` today
+    // (`relation_fixed_tuple_assignable_to_first_plus_rest` is `#[ignore]`d);
+    // the oracle captures `assignable` (the fixed tail satisfies the rest slot).
+    relation_spec(
+        "relation_fixed_to_first_rest",
+        "[string, number]",
+        "[string, ...unknown[]]",
+        &["relation_fixed_tuple_assignable_to_first_plus_rest"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::NotAssignable,
+        )),
+    ),
+    relation_spec(
+        "relation_rest_to_fixed",
+        "[string, ...number[]]",
+        "[string, number]",
+        &["relation_rest_tuple_not_assignable_to_fixed_tuple"],
+        None,
+    ),
+    relation_spec(
+        "relation_one_to_one_optional",
+        "[string]",
+        "[string, number?]",
+        &["relation_one_tuple_assignable_to_one_with_optional_second_slot"],
+        None,
+    ),
+    relation_spec(
+        "relation_empty_to_readonly_array",
+        "[]",
+        "readonly string[]",
+        &["relation_empty_tuple_assignable_to_readonly_array"],
+        None,
+    ),
+    // -- Row 6: whole-union (×1) ---------------------------------------------
+    // COLLAPSE 2 of 2: the DISTRIBUTIVE `IsStringDistributive<string|number>`
+    // and the tuple-wrapped `IsStringNonDistributive<string|number>` contracts
+    // share the raw relation identity `string|number`→`string` (the
+    // distribution scaffold is projection-level; the oracle's own tuple wire
+    // never distributes).
+    relation_spec(
+        "relation_whole_union_not_assignable",
+        "string | number",
+        "string",
+        &[
+            "relation_distributive_conditional_over_union_emits_branch_union",
+            "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+        ],
+        None,
+    ),
+    // -- Row 7: intersections (×2) -------------------------------------------
+    relation_spec(
+        "relation_intersection_extends_base",
+        "{ a: string } & { b: number }",
+        "{ a: string }",
+        &["relation_intersection_assignable_to_one_base_arm"],
+        None,
+    ),
+    relation_spec(
+        "relation_base_extends_intersection",
+        "{ a: string }",
+        "{ a: string } & { b: number }",
+        &["relation_one_arm_not_assignable_to_intersection"],
+        None,
+    ),
+    // -- Row 8: `infer` bindings (×6 — all `UnsupportedKey` ledger rows) -----
+    relation_infer_spec(
+        "relation_infer_value_of_object",
+        "{ value: number }",
+        "{ value: infer V }",
+        BINDER_V,
+        &["relation_infer_value_of_object_property"],
+    ),
+    relation_infer_spec(
+        "relation_infer_head_of_tuple",
+        "[1, 2, 3]",
+        "[infer H, ...unknown[]]",
+        BINDER_H,
+        &["relation_infer_head_of_tuple_pattern"],
+    ),
+    relation_infer_spec(
+        "relation_infer_tail_of_tuple",
+        "[1, 2, 3]",
+        "[unknown, ...infer R]",
+        BINDER_R,
+        &["relation_infer_tail_of_tuple_pattern"],
+    ),
+    relation_infer_spec(
+        "relation_infer_return_of_function",
+        "() => \"hello\"",
+        "(...args: any[]) => infer R",
+        BINDER_R,
+        &["relation_infer_return_of_function"],
+    ),
+    relation_infer_spec(
+        "relation_infer_params_of_function",
+        "((x: string, y?: number) => void)",
+        "(...args: infer A) => any",
+        BINDER_A,
+        &["relation_infer_params_of_function_preserves_optional_undefined"],
+    ),
+    relation_infer_spec(
+        "relation_infer_single_param",
+        "((s: string) => void)",
+        "((x: infer X) => any)",
+        BINDER_X,
+        &["relation_infer_single_param_of_function"],
+    ),
+];
+
+/// Why the relation registry failed validation (PURE, over the registry's own
+/// types only — the canonical-operand consistency proof lives in the src-side
+/// guard, which runs the shared derivation over every spec).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RelationRegistryError {
+    /// A spec carried an empty `oracle_family` / operand text / contract-row
+    /// mapping.
+    EmptyField {
+        row_function: &'static str,
+        field: &'static str,
+    },
+    /// Two specs shared a `(row_file, row_function, query_ordinal)` key.
+    DuplicateKey {
+        row_file: &'static str,
+        row_function: &'static str,
+        query_ordinal: u16,
+    },
+    /// A binder layout's ordinals were not exactly `0..n-1` in layout order.
+    BinderOrdinalSequence { row_function: &'static str },
+    /// A binder layout carried the same name twice.
+    DuplicateBinderName {
+        row_function: &'static str,
+        name: &'static str,
+    },
+    /// An `UnsupportedKey` pin sat on a binder-free spec (only an inference
+    /// context is an unsupported key), or a `MismatchedVerdict` pin sat on a
+    /// binder-carrying spec (an inference key has no engine verdict to pin).
+    PinShape { row_function: &'static str },
+    /// A contract row was named by two specs (each projection contract maps to
+    /// exactly one raw relation identity).
+    DuplicateContractRow {
+        row_function: &'static str,
+        contract_row: &'static str,
+    },
+}
+
+/// Validate the relation registry's structural well-formedness — PURE, over the
+/// registry's own types only: non-empty fields; unique row keys; binder layouts
+/// with ordinals exactly `0..n-1` in layout order and unique names; the
+/// ledger-pin shape honesty rules (an `UnsupportedKey` pin requires a binder
+/// layout — only an inference context is an unsupported key; a
+/// `MismatchedVerdict` pin requires an EMPTY layout — an inference key has no
+/// engine verdict to pin); contract rows unique across the whole table.
+#[allow(dead_code)]
+pub(crate) fn relation_registry_well_formed(
+    specs: &[RelationQuerySpec],
+) -> Result<(), RelationRegistryError> {
+    let mut keys: Vec<(&'static str, &'static str, u16)> = Vec::new();
+    let mut contract_rows: Vec<&'static str> = Vec::new();
+    for spec in specs {
+        for (field, value) in [
+            ("oracle_family", spec.oracle_family),
+            ("source_text", spec.source_text),
+            ("target_text", spec.target_text),
+        ] {
+            if value.is_empty() {
+                return Err(RelationRegistryError::EmptyField {
+                    row_function: spec.row_function,
+                    field,
+                });
+            }
+        }
+        if spec.contract_rows.is_empty() {
+            return Err(RelationRegistryError::EmptyField {
+                row_function: spec.row_function,
+                field: "contract_rows",
+            });
+        }
+        let key = (spec.row_file, spec.row_function, spec.query_ordinal);
+        if keys.contains(&key) {
+            return Err(RelationRegistryError::DuplicateKey {
+                row_file: spec.row_file,
+                row_function: spec.row_function,
+                query_ordinal: spec.query_ordinal,
+            });
+        }
+        keys.push(key);
+
+        let mut names: Vec<&'static str> = Vec::new();
+        for (index, binder) in spec.binder_layout.iter().enumerate() {
+            if binder.ordinal as usize != index {
+                return Err(RelationRegistryError::BinderOrdinalSequence {
+                    row_function: spec.row_function,
+                });
+            }
+            if names.contains(&binder.name) {
+                return Err(RelationRegistryError::DuplicateBinderName {
+                    row_function: spec.row_function,
+                    name: binder.name,
+                });
+            }
+            names.push(binder.name);
+        }
+
+        match spec.engine_pin {
+            Some(EngineObservationPin::UnsupportedKey) if spec.binder_layout.is_empty() => {
+                return Err(RelationRegistryError::PinShape {
+                    row_function: spec.row_function,
+                });
+            }
+            Some(EngineObservationPin::MismatchedVerdict(_)) if !spec.binder_layout.is_empty() => {
+                return Err(RelationRegistryError::PinShape {
+                    row_function: spec.row_function,
+                });
+            }
+            _ => {}
+        }
+
+        for contract_row in spec.contract_rows {
+            if contract_rows.contains(contract_row) {
+                return Err(RelationRegistryError::DuplicateContractRow {
+                    row_function: spec.row_function,
+                    contract_row,
+                });
+            }
+            contract_rows.push(contract_row);
+        }
+    }
+    Ok(())
+}

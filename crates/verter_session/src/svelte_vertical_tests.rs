@@ -1661,7 +1661,7 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
     assert!(
         obj.properties
             .iter()
-            .any(|m| matches!(m, verter_type_expr::ObjectMember::Property(p) if p.name == "name")),
+            .any(|m| matches!(m, verter_type_expr::ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "name")),
         "the hydrated body is the authored `{{ name: string }}` annotation"
     );
 }

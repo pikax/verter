@@ -727,13 +727,35 @@ defineProps<Payload>()
             "file={file}"
         );
         assert!(payload.inferred_class_members.is_empty(), "file={file}");
+
+        // Pinned terminal state: the entry stays `Complete(Props)` with the
+        // declaration-local failure and the aggregate completeness stays
+        // `Complete` (a contained failure never faults the compute).
+        assert!(
+            !output.completeness.is_partial(),
+            "aggregate completeness stays Complete for a contained inference failure, file={file}"
+        );
+        // The non-cacheable read channel (`OutputMaterializationLoss`) fires
+        // exactly when the materialization loses typed degradation:
+        // `UnsupportedReturn.vue`'s method type carries a degraded leaf (the
+        // while-loop return path is unresolvable) ⇒ refused; the nested
+        // `[] as any[]` lowers to a concrete `any[]` with NOTHING lost ⇒
+        // cacheable (declaration-local failure only).
+        let expect_cacheable = file.contains("NestedUnsafe");
+        assert_eq!(
+            output.facts_cacheable(),
+            expect_cacheable,
+            "the loss channel must refuse admission exactly when degradation is lost, file={file}"
+        );
     }
 }
 
 #[test]
 fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let mut inferred = "0".to_owned();
+    // A deep array nest is lowered element-wise by the flow IR's own
+    // structural lowering, so it charges that lowering's nesting envelope.
+    let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
     }
@@ -765,9 +787,17 @@ defineProps<Payload>()
             TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
         ))
     );
+    // Pinned terminal state: the aggregate completeness is EXACTLY
+    // `Partial(BUDGET_EXCEEDED)` — the declaration-local classification is
+    // preserved end-to-end, never masked by a generic fault class.
+    let reasons = output.completeness.reasons();
     assert!(
-        output.completeness.is_partial(),
-        "budget exhaustion must make the TypeInfo result partial"
+        reasons.contains(crate::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
+        "aggregate completeness must carry BUDGET_EXCEEDED, got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT),
+        "the precise budget class must NOT be masked by SEMANTIC_QUERY_FAULT, got {reasons:?}"
     );
     assert!(
         !output.facts_cacheable(),
@@ -778,7 +808,9 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let mut inferred = "0".to_owned();
+    // A deep array nest is lowered element-wise by the flow IR's own
+    // structural lowering, so it charges that lowering's nesting envelope.
+    let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
     }

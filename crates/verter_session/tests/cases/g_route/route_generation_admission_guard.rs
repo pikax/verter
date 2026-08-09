@@ -273,10 +273,15 @@ struct Producer {
 }
 
 /// The full producer roster — explicit per-producer classification.
-fn producers() -> [Producer; 5] {
+fn producers() -> [Producer; 4] {
     [
-        // The 5 ENTRY PRODUCERS — each builds a shared-cache admission
+        // The 4 ENTRY PRODUCERS — each builds a shared-cache admission
         // carrier and MUST abort the whole entry on `RouteGeneration`.
+        // The materialization cycle gate (`ClassifyMaterializationCycleGate`)
+        // builds NO bespoke carrier: its admission carrier is assembled by
+        // the generic memo finalizer (`finalise_traced_build_output`) from
+        // the traced fact set + observed self-roots, the same rail every
+        // other semantic family rides, so it is outside this roster.
         Producer {
             file: "component_meta_materialize.rs",
             signature: "pub fn fact_signature_from_fence(",
@@ -285,11 +290,6 @@ fn producers() -> [Producer; 5] {
         Producer {
             file: "component_meta_materialize.rs",
             signature: "fn materialize_structure_read_set(",
-            kind: ProducerKind::EntryProducer,
-        },
-        Producer {
-            file: "component_meta_caches.rs",
-            signature: "fn trace_ref_cycle_compute<C>(",
             kind: ProducerKind::EntryProducer,
         },
         Producer {

@@ -54,7 +54,7 @@ pub(crate) const NORMALIZER_VERSION: u32 = 1;
 /// than producing a possibly-false-diverging comparison value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NormalizeReject {
-    /// `TypeExpr::Unknown { raw }` — the lowering could not represent the type;
+    /// `TypeExpr::Unknown(UnknownValue)` — the lowering could not represent the type;
     /// a comparison value can never be derived from it (step 7).
     UnknownNode,
     /// `TypeExpr::SyntheticSlotBinding` — a display-only carrier with no
@@ -315,12 +315,14 @@ fn normalize_node(
                     name: placeholder,
                     constraint: None,
                     default: None,
+                    is_const: param.is_const,
                 }))
             } else {
                 Ok(TypeExpr::TypeParameter(TypeParam {
                     name: param.name.clone(),
                     constraint: normalize_opt(&param.constraint, mode, scope)?,
                     default: normalize_opt(&param.default, mode, scope)?,
+                    is_const: param.is_const,
                 }))
             }
         }
@@ -449,8 +451,8 @@ fn normalize_object(
         match m {
             ObjectMember::Property(p) => {
                 unordered.push(ObjectMember::Property(
-                    ObjectProperty::synthetic_with_visibility(
-                        p.name.clone(),
+                    ObjectProperty::synthetic_key_with_visibility(
+                        p.key.clone(),
                         normalize_node(&p.ty, mode, scope)?,
                         p.optional,
                         p.readonly,
@@ -468,6 +470,13 @@ fn normalize_object(
                     idx.readonly,
                 )));
             }
+            // Spread position is semantic (the fold depends on where the
+            // spread sits between direct members) — PRESERVED, never sorted.
+            ObjectMember::Spread(spread) => {
+                ordered.push(ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    normalize_node(&spread.ty, mode, scope)?,
+                )));
+            }
             ObjectMember::CallSignature(f) => {
                 ordered.push(ObjectMember::CallSignature(normalize_function(
                     f, mode, scope,
@@ -480,8 +489,8 @@ fn normalize_object(
             }
             ObjectMember::Method(msig) => {
                 ordered.push(ObjectMember::Method(
-                    MethodSignature::synthetic_with_visibility(
-                        msig.name.clone(),
+                    MethodSignature::synthetic_key_with_visibility(
+                        msig.key.clone(),
                         normalize_function(&msig.function, mode, scope)?,
                         msig.optional,
                         msig.visibility,
@@ -538,6 +547,7 @@ fn normalize_function(
                 name: placeholder,
                 constraint: normalize_opt(&tp.constraint, mode, scope)?,
                 default: normalize_opt(&tp.default, mode, scope)?,
+                is_const: tp.is_const,
             });
         }
         Ok(FunctionExpr::synthetic(

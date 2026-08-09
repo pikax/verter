@@ -1367,7 +1367,7 @@ impl VerterHost {
             }
             match crate::project_semantic_dispatch::node_data_for(ctx, node).as_deref() {
                 Some(crate::semantic_query::SemanticNodeData::Object(surface)) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
                             ctx,
                             member.value,

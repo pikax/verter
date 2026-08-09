@@ -127,12 +127,9 @@ fn deeply_nested_mixed_variant_chain_drops_without_stack_overflow() {
                 readonly: false,
             }),
             6 => Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "p".to_string(),
-                    own(current),
-                    false,
-                    false,
-                ))],
+                properties: vec![ObjectMember::Property(
+                    ObjectProperty::synthetic_public_key("p".into(), own(current), false, false),
+                )],
             }))),
             7 => Arc::new(TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
                 vec![FunctionParam::synthetic(
@@ -148,6 +145,7 @@ fn deeply_nested_mixed_variant_chain_drops_without_stack_overflow() {
                 name: "T".to_string(),
                 constraint: Some(current),
                 default: None,
+                is_const: false,
             })),
             9 => Arc::new(TypeExpr::RecursiveRef {
                 name: Arc::from("R"),

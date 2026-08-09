@@ -116,37 +116,81 @@ impl FrameworkSurfaceAdapter for SvelteFrameworkAdapter {
         // sources resolved (supported-empty when present-but-empty); MISSING for
         // every source ⇒ the kind stays absent (the executor fills it
         // supported-empty for a supported kind).
-        let mut by_kind: Vec<(FrameworkSurfaceKind, MacroSurfaceDtos, bool)> = Vec::new();
+        // The merge carries each kind's DIAGNOSTICS with its members. A
+        // contributing source that resolved PARTIAL makes the merged kind
+        // partial: folding it back to `Resolved` published a surface the
+        // substrate had failed to compute as SUPPORTED /
+        // `GRAPH_EXACTNESS_EXACT_RESOLVED`, byte-identical on the wire to a
+        // clean one — and a source-family merge is exactly where the
+        // evidence would be lost, because the merged members look the same
+        // either way.
+        struct KindAggregate {
+            dtos: MacroSurfaceDtos,
+            present: bool,
+            diagnostics: Vec<String>,
+        }
+        let mut by_kind: Vec<(FrameworkSurfaceKind, KindAggregate)> = Vec::new();
         for item in resolved.items {
             let ResolvedDemand::SvelteSurface(payload) = item.result else {
                 // The Svelte adapter only plans SvelteSurface demands; any other
                 // resolved demand is not its concern.
                 continue;
             };
-            let entry = match by_kind.iter_mut().find(|(k, _, _)| *k == item.kind) {
-                Some(e) => e,
+            let entry = match by_kind.iter_mut().find(|(k, _)| *k == item.kind) {
+                Some((_, e)) => e,
                 None => {
-                    by_kind.push((item.kind, MacroSurfaceDtos::default(), false));
-                    by_kind.last_mut().unwrap()
+                    by_kind.push((
+                        item.kind,
+                        KindAggregate {
+                            dtos: MacroSurfaceDtos::default(),
+                            present: false,
+                            diagnostics: Vec::new(),
+                        },
+                    ));
+                    &mut by_kind.last_mut().unwrap().1
                 }
             };
-            if let ResolvedOutcome::Resolved(dtos) | ResolvedOutcome::Partial { value: dtos, .. } =
-                &payload
-            {
-                entry.2 = true;
-                merge_source_into(&mut entry.1, item.kind, dtos);
+            match &payload {
+                ResolvedOutcome::Resolved(dtos) => {
+                    entry.present = true;
+                    merge_source_into(&mut entry.dtos, item.kind, dtos);
+                }
+                ResolvedOutcome::Partial { value, diagnostics } => {
+                    entry.present = true;
+                    entry.diagnostics.extend(diagnostics.iter().cloned());
+                    merge_source_into(&mut entry.dtos, item.kind, value);
+                }
+                // An UNSUPPORTED source still records WHY: a kind whose only
+                // evidence is an unsupported source must not read as a clean
+                // absent family.
+                ResolvedOutcome::Unsupported { diagnostics } => {
+                    entry.diagnostics.extend(diagnostics.iter().cloned());
+                }
+                ResolvedOutcome::Missing => {}
             }
         }
 
         let surfaces = by_kind
             .into_iter()
-            .map(|(kind, dtos, present)| NormalizedSurface {
-                kind,
-                outcome: if present {
-                    ResolvedOutcome::Resolved(dtos)
-                } else {
-                    ResolvedOutcome::Missing
-                },
+            .map(|(kind, mut aggregate)| {
+                aggregate.diagnostics.sort();
+                aggregate.diagnostics.dedup();
+                let outcome = match (aggregate.present, aggregate.diagnostics.is_empty()) {
+                    (true, true) => ResolvedOutcome::Resolved(aggregate.dtos),
+                    (true, false) => ResolvedOutcome::Partial {
+                        value: aggregate.dtos,
+                        diagnostics: aggregate.diagnostics,
+                    },
+                    // No source produced a family. A recorded diagnostic still
+                    // means "we could not tell", which is not the same claim as
+                    // "this component has no such family".
+                    (false, true) => ResolvedOutcome::Missing,
+                    (false, false) => ResolvedOutcome::Partial {
+                        value: MacroSurfaceDtos::default(),
+                        diagnostics: aggregate.diagnostics,
+                    },
+                };
+                NormalizedSurface { kind, outcome }
             })
             .collect();
         NormalizedSurfaces { surfaces }

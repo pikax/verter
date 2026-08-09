@@ -160,10 +160,13 @@ pub(crate) fn wrapper_role_for_value_signature_return(
     let Some(candidate) = wrapper_candidate_for_route(dispatch.ctx, route) else {
         return (ReactiveWrapperRole::None, None);
     };
-    let Some(return_ty) = signature.return_ty.as_ref() else {
+    let verter_type_expr::facts::FunctionReturnSource::Declared(return_locator) =
+        &signature.return_source
+    else {
         return unresolved(ReactiveWrapperUnresolvedReason::MissingDependency);
     };
-    let source = SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(return_ty.clone()));
+    let source =
+        SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(return_locator.slot().clone()));
     // TYPED raise boundary: a genuine absence stays `MissingDependency`, but a
     // typed query failure publishes ITS OWN reason (a budget trip, a
     // cancellation, a cycle, an unsupported surface, a fault) instead of being

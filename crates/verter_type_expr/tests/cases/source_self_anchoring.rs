@@ -14,8 +14,8 @@ use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
     AuthoredReferenceHeadFact, ClosedTypeFact, FactOrLocator, FunctionParamFact,
     FunctionSignatureFact, LeafTypeFact, ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact,
-    ProjectedMemberFact, ProjectedTypeFact, ResolvedLocalShape, ReturnInferenceCompleteness,
-    SemanticTypeSource, SynthesizedMemberFact,
+    ProjectedMemberFact, ProjectedTypeFact, ResolvedLocalShape, SemanticTypeSource,
+    SynthesizedMemberFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
@@ -129,7 +129,7 @@ fn closed_object_property_slot_absolutizes_deeply() {
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
         members: Arc::from(
             vec![ObjectMemberFact::Property(ObjectPropertyFact {
-                name: "x".to_string(),
+                key: "x".into(),
                 optional: false,
                 readonly: false,
                 visibility: MemberVisibility::Public,
@@ -152,10 +152,11 @@ fn closed_object_property_slot_absolutizes_deeply() {
 #[test]
 fn projected_member_and_function_positions_absolutize_deeply() {
     let member = SemanticTypeSource::Projected(ProjectedTypeFact::Member(ProjectedMemberFact {
-        name: "onSelect".to_string(),
+        key: "onSelect".into(),
         optional: true,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility: MemberVisibility::Public,
         declared_in_macro_type_arg: false,
         declaration_origin: DeclarationOrigin::Synthetic,
@@ -185,8 +186,9 @@ fn projected_member_and_function_positions_absolutize_deeply() {
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: Some(slot("/lib/keep.ts")),
-            return_inference: ReturnInferenceCompleteness::NotInferred,
+            return_source: verter_type_expr::facts::FunctionReturnSource::Declared(
+                verter_type_expr::locators::FunctionReturnLocator::Authored(slot("/lib/keep.ts")),
+            ),
             return_reference_head: AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: false,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
@@ -206,13 +208,14 @@ fn projected_member_and_function_positions_absolutize_deeply() {
         "a producer-local function-parameter slot must absolutize"
     );
     assert_eq!(
-        signature
-            .return_ty
-            .as_ref()
-            .expect("return slot kept")
-            .anchor
-            .canonical_id
-            .as_ref(),
+        match &signature.return_source {
+            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => locator,
+            other => panic!("return source kept, got {other:?}"),
+        }
+        .slot()
+        .anchor
+        .canonical_id
+        .as_ref(),
         "/lib/keep.ts",
         "an absolute return-type anchor must NOT be rewritten"
     );

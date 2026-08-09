@@ -35,6 +35,7 @@ use verter_type_expr::facts::SvelteSnippetImportFact;
 use verter_type_expr::locators::AuthoredTypePayloadRef;
 use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
+    UnknownValue,
 };
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
@@ -472,15 +473,17 @@ fn resolve_runes_props(
                 .members
                 .iter()
                 .filter(|member| member.visibility.is_public())
-                .map(|member| {
-                    (
-                        member.name.as_ref().to_string(),
-                        classify_svelte_callable_role(
-                            &dispatch,
-                            member.value,
-                            &facts.snippet_imports,
-                        ),
-                    )
+                .filter_map(|member| {
+                    member.published_name().map(|name| {
+                        (
+                            name.to_string(),
+                            classify_svelte_callable_role(
+                                &dispatch,
+                                member.value,
+                                &facts.snippet_imports,
+                            ),
+                        )
+                    })
                 })
                 .collect::<std::collections::HashMap<_, _>>();
             let fields = props_from_typeinfo_surface(
@@ -513,7 +516,9 @@ fn resolve_runes_props(
                 verter_type_expr::facts::SemanticTypeSource::Projected(
                     verter_type_expr::facts::ProjectedTypeFact::MemberPath {
                         base: props_type.locator.clone(),
-                        path: Arc::from(vec![row.analysis.name.clone()].into_boxed_slice()),
+                        path: Arc::from([verter_type_expr::facts::FactPropertyKey::from(
+                            row.analysis.name.clone(),
+                        )]),
                     },
                 ),
             );
@@ -575,12 +580,15 @@ fn prop_origins_from_surface(
         if !member.visibility.is_public() {
             continue;
         }
+        let Some(prop_name) = member.published_name() else {
+            continue;
+        };
         let Some(origin) = member_declaration_origin(owner, member) else {
             continue;
         };
         origins.push(
             crate::typeinfo::framework_surface::results::PropOriginEntry {
-                prop_name: member.name.as_ref().to_string(),
+                prop_name: prop_name.to_string(),
                 origin,
             },
         );
@@ -604,7 +612,7 @@ fn member_declaration_origin(
 
     let canonical_file = member.origin.canonical_file.as_ref()?;
     let canonical_source = canonical_file.as_ref().to_string();
-    let member_name = member.name.as_ref().to_string();
+    let member_name = member.published_name()?.to_string();
     let span = member
         .origin
         .declaration_span
@@ -850,6 +858,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
         .iter()
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
+            let name = member.published_name()?.to_string();
             // The validated-snippet positional binding NODES, decided ENTIRELY in
             // the node domain through the shared `CallableNodeView` (which
             // carrier-preserving-peels the `Snippet<Params>` carrier and reads its
@@ -905,7 +914,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                                 occurrence:
                                     verter_type_expr::facts::CallableOccurrenceHandle::member(
                                         member.value.0,
-                                        Arc::from([member.name.as_ref().to_string()]),
+                                        Arc::from([name.clone()]),
                                     ),
                                 projection:
                                     verter_type_expr::facts::CallableOccurrenceProjection::Return,
@@ -923,7 +932,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 &PublicationPolicy::exact_only(),
             );
             Some((AnalyzedSlotField {
-                name: member.name.as_ref().to_string(),
+                name,
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
@@ -962,7 +971,9 @@ fn materialize_snippet_slot_return(
     let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
     cap.materialize_output_type_expr(return_node)
         .map(|raised| raised.into_type_expr(&cap))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() })
+        .unwrap_or(TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::missing_output(),
+        ))
 }
 
 /// Materialize the validated Svelte snippet-slot bindings from NODE-DOMAIN
@@ -1038,12 +1049,16 @@ fn retain_svelte_snippet_members(
                 verter_type_expr::PropCallableRole::SvelteSnippet { .. }
             )
         })
-        .map(|member| Arc::clone(&member.name))
+        .filter_map(|member| member.published_name().map(|name| name.to_string()))
         .collect::<std::collections::HashSet<_>>();
     let members: Vec<_> = surface
         .members
         .iter()
-        .filter(|member| keep.contains(&member.name))
+        .filter(|member| {
+            member
+                .published_name()
+                .is_some_and(|name| keep.contains(name.as_ref()))
+        })
         .cloned()
         .collect();
     TypeInfoSurface {
@@ -1051,14 +1066,15 @@ fn retain_svelte_snippet_members(
             .entries
             .iter()
             .filter(|entry| match entry {
-                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => {
-                    keep.contains(&member.name)
-                }
+                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => member
+                    .published_name()
+                    .is_some_and(|name| keep.contains(name.as_ref())),
                 _ => true,
             })
             .cloned()
             .collect(),
         members: Arc::from(members.into_boxed_slice()),
+        members_complete: surface.members_complete,
         call_signatures: Arc::clone(&surface.call_signatures),
         construct_signatures: Arc::clone(&surface.construct_signatures),
         index_signatures: Arc::clone(&surface.index_signatures),
@@ -1383,7 +1399,10 @@ fn callback_events_from_props_surface(
         }
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
         // suffix. The suffix is the event name (NO strip applied to the payload).
-        let Some(event_name) = member.name.as_ref().strip_prefix("on") else {
+        let Some(member_name) = member.published_name() else {
+            continue;
+        };
+        let Some(event_name) = member_name.strip_prefix("on") else {
             continue;
         };
         if event_name.is_empty() {
@@ -1433,7 +1452,7 @@ fn callback_events_from_props_surface(
                             base: return_base.clone(),
                             occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                                 member.value.0,
-                                Arc::from([member.name.as_ref().to_string()]),
+                                Arc::from([member_name.to_string()]),
                             ),
                             projection:
                                 verter_type_expr::facts::CallableOccurrenceProjection::Parameters {
@@ -1453,7 +1472,7 @@ fn callback_events_from_props_surface(
                     base: return_base.clone(),
                     occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                         member.value.0,
-                        Arc::from([member.name.as_ref().to_string()]),
+                        Arc::from([member_name.to_string()]),
                     ),
                     projection: verter_type_expr::facts::CallableOccurrenceProjection::Return,
                 },
@@ -1473,7 +1492,7 @@ fn callback_events_from_props_surface(
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member.name.as_ref().to_string()]),
+                    Arc::from([member_name.to_string()]),
                 ),
                 0,
             ),
@@ -1530,14 +1549,16 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
         .iter()
         .map(|param| {
             // Position-preserving: mint the param's `ty` node ONCE; a node that
-            // does not materialize keeps its tuple SLOT with the opaque `Unknown`
-            // raise-miss value (the `output_sink::raise_node_to_sealed_carrier`
-            // convention) so subsequent payload params never shift. A declared
-            // param's `ty` always mints, so the fallback is robustness only.
+            // does not materialize keeps its tuple SLOT with an exact empty
+            // `Unknown` (DISPLAY robustness only — the seam notes a
+            // present-but-unraisable failure as an `OutputMaterializationLoss`
+            // non-cacheable read, so the payload is never admitted complete). A
+            // declared param's `ty` always mints, so the fallback is robustness
+            // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
                 .map(|raised| raised.into_type_expr(&cap))
-                .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() });
+                .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
                 // display-facing tuple `label` (`Option<String>`).
@@ -1583,17 +1604,17 @@ fn instance_export_display_node(
 ) -> SemanticNodeId {
     let resolved = follow_alias_chain(store, node);
     if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
-        if surface.members.is_empty()
+        if surface.positive_members().is_empty()
             && surface.construct_signatures.is_empty()
             && surface.index_signatures.is_empty()
-            && !surface.has_index_signature
+            && !surface.has_known_index_signature()
             && surface.keyspace.is_none()
             && surface.call_signatures.len() == 1
         {
             let sig = surface.call_signatures[0];
             if matches!(
                 store.node_data(follow_alias_chain(store, sig)).as_deref(),
-                Some(SemanticNodeData::Function { .. })
+                Some(SemanticNodeData::Signature { .. })
             ) {
                 return sig;
             }

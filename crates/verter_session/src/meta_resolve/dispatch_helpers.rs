@@ -39,7 +39,7 @@ use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────────
 
 /// Realize a slot/macro member value to its underlying callable
-/// [`crate::semantic_query::SemanticNodeData::Function`] node, if one
+/// [`crate::semantic_query::SemanticNodeData::Signature`] node, if one
 /// exists, by normalizing through the carrier shells the
 /// `StructuralTransit(Navigate)` macro-publication path produces.
 ///
@@ -119,8 +119,13 @@ fn realize_callable_member_inner(
     }
     let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
     match data.as_ref() {
-        // (1) Function — the realized callable. Return verbatim.
-        SemanticNodeData::Function { .. } => Some(node),
+        // (1) A CALL signature — the realized callable. Return verbatim.
+        // A CONSTRUCT signature (`new (...) => R`) is not invocable as a
+        // callback and falls through to the non-callable arm below.
+        SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            ..
+        } => Some(node),
 
         // (2) Alias → recurse on inner.
         SemanticNodeData::Alias(inner) => {
@@ -213,6 +218,9 @@ fn realize_callable_member_inner(
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        identity.owner,
+                    ),
                 },
                 name: Arc::clone(&identity.decl_name),
             }));
@@ -569,7 +577,7 @@ pub(crate) fn decompose_indexed_access_chain_node(
                 }
                 // A type-node index is not a path-precise string/number hop —
                 // stop and let the dispatch resolve the whole indexed-access.
-                IndexKey::TypeNode(_) => break,
+                IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => break,
             },
             _ => break,
         }
@@ -679,7 +687,7 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
 ///   slot).
 pub(crate) fn arg_preserving_member_use_site_slot(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    member_name: &str,
+    member_key: &crate::semantic_query::PropertyKey,
     declaration_origin: Option<&str>,
     value_node: crate::semantic_query::SemanticNodeId,
 ) -> Option<verter_type_expr::locators::TypeBodySlot> {
@@ -701,7 +709,7 @@ pub(crate) fn arg_preserving_member_use_site_slot(
         let declares_member = dispatch
             .ctx
             .prepared_type_decl_return_only(origin, declaring_owner, name)
-            .is_some_and(|prepared| prepared.member_index.contains_key(member_name));
+            .is_some_and(|prepared| prepared.member_index.contains_key(member_key));
         if !declares_member {
             continue;
         }
@@ -722,7 +730,7 @@ pub(crate) fn arg_preserving_member_use_site_slot(
     if !prepared.type_parameters.is_empty() {
         return None;
     }
-    let slot = prepared.member_index.get(member_name)?.ty.clone();
+    let slot = prepared.member_index.get(member_key)?.ty.clone();
 
     // Honesty verification: the candidate slot must raise to the SAME
     // resolved instantiation as the observed value — equal base identity,

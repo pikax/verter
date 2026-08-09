@@ -1,8 +1,8 @@
-//! Graph-native registry-route + cycle-BFS predicates.
+//! Graph-native registry-route + cycle-gate predicates.
 //!
 //! Domain 12 — owns the §1.12 graph-native variants of the
 //! TypeExpr-based registry-route helpers, the package-ref check, and
-//! the cycle-BFS predicates that gate ref/recursive-ref termination:
+//! the node-domain front of the materialization cycle gate:
 //!
 //! - `RouteExtraction` struct + `extract_route_root_identity_node`,
 //!   `extract_pick_omit_route`, `build_keys_union_node`,
@@ -12,23 +12,14 @@
 //! - `type_node_has_package_backed_root`,
 //!   `declaration_body_prefers_inline_materialization_node`
 //!   (graph-native predicates the materializer / walker call).
-//! - `ref_root_reaches_transitive_cycle_node`, `bfs_compute_inner`,
-//!   `body_contains_recursive_ref_to_name`,
-//!   `has_complex_cycle_guard_surface_node`, `collect_ref_identities_node`
-//!   (cycle-BFS termination + recursive-ref reachability).
+//! - `node_root_reaches_transitive_cycle_with_fence` (the node-root
+//!   aggregator over the sealed materialization cycle gate —
+//!   [`ProjectSemanticDispatch::classify_materialization_cycle_gate`],
+//!   the SOLE cycle-gate authority).
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
-
-// `dep_signature` module is accessed via path (`dep_signature::BFS_*_COUNTER`)
-// inside `bfs_compute_inner` for thread-local counter access. The bare
-// module-name use is gated `#[cfg(test)]` because the BFS instrumentation
-// counters are themselves test-only (`#[cfg(test)]` thread-locals).
-#[cfg(test)]
-use super::dep_signature;
-#[cfg(test)]
-use super::dep_signature::record_bfs_child_refs_count_for_test;
 
 /// Return type for [`extract_route_root_identity_node`].
 ///
@@ -66,7 +57,7 @@ pub(crate) struct RouteExtraction {
 /// - `Foo['a']['b']…` — chained `IndexedAccess` whose innermost
 ///   `object` is a bare `DeclRef` OR `InstantiationRef`, with every
 ///   `IndexKey` a `String` literal (rejects `IndexKey::Number` /
-///   `IndexKey::TypeNode`).
+///   `IndexKey::Computed`).
 ///
 /// Plain `DeclRef` and userland (non-builtin) `InstantiationRef`
 /// return `None` — they are NOT route shapes; they fall through to the
@@ -183,23 +174,33 @@ pub(crate) fn extract_pick_omit_route(
 /// (no file scope) since the keys are workspace-shared sentinels.
 pub(crate) fn build_keys_union_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
-    keys: &[String],
-) -> crate::semantic_query::SemanticNodeId {
+    keys: &[verter_type_expr::facts::FactPropertyKey],
+) -> Option<crate::semantic_query::SemanticNodeId> {
     use crate::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
+    use verter_type_expr::PropertyKey;
 
-    if keys.len() == 1 {
-        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-            keys[0].clone(),
-        )))
+    let key_ids: Option<Vec<crate::semantic_query::SemanticNodeId>> = keys
+        .iter()
+        .map(|key| match key {
+            PropertyKey::String(value) => Some(graph.intern_node(SemanticNodeData::Literal(
+                LiteralValue::String(value.to_string()),
+            ))),
+            PropertyKey::Number(value) => Some(graph.intern_node(SemanticNodeData::Literal(
+                LiteralValue::Number(value.get() as f64),
+            ))),
+            // The semantic node vocabulary has no nominal unique-symbol leaf.
+            // Reject the conversion instead of fabricating a string literal.
+            PropertyKey::UniqueSymbol(_) => None,
+        })
+        .collect();
+    let key_ids = key_ids?;
+    if let [only] = key_ids.as_slice() {
+        Some(*only)
     } else {
-        let key_ids: Vec<crate::semantic_query::SemanticNodeId> = keys
-            .iter()
-            .map(|k| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(k.clone()))))
-            .collect();
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
+        Some(graph.intern_node(SemanticNodeData::Union(Arc::from(
             key_ids.into_boxed_slice(),
-        )))
+        ))))
     }
 }
 
@@ -231,7 +232,9 @@ pub(crate) fn extract_indexed_access_route(
                     // Numeric / type indices are not legal route
                     // hops (parity with TypeScript: `Foo[0]` and
                     // `Foo[K]` are not declared registry routes).
-                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                    IndexKey::Number(_) | IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => {
+                        return None;
+                    }
                 };
                 hops_reverse.push(hop);
                 current = *object;
@@ -328,7 +331,7 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// - All other shapes — `false` (matches the TypeExpr `_` arm).
 ///
 /// `depth` is fused at 256 to bound runtime on pathological chains
-/// (matches [`has_complex_cycle_guard_surface_node`] etc.). On fuse
+/// (matches the cycle-gate producer's scanner fuses). On fuse
 /// the predicate returns `false`: a runaway recursion is treated as
 /// "not package-backed" so the caller does NOT short-circuit through
 /// the package-backed branch.
@@ -399,595 +402,6 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
             declaration_body_prefers_inline_materialization_node(graph, *inner)
         }
         _ => extract_route_root_identity_node(graph, body_id, 0).is_some(),
-    }
-}
-
-/// R — graph-native BFS for transitive cycle
-/// detection, with ctx-owned cache.
-///
-/// Architecture:
-///   1. **Fast path (§4.9)** — `RefCycleResultDb::peek` consults the
-///      generation-local cache. On `validated_at_generation == current`,
-///      returns the cached `bool` without re-walking.
-///   2. **Slow path** — cooperative-admission via
-///      `ref_cycle_db_get_or_compute`; the BFS body
-///      ([`bfs_compute_inner`]) runs synchronously in the
-///      `compute` closure (per singleflight's synchronous-
-///      compute contract), capturing `&dyn ResolverContext` directly. On
-///      cooperative-admission failure (revalidation rejected the entry),
-///      falls back to an uncached recompute so the caller never sees
-///      a publishing miss.
-///
-/// The cache key is the content-free `RefCycleResultKey`
-/// (`ResolvedDeclSlotIdentity` root slot + `resolve_env_hash` + version
-/// — R6: no `DeclIdentity`/`whole_hash` in the key); entries store
-/// `(result, read_set_signature.facts + self_root_canonicals,
-/// validated_at_generation)`. The fact rail is built from the BFS root's
-/// self-root plus every visited decl's `FileWholeHash` and the
-/// `Instantiate` dispatch fences accumulated during the BFS, so version
-/// rooting is value-side and cache invalidation is precise per-canonical
-/// (via `RefCycleResultDb::invalidate_for_canonical`) and
-/// project-generation-wide (via `invalidate_all`).
-///
-/// Legacy parity rules carried into the
-/// inner BFS body unchanged:
-///
-/// - Queue carries `(DeclIdentity, path_has_complex_signal: bool)`.
-/// - Visited set keyed on `DeclIdentity` (first-visit-wins).
-/// - Walks THROUGH bodies with complex surfaces (does NOT stop at
-///   them); the complex-signal flag composes through child hops.
-/// - Decision rule on self-rediscovery:
-///   `cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args`
-///   — a self-cycle through a plain object self-member route like
-///   `Props['to']` does NOT trigger; only complex helpers do.
-/// - `MAX_HOPS = 64`; when the budget is exhausted, returns the
-///   path's complex-signal flag (matches legacy fallback).
-///
-/// Wired in production by B1's materialiser registry-route +
-/// recursive-helper guards.
-pub(crate) fn ref_root_reaches_transitive_cycle_node(
-    root_identity: &crate::semantic_query::DeclIdentity,
-    ctx: &dyn ResolverContext,
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-) -> bool {
-    let db = ctx.project_type_store().ref_cycle_db();
-
-    // Fast path: peek with generation-local validity. On hit, extend
-    // the caller's local_fence and return without dispatching any
-    // Instantiate query.
-    if let Some(read) = crate::component_meta_caches::ref_cycle_db_peek(db, root_identity, ctx) {
-        crate::component_meta_audit::merge_dep_signature_into_local_fence(
-            local_fence,
-            &read.dep_signature,
-        );
-        // Type-resolution audit: surface the ref-cycle cache hit on
-        // the active request context so the per-request snapshot
-        // attributes the hit. Cheap when no context is installed.
-        if let Some(req_ctx) = crate::request_context::current_request_context() {
-            req_ctx.bump_type_resolution_ref_root_cycle_hit();
-        }
-        return read.value;
-    }
-
-    // Slow path: cooperative-admission with synchronous compute. The
-    // closure captures `&dyn ResolverContext` by reference — Rust borrow safe
-    // because the query-identity `query::lookup` split-publish path (which
-    // `ref_cycle_db_get_or_compute` drives) runs the compute closure on
-    // the calling thread (per the synchronous-compute contract documented
-    // in `cache_runtime/singleflight.rs`).
-    let read_opt = crate::component_meta_caches::ref_cycle_db_get_or_compute(
-        db,
-        root_identity,
-        ctx,
-        |compute_fence, observed_self_roots| {
-            bfs_compute_inner(root_identity, ctx, compute_fence, observed_self_roots)
-        },
-    );
-
-    match read_opt {
-        Some(read) => {
-            crate::component_meta_audit::merge_dep_signature_into_local_fence(
-                local_fence,
-                &read.dep_signature,
-            );
-            read.value
-        }
-        None => {
-            // Cooperative admission returned None (revalidation
-            // rejected the freshly-built entry). Recompute uncached as
-            // a fallback so the caller still sees a result. Do NOT
-            // cache: the same revalidation race that just rejected
-            // the entry would reject the next attempt too.
-            let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-            let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-            let result =
-                bfs_compute_inner(root_identity, ctx, &mut fence, &mut observed_self_roots);
-            local_fence.extend(fence);
-            result
-        }
-    }
-}
-
-/// R — extracted BFS body. Identical legacy-parity
-/// logic to `ref_root_reaches_transitive_cycle_node`'s pre-cache body
-/// (preserves recursive-ref back-edge detection, intermediate-self
-/// check, and `ProjectionMode::Skeleton` for open-generic preservation
-/// per §4.21 / R10-2).
-///
-/// The wrapper [`ref_root_reaches_transitive_cycle_node`] calls this
-/// from inside the cooperative-admission `compute` closure on the cold
-/// path. The wrapper additionally calls it directly on the
-/// uncached-fallback branch when the cooperative admission's
-/// revalidation rejects the freshly-built entry.
-pub(crate) fn bfs_compute_inner(
-    root_identity: &crate::semantic_query::DeclIdentity,
-    ctx: &dyn ResolverContext,
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    observed_self_roots: &mut Vec<(Arc<str>, crate::types::Hash16)>,
-) -> bool {
-    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
-    use rustc_hash::FxHashSet;
-    use std::collections::VecDeque;
-
-    const MAX_HOPS: usize = 64;
-
-    #[cfg(test)]
-    dep_signature::BFS_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
-
-    // Record one observed self-root per visited declaration identity.
-    // Each `DeclIdentity` carries an embedded observed `whole_hash`
-    // captured when the identity was constructed — an observed
-    // identity, NOT a current-content re-read. A real declaring file
-    // (non-builtin canonical) becomes a strict self-root: a content
-    // edit to it rejects the cached cycle result. The synthetic
-    // `__builtin__` carrier identity (and any other empty/synthetic
-    // canonical) is skipped — it has no file to root against.
-    let record_self_root =
-        |identity: &crate::semantic_query::DeclIdentity,
-         roots: &mut Vec<(Arc<str>, crate::types::Hash16)>| {
-            let canonical = identity.canonical_id.as_ref();
-            if canonical.is_empty() || canonical == "__builtin__" {
-                return;
-            }
-            roots.push((Arc::clone(&identity.canonical_id), identity.whole_hash));
-        };
-
-    let dispatch = ctx.dispatch();
-    let graph = ctx.project_type_store().semantic_graph();
-    let mut visited: FxHashSet<crate::semantic_query::DeclIdentity> = FxHashSet::default();
-    let mut queue: VecDeque<(crate::semantic_query::DeclIdentity, bool)> = VecDeque::new();
-    visited.insert(root_identity.clone());
-    record_self_root(root_identity, observed_self_roots);
-    queue.push_back((root_identity.clone(), false));
-
-    let mut remaining_hops: usize = MAX_HOPS;
-    while let Some((current, path_has_complex_signal)) = queue.pop_front() {
-        if remaining_hops == 0 {
-            // Legacy parity: fall back to the carried flag rather
-            // than blanket-false. Conservative on bounded cyclic
-            // chains.
-            return path_has_complex_signal;
-        }
-        remaining_hops -= 1;
-
-        #[cfg(test)]
-        dep_signature::BFS_VISITED_COUNTER.with(|c| c.set(c.get() + 1));
-
-        // Clone current's identity for instrumentation AND for the
-        // self-cycle / intermediate-self check below. `current` is
-        // moved into the SemanticQueryKey on the next line; we keep
-        // a clone here for the rest of this iteration.
-        let current_identity = current.clone();
-        #[cfg(test)]
-        let current_decl_name_for_test = Arc::clone(&current.decl_name);
-
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::clone(&current.canonical_id),
-                current.owner,
-                Arc::clone(&current.decl_name),
-            ),
-            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            // Skeleton mode preserves open generics so body lowering
-            // produces TypeParam graph nodes for T-refs (not
-            // Opaque(Miss)). This BFS is a structural guard, not a
-            // publication boundary, so keep the Skeleton shape while
-            // using StructuralTransit demand to prevent nested mapped
-            // operators from emitting member publication edges.
-            dispatch.instantiate_context_for(
-                &current.canonical_id,
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Skeleton,
-                ),
-            ),
-        ));
-        let read = dispatch.execute_read(key);
-        crate::request_context::observe_component_meta_read_suppress(&read);
-        crate::component_meta_audit::merge_dep_signature_into_local_fence(
-            local_fence,
-            &read.dep_signature,
-        );
-        let body_id = match read.value {
-            QueryResult::Value(id) => id,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => continue,
-        };
-
-        let body_has_complex_signal =
-            path_has_complex_signal || has_complex_cycle_guard_surface_node(ctx, body_id, 0);
-
-        // Dispatch's recursive-ref back-edge is published as
-        // `Opaque(RecursiveRef { name })` — not a DeclRef — so a
-        // pure-graph walk would miss the self-cycle. Detect it
-        // explicitly: any `Opaque(RecursiveRef { name })` whose name
-        // matches the BFS root's decl_name is a back-edge to root,
-        // and the body already carries complex_signal (the body
-        // contained a recursive carrier, which is exactly the
-        // canonical complex-cycle-guard pattern via DeclRef /
-        // InstantiationRef arms).
-        if body_contains_recursive_ref_to_name(graph, body_id, &root_identity.decl_name, 0) {
-            // The recursive-ref back-edge IS the cycle. Compose the
-            // signal: body_has_complex_signal already carries the
-            // complex shape; if the body wraps the back-edge in any
-            // complex shape (Union/IndexedAccess/Conditional/etc),
-            // body_has_complex_signal is true and we report the cycle.
-            if body_has_complex_signal {
-                return true;
-            }
-        }
-
-        let mut child_refs: Vec<(crate::semantic_query::DeclIdentity, bool)> = Vec::new();
-        collect_ref_identities_node(graph, body_id, &mut child_refs, 0);
-
-        // F-prep test instrumentation. Records
-        // child_refs.len() per visited identity name into the per-thread
-        // observer (no-op when no observer installed).
-        #[cfg(test)]
-        record_bfs_child_refs_count_for_test(current_decl_name_for_test.as_ref(), child_refs.len());
-
-        for (child_identity, ref_has_type_args) in child_refs {
-            let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
-            // Cycle is reported when:
-            //  (a) child == root (transitive cycle back to BFS root), OR
-            //  (b) child == current (intermediate self-reference at this
-            //      decl — match `ref_name == name` against the
-            //      CURRENT decl, not the root). This catches fixtures
-            //      where DotPathKeys's body recursively references
-            //      DotPathKeys via a complex helper surface (canonical
-            //      nuxt-ui DotPathKeys).
-            if cycle_has_complex_signal
-                && (&child_identity == root_identity || child_identity == current_identity)
-            {
-                return true;
-            }
-            if visited.insert(child_identity.clone()) {
-                record_self_root(&child_identity, observed_self_roots);
-                queue.push_back((child_identity, cycle_has_complex_signal));
-            }
-        }
-    }
-    false
-}
-
-/// Helper: returns `true` when `node`'s shallow surface contains a
-/// `SemanticNodeData::Opaque(QueryError::RecursiveRef { name })`
-/// matching `target_name`. Used by
-/// [`ref_root_reaches_transitive_cycle_node`] to detect dispatch's
-/// recursive-ref back-edges (the dispatch engine collapses self-
-/// references into an `Opaque(RecursiveRef)` sentinel rather than
-/// a regular DeclRef, so a pure-graph walk would miss them).
-///
-/// Walks the same shallow shapes as
-/// [`collect_ref_identities_node`]; depth-fused at 256.
-pub(crate) fn body_contains_recursive_ref_to_name(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-    target_name: &Arc<str>,
-    depth: u32,
-) -> bool {
-    use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId};
-    use rustc_hash::FxHashSet;
-
-    if depth > 256 {
-        return false;
-    }
-
-    let mut stack: Vec<SemanticNodeId> = vec![node];
-    let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-    while let Some(current) = stack.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(data) = graph.node_data(current) else {
-            continue;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Opaque(QueryError::RecursiveRef { name }) => {
-                if name == target_name {
-                    return true;
-                }
-            }
-            SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
-                for &m in members.iter() {
-                    stack.push(m);
-                }
-            }
-            SemanticNodeData::Object(surface) => {
-                for member in surface.members.iter() {
-                    stack.push(member.value);
-                }
-                for sig in surface.index_signatures.iter() {
-                    stack.push(sig.key_type);
-                    stack.push(sig.value_type);
-                }
-                for &call in surface.call_signatures.iter() {
-                    stack.push(call);
-                }
-                for &cons in surface.construct_signatures.iter() {
-                    stack.push(cons);
-                }
-            }
-            SemanticNodeData::Array { element, .. } => stack.push(*element),
-            SemanticNodeData::Tuple { elements, .. } => {
-                for element in elements.iter() {
-                    stack.push(element.value);
-                }
-            }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                stack.push(*object);
-                if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
-                    stack.push(*idx_node);
-                }
-            }
-            SemanticNodeData::KeyOf { base } => stack.push(*base),
-            SemanticNodeData::Function {
-                params,
-                return_type,
-                ..
-            } => {
-                for param in params.iter() {
-                    stack.push(param.ty);
-                }
-                stack.push(*return_type);
-            }
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                ..
-            } => {
-                stack.push(*check);
-                stack.push(*extends);
-                stack.push(*true_branch_ref);
-                stack.push(*false_branch_ref);
-            }
-            SemanticNodeData::Mapped { source, mapper } => {
-                stack.push(*source);
-                stack.push(mapper.key_space);
-                stack.push(mapper.value_expr);
-                if let Some(remap) = mapper.name_remap {
-                    stack.push(remap);
-                }
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                for &expr in expressions.iter() {
-                    stack.push(expr);
-                }
-            }
-            SemanticNodeData::InstantiationRef { args, .. } => {
-                for &arg in args.iter() {
-                    stack.push(arg);
-                }
-            }
-            // Carrier `type_args` are descended (args-only): a carrier's
-            // applied arguments can carry an `Opaque(RecursiveRef)` back-edge.
-            // The carrier head is not inspected (head resolution is separate).
-            SemanticNodeData::BareRef(_)
-            | SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::ImportType(_) => {
-                for &arg in data.carrier_type_args().iter() {
-                    stack.push(arg);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Helper: walker-parity check for "complex" cycle-guard surfaces.
-/// R7-13 legacy parity: a body whose top shape is something other
-/// than a plain Object / Function / Array / Tuple / Primitive /
-/// Literal / TypeParameter / Infer counts as "complex".
-///
-/// `depth` fuses recursion at 256 to bound runtime on pathological
-/// graphs. The fuse intentionally returns `false` on
-/// hit — a runaway recursion is treated as "not complex" so the
-/// caller continues the BFS rather than terminating prematurely.
-pub(crate) fn has_complex_cycle_guard_surface_node(
-    ctx: &dyn ResolverContext,
-    node: crate::semantic_query::SemanticNodeId,
-    depth: u32,
-) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    if depth > 256 {
-        return false;
-    }
-    let graph = ctx.project_type_store().semantic_graph();
-    let Some(data) = graph.node_data(node) else {
-        return false;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Alias(inner) => {
-            has_complex_cycle_guard_surface_node(ctx, *inner, depth + 1)
-        }
-        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
-            members
-                .iter()
-                .any(|&m| has_complex_cycle_guard_surface_node(ctx, m, depth + 1))
-                || members.iter().any(|&m| {
-                    let d = graph.node_data(m);
-                    !matches!(d.as_deref(), Some(SemanticNodeData::Object(_)))
-                })
-        }
-        SemanticNodeData::DeclRef { .. }
-        | SemanticNodeData::InstantiationRef { .. }
-        | SemanticNodeData::IndexedAccess { .. }
-        | SemanticNodeData::Conditional { .. }
-        | SemanticNodeData::Mapped { .. }
-        | SemanticNodeData::KeyOf { .. }
-        | SemanticNodeData::TypeOf(_)
-        | SemanticNodeData::TemplateLiteral { .. } => true,
-        _ => false,
-    }
-}
-
-/// Helper: collect every reachable `DeclRef` / `InstantiationRef`
-/// identity from `node`'s declaration body, paired with whether the
-/// reference carries type arguments. Walker-parity (R7-14): walks
-/// THROUGH every TypeExpr-like shape that could carry a Ref —
-/// Conditional / Mapped / TemplateLiteral / Object members + index
-/// signatures + call/construct/method signatures / Function
-/// parameters + return / Tuple elements / IndexedAccess(index +
-/// object) / KeyOf / Array / Alias. Aggressive collection — never
-/// stops at "complex" body shapes (those are the cycle indicator,
-/// not the termination signal).
-///
-/// `depth` fuses recursion at 256. The fuse returns
-/// without recording new identities to bound runtime on
-/// pathological graphs.
-pub(crate) fn collect_ref_identities_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-    out: &mut Vec<(crate::semantic_query::DeclIdentity, bool)>,
-    depth: u32,
-) {
-    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
-    use rustc_hash::FxHashSet;
-
-    if depth > 256 {
-        return;
-    }
-
-    let mut stack: Vec<SemanticNodeId> = vec![node];
-    let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-    while let Some(current) = stack.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(data) = graph.node_data(current) else {
-            continue;
-        };
-        match data.as_ref() {
-            SemanticNodeData::DeclRef { identity } => {
-                // Bare DeclRef has no type arguments — false.
-                out.push((identity.clone(), false));
-            }
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let ref_has_type_args = !args.is_empty();
-                out.push((base.clone(), ref_has_type_args));
-                for &arg in args.iter() {
-                    stack.push(arg);
-                }
-            }
-            SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
-                for &m in members.iter() {
-                    stack.push(m);
-                }
-            }
-            SemanticNodeData::Object(surface) => {
-                // Members hold property/method bodies.
-                for member in surface.members.iter() {
-                    stack.push(member.value);
-                }
-                // Index signatures expose key + value types.
-                for sig in surface.index_signatures.iter() {
-                    stack.push(sig.key_type);
-                    stack.push(sig.value_type);
-                }
-                // Call / construct signatures publish as Function nodes.
-                for &call in surface.call_signatures.iter() {
-                    stack.push(call);
-                }
-                for &cons in surface.construct_signatures.iter() {
-                    stack.push(cons);
-                }
-            }
-            SemanticNodeData::Array { element, .. } => stack.push(*element),
-            SemanticNodeData::Tuple { elements, .. } => {
-                for element in elements.iter() {
-                    stack.push(element.value);
-                }
-            }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                stack.push(*object);
-                if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
-                    stack.push(*idx_node);
-                }
-            }
-            SemanticNodeData::KeyOf { base } => stack.push(*base),
-            SemanticNodeData::Function {
-                params,
-                return_type,
-                type_parameters,
-                ..
-            } => {
-                for param in params.iter() {
-                    stack.push(param.ty);
-                }
-                stack.push(*return_type);
-                for tp in type_parameters.iter() {
-                    if let Some(c) = tp.constraint {
-                        stack.push(c);
-                    }
-                    if let Some(d) = tp.default {
-                        stack.push(d);
-                    }
-                }
-            }
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                ..
-            } => {
-                stack.push(*check);
-                stack.push(*extends);
-                stack.push(*true_branch_ref);
-                stack.push(*false_branch_ref);
-            }
-            SemanticNodeData::Mapped { source, mapper } => {
-                stack.push(*source);
-                stack.push(mapper.key_space);
-                stack.push(mapper.value_expr);
-                if let Some(remap) = mapper.name_remap {
-                    stack.push(remap);
-                }
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                for &expr in expressions.iter() {
-                    stack.push(expr);
-                }
-            }
-            // Carrier `type_args` are descended (args-only): a `BareRef` /
-            // `TypeOf` / `ImportType` carrier applies its arguments at the
-            // reference site, and an arg can carry a `DeclRef` /
-            // `InstantiationRef` (a declaration edge). The carrier HEAD is NOT
-            // collected here — a `BareRef` / `ImportType` head is unresolved
-            // (no decl identity) and a `TypeOf` head is a value root (no decl
-            // identity); head resolution is a separate concern.
-            SemanticNodeData::BareRef(_)
-            | SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::ImportType(_) => {
-                for &arg in data.carrier_type_args().iter() {
-                    stack.push(arg);
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -1100,17 +514,37 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
 /// resolver ([`ProjectSemanticDispatch::resolve_carrier_subject_node`] under
 /// `Published(Navigate)`) and the resolved `DeclRef`/`InstantiationRef` identity
 /// is collected (a generic carrier `A<string>` must NOT bypass the cycle gate).
-/// A real miss collects no root. `MAX_*` caps bound the collection.
+/// A real miss collects no root. `MAX_*` caps bound the collection; when a cap
+/// stops a push or a descent that could have contributed a root, `truncated`
+/// is set so the aggregate demotes to a fallback instead of silently ORing a
+/// partial root set.
 fn collect_node_root_identities(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
     out: &mut Vec<crate::semantic_query::DeclIdentity>,
+    truncated: &mut bool,
 ) {
     use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticNodeData};
     const MAX_CYCLE_ROOTS: usize = 16;
     const MAX_ROOT_COLLECT_DEPTH: u32 = 8;
     if out.len() >= MAX_CYCLE_ROOTS || depth >= MAX_ROOT_COLLECT_DEPTH {
+        // A cap fired with the node unexamined: any shape that could
+        // have contributed (or descended to) a root marks the
+        // collection truncated.
+        let could_contribute = match dispatch.graph().node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::IndexedAccess { .. }
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. },
+            ) => true,
+            Some(data) => data.bare_ref_head().is_some(),
+            None => false,
+        };
+        if could_contribute {
+            *truncated = true;
+        }
         return;
     }
     enum Step {
@@ -1140,7 +574,9 @@ fn collect_node_root_identities(
         }
     };
     match step {
-        Step::Recurse(next) => collect_node_root_identities(dispatch, next, depth + 1, out),
+        Step::Recurse(next) => {
+            collect_node_root_identities(dispatch, next, depth + 1, out, truncated)
+        }
         Step::Push(identity) => {
             if !out.contains(&identity) {
                 out.push(identity);
@@ -1151,7 +587,7 @@ fn collect_node_root_identities(
                 out.push(base);
             }
             for arg in args {
-                collect_node_root_identities(dispatch, arg, depth + 1, out);
+                collect_node_root_identities(dispatch, arg, depth + 1, out, truncated);
             }
         }
         Step::ResolveBare => {
@@ -1160,7 +596,7 @@ fn collect_node_root_identities(
                 ProjectionReductionContext::published(ProjectionMode::Navigate),
             );
             if resolved != node {
-                collect_node_root_identities(dispatch, resolved, depth + 1, out);
+                collect_node_root_identities(dispatch, resolved, depth + 1, out, truncated);
             }
         }
         Step::Stop => {}
@@ -1168,27 +604,53 @@ fn collect_node_root_identities(
 }
 
 /// Node-domain front for the transitive-cycle gate. Collects the surface root
-/// identities of `node` ([`collect_node_root_identities`]) and ORs the shared
-/// cached BFS ([`ref_root_reaches_transitive_cycle_node`]) over each, merging
-/// each root's cross-file fence entry (the scope self-entry and `__builtin__`
-/// roots are skipped) into the BFS-visited fence, which is observed via
-/// `emit_dispatch_dep_signature_facts`. Takes `ctx` (the node carries resolved
-/// identities, so no name-resolution engine is needed).
+/// identities of `node` ([`collect_node_root_identities`]) and aggregates the
+/// sealed materialization cycle gate
+/// ([`ProjectSemanticDispatch::classify_materialization_cycle_gate`]) over
+/// each through the OR lattice
+/// ([`crate::semantic_query::MaterializationCycleGateOutcome::aggregate`]):
+/// Stop dominates Continue, any `LegacyFallback` infects the aggregate
+/// (its partial rail is observed onto the request), and a truncated root
+/// collection adds `RootCollectorLimit` (never a silent false). Each root
+/// read's cross-file dep signature is merged into the returned fence, which
+/// is observed via `emit_dispatch_dep_signature_facts`. Takes `ctx` (the
+/// node carries resolved identities, so no name-resolution engine is
+/// needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     node: crate::semantic_query::SemanticNodeId,
 ) -> (bool, crate::semantic_query::DepSignature) {
+    use crate::semantic_query::{
+        MaterializationCycleGateFallbackReason, MaterializationCycleGateFallbackReasons,
+        MaterializationCycleGateOutcome, MaterializationCycleGateVerdict,
+    };
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let mut roots: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
-    {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
-        collect_node_root_identities(&dispatch, node, 0, &mut roots);
-    }
+    let mut truncated = false;
+    collect_node_root_identities(&dispatch, node, 0, &mut roots, &mut truncated);
     if roots.is_empty() {
+        if truncated {
+            // A truncated collection with no collected roots cannot
+            // prove "no cycle": the walk is incomplete, the verdict is
+            // fail-open Continue, and the request goes partial.
+            crate::request_context::mark_request_result_partial();
+        }
         return (false, Arc::from(Vec::new()));
     }
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-    let mut result = false;
+    let mut outcomes: Vec<MaterializationCycleGateOutcome> = Vec::with_capacity(roots.len() + 1);
+    if truncated {
+        crate::request_context::mark_request_result_partial();
+        outcomes.push(MaterializationCycleGateOutcome::LegacyFallback {
+            verdict: MaterializationCycleGateVerdict::Continue,
+            reasons: MaterializationCycleGateFallbackReasons::new([
+                MaterializationCycleGateFallbackReason::RootCollectorLimit,
+            ])
+            .expect("single reason is non-empty"),
+        });
+    }
     for identity in &roots {
         if !identity.canonical_id.as_ref().is_empty()
             && identity.canonical_id.as_ref() != "__builtin__"
@@ -1199,11 +661,21 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
                 crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
             ));
         }
-        result |= ref_root_reaches_transitive_cycle_node(identity, ctx, &mut fence);
+        let read = dispatch.classify_materialization_cycle_gate(identity);
+        crate::request_context::observe_component_meta_read_suppress(&read);
+        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+            &mut fence,
+            &read.dep_signature,
+        );
+        outcomes.push(read.value);
     }
+    let aggregate = MaterializationCycleGateOutcome::aggregate(outcomes);
     let fence_signature: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
     crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(ctx, &fence_signature);
-    (result, fence_signature)
+    (
+        matches!(aggregate.verdict(), MaterializationCycleGateVerdict::Stop),
+        fence_signature,
+    )
 }
 
 #[cfg(test)]

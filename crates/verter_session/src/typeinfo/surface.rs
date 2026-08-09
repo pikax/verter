@@ -4,7 +4,7 @@
 //! [`TypeInfoSurface`] is the typeinfo-owned PUBLIC projection of the shared
 //! semantic graph's one-level surface ([`SurfaceView`]). It is a THIN
 //! projection — it reads the span-rich GRAPH payloads
-//! ([`SurfaceMember::spans`], [`SemanticNodeData::Function`]'s
+//! ([`SurfaceMember::spans`], [`SemanticNodeData::Signature`]'s
 //! `signature_span` / `return_type_span`, [`IndexSignature::spans`]) and pairs
 //! each span with its DECLARATION file. For a named member / index signature
 //! that file is the member's own `declaration_origin` (stamped from the
@@ -114,8 +114,8 @@ pub struct JsdocTagSpan {
 /// body issues a path projection rooted at `value`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfoSurfaceMember {
-    /// Interned member name.
-    pub name: Arc<str>,
+    /// Exact authored key, retaining computed semantic children.
+    pub key: crate::semantic_query::AuthoredPropertyKey,
     /// Span of the member's NAME at its declaration site (in the origin file's
     /// coordinates). `None` when the member is synthesized (a union
     /// common-member, a mapped-produced member) and has no single source site.
@@ -130,8 +130,10 @@ pub struct TypeInfoSurfaceMember {
     pub optional: bool,
     /// `readonly` member.
     pub readonly: bool,
-    /// Method-style member (`name(): T`) vs property-style (`name: T`).
-    pub is_method: bool,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Declared accessibility of the member, carried verbatim from the graph
     /// [`SurfaceMember::visibility`]. `Public` for every non-class origin; a
     /// class member carries its `TSAccessibility`. The shared surface RECORDS
@@ -158,6 +160,25 @@ pub struct TypeInfoSurfaceMember {
     pub jsdoc_tag_spans: Arc<[JsdocTagSpan]>,
     /// Typed origin + merge role.
     pub origin: SurfaceMemberOrigin,
+}
+
+impl TypeInfoSurfaceMember {
+    /// Ordinary string key for framework APIs whose published vocabulary is
+    /// explicitly string-only.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
+    /// The member's PUBLISHED name, derived by the shared key authority
+    /// ([`verter_type_expr::AuthoredPropertyKey::published_name`]): an
+    /// ordinary string key verbatim, a numeric literal key by its
+    /// canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
+    /// `None` for symbol / computed keys.
+    #[must_use]
+    pub fn published_name(&self) -> Option<Arc<str>> {
+        self.key.published_name()
+    }
 }
 
 /// One call (`(args): ret`) or construct (`new (args): ret`) signature on a
@@ -233,6 +254,8 @@ pub struct TypeInfoSurface {
     pub entries: Arc<[TypeInfoSurfaceEntry]>,
     /// Named members in declaration order.
     pub members: Arc<[TypeInfoSurfaceMember]>,
+    /// Whether `members` is the complete named-member domain.
+    pub members_complete: bool,
     /// Call signatures in declaration order.
     pub call_signatures: Arc<[TypeInfoSurfaceSignature]>,
     /// Construct signatures in declaration order.
@@ -256,6 +279,7 @@ impl TypeInfoSurface {
         Self {
             entries: Arc::from([]),
             members: Arc::from(Vec::new().into_boxed_slice()),
+            members_complete: true,
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -273,6 +297,19 @@ impl TypeInfoSurface {
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
+        Self::build_with_completeness(graph, view, true)
+    }
+
+    /// [`Self::build`] with an explicit completeness verdict: a partial
+    /// projection read (open-spread evidence, budget, cycles) keeps the
+    /// positive members but must report `members_complete = false` —
+    /// omission from this surface is then never absence evidence.
+    #[must_use]
+    pub fn build_with_completeness(
+        graph: &SemanticGraphStore,
+        view: &SurfaceView,
+        members_complete: bool,
+    ) -> Self {
         let entries = view
             .entries
             .iter()
@@ -292,13 +329,19 @@ impl TypeInfoSurface {
                 }
             })
             .collect();
-        Self::from_ordered_entries(entries, view.keyspace, view.has_index_signature)
+        Self::from_ordered_entries(
+            entries,
+            view.keyspace,
+            view.has_known_index_signature(),
+            members_complete,
+        )
     }
 
     fn from_ordered_entries(
         entries: Vec<TypeInfoSurfaceEntry>,
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
+        members_complete: bool,
     ) -> Self {
         let mut members = Vec::new();
         let mut call_signatures = Vec::new();
@@ -321,12 +364,252 @@ impl TypeInfoSurface {
         Self {
             entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
+            members_complete,
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
             construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace,
             has_index_signature,
         }
+    }
+
+    /// Build a presence-only surface from POSITIVE member evidence
+    /// gathered by recursing an open carrier (`Union` / `Intersection` /
+    /// `Conditional` branches — the walker's typed open evidence for
+    /// compound roots containing open programs). Named members only
+    /// (signatures / index facts are not recovered from open carriers);
+    /// `members_complete` is always `false` — omission is not absence.
+    #[must_use]
+    pub fn from_presence_members(
+        graph: &SemanticGraphStore,
+        members: &[crate::semantic_query::SurfaceMember],
+    ) -> Self {
+        let members: Vec<TypeInfoSurfaceMember> = members
+            .iter()
+            .map(|member| build_member(graph, member))
+            .collect();
+        Self::from_ordered_entries(
+            members
+                .into_iter()
+                .map(TypeInfoSurfaceEntry::Member)
+                .collect(),
+            None,
+            false,
+            false,
+        )
+    }
+
+    /// Join a spread-program projection into one shallow surface.
+    ///
+    /// A single closed alternative yields the exact complete surface — the
+    /// closed witness is the only completeness proof. Every other shape (open
+    /// residuals, correlated multi-branch formulas) joins POSITIVE members
+    /// only and reports `members_complete = false`: omission from the joined
+    /// view is never absence evidence, and the joined view is typeinfo output
+    /// that never re-enters binary semantic relation.
+    #[must_use]
+    pub fn from_spread_projection(
+        graph: &SemanticGraphStore,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+    ) -> Option<Self> {
+        use crate::semantic_query::{
+            AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
+            PropertyKey,
+        };
+
+        fn union_value(graph: &SemanticGraphStore, values: Vec<SemanticNodeId>) -> SemanticNodeId {
+            let mut arms: Vec<SemanticNodeId> = Vec::new();
+            for value in values {
+                match graph.node_data(value).as_deref() {
+                    Some(SemanticNodeData::Union(nested)) => {
+                        for arm in nested.iter().copied() {
+                            if !arms.contains(&arm) {
+                                arms.push(arm);
+                            }
+                        }
+                    }
+                    _ if !arms.contains(&value) => arms.push(value),
+                    _ => {}
+                }
+            }
+            match arms.as_slice() {
+                [only] => *only,
+                _ => graph.intern_node(SemanticNodeData::Union(Arc::from(arms))),
+            }
+        }
+
+        let alternatives = formula.alternatives();
+        if let [only] = alternatives {
+            if let Some(closed) = only.closed() {
+                let view = closed.to_closed_surface_view()?;
+                return Some(Self::build(graph, &view));
+            }
+        }
+
+        struct MemberJoin {
+            key: PropertyKey,
+            present_in: usize,
+            optional_somewhere: bool,
+            values: Vec<SemanticNodeId>,
+            readonly_all: bool,
+            method_kind: Option<verter_type_expr::ObjectMethodKind>,
+            has_implementation_body: bool,
+        }
+
+        let alternative_count = alternatives.len();
+        let mut joins: Vec<MemberJoin> = Vec::new();
+        let mut call_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut construct_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut index_joins: Vec<(usize, SemanticNodeId, Vec<SemanticNodeId>, bool)> = Vec::new();
+        for alternative in alternatives {
+            alternative.positive().visit(|fact| {
+                // JS property identity: dual spellings of one property
+                // join into ONE row (matching the walker and macro
+                // merges), so a colliding second alternative unions the
+                // value instead of publishing a mis-optionaled duplicate.
+                let join = match joins
+                    .iter_mut()
+                    .find(|join| join.key.element_access_collides(fact.key()))
+                {
+                    Some(join) => join,
+                    None => {
+                        joins.push(MemberJoin {
+                            key: fact.key().clone(),
+                            present_in: 0,
+                            optional_somewhere: false,
+                            values: Vec::new(),
+                            readonly_all: true,
+                            method_kind: None,
+                            has_implementation_body: false,
+                        });
+                        joins.last_mut().expect("just pushed")
+                    }
+                };
+                join.present_in += 1;
+                join.optional_somewhere |= fact.presence() == PositiveKeyPresence::Optional;
+                if let ProjectionEvidence::Proven(value) = fact.value() {
+                    if !join.values.contains(value) {
+                        join.values.push(*value);
+                    }
+                }
+                match fact.facets() {
+                    ProjectionEvidence::Proven(facets) => {
+                        join.readonly_all &= facets.readonly();
+                        if join.method_kind.is_none() {
+                            join.method_kind = facets.method_kind();
+                            join.has_implementation_body = facets.has_implementation_body();
+                        }
+                    }
+                    ProjectionEvidence::Indeterminate => join.readonly_all = false,
+                }
+            });
+            for signature in alternative.signatures() {
+                let bucket = match signature.kind() {
+                    ObjectSignatureKind::Call => &mut call_nodes,
+                    ObjectSignatureKind::Construct => &mut construct_nodes,
+                };
+                if !bucket.contains(&signature.node()) {
+                    bucket.push(signature.node());
+                }
+            }
+            for index in alternative.indices() {
+                let domain = index.domain() as usize;
+                let entry = match index_joins.iter_mut().find(|(d, ..)| *d == domain) {
+                    Some(entry) => entry,
+                    None => {
+                        index_joins.push((domain, index.key_type(), Vec::new(), true));
+                        index_joins.last_mut().expect("just pushed")
+                    }
+                };
+                if let ProjectionEvidence::Proven(value) = index.value() {
+                    if !entry.2.contains(value) {
+                        entry.2.push(*value);
+                    }
+                }
+                entry.3 &= matches!(index.readonly(), ProjectionEvidence::Proven(true));
+            }
+        }
+
+        let members: Vec<TypeInfoSurfaceMember> = joins
+            .into_iter()
+            .map(|join| {
+                // A definitely-present key whose value is Indeterminate in
+                // EVERY alternative (an open residual may overwrite it)
+                // still publishes its row — with the honest open value,
+                // matching the walker's `Opaque(OpenSurface)` convention —
+                // never a dropped row.
+                let value = if join.values.is_empty() {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::OpenSurface,
+                    ))
+                } else {
+                    union_value(graph, join.values)
+                };
+                build_member(
+                    graph,
+                    &SurfaceMember {
+                        key: AuthoredPropertyKey::from_known(join.key),
+                        value,
+                        optional: join.optional_somewhere || join.present_in < alternative_count,
+                        readonly: join.readonly_all,
+                        method_kind: join.method_kind,
+                        has_implementation_body: join.has_implementation_body,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        spans: verter_type_expr::MemberSpans::default(),
+                        declaration_origin: None,
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    },
+                )
+            })
+            .collect();
+        let call_signatures: Vec<TypeInfoSurfaceSignature> = call_nodes
+            .into_iter()
+            .map(|node| build_signature(graph, node))
+            .collect();
+        let construct_signatures: Vec<TypeInfoSurfaceSignature> = construct_nodes
+            .into_iter()
+            .map(|node| build_signature(graph, node))
+            .collect();
+        let index_signatures: Vec<TypeInfoIndexSignature> = index_joins
+            .into_iter()
+            .filter(|(.., values, _)| !values.is_empty())
+            .map(|(_, key_type, values, readonly)| TypeInfoIndexSignature {
+                key_type,
+                value_type: union_value(graph, values),
+                key_span: None,
+                value_span: None,
+                declaration_span: None,
+                readonly,
+            })
+            .collect();
+        let has_index_signature = !index_signatures.is_empty();
+        Some(Self::from_ordered_entries(
+            members
+                .into_iter()
+                .map(TypeInfoSurfaceEntry::Member)
+                .chain(
+                    call_signatures
+                        .into_iter()
+                        .map(TypeInfoSurfaceEntry::CallSignature),
+                )
+                .chain(
+                    construct_signatures
+                        .into_iter()
+                        .map(TypeInfoSurfaceEntry::ConstructSignature),
+                )
+                .chain(
+                    index_signatures
+                        .into_iter()
+                        .map(TypeInfoSurfaceEntry::IndexSignature),
+                )
+                .collect(),
+            None,
+            has_index_signature,
+            false,
+        ))
     }
 
     /// Enrich each member AND each call / construct signature with its
@@ -423,7 +706,12 @@ impl TypeInfoSurface {
             entries.push(enriched);
         }
 
-        Self::from_ordered_entries(entries, self.keyspace, self.has_index_signature)
+        Self::from_ordered_entries(
+            entries,
+            self.keyspace,
+            self.has_index_signature,
+            self.members_complete,
+        )
     }
 }
 
@@ -503,13 +791,14 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         CanonicalSpan::from_parts(canonical.as_ref(), member.spans.type_annotation);
 
     TypeInfoSurfaceMember {
-        name: Arc::clone(&member.name),
+        key: member.key.clone(),
         name_span,
         value: member.value,
         type_annotation_span,
         optional: member.optional,
         readonly: member.readonly,
-        is_method: member.is_method,
+        method_kind: member.method_kind,
+        has_implementation_body: member.has_implementation_body,
         // Carry the graph member's declared accessibility onto the typeinfo
         // surface (Public for every non-class origin).
         visibility: member.visibility,
@@ -533,7 +822,7 @@ fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfo
     let canonical = node_origin_file(graph, node);
     let (signature_span, parameter_spans, return_type_span) = match graph.node_data(node) {
         Some(data) => match &*data {
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 signature_span,
                 return_type_span,

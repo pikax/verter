@@ -329,16 +329,16 @@ fn object_node_wire_omits_non_public_members() {
     // of the public outer member `a` — exercises recursive sanitisation.
     let inner = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::with_visibility(
-                "pub_inner".to_string(),
+            ObjectMember::Property(ObjectProperty::with_key_visibility(
+                "pub_inner".into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
                 MemberVisibility::Public,
                 Default::default(),
             )),
-            ObjectMember::Property(ObjectProperty::with_visibility(
-                "priv_inner".to_string(),
+            ObjectMember::Property(ObjectProperty::with_key_visibility(
+                "priv_inner".into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
@@ -350,24 +350,24 @@ fn object_node_wire_omits_non_public_members() {
 
     let outer = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::with_visibility(
-                "a".to_string(),
+            ObjectMember::Property(ObjectProperty::with_key_visibility(
+                "a".into(),
                 inner,
                 false,
                 false,
                 MemberVisibility::Public,
                 Default::default(),
             )),
-            ObjectMember::Property(ObjectProperty::with_visibility(
-                "b".to_string(),
+            ObjectMember::Property(ObjectProperty::with_key_visibility(
+                "b".into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
                 MemberVisibility::Protected,
                 Default::default(),
             )),
-            ObjectMember::Method(MethodSignature::with_visibility(
-                "c".to_string(),
+            ObjectMember::Method(MethodSignature::with_key_visibility(
+                "c".into(),
                 FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
                 false,
                 MemberVisibility::Private,
@@ -389,11 +389,15 @@ fn object_node_wire_omits_non_public_members() {
             strings.get((id - 1) as usize).map(String::as_str)
         }
     };
+    let member_name = |member: &GraphObjectMember| match &member.key {
+        Some(GraphPropertyKey::String { value }) => name_of(*value),
+        _ => None,
+    };
 
     let GraphNode::Object { members } = &nodes[(outer_id - 1) as usize] else {
         panic!("outer must encode to GraphNode::Object");
     };
-    let outer_member_names: Vec<&str> = members.iter().filter_map(|m| name_of(m.name)).collect();
+    let outer_member_names: Vec<&str> = members.iter().filter_map(member_name).collect();
     assert_eq!(
         outer_member_names,
         vec!["a"],
@@ -409,10 +413,7 @@ fn object_node_wire_omits_non_public_members() {
     else {
         panic!("the value type of `a` must encode to GraphNode::Object");
     };
-    let inner_member_names: Vec<&str> = inner_members
-        .iter()
-        .filter_map(|m| name_of(m.name))
-        .collect();
+    let inner_member_names: Vec<&str> = inner_members.iter().filter_map(member_name).collect();
     assert_eq!(
         inner_member_names,
         vec!["pub_inner"],
@@ -576,8 +577,8 @@ fn representative_recursive_mapped_type() -> TypeExpr {
     // `{ deep: { tree: Tree<string> } }` — nested object members whose
     // value types recurse through the same node-interning path.
     let inner_object = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-            "tree".to_string(),
+        properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
+            "tree".into(),
             recursive,
             false,
             false,
@@ -586,8 +587,8 @@ fn representative_recursive_mapped_type() -> TypeExpr {
         ))],
     }));
     let outer_object = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-            "deep".to_string(),
+        properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
+            "deep".into(),
             inner_object,
             true,
             false,

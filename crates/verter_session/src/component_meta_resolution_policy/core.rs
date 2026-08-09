@@ -542,10 +542,15 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
         | Some(SemanticNodeData::RawFallback { .. })
         | Some(SemanticNodeData::TypeParam { .. })
         | Some(SemanticNodeData::Infer { .. })
+        | Some(SemanticNodeData::InferRef { .. })
         | Some(SemanticNodeData::SyntheticBinding { .. })
+        // The sealed callable carrier is an intra-transaction call callee,
+        // never a publishable body.
+        | Some(SemanticNodeData::DeferredCallable(_))
         | None => false,
         Some(
             SemanticNodeData::Object(_)
+            | SemanticNodeData::ObjectSpreadProgram(_)
             | SemanticNodeData::Union(_)
             | SemanticNodeData::Intersection(_)
             | SemanticNodeData::Primitive(_)
@@ -557,8 +562,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::Function { .. }
-            | SemanticNodeData::ConstructorType { .. }
+            | SemanticNodeData::Signature { .. }
             | SemanticNodeData::MergedDecl { .. },
         ) => true,
         // Reference carriers are rejected by the head check above.

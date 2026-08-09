@@ -40,7 +40,7 @@ fn audit_payload_files() -> Vec<PathBuf> {
 }
 
 #[test]
-fn diagnostics_only_on_typeinfo_graph_payload() {
+pub(crate) fn diagnostics_only_on_typeinfo_graph_payload() {
     // Graph-publication degradation accounting — `degraded: bool` and
     // `degradation_reasons: Vec<TypeInfoDegradationReasonTag>` — is the
     // typeinfo-graph diagnostics surface. It must live ONLY on

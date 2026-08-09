@@ -63,10 +63,13 @@ pub(super) fn collect_snippet_candidate_members_from_lowered(
         else {
             continue;
         };
+        let Some(member_name) = property.key.as_string() else {
+            continue;
+        };
         out.snippet_candidates.push(SvelteSnippetMemberCandidate {
             local_binding: name.as_ref().to_string(),
             import_source: source.clone(),
-            member_name: property.name.clone(),
+            member_name: member_name.to_string(),
         });
     }
 }

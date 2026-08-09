@@ -280,6 +280,7 @@ fn view_answers_the_premutation_world_for_a_dependency_it_never_observed() {
 fn a_point_miss_rejects_and_enumerates_nothing() {
     use verter_semantic::facts::registry::{FactLane, InternedName, SymbolSpace};
     use verter_semantic::facts::FactKey;
+    use verter_type_expr::facts::FactPropertyKey;
 
     let host = host_with_n_materialized_files(250);
     let view = freshly_built_view(&host);
@@ -300,7 +301,7 @@ fn a_point_miss_rejects_and_enumerates_nothing() {
                 canonical_id: ABSENT.to_string(),
                 key: FactKey::MemberPresence {
                     exporter: InternedName::from("Missing"),
-                    name: InternedName::from("x"),
+                    name: FactPropertyKey::identifier("x"),
                     space: SymbolSpace::Type,
                 },
                 lane: FactLane::Semantic,

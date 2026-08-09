@@ -1,19 +1,24 @@
 //! Freshness guard for the generated typeinfo manifest data.
 //!
-//! Every file under `crates/verter_session/tests/manifest_data/`
-//! (`typeinfo_ignored_test_manifest_rows.rs`,
-//! `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`) is
-//! produced from `scripts/gen-typeinfo-ignore-manifest.mjs`
-//! (`pnpm gen:typeinfo-manifest`) — the SOLE writer of all three files.
-//! The authoritative machine-readable row→block partition at
-//! `scripts/manifests/typeinfo-row-block-partition.json` feeds ONLY each
-//! `IgnoredTestRow`'s `block_id` (joined with the live `#[ignore]`
-//! discovery and the Capability Map). The `AdditionalProofRow` table and
-//! the `TYPEINFO_PARITY_BLOCKS` block contracts (each block's
-//! required_guards/verification_labels/prereqs/mechanisms) come from the
-//! generator's own maps, NOT from the row partition. Whenever the generator
-//! or its inputs change, the committed files must be regenerated and
-//! committed in the same change.
+//! Every generated manifest artifact (`typeinfo_ignored_test_manifest_rows.rs`,
+//! `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`,
+//! `typeinfo_guard_registry.rs`, `typeinfo_guard_registry_lib.rs` under
+//! `crates/verter_session/tests/cases/manifest_data/`, plus
+//! `docs/arch/typeinfo-row-registry-counts.md`) is produced from
+//! `scripts/gen-typeinfo-ignore-manifest.mjs`
+//! (`pnpm gen:typeinfo-manifest`) — the SOLE writer of all of them.
+//! The authoritative append-only row registry at
+//! `scripts/manifests/typeinfo-row-block-partition.json` feeds each
+//! `IgnoredTestRow`'s `block_id` and `status` (joined with the live
+//! `#[ignore]` discovery and the Capability Map); block landing statuses,
+//! amendments, and landing transactions come from
+//! `scripts/manifests/typeinfo-programme-reconciliation.json`. The
+//! `AdditionalProofRow` table, the `TYPEINFO_PARITY_BLOCKS` block
+//! contracts (each block's
+//! required_guards/verification_labels/prereqs/mechanisms), and the
+//! `GuardId` registry come from the generator's own maps, NOT from the row
+//! registry. Whenever the generator or its inputs change, the committed
+//! files must be regenerated and committed in the same change.
 //!
 //! This guard mirrors the proto-bindings freshness pattern
 //! (`crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs`): it
@@ -99,7 +104,7 @@ fn which_on_path(name: &Path) -> Option<PathBuf> {
 /// committed without regenerating — surfaces as a non-zero exit (status 6)
 /// and the generator's named-file diff is echoed in the panic message.
 #[test]
-fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
+pub(crate) fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
     let root = workspace_root();
     let script = root
         .join("scripts")
@@ -147,153 +152,5 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
          generator exit: {status}\n\
          --- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
         status = output.status,
-    );
-}
-
-/// Discriminating per-block-count pin for the lifted rows. Each assertion is
-/// pinned to the exact committed lift partition — so reverting (or
-/// mis-counting) any lift's manifest re-partition breaks this test. The
-/// committed partition: `U2.QUERY_VALUE_DOMAIN` owns 21 rows (all lifted —
-/// the 2 index-signature publications, the 8 utility-reducer lifts, the
-/// 10 class-surface-era pure-reduction lifts, and the 1 module-augmentation
-/// namespace alias-chain lift, whose measured trace terminates at
-/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 24 (15
-/// lifted — incl. the 2 JSX parametric intrinsic-lookup rows re-homed in from
-/// `U2.JSX_FOUNDATIONS` and the wide/deep literal-union projection row
-/// re-homed in from `U2.MAPPED_TEMPLATE` on its measured path-precise
-/// trace); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 18 (5 lifted);
-/// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
-/// trace dispatches `ResolveClassSurface` + `ProjectPath`);
-/// `U2.MODULE_AUGMENTATION` owns 4 (0 lifted — the 4 remaining rows whose
-/// `as const` / bare `typeof` / `typeof import` / `import("…").X` source
-/// bodies are gate-rejected by the oracle source-walk stay `Ignored`; the
-/// `typeof import(...)["default"]` row RE-LIFTED to `U2.INDEXED_ACCESS` once
-/// the readonly was fixed by decoupling per-property `as const` from
-/// readonly).
-#[test]
-fn manifest_block_counts_reflect_lifts() {
-    let rows = workspace_root().join(
-        "crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs",
-    );
-    let src =
-        std::fs::read_to_string(&rows).unwrap_or_else(|e| panic!("read {}: {e}", rows.display()));
-    let count = |needle: &str| src.matches(needle).count();
-
-    // Per-block generated row counts (the honest override distribution).
-    assert_eq!(
-        count("block_id: TypeInfoParityBlockId::U2QueryValueDomain,"),
-        21,
-        "U2.QUERY_VALUE_DOMAIN must own 21 rows: the 2 lifted index-signature \
-         publication rows, the 8 U2.UTILITIES reducer rows, the 10 \
-         class-surface-era pure-reduction rows, and the 1 module-augmentation \
-         namespace alias-chain row — every row whose measured trace terminates \
-         at {{ResolveDecl, Instantiate(, TypeOf)}}",
-    );
-    assert_eq!(
-        count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        24,
-        "U2.INDEXED_ACCESS must own 24 rows after the 2 brand-tag index chains \
-         and the 2 decoration-invariance indexed-access rows moved IN from \
-         U2.CLASS_SURFACES (14 → 18), the 3 module-augmentation indexed-member \
-         projection rows (the `as const` typeof indexed member + the `typeof \
-         import(...)[\"default\"]` default-export value projection + the `typeof \
-         import(...)[\"leafName\"]` named-value projection) moved IN from \
-         U2.MODULE_AUGMENTATION (18 → 21), the 2 JSX parametric \
-         intrinsic-lookup rows (`IntrinsicPropsFor<\"div\">` / \
-         `IntrinsicPropsFor<\"span\">`) moved IN from U2.JSX_FOUNDATIONS on their \
-         measured-trace lifts (21 → 23), and the wide/deep literal-union \
-         projection row (`wide_deep_projected_token`) re-homed IN from \
-         U2.MAPPED_TEMPLATE on its measured path-precise trace (23 → 24)",
-    );
-    assert_eq!(
-        count("block_id: TypeInfoParityBlockId::U2Utilities,"),
-        32,
-        "U2.UTILITIES must own 32 rows after the 2 built-in modifier-utility rows \
-         moved to U2.MAPPED_TEMPLATE (42 → 40) and the 8 utility-reducer lifts \
-         moved to their measured production block U2.QUERY_VALUE_DOMAIN (40 → 32)",
-    );
-    assert_eq!(
-        count("block_id: TypeInfoParityBlockId::U2MappedTemplate,"),
-        18,
-        "U2.MAPPED_TEMPLATE must own 18 rows after the 2 built-in modifier-utility \
-         rows arrived lifted (16 → 18) and `wide_deep_projected_token` re-homed \
-         OUT to U2.INDEXED_ACCESS on its measured trace (19 → 18): the token \
-         member projects path-precisely from the inline intersection arm and the \
-         non-contributing `Pick` arm stays a deferred carrier",
-    );
-
-    assert_eq!(
-        count("block_id: TypeInfoParityBlockId::U2ModuleAugmentation,"),
-        4,
-        "U2.MODULE_AUGMENTATION must own 4 rows after the 4 lifted rows (the \
-         `as const` typeof indexed member + the `typeof import(...)[\"default\"]` \
-         default-export value projection + the `typeof import(...)[\"leafName\"]` \
-         named-value projection + the namespace alias-chain row) re-homed OUT on \
-         their measured-trace lifts (8 → 4); the remaining 4 rows stay `Ignored` \
-         (all gate-rejected at the oracle source-walk: `Reject(ConstAssertion)`, \
-         two `Reject(DeferredConstruct(\"typeof\"/\"typeof-import\"))`, and \
-         `Reject(DeferredConstruct(\"import-type\"))`)",
-    );
-
-    // Lifted-status counts.
-    assert_eq!(
-        count("status: IgnoreStatus::Lifted {"),
-        46,
-        "exactly 46 IgnoredTestRows must carry `status: Lifted` (the 19 \
-         pre-class-surface lifts + the 19 class-surface-era lifts + the 4 \
-         module-augmentation-era lifts + the 2 JSX-era lifts + the 2 \
-         mapped-template-era lifts)",
-    );
-    assert_eq!(
-        count(
-            "status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2QueryValueDomain }"
-        ),
-        21,
-        "the 2 index-signature lifts, the 8 utility-reducer lifts, the 10 \
-         class-surface-era pure-reduction lifts, and the 1 module-augmentation \
-         namespace alias-chain lift must record their lifting block \
-         as U2.QUERY_VALUE_DOMAIN",
-    );
-    assert_eq!(
-        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        15,
-        "the 2 terminal indexed-access projection lifts, the 3 keyof-expansion \
-         lifts, the 2 brand-tag index-chain lifts, the 2 \
-         decoration-invariance lifts, the 3 module-augmentation \
-         indexed-member projection lifts, the 2 JSX parametric \
-         intrinsic-lookup lifts, and the wide/deep literal-union projection \
-         lift (re-homed on its measured path-precise trace) must record \
-         their lifting block as U2.INDEXED_ACCESS",
-    );
-    assert_eq!(
-        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
-        5,
-        "the 2 built-in modifier-utility lifts + the `-?` optional-remover \
-         (`mapped_modifier_minus_optional`) \
-         lift + the 2 mapped-template-era lifts (the `RecordTemplateRootSlot` \
-         string-literal index-chain row + the `CounterHandlers` key-remap \
-         mapped-type row) must record their lifting block as U2.MAPPED_TEMPLATE \
-         (the wide/deep literal-union projection lift re-homed to \
-         U2.INDEXED_ACCESS on its measured path-precise trace)",
-    );
-
-    assert_eq!(
-        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2ClassSurfaces }"),
-        5,
-        "the 5 class typeof-path lifts (static inheritance ×2, static-generic \
-         instantiation, `.prototype` extraction ×2 — the rows whose measured \
-         trace dispatches ResolveClassSurface + ProjectPath) must record their \
-         lifting block as U2.CLASS_SURFACES",
-    );
-
-    // Total ignored (status: Ignored) rows after 46 lifts. (356 table rows:
-    // the 6 guard-backed footprint-attach / cache-invalidation edit-cycle
-    // rows left the partition when their `#[ignore]`s were removed — a
-    // guard-backed row lands as an always-running test rather than an
-    // oracle-backed `Lifted` row.)
-    assert_eq!(
-        count("status: IgnoreStatus::Ignored"),
-        310,
-        "exactly 310 IgnoredTestRows must remain `Ignored` (356 total − 46 lifted)",
     );
 }

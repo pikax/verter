@@ -423,8 +423,9 @@ impl ComponentMetaOutputLane {
 /// public error surface stays fully nameable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteriorSourceStep {
-    /// A named object / surface / synthesized / leaf-object member value.
-    Member(std::sync::Arc<str>),
+    /// An exact authored object / surface / synthesized / leaf-object member
+    /// key.
+    Member(verter_type_expr::facts::FactAuthoredPropertyKey),
     /// A function parameter position (source order).
     Parameter { ordinal: u32 },
     /// The function return-type position.
@@ -452,7 +453,10 @@ pub enum InteriorSourceStep {
 impl std::fmt::Display for InteriorSourceStep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InteriorSourceStep::Member(name) => write!(f, ".{name}"),
+            InteriorSourceStep::Member(key) => {
+                let encoded = serde_json::to_string(key).map_err(|_| std::fmt::Error)?;
+                write!(f, ".member[{encoded}]")
+            }
             InteriorSourceStep::Parameter { ordinal } => write!(f, ".param[{ordinal}]"),
             InteriorSourceStep::ReturnType => write!(f, ".return"),
             InteriorSourceStep::TypeParamConstraint { ordinal } => {

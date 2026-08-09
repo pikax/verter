@@ -399,7 +399,12 @@ fn mode_boundary_reexport_chain_resolves_imported_alias() {
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     if let verter_type_expr::ObjectMember::Property(prop) = member {
-                        out.insert(prop.name.clone(), prop.ty.clone());
+                        out.insert(
+                            prop.string_name()
+                                .expect("mode-boundary fixture uses string keys")
+                                .to_owned(),
+                            prop.ty.clone(),
+                        );
                     }
                 }
             }

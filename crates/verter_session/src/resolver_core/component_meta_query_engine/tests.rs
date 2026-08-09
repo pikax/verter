@@ -463,8 +463,10 @@ export interface LinkProps extends NuxtLinkProps {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -530,8 +532,12 @@ export class MixedClass {
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(p) => Some(p.name.clone()),
-                    ObjectMember::Method(m) => Some(m.name.clone()),
+                    ObjectMember::Property(p) => {
+                        Some(p.string_name().expect("string-key fixture").to_owned())
+                    }
+                    ObjectMember::Method(m) => {
+                        Some(m.string_name().expect("string-key fixture").to_owned())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -662,7 +668,11 @@ export interface LinkProps extends NuxtLinkProps {
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "to" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("`to` member should be present");
@@ -767,8 +777,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -781,7 +793,11 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "to" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("`to` member should be present");
@@ -896,8 +912,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -1028,8 +1046,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -2640,7 +2660,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
 /// the compute's `refuse_result_cache_admission_if_partial` gate — which only
 /// catches the wildcard-route FUSE trip — does NOT fire. The ONLY rail that
 /// refuses the poisoned verdict is the nested fact tracer (the
-/// `RefCycleResultDb` / `app_config_no_override_proof` sibling pattern), which
+/// `app_config_no_override_proof` sibling pattern), which
 /// pre-fix `can_resolve_registry_symbol` never installed — admitting a verdict
 /// derived from a served-without-publication basis whose facts validate live.
 ///
@@ -2717,7 +2737,7 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         db.live_count(),
         before,
         "POISON: a fenced (non-cacheable) resolvability compute admitted its verdict into \
-         ResolvabilityDb — the nested fact tracer (RefCycleResultDb / app_config sibling \
+         ResolvabilityDb — the nested fact tracer (the app_config sibling \
          pattern) must refuse admission, else a later same-generation warm hit inherits the \
          stale verdict derived from a served-without-publication basis",
     );

@@ -10,7 +10,10 @@ const LEGACY_SLOT_OWNER: &str = "/Component.svelte";
 
 fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> TypeInfoSurface {
     retain_svelte_snippet_members(surface, |member| {
-        if names.contains(&member.name.as_ref()) {
+        if member
+            .string_name()
+            .is_some_and(|name| names.contains(&name))
+        {
             verter_type_expr::PropCallableRole::SvelteSnippet {
                 symbol: verter_type_expr::ResolvedSymbolIdentity {
                     canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
@@ -522,7 +525,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     let row_member = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "row")
+        .find(|m| m.string_name().expect("string-key fixture") == "row")
         .expect("the `row` member is present");
     let dispatch = ctx.dispatch();
     let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
@@ -648,7 +651,8 @@ fn nsnippet_function(
     rest_tuple: crate::semantic_query::SemanticNodeId,
 ) -> crate::semantic_query::SemanticNodeId {
     let void = nprim(graph, crate::semantic_query::PrimitiveKind::Void);
-    graph.intern_node(crate::semantic_query::SemanticNodeData::Function {
+    graph.intern_node(crate::semantic_query::SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![
                 crate::semantic_query::FunctionParam::synthetic(
@@ -667,6 +671,8 @@ fn nsnippet_function(
             .into_boxed_slice(),
         ),
         return_type: void,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -1261,7 +1267,7 @@ fn assert_callback_row_param_resolves_precisely(
     let member = props_surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == member_name)
+        .find(|m| m.string_name().expect("string-key fixture") == member_name)
         .unwrap_or_else(|| panic!("the `{member_name}` member is on the props surface"));
     let dispatch = ctx.dispatch();
     let signature = CallableNodeView::new(&dispatch, member.value)
@@ -1285,13 +1291,16 @@ fn assert_callback_row_param_resolves_precisely(
         )
         .expect("`Row` resolves to an object surface in its declaring scope");
     assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
+        resolved
+            .members
+            .iter()
+            .any(|m| m.string_name().expect("string-key fixture") == "id"),
         "the resolved `Row` surface carries member `id` (precise named-ref \
          resolution via graph demand), got members {:?}",
         resolved
             .members
             .iter()
-            .map(|m| m.name.as_ref())
+            .map(|m| m.string_name().expect("string-key fixture"))
             .collect::<Vec<_>>()
     );
 }
@@ -1846,7 +1855,7 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
     let row = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "row")
+        .find(|m| m.string_name().expect("string-key fixture") == "row")
         .expect("the `row` member is present");
     let dispatch = ctx.dispatch();
     let context = crate::semantic_query::ProjectionReductionContext::published(
@@ -1940,8 +1949,12 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
             assert_eq!(root_identity.symbol_name.as_ref(), "Props");
             assert_eq!(local_name, "Args");
             assert!(
-                declaration.member_index.contains_key("bad")
-                    && declaration.member_index.contains_key("good"),
+                declaration
+                    .member_index
+                    .contains_key(&crate::semantic_query::PropertyKey::identifier("bad"))
+                    && declaration
+                        .member_index
+                        .contains_key(&crate::semantic_query::PropertyKey::identifier("good")),
                 "the exact authored declaration survives as a partial carrier"
             );
         }
@@ -1974,7 +1987,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let bad = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "bad")
+        .find(|m| m.string_name().expect("string-key fixture") == "bad")
         .expect("the `bad` member is present");
     let graph = ctx.project_type_store().semantic_graph();
     let bad_data = graph.node_data(bad.value).expect("bad member graph node");
@@ -2157,7 +2170,9 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         panic!("fully resolved Props must prepare completely, got {preparation:?}");
     };
     assert_eq!(declaration.root_identity.owner, props_owner);
-    assert!(declaration.member_index.contains_key("row"));
+    assert!(declaration
+        .member_index
+        .contains_key(&crate::semantic_query::PropertyKey::identifier("row")));
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
@@ -2175,7 +2190,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
     let row = surface
         .members
         .iter()
-        .find(|member| member.name.as_ref() == "row")
+        .find(|member| member.string_name().expect("string-key fixture") == "row")
         .expect("resolved row member");
     let dispatch = ctx.dispatch();
     let params = CallableNodeView::new(&dispatch, row.value)
@@ -2213,5 +2228,92 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
     assert!(
         !read.result_is_partial && !read.cache_suppress,
         "the fully resolved path remains Complete and cacheable"
+    );
+}
+
+/// Svelte lane: a degraded output or a present-but-unraisable fold `None`
+/// is noted as an `OutputMaterializationLoss` NON-CACHEABLE read at the seam /
+/// terminal unwrap (never admitted complete) — while the compute's
+/// completeness stays `Complete`.
+#[test]
+fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
+    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
+    use crate::resolver_core::FactReadSetFinalise;
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember};
+    use crate::VerterHost;
+    use std::sync::Arc;
+
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let absent = SemanticNodeId(u64::MAX);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let cap = super::TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+
+    // Degraded output: an object whose member value is unraisable degrades
+    // (typed `UnrepresentableSurfaceMember` leaf) — the terminal unwrap must
+    // observe the sidecar into the admission scope BEFORE discarding it.
+    let broken_obj = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    key: crate::semantic_query::AuthoredPropertyKey::string("broken"),                    value: absent,
+                    optional: false,
+                    readonly: false,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let _scope = ColdComputeCompletenessScope::enter();
+    let (_raised, facts) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let sealed = cap
+                .materialize_output_type_expr(broken_obj)
+                .expect("the object raises (degraded member)");
+            sealed.into_type_expr(&cap)
+        });
+    assert!(
+        matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
+        "a degraded output must finalise NON-CACHEABLE (OutputMaterializationLoss)"
+    );
+    assert!(
+        !current_cold_compute_completeness().is_partial(),
+        "the ACTIVE scope's completeness stays Complete (a contained degradation never faults it)"
+    );
+
+    // Fold None: a present-but-unraisable composite fails the fold — the
+    // seam notes the loss before returning `None`, completeness Complete.
+    let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![str_id, absent].into_boxed_slice(),
+    )));
+    let _scope = ColdComputeCompletenessScope::enter();
+    let (_raised, facts) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            cap.materialize_output_type_expr(union_absent)
+        });
+    assert!(_raised.is_none(), "the composite fold fails");
+    assert!(
+        matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
+        "a present-but-unraisable fold failure must finalise NON-CACHEABLE"
+    );
+    assert!(
+        !current_cold_compute_completeness().is_partial(),
+        "a torn read never faults the ACTIVE scope's completeness"
     );
 }

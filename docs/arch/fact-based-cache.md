@@ -96,7 +96,7 @@ on lib data:
 - `ResolvedImportFacts` does **NOT** include `lib_env_hash`. A lib
   update does not change where `./theme` resolves.
 - `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb`
+  `SemanticGraphStore`, `ComponentMetaResultDb`
   **DO** include `lib_env_hash` because semantic meaning depends on
   intrinsic types (`Array<T>`, `HTMLElement`, etc.) and / or module
   augmentations stitching into the effective surface.
@@ -117,7 +117,7 @@ together. Concretely:
   `decorator_semantics`, `use_define_for_class_fields`) folds into
   `type_env_hash`, so it enters every layer that already carries
   `type_env_hash` (typed-IR resolve, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb`,
+  `SemanticGraphStore`, `ComponentMetaResultDb`,
   `TypeInfoGraphResultDb`) and stays absent from `ResolvedImportFacts`
   (which carries no `type_env_hash`).
 - A `resolve_env` addition (`jsx_import_source`, `module_resolution`,
@@ -157,7 +157,7 @@ material:
   the per-reducer budgets, parent §4.3 / §6) is part of the **cache
   identity + the recorded facts** of the depth-sensitive query-identity
   caches (`SemanticGraphStore` `Instantiate` / `Conditional` / `MappedType`
-  nodes, `MaterializeStructureDb`, `RefCycleResultDb`, `TypeInfoGraphResultDb`).
+  nodes, `MaterializeStructureDb`, `TypeInfoGraphResultDb`).
   Two reductions of the same type under different depth policies reduce
   differently (one truncates at a shallower depth), so the policy is a
   meaning-affecting input. It folds into `type_env_hash` (the depth limit is a
@@ -180,7 +180,7 @@ material:
 | `RouteDb` per-name resolution | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (R6 content-free; R21 — routes are resolve-domain, so `parse_env_hash` / `type_env_hash` do NOT key, but `lib_env_hash` does because module augmentations stitch into the route surface) | Fact-validated per candidate via the value-side `ValidatedFactCache` fact signature; stable misses preserved |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (R6 content-free; R21 split-env) | Fact-validated per candidate via the value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>` |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` (R6 — the SUBJECT is the content-free env-bearing slot, NOT a graph-instance `SemanticNodeId`; `normalized_type_args` carries `SemanticNodeId`s exactly as the compliant `SemanticQueryKey::Instantiate.args` does — args are query-identity, the violation was a SemanticNodeId *subject*. R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`.) The per-thread recursion/depth identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). A root-less anonymous subject keys NO slot (uncached). | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the materialise subject's declaration-origin file — the extracted route root for a route-shaped subject, the `base` node's origin for a non-route subject; never the consumer scope — + `validated_at_generation`) |
-| `RefCycleResultDb` | Query-identity (multi-candidate) | `RefCycleResultKey { root: ResolvedDeclSlotIdentity, resolve_env_hash, version }` (R6 content-free — the versioned `DeclIdentity` is NOT the key; R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`) | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the BFS root + every visited declaration's file + `validated_at_generation`) |
+| `ClassifyMaterializationCycleGate` (materialization cycle gate) | Semantic-query family over the `SemanticGraphStore` memo | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` (R6 content-free — no `DeclIdentity`, generation, or algorithm version; the slot carries `type_env`/`lib_env`/`project_identity`; fixed empty-args / `StructuralTransit` / `Skeleton` axes) | Only `Decided` admits (`LegacyFallback` always suppressed); fact-validated per candidate (`ReadSetSignature.facts` + observed self-roots = the walk root + every visited declaration's file) + live-generation gate |
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` (slot identity, e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`) | Fact-validated per candidate; the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals` |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` (R6 content-free — the owner whole-hash is the value-side candidate discriminant, never a key field; R21 full split-env) | Fact-validated per candidate (owner whole-hash candidate discriminant + `ReadSetSignature.facts` + `validated_at_generation`; the owner `FileWholeHash` stays in the value facts) |
 | `CompileSlot.fact_dep_signature` (per-profile compile cache) | Profile-keyed (`CompileProfile`) on `compile_slots: FxHashMap<u64, CompileSlot>` | `(canonical, compile_profile_hash)` (no version hash in the key; `semantic_hash` + override-hashes ride on the slot value) | Carrier is `ReadSetSignature { facts, overflowed }`. Cold-build producer routes the finalised tracer through `SignatureAdmission::from_finalise(...)`; `Cacheable(sig)` → `compile_slots.insert(CompileSlot { fact_dep_signature: sig, .. })`; `NonCacheable` (overflow / unresolved provenance / self-root conflict / route-generation dependency) → skip-publish refusal, fresh value returned to caller without admitting. Empty (`facts.is_empty() && !overflowed`) is a valid admitted state — the warm-hit oracle validates vacuously and falls back to the `semantic_hash` / override-hash pre-filter |
@@ -192,7 +192,7 @@ comments, JSDoc, generic param rename). Computed once per
 `(canonical, content_hash, parse_env_hash)` and lives alongside
 `IndexedReady` in `FileArtifactStore.FileArtifacts`.
 
-## Multi-candidate `FamilySlots` — per-family adaptive caps + eviction
+## Multi-candidate `FamilySlots` — per-family bounded retention
 
 Each query-identity cache slot in the multi-candidate `FamilySlots`
 substrate (`crates/verter_session/src/semantic_query_memo/mod.rs`;
@@ -201,61 +201,72 @@ version/env variants of the same query identity coexist as candidates, and
 validity is decided per-candidate by `ReadSetSignature.validate_with_self_roots`
 against the caller's live view (`validated_at_generation` is recency metadata
 only, never a validity oracle). The candidate-list **capacity and eviction
-policy is per-family, not a uniform cap of 4 with FIFO eviction**:
+policy is per-family** (`U3.ADAPTIVE_FAMILY_RETENTION`, LANDED), replacing the
+legacy uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` with front-removal (FIFO)
+eviction:
 
-- **`candidate_cap()` is per-family.** Each query family declares its own
-  candidate cap via a `candidate_cap()` function on the family descriptor
-  rather than a single global `FAMILY_SLOT_CANDIDATE_CAP = 4`. The
-  inference/substitution-heavy families — **`Relate`, `ResolveCall`,
-  `Instantiate`, `Conditional`, `MappedType`, `FlowReturn`** — get **higher**
-  adaptive caps (the same identity legitimately coexists across many live
-  substitution / inference-context / env variants, so a small cap would thrash
-  a hot inference loop). Content-light families (e.g. `ResolveEnum`,
-  `KeyOf`, `ResolveOverloadSet`) keep a **small** cap. The cap is *adaptive*:
-  it may grow toward the family's ceiling under sustained valid-hit pressure
-  and shrink back, never exceeding the family ceiling or the global memory
-  ceiling below.
-- **Eviction = invalid-first, then LRU-by-valid-hit.** When a slot is at its
-  cap and a new candidate must be admitted, eviction is **two-tier**: (1) evict
-  any candidate that is **invalid** under the current live view first (an
-  invalid candidate can never warm-hit, so it is pure overhead); (2) only if
-  every candidate is still valid, evict the **least-recently valid-hit**
-  candidate (LRU keyed on the last generation at which the candidate served a
-  validated warm hit), not the oldest-inserted (FIFO). FIFO evicts a
-  freshly-inserted-but-hot candidate; LRU-by-valid-hit retains the candidates
-  that are actually serving the workload. Same-discriminant re-publish
-  (matching `validated_at_generation` + `facts`) replaces in place and does
-  not consume a slot.
-- **Global memory ceiling.** Per-family caps are bounded by a process-wide
-  **global memory ceiling** over the whole multi-candidate substrate: the sum
-  of admitted candidates across all families and slots cannot exceed the
-  ceiling. When the global ceiling is reached, admission applies the same
-  invalid-first / LRU-by-valid-hit eviction **across** slots (globally, not
-  just within the target slot) before admitting, so one hot family cannot
-  starve memory from the rest. A candidate that cannot be admitted without
-  breaching the ceiling and whose eviction victims are all still valid +
-  more-recently-hit is **not admitted** — the value is returned to the caller
-  through the typed `ReturnOnly`/`ComputeAdmission` path, never published
-  (consistent with the substrate's existing non-admission discipline).
-- **Benched fallback-count bound per family.** Each family carries a
-  **benchmarked fallback-count bound** — the maximum tolerated cold-recompute
-  ("fallback") rate for that family's representative workload — regression-
-  gated through the existing `BenchResultRow`, which already reports cache
-  mode, hit count, and fallback count. The bench asserts the per-family
-  fallback count stays at or below its declared bound for the representative
-  batch; a cap regression (e.g. silently reverting a hot family to a small cap)
-  shows up as a fallback-count regression and fails the bench gate. This makes
-  the per-family caps an empirically-tuned, regression-protected contract
-  rather than a hand-picked constant.
+- **`candidate_cap()` is per-family (LANDED).** Every `FamilyKey` declares its
+  own candidate cap via an exhaustive, wildcard-free `candidate_cap()` on the
+  family identity — no uniform constant. The floor is **4**. The live
+  inference/substitution-heavy families — **`Instantiate`, `TypeOf`,
+  `Conditional`, `MappedType`** — hold **8**: the same content-free identity
+  legitimately coexists across many live substitution / inference-context /
+  env variants, so the floor would thrash a hot inference loop. (The earlier
+  design list named `Relate` / `ResolveCall` / `FlowReturn` here; in the landed
+  family taxonomy those have no live `FamilyKey` producer — `Relate` is
+  non-producing in the family memo and the flow/call families are U6-future —
+  so the higher cap attaches to the live inference/substitution families.)
+  Content-light projection and modeless families (e.g. `ResolveEnum`, `KeyOf`,
+  `ResolveOverloadSet`, `NormalizeUnion`) and every non-producing variant keep
+  the floor. The *adaptive* half of the design — growing a family's cap toward
+  a ceiling under sustained valid-hit pressure and shrinking back — is
+  **deferred to full `U3.CACHE_FACT_MODEL`**; the landed caps are fixed.
+- **Eviction = invalid-first, then LRU-by-valid-hit (LANDED).** When a slot is
+  at its family cap and a new candidate must be admitted, eviction is
+  **two-tier**: (1) evict the first candidate (front-to-back) that is
+  **invalid** against the publishing caller's stable store view — planned
+  snapshot/validate/reacquire OUTSIDE the `entries` mutex with an
+  `admission_seq` identity recheck under it (an invalid candidate can never
+  warm-hit, so it is pure overhead); (2) only if every candidate is still
+  valid, evict the **least-recently valid-hit** candidate (the front of the
+  slot's LRU order — a validated warm hit promotes its candidate to the back),
+  not the oldest-inserted (FIFO). FIFO evicts a freshly-inserted-but-hot
+  candidate; LRU-by-valid-hit retains the candidates that are actually serving
+  the workload. Same-discriminant re-publish (matching
+  `validated_at_generation` + `facts`) replaces in place and becomes freshest.
+  A new cacheable candidate is **always admitted** after local eviction —
+  cacheability never depends on memory pressure — and every displaced
+  candidate's per-`admission_seq` reverse-index registrations are drained,
+  whatever its slot position.
+- **Global memory ceiling (DEFERRED — full `U3.CACHE_FACT_MODEL`).** The
+  process-wide bound over the whole multi-candidate substrate — the sum of
+  admitted candidates across all families and slots, with cross-slot
+  invalid-first / LRU-by-valid-hit eviction at the ceiling and typed
+  `ReturnOnly`/`ComputeAdmission` non-admission for a candidate that cannot be
+  admitted — is **NOT live**. It remains named full-U3 work; admission
+  semantics at the bridge are unchanged and memory-pressure-independent.
+- **Benched fallback-count bound per family (DEFERRED — full
+  `U3.CACHE_FACT_MODEL`).** Each family carries a **benchmarked
+  fallback-count bound** — the maximum tolerated cold-recompute ("fallback")
+  rate for that family's representative workload — regression-gated through
+  the existing `BenchResultRow`, which already reports cache mode, hit count,
+  and fallback count. The bench asserts the per-family fallback count stays at
+  or below its declared bound for the representative batch; a cap regression
+  (e.g. silently reverting a hot family to a small cap) shows up as a
+  fallback-count regression and fails the bench gate. This makes the
+  per-family caps an empirically-tuned, regression-protected contract rather
+  than a hand-picked constant; it gates on the adaptive-cap half and lands
+  with it.
 
 The validity rail is unchanged: the per-family cap + eviction policy governs
 only *which* candidates a slot retains; *whether* a retained candidate may
 warm-hit is still decided exclusively by `ReadSetSignature.validate_with_self_roots`
-against the caller's live view. Pinned by
-**`cache_candidate_cap_is_per_family_not_uniform`**,
-**`family_eviction_prefers_invalid_then_lru_valid_hit`**, and the benched
-per-family fallback-count bound (owned at `U3.CACHE_FACT_MODEL`; the result-DB
-candidate storage at `U10.RESULT_DB` rides the same substrate).
+against the caller's live view. The family-local policy is pinned by
+**`cache_candidate_cap_is_per_family_not_uniform`** and
+**`family_eviction_prefers_invalid_then_lru_valid_hit`** (owned at
+`U3.ADAPTIVE_FAMILY_RETENTION`; the result-DB candidate storage at
+`U10.RESULT_DB` rides the same substrate). The deferred global ceiling + typed
+non-admission + benched fallback bound stay owned at `U3.CACHE_FACT_MODEL`.
 
 ## Fact registry shape
 
@@ -298,14 +309,16 @@ enum FactKey {
     // Route-surface domain (R12; populated downstream by RouteDb) — ONE arm
     ModuleAugmentationIndexShape { target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern },
 
-    // Program-analysis domain (populated by the demand-sliced flow engine)
-    FlowSlice { function_slot, projection_path, slice_hash, selected_binding_ids, selected_effect_ids, selected_control_region_ids, closure_summary_ids },
+    // NOTE: no `FlowBody` variant — the ProgramAnalysis rail is NOT a
+    // per-file registry fact and has no `FactKey` (see below).
 }
 
 enum FactDomain { ParseFile, ResolveImports, RouteSurface, ProgramAnalysis }
 
 impl FactKey {
-    fn domain(&self) -> FactDomain;  // routes per-domain validator dispatch
+    // Routes the three REGISTRY domains (ParseFile / ResolveImports /
+    // RouteSurface). There is deliberately NO ProgramAnalysis arm.
+    fn domain(&self) -> FactDomain;
 }
 ```
 
@@ -314,44 +327,68 @@ augmentation statement. It distinguishes same-name contributors from module
 and instance script regions; the resolved augmentation target scope remains
 unpartitioned by lexical owner.
 
-`FactKey::domain()` routes validator lookups through the `StoreView`
-trait surface:
+`StoreView::validates` dispatches on the `FactVersionRef` VARIANT — each
+of the four closed domains routes to its per-domain validator:
 
 ```rust
 trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
     fn validates(&self, fact: &FactVersionRef) -> bool;
     // R26 per-domain validators — default impls return `false`;
-    // Stage 6 producers override.
+    // producers override.
     fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool { false }
     fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool { false }
     fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool { false }
-    // ProgramAnalysis domain — owns the `FlowSlice` fact (the demand-sliced flow
-    // engine). Validates against the current region/function-body identity
-    // (`flow_body_stable_hash`) + the stored `FlowSlice` semantic hash. Fail-closed:
-    // a missing / overflowed / stale / unrooted `FlowSlice` fact returns `false`.
+    // ProgramAnalysis domain — the `FlowBody` whole-function rail (no
+    // FactKey; see below). Default impl fails closed; the production
+    // `HostStoreView` overrides with the live `FunctionProgramIndex`
+    // whole-body hash comparison.
     fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool { false }
 }
 ```
 
-The dispatch table is bounded by `FactDomain` (4 variants), not by
-`FactKey`. Adding a new `FactKey` extends a per-domain `*FactRef`
-enum but does NOT widen the trait.
+The dispatch table is bounded by the four `FactVersionRef` domain
+variants, not by `FactKey`. Adding a new `FactKey` extends a per-domain
+registry `*FactRef` enum but does NOT widen the trait.
 
-The `ProgramAnalysis` domain is the fourth closed `FactDomain`. It owns
-the `FlowSlice` fact produced by the demand-sliced flow engine — `FlowSlice`
-is NOT a parse / resolve-imports / route-surface fact. Its
-`FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef { .. })` carries the
-flow-region identity (`function_slot`, `projection_path`, `flow_body_stable_hash`)
-plus the stored `FlowSlice` semantic hash. `StoreView::validates_program_analysis_domain`
-re-derives the live region's `flow_body_stable_hash` and the recorded slice's
-semantic hash and validates BOTH gates; it FAILS CLOSED on a missing, overflowed,
-stale (body changed → `flow_body_stable_hash` differs), or unrooted fact — a
-fail-closed miss recomputes rather than serving a torn slice. `flow_body_stable_hash`
-is content-derived flow node/fact identity, NOT a query-identity-key dimension:
-query-identity keys stay content-free (R6); the flow result is version-rooted via
-this `FlowSlice` fact, exactly as the other query-identity caches version-root
-through their recorded facts.
+The `ProgramAnalysis` domain is the fourth closed `FactDomain` — and the
+only one with NO `FactKey`. The `FlowBody` rail is a read-time recorded
+`FactVersionRef` variant, not a per-file registry fact
+(`verter_workspace::fact_cache`):
+
+```rust
+/// The exact function identity of a program-analysis `FlowBody` fact.
+struct ProgramAnalysisFunctionRef {
+    canonical_id, owner, merged_symbol_name, symbol_space,
+    function_part, overload_ordinal,
+}
+
+enum ProgramAnalysisFactRef {
+    /// One served function position's whole-body stable hash, observed
+    /// from the per-file `FunctionProgramIndex`.
+    FlowBody { function: ProgramAnalysisFunctionRef, flow_body_stable_hash: FactHash16 },
+}
+
+enum FactVersionRef { /* …, */ ProgramAnalysis(ProgramAnalysisFactRef), /* … */ }
+```
+
+The whole-function flow producer (`SemanticQueryKey::FlowReturn`) observes
+`FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { .. })`
+— the exact function identity plus the `flow_body_stable_hash` the
+producing read observed from the per-file `FunctionProgramIndex`.
+`validates` dispatches the variant to `validates_program_analysis_domain`;
+the production override (`HostStoreView` in `resolver_store.rs`) compares
+the recorded hash against the live `FunctionProgramIndex` entry for that
+exact identity (owner / merged name / symbol space / function part /
+overload ordinal) — a structural index read through the view's captured
+`IndexedReady`; it does NOT re-lower or rerun reachability. It FAILS
+CLOSED on a tombstoned, untracked, or artifact-missing canonical and on
+any hash mismatch (body changed → `flow_body_stable_hash` differs) — a
+fail-closed miss recomputes rather than serving a torn result.
+`flow_body_stable_hash` is content-derived body identity, NOT a
+query-identity-key dimension: query-identity keys stay content-free (R6);
+the flow result is version-rooted via this `FlowBody` fact, exactly as the
+other query-identity caches version-root through their recorded facts.
 
 ## Two-phase emission (R28)
 

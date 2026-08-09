@@ -136,3 +136,21 @@ export abstract class AbstractBase {
   abstract describe(): string;
 }
 export type AbstractInstanceShape = InstanceType<abstract new (name: string) => AbstractBase>;
+
+// (11) `this`-receiver call INSIDE a class method. `run` has no return
+// annotation; its body calls the sibling `helper` through `this`, so the
+// receiver is the class instance and the call's return is `helper`'s
+// declared `string`.
+export class ThisMemberCaller {
+  helper(): string {
+    return "hi";
+  }
+  run() {
+    return this.helper();
+  }
+}
+export function callClassThisMember() {
+  const instance = new ThisMemberCaller();
+  return instance.run();
+}
+export type ClassThisMemberResult = ReturnType<typeof callClassThisMember>;

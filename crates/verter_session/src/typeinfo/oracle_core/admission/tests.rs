@@ -486,9 +486,9 @@ fn type_expr_backstop_rejects_any_never_unknown() {
         AdmissionVerdict::Reject(RejectReason::NeverKeyword)
     );
     assert_eq!(
-        admit_type_expr(&TypeExpr::Unknown {
-            raw: "??".to_string()
-        }),
+        admit_type_expr(&TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::unsupported_syntax("??")
+        )),
         AdmissionVerdict::Reject(RejectReason::UnknownOrParseLeftover)
     );
     // E3: a lowered object carrying a clean callable member ADMITs through

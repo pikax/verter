@@ -16,8 +16,8 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache consulted by `get_component_meta` before any cold work.
 - `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. The canonical lazy semantic layer and sole authority for reusable type-resolution work. Two parallel memos:
   - **Node memo** (mode-erased `FamilyKey` → `FamilySlots`) for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
-  - **Relation memo** (keyed by full-identity `RelateMemoKey` — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }` — all three cache-with-fence.
-  - Canonical node variants include `SemanticNodeData::Function { params, return_type, type_parameters }` (class/interface lower to `Object` with heritage merged).
+  - **Relation memo** (keyed by full-identity `RelateMemoKey` — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. Admission is decided-only: only the binary `Assignable { bindings }` / `NotAssignable` payloads publish (cache-with-fence); `Unknown`, `BudgetExceeded` (public payload, `cache_suppress`), session-local inference deltas, and abandoned sessions publish NOTHING — no memo entry, no fact signature, no reverse index.
+  - Canonical node variants include `SemanticNodeData::Signature { kind: SignatureKind::{Call,Construct}, params, return_type, type_parameters }` — one variant for call and construct signatures (class/interface lower to `Object` with heritage merged).
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
 

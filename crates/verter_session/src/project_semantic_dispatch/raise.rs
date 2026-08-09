@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use crate::semantic_query::SurfaceView;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::TypeExpr;
 
@@ -30,7 +31,7 @@ use crate::instant::Instant;
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+    SemanticNodeId, SemanticQueryKey, SurfaceMember, TupleElement,
 };
 // `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
 // harness wrapper below; the production reverse boundaries take a
@@ -49,6 +50,11 @@ mod shape_engine;
 // projection) reuse the shape engine's mapping instead of duplicating it.
 pub(crate) use shape_engine::semantic_primitive_to_primitive_name;
 pub(crate) use shape_engine::RaisedShallowMemberOutput;
+// The materialize-fold degradation sidecar vocabulary — the sealed output
+// payload (sibling `output_materialization`) carries it.
+#[cfg(test)]
+pub(in crate::project_semantic_dispatch) use shape_engine::fold_to_type_expr;
+pub(in crate::project_semantic_dispatch) use shape_engine::{DegradedLeaf, MaterializedTypeExpr};
 
 /// Graph-native result of reducing one output demand before the terminal sink
 /// performs its single display materialization.
@@ -170,7 +176,12 @@ fn canonicalise_for_digest(
     match key {
         SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
             base: *base,
-            path: Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice()),
+            path: Arc::from(
+                vec![PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
+                )]
+                .into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
         SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
@@ -267,6 +278,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::TypeOf { .. } => "TypeOf",
         SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
         SemanticQueryKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+        SemanticQueryKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
         SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
         SemanticQueryKey::Relate { .. } => "Relate",
         SemanticQueryKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
@@ -280,6 +292,9 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
         SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
         SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
+        SemanticQueryKey::ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
+        SemanticQueryKey::FlowReturn(_) => "FlowReturn",
+        SemanticQueryKey::ResolveCall(_) => "ResolveCall",
     }
 }
 
@@ -298,7 +313,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
     /// [`Self::materialize_reduced_output_type_expr`]. This function alone
     /// is shell-only.
-    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<MaterializedTypeExpr> {
         let mut active = FxHashSet::default();
         // The shell-only materialization entry: delegate to the shared shape
         // engine's `MaterializeTypeExprAlg` — the SOLE exhaustive
@@ -318,7 +333,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// graph node they want to materialise (typically the demanded terminal of
     /// a navigate-driven walk) and want it raised AS-IS. It is a thin wrapper
     /// over the shell-only [`Self::raise_node_to_type_expr`] primitive, so every
-    /// carrier round-trips here (raw-fallback text → `Unknown { raw }`, the
+    /// carrier round-trips here (raw-fallback text → `TypeExpr::Unknown(UnknownValue)`, the
     /// synthetic binding, the constructor carrier, the `RecursiveRef` back-edge
     /// via `Opaque(QueryError::RecursiveRef)`); tuple-element rest fidelity
     /// rides on the `Tuple` arm's `TupleElement.rest`.
@@ -372,9 +387,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let cap = TestOutputCap::new(self);
         cap.materialize_output_type_expr(handle.node())
             .map(|carrier| carrier.into_type_expr(&cap))
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "<materialize miss>".to_string(),
-            })
+            .unwrap_or(TypeExpr::Unknown(
+                verter_type_expr::UnknownValue::compatibility_projection("<materialize miss>"),
+            ))
     }
 
     /// Test-only plain SHELL-raise that returns the unwrapped `TypeExpr`
@@ -470,11 +485,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
         let reduced = self.reduce_output_node_with_context(node, context);
-        let type_expr =
-            self.raise_node_to_type_expr(reduced.node_id)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: "<raise miss after reduction>".to_string(),
-                });
+        // A raise failure after a successful reduction is PRESENT-BUT-
+        // UNRAISABLE, never a genuine absence: degrade as the TYPED
+        // unmaterialized `Miss` carrier — the sidecar carries the leaf, the
+        // payload goes PARTIAL at the `from_parts` choke point (never
+        // admitted complete), and the compat tree projects the `semanticMiss`
+        // spelling.
+        let type_expr = self
+            .raise_node_to_type_expr(reduced.node_id)
+            .unwrap_or_else(|| MaterializedTypeExpr::degraded(QueryError::Miss));
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced.node_id),
             OutputTypeExpr::from_raise(type_expr),
@@ -527,9 +546,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
         let type_expr = self
             .raise_node_to_type_expr(reduced)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "<raise miss after reduction>".to_string(),
-            });
+            .unwrap_or_else(|| MaterializedTypeExpr::degraded(QueryError::Miss));
         let result_is_partial = state.result_is_partial;
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced),
@@ -751,6 +768,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::DeclRef { .. }
@@ -761,6 +779,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => {}
             SemanticNodeData::Alias(target) => {
                 stack.push(ReduceFrame::descend(*target, parent_context));
@@ -771,7 +790,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // terminal).
             SemanticNodeData::Object(view) => {
                 if is_whole_surface_published(parent_context) {
-                    for member in view.members.iter() {
+                    for member in view.positive_members().iter() {
                         stack.push(ReduceFrame::descend(member.value, parent_context));
                     }
                     for sig in view.call_signatures.iter() {
@@ -786,6 +805,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(ks) = view.keyspace {
                         stack.push(ReduceFrame::descend(ks, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                if is_whole_surface_published(parent_context) {
+                    for child in program.child_nodes() {
+                        stack.push(ReduceFrame::descend(child, parent_context));
                     }
                 }
             }
@@ -808,7 +834,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -842,8 +868,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 let object_context = indexed_access_object_context(parent_context);
-                stack.push(ReduceFrame::descend(*object, object_context));
-                if let IndexKey::TypeNode(n) = index {
+                // The flow-return `ReturnType<typeof callee>['b']` member
+                // hop: the OBJECT is NOT pre-reduced — reducing the
+                // builtin carrier here would execute the callee's WHOLE
+                // signature composition for a single-member demand. The
+                // un-reduced carrier flows into the `IndexedAccess`
+                // dispatch verbatim (the reduce arm's mapping fall-through)
+                // and the walker's member-hop admission dispatches
+                // `FlowReturn` with the single-member demand.
+                let flow_member_hop = matches!(index, IndexKey::String(_))
+                    && self.is_flow_return_type_member_base(*object);
+                if !flow_member_hop {
+                    stack.push(ReduceFrame::descend(*object, object_context));
+                }
+                if let IndexKey::Computed(n) = index {
                     stack.push(ReduceFrame::descend(
                         *n,
                         structural_operand_context(parent_context),
@@ -889,13 +927,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::InstantiationRef { args, .. } => {
+            SemanticNodeData::InstantiationRef { base, args } => {
                 // Args travel with the carrier — substituted into the
                 // body if the carrier's dispatch reifies. Under
                 // Navigate the carrier stays terminal so args effectively
                 // stay un-reduced via the mapping fall-through.
-                for arg in args.iter() {
-                    stack.push(ReduceFrame::descend(*arg, parent_context));
+                //
+                // EXCEPT the flow-return `ReturnType<typeof callee>`
+                // carrier under a non-whole-surface demand: reducing its
+                // `typeof` argument here would compose the callee's full
+                // signature — an eager WHOLE-body flow evaluation at a
+                // position whose carrier stays terminal. The demand
+                // points own that materialisation (the walker's member
+                // hop dispatches the single-member `FlowReturn`; a
+                // whole-surface demand reifies through `Instantiate`).
+                let _ = base;
+                let flow_return_carrier_stop = !is_whole_surface_published(parent_context)
+                    && self.is_flow_return_type_member_base_data(data);
+                if !flow_return_carrier_stop {
+                    for arg in args.iter() {
+                        stack.push(ReduceFrame::descend(*arg, parent_context));
+                    }
                 }
             }
             SemanticNodeData::MergedDecl { contributors } => {
@@ -905,13 +957,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     for contributor in contributors.iter() {
                         stack.push(ReduceFrame::descend(*contributor, parent_context));
                     }
-                }
-            }
-            // The constructor signature descends like the function
-            // signature under whole-surface publication.
-            SemanticNodeData::ConstructorType { signature } => {
-                if is_whole_surface_published(parent_context) {
-                    stack.push(ReduceFrame::descend(*signature, parent_context));
                 }
             }
         }
@@ -946,7 +991,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   under whole-surface `Published(Expanded)` (demand rule)
     ///   — so non-whole-surface contexts return the parent verbatim.
     /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
-    ///   variant and become `Unknown { raw: "<…>" }`.
+    ///   variant and become `TypeExpr::Unknown(UnknownValue)` (raw text
+    ///   payload carries the hard-stop message).
     /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
     ///   return `node` as-is.
     #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
@@ -1042,6 +1088,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Raw-fallback / synthetic-binding carriers pass through this
             // reducer unchanged — the dispatch resolves them as a whole.
             | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // Unresolved bare-name / dynamic-import reference carriers: a
@@ -1073,7 +1120,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::TemplateLiteral { .. } => {
                 self.opaque_unknown_with(node, "<unresolved template literal type>")
             }
-            SemanticNodeData::Infer { .. } => {
+            SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
                 self.opaque_unknown_with(node, "<unresolved infer type>")
             }
 
@@ -1257,7 +1304,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     let projection_path: Arc<[PathSegment]> = Arc::from(
                         path.iter()
-                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .map(|segment| {
+                                PathSegment::Member(
+                                    crate::semantic_query::PropertyKey::identifier(Arc::clone(
+                                        segment,
+                                    )),
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
@@ -1339,6 +1392,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,
@@ -1459,6 +1513,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(_) => {
                 rebuild_object(self, node, &state.mapping, context).unwrap_or(node)
             }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let rebuilt = program.map_child_nodes(|child| {
+                    state
+                        .mapping
+                        .get(&(child, context))
+                        .copied()
+                        .unwrap_or(child)
+                });
+                if rebuilt == *program {
+                    node
+                } else {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(rebuilt),
+                    )
+                }
+            }
             SemanticNodeData::Union(arms) => rebuild_union_or_intersection(
                 self,
                 node,
@@ -1499,18 +1570,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
                     .unwrap_or(node)
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => rebuild_function(
                 self,
                 node,
+                *kind,
                 params,
                 *return_type,
                 type_parameters,
+                occurrence.clone(),
+                return_carrier.clone(),
                 *signature_span,
                 *return_type_span,
                 &state.mapping,
@@ -1525,27 +1602,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     already
                 } else {
                     self.reduce_subtree(merged, context, state)
-                }
-            }
-            // Structural fidelity carriers rebuild from their reduced single
-            // child (like `Array` / `Function`): if the child is unchanged
-            // the shell is preserved, else a scope-preserving shell is
-            // re-interned.
-            SemanticNodeData::ConstructorType { signature } => {
-                let new_sig = state
-                    .mapping
-                    .get(&(*signature, context))
-                    .copied()
-                    .unwrap_or(*signature);
-                if new_sig == *signature {
-                    node
-                } else {
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::ConstructorType {
-                            signature: new_sig,
-                        },
-                    )
                 }
             }
         }
@@ -1783,8 +1839,8 @@ fn rebuild_object(
     };
     let mut changed = false;
     let new_members: Arc<[SurfaceMember]> = {
-        let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
-        for m in view.members.iter() {
+        let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.positive_members().len());
+        for m in view.positive_members().iter() {
             let new_value = mapping.get(&(m.value, context)).copied().unwrap_or(m.value);
             if new_value != m.value {
                 changed = true;
@@ -1850,7 +1906,8 @@ fn rebuild_object(
             }
         })
         .collect();
-    let new_view = SurfaceView::from_entries(entries, view.keyspace, view.has_index_signature);
+    let new_view =
+        SurfaceView::from_entries(entries, view.keyspace, view.has_known_index_signature());
     Some(
         dispatch
             .graph()
@@ -1932,9 +1989,12 @@ fn rebuild_tuple(
 fn rebuild_function(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
+    kind: crate::semantic_query::SignatureKind,
     params: &Arc<[crate::semantic_query::FunctionParam]>,
     return_type: SemanticNodeId,
     type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
+    return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
     return_type_span: Option<verter_span::Span>,
     mapping: &MappingMap,
@@ -1985,11 +2045,23 @@ fn rebuild_function(
     }
     Some(dispatch.graph().intern_preserving_scope(
         node,
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),
-            // Node remapping preserves source provenance.
+            // Node remapping preserves source provenance — the occurrence
+            // verbatim, the declared carrier retargeted at the remapped
+            // return.
+            occurrence,
+            return_carrier: match return_carrier {
+                crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                    crate::semantic_query::SignatureReturnCarrier::Declared(new_return)
+                }
+                crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                    crate::semantic_query::SignatureReturnCarrier::Function(source)
+                }
+            },
             signature_span,
             return_type_span,
         },
@@ -2548,7 +2620,7 @@ fn lower_and_classify_key_domain_at(
         return ClosednessVerdict::Unavailable;
     };
     let lowering = escape_lowering_env(dispatch, prepared, bindings);
-    let node = lower_body_under_env(dispatch, prepared, &body, &lowering.env);
+    let node = lower_body_under_env(dispatch, prepared, slot, &body, &lowering.env);
     classify_lowered_node_key_domain_at(dispatch, node, lowering.bound_params, budget, position)
 }
 
@@ -2662,6 +2734,7 @@ fn type_param_shell_node(
 fn lower_body_under_env(
     dispatch: &ProjectSemanticDispatch<'_>,
     prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    slot: &verter_type_expr::locators::TypeBodySlot,
     body: &TypeExpr,
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -2673,8 +2746,9 @@ fn lower_body_under_env(
     };
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    dispatch.shallow_lower_type_expr_with_context(
+    dispatch.shallow_lower_type_expr_with_context_at_locator(
         body,
+        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
         env,
         &scope,
         &prepared.name_resolution,
@@ -2902,7 +2976,8 @@ fn prepared_instantiation_key_domain_is_closed_unguarded(
             continue;
         };
         let lowering = escape_lowering_env(dispatch, &prepared, &bindings);
-        let default_node = lower_body_under_env(dispatch, &prepared, &default_body, &lowering.env);
+        let default_node =
+            lower_body_under_env(dispatch, &prepared, slot, &default_body, &lowering.env);
         let verdict =
             classify_lowered_node_key_domain(dispatch, default_node, lowering.bound_params, budget);
         if verdict.is_closed() {
@@ -3209,9 +3284,14 @@ pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
     // `items`.
     //
     // The three key-domain operands split BY ROLE. The SOURCE and the key
-    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness (a
-    // value-producing builtin source such as `ReturnType<…>` makes no
-    // closed-key claim and stays OPEN). The `as`-REMAP is
+    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness.
+    // A value-producing builtin source (`ReturnType<…>`) makes no
+    // closed-key claim from its argument bindings, so the registry rule
+    // alone cannot prove it; the walk then falls back to a bounded ONE-HOP
+    // reduction of the instantiation and classifies the REDUCED surface
+    // (`OpenWalk::reduced_instantiation_key_domain_is_closed`), staying
+    // OPEN on a partial demand, a no-progress carrier-stop, or an open
+    // reduced surface. The `as`-REMAP is
     // [`OpenRole::MappedNameRemap`] — a K-only transform over the bound
     // binder (`as keyof Foo<T>` over a fixed-key `Foo`, `as Capitalize<K>`)
     // is decidable per key and stays CLOSED, while a direct outer-generic
@@ -3252,9 +3332,12 @@ pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
 ///   question ([`OpenQuestion::KeyDomain`]) and MUST PROVE finiteness: a
 ///   concrete no-open-argument instantiation is NOT taken closed by
 ///   shortcut — it falls through to the builtin registry
-///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, so a
+///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, and a
 ///   value-producing builtin (`ReturnType`, `InstanceType`, the string
-///   intrinsics, …) that makes NO closed-key claim stays OPEN. An
+///   intrinsics, …) the registry cannot prove closed is decided by the
+///   bounded one-hop reduction fallback
+///   ([`OpenWalk::reduced_instantiation_key_domain_is_closed`]): CLOSED
+///   only when the REDUCED surface is. An
 ///   instantiation is judged per-argument
 ///   (`per_argument_key_domain = true`): an open argument confined to
 ///   member VALUE positions of a fixed-key body keeps the key domain
@@ -3327,8 +3410,9 @@ impl OpenRole {
     /// set is concrete at build time and the mapped key enumerator owns it
     /// (a `Capitalize<K>` over the bound binder is decidable per key). The
     /// `KeyDomainProof` role must PROVE finiteness — it falls through to the
-    /// builtin registry / prepared-decl proof, which is what keeps a
-    /// value-producing builtin source (`ReturnType<…>`) OPEN.
+    /// builtin registry / prepared-decl proof, and a builtin the registry
+    /// cannot prove closed (a value-producing `ReturnType<…>`) is decided by
+    /// the bounded one-hop reduction fallback, never by this shortcut.
     fn concrete_no_open_arg_is_closed(self) -> bool {
         matches!(self, OpenRole::MappedNameRemap)
     }
@@ -3380,11 +3464,11 @@ struct OpenWalk<'a> {
     /// diverge on recursive refs.
     dispatch: &'a ProjectSemanticDispatch<'a>,
     bound_params: FxHashSet<SemanticNodeId>,
-    /// Infer NAMES bound by an enclosing oracle-selected bare-infer
+    /// Exact infer declarations bound by an enclosing oracle-selected bare-infer
     /// conditional (`X := check` — see the tri-state `Conditional` arm):
     /// an `Infer` reference in the selected branch classifies as its
     /// bound node. Empty outside such a branch.
-    bound_infers: FxHashMap<Arc<str>, SemanticNodeId>,
+    bound_infers: FxHashMap<crate::semantic_query::InferBinderId, SemanticNodeId>,
     /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
     /// per-argument key-domain judgement, and the concrete-instantiation
     /// shortcut are all DERIVED from this role (see [`OpenRole`]) — there
@@ -3475,9 +3559,12 @@ impl<'a> OpenWalk<'a> {
     /// the key-space-finiteness question and MUST PROVE finiteness — a
     /// concrete no-open-argument instantiation is NOT taken closed by
     /// shortcut, it falls through to the builtin registry / prepared-decl
-    /// proof, so a value-producing builtin source (`ReturnType<…>`,
-    /// `InstanceType<…>`, the string intrinsics) that makes no closed-key
-    /// claim stays OPEN (and `& T` opens the key domain → carrier-stop). It
+    /// proof; a value-producing builtin source (`ReturnType<…>`,
+    /// `InstanceType<…>`, the string intrinsics) makes no closed-key claim
+    /// from its argument bindings, so it is decided by the bounded one-hop
+    /// reduction fallback (`reduced_instantiation_key_domain_is_closed`) —
+    /// OPEN only when the reduced surface is partial, no-progress, or
+    /// itself open (and `& T` opens the key domain → carrier-stop). It
     /// does NOT descend value surfaces — a member value reaching the outer
     /// generic does not change which KEYS the source exposes
     /// (`{ [K in keyof {a: Foo<T>}]: string }` enumerates `{a}`). A resolved
@@ -3542,7 +3629,7 @@ impl<'a> OpenWalk<'a> {
         }
     }
 
-    /// A child walk with the SAME policy + remaining budget and `name`
+    /// A child walk with the SAME policy + remaining budget and exact `binder`
     /// bound to `node` in the infer-binding environment — used by the
     /// tri-state `Conditional` arm when the shared oracle selects TRUE
     /// via the bare-infer pattern (`X := check`): the selected branch's
@@ -3551,9 +3638,13 @@ impl<'a> OpenWalk<'a> {
     /// `memo`/`in_flight` state (same rule as
     /// [`Self::scoped_with_bound_binder`]); the caller copies the
     /// child's spent budget back.
-    fn scoped_with_bound_infer(&self, name: Arc<str>, node: SemanticNodeId) -> Self {
+    fn scoped_with_bound_infer(
+        &self,
+        binder: crate::semantic_query::InferBinderId,
+        node: SemanticNodeId,
+    ) -> Self {
         let mut bound_infers = self.bound_infers.clone();
-        bound_infers.insert(name, node);
+        bound_infers.insert(binder, node);
         Self {
             dispatch: self.dispatch,
             bound_params: self.bound_params.clone(),
@@ -3713,8 +3804,8 @@ impl<'a> OpenWalk<'a> {
             // conditional (`X := check`) classifies as its bound node —
             // the same binding the build-side substitution applies; an
             // unbound placeholder stays closed.
-            SemanticNodeData::Infer { name } => {
-                match self.bound_infers.get(name.as_ref()).copied() {
+            SemanticNodeData::Infer { binder, .. } | SemanticNodeData::InferRef { binder, .. } => {
+                match self.bound_infers.get(binder).copied() {
                     Some(bound) => self.node_is_open(ctx, bound),
                     None => false,
                 }
@@ -3722,8 +3813,8 @@ impl<'a> OpenWalk<'a> {
 
             // --- operator shapes ---
             // TRI-STATE conditional through the SHARED branch-selection
-            // oracle (the pre-relation infer-pattern cases, then the same
-            // `shallow_relation_check` → `relate_nodes` path
+            // oracle (the infer routing, then the same sole
+            // `execute(SemanticQueryKey::Relate)` authority
             // `build_conditional` selects branches with; `any` / `error`
             // checks defer): a SELECTED branch IS the conditional's
             // surface — classify only it (an open losing branch is dead
@@ -3756,20 +3847,41 @@ impl<'a> OpenWalk<'a> {
                 // diverging.
                 let (mut selection, infer) =
                     self.dispatch.conditional_branch_selection(check, extends);
-                let mut bare_infer_binding: Option<(Arc<str>, SemanticNodeId)> = None;
+                let mut bare_infer_binding: Option<(
+                    crate::semantic_query::InferBinderId,
+                    SemanticNodeId,
+                )> = None;
                 match infer {
-                    Some(super::InferPatternSelection::BareInfer { name }) => {
-                        bare_infer_binding = Some((name, check));
+                    Some(super::relation::RelationInferBindings {
+                        shape: super::relation::InferPatternShape::Bare,
+                        bindings,
+                    }) => {
+                        // The bare-infer binding the relation fixed at
+                        // session close (`X := check`) — the SAME binding
+                        // the build-side substitution applies.
+                        if let Some(binding) = bindings.first() {
+                            if let Some(SemanticNodeData::Infer { binder, .. }) =
+                                super::node_data_for(ctx, binding.param).as_deref()
+                            {
+                                bare_infer_binding = Some((binder.clone(), binding.bound));
+                            }
+                        }
                     }
-                    Some(super::InferPatternSelection::FunctionInfer { .. }) => {
+                    Some(super::relation::RelationInferBindings { .. }) => {
+                        // A non-bare infer selection (object / tuple /
+                        // function pattern) binds check-SIGNATURE
+                        // components — widened to the Deferred treatment
+                        // here (a superset of the selected branch;
+                        // classifying the raw branch with unbound-closed
+                        // infer placeholders would risk a false-CLOSED).
                         selection = super::ConditionalBranchSelection::Deferred;
                     }
                     None => {}
                 }
                 match selection {
                     super::ConditionalBranchSelection::True => match bare_infer_binding {
-                        Some((name, bound)) => {
-                            let mut scoped = self.scoped_with_bound_infer(name, bound);
+                        Some((binder, bound)) => {
+                            let mut scoped = self.scoped_with_bound_infer(binder, bound);
                             let open = scoped.node_is_open(ctx, true_branch);
                             self.budget = scoped.budget;
                             open
@@ -3951,10 +4063,29 @@ impl<'a> OpenWalk<'a> {
                     // (`Pick<Pick<{…}, 'a' | 'b'>, 'a'>` or
                     // `Pick<Partial<{…}>, 'a'>`) must NOT be judged
                     // OPEN.
-                    return !builtin_utility_key_domain_is_closed(
-                        base.decl_name.as_ref(),
-                        &arg_bindings,
-                    );
+                    if builtin_utility_key_domain_is_closed(base.decl_name.as_ref(), &arg_bindings)
+                    {
+                        return false;
+                    }
+                    // The registry rule cannot prove the domain closed —
+                    // for a VALUE-PRODUCING utility (`ReturnType`,
+                    // `InstanceType`, `Awaited`, the string intrinsics, …)
+                    // that is not a proof of openness: the produced key set
+                    // derives from argument VALUE structure the
+                    // per-argument binding walk never inspected. A heritage
+                    // clause `extends ReturnType<typeof f>` whose flow
+                    // return is a closed object surface HAS a finite key
+                    // domain; judging it open carrier-stops a mapped type
+                    // over the interface and publishes a zero-member
+                    // surface for a fully modelled shape. Fall back to a
+                    // bounded one-hop reduction of the instantiation and
+                    // classify the REDUCED surface with this same walk.
+                    // Every earlier conservatism is preserved: a partial /
+                    // truncated / faulted read, a stable carrier-stop (no
+                    // progress), and a reduced surface that is itself open
+                    // all keep the OPEN verdict the registry-only rule
+                    // produced.
+                    return !self.reduced_instantiation_key_domain_is_closed(ctx, node);
                 }
                 !prepared_instantiation_key_domain_is_closed(
                     self.dispatch,
@@ -4021,7 +4152,10 @@ impl<'a> OpenWalk<'a> {
                 }
                 (self.role.descend_value_surfaces()
                     || self.position == OperandPosition::ValueSensitive)
-                    && (view.members.iter().any(|m| self.node_is_open(ctx, m.value))
+                    && (view
+                        .positive_members()
+                        .iter()
+                        .any(|m| self.node_is_open(ctx, m.value))
                         || view
                             .call_signatures
                             .iter()
@@ -4035,7 +4169,7 @@ impl<'a> OpenWalk<'a> {
                             .iter()
                             .any(|s| self.node_is_open(ctx, s.value_type)))
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -4080,9 +4214,6 @@ impl<'a> OpenWalk<'a> {
             }
 
             // --- unresolved / fidelity carriers ---
-            // A constructor type delegates to its inner function signature
-            // (which carries the value-surface descent rule).
-            SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
             // A `typeof X` value-rooted lookup is NOT a resolvable
             // type-position declaration head for this purpose (its root is a
             // VALUE namespace, not a type declaration whose key domain we can
@@ -4168,10 +4299,53 @@ impl<'a> OpenWalk<'a> {
             // An unresolved raw-fallback carrier holds no type arguments and no
             // outer generic (closed for the outer-generic question) but is
             // undecidable for the key-domain question.
+            SemanticNodeData::ObjectSpreadProgram(_) => true,
             SemanticNodeData::RawFallback { .. } => self.role.question().undecidable_is_open(),
             // A synthetic slot-binding is a concrete shallow terminal.
             SemanticNodeData::SyntheticBinding { .. } => false,
+            // The sealed callable carrier is a concrete indexed callable
+            // position — closed for both open-ness questions.
+            SemanticNodeData::DeferredCallable(_) => false,
         }
+    }
+
+    /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
+    ///
+    /// Resolves a `__builtin__` instantiation the per-utility output-key
+    /// rule could not prove closed through the ONE shared structural-fact
+    /// demand ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]
+    /// — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// fail-closed, dep-signature facts recorded into the active tracer),
+    /// then classifies the REDUCED node with this same walk at the
+    /// key-domain position. Returns `false` (not provably closed) on a
+    /// partial / truncated / faulted demand, on a no-progress stable
+    /// carrier-stop (classifying the SAME node would read this walk's own
+    /// in-flight back-edge as closed), and on a reduced surface that is
+    /// itself open — exactly the verdict the registry-only rule produced
+    /// for those cases.
+    fn reduced_instantiation_key_domain_is_closed(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+    ) -> bool {
+        if self.budget == 0 {
+            return false;
+        }
+        self.budget -= 1;
+        let Some(reduced) = self
+            .dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()
+        else {
+            return false;
+        };
+        if reduced == node {
+            return false;
+        }
+        !self.node_is_open_at(ctx, reduced, OperandPosition::KeyDomain)
     }
 
     /// Whether an [`IndexKey`](crate::semantic_query::IndexKey) index
@@ -4187,8 +4361,8 @@ impl<'a> OpenWalk<'a> {
     ) -> bool {
         use crate::semantic_query::IndexKey;
         match index {
-            IndexKey::String(_) | IndexKey::Number(_) => false,
-            IndexKey::TypeNode(node) => {
+            IndexKey::String(_) | IndexKey::Number(_) | IndexKey::UniqueSymbol(_) => false,
+            IndexKey::Computed(node) => {
                 self.node_is_open_at(ctx, *node, OperandPosition::KeyDomain)
             }
         }
@@ -4434,11 +4608,11 @@ pub(crate) fn node_shallow_member_output_with_dispatch(
     shape_engine::project_node_shallow_member_output(dispatch, node)
 }
 
-/// Node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`:
-/// whether `node`'s OWN raised ROOT term is an unmaterialised sentinel. A whole-
-/// raise `None` is `false` (the materialiser's `<raise miss after reduction>`
-/// fallback is not a recognised sentinel, so the `TypeExpr` recogniser also
-/// answers `false` there). DISPATCH-taking primary — the cache-admission gate
+/// Whether `node`'s OWN raised ROOT term is a typed unmaterialised degradation
+/// (the node-domain root-sentinel fact). A whole-raise `None` never reaches
+/// this fact (the terminal degrades it as the typed `Miss` carrier upstream,
+/// so the question is moot there); the compat tree is inert and never feeds
+/// this classification. DISPATCH-taking primary — the cache-admission gate
 /// reads this off the reduced-output carrier node instead of materialising it.
 #[must_use]
 pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
@@ -4491,16 +4665,34 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
 /// running a raised-string walk.
 //
 // Production consumer: the publication reducer's input-side no-poison gate
-// (`meta_resolve::projectors::output_sink::reduce_field_type_expr_with_mode`),
-// which seals the INPUT as the published carrier only when the input is
-// CONFIDENTLY miss-free (`Some(false)`). The parity suite additionally
-// exercises it as the node-vs-`TypeExpr` equivalence proof.
+// (`meta_resolve::projectors::output_sink::reduce_field_value_node` /
+// `reduce_published_field_types` — the deleted TypeExpr helper
+// `reduce_field_type_expr_with_mode` is gone), which seals the INPUT as the
+// published carrier only when the input is CONFIDENTLY miss-free
+// (`Some(false)`). The parity suite additionally exercises it as the
+// node-vs-`TypeExpr` equivalence proof.
 #[must_use]
 pub(crate) fn node_contains_semantic_miss_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<bool> {
     shape_engine::project_node_contains_semantic_miss(dispatch, node)
+}
+
+/// The node-domain declaration facts of `node` in ONE fold: whether every
+/// rendered leaf is declaration-safe (no implicit `any` / unknown /
+/// synthetic slot binding / return-less function) AND the reachable
+/// `typeof <value>` dependency paths. `None` when the whole raise is
+/// `None`. The terminal splice pipeline decides on this — it materializes
+/// at most once afterwards, solely for display.
+pub(crate) fn node_declaration_facts_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<(
+    bool,
+    std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+)> {
+    shape_engine::project_node_declaration_facts(dispatch, node)
 }
 
 /// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
@@ -4673,8 +4865,8 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = &expr else {
-            panic!("expected IndexedAccess expr, got {expr:?}");
+        let TypeExpr::IndexedAccess { index, .. } = expr.expr() else {
+            panic!("expected IndexedAccess expr, got {:?}", expr.expr());
         };
         assert_eq!(
             **index,
@@ -4702,7 +4894,7 @@ mod tests {
             .raise_node_to_type_expr(intersection)
             .expect("intersection must raise");
 
-        match &expr {
+        match expr.expr() {
             TypeExpr::Object(object) => {
                 assert!(
                     object.properties.is_empty(),
@@ -4745,20 +4937,24 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let oracle = |node| {
             type_expr_root_is_unmaterialized_sentinel(
-                &dispatch
+                dispatch
                     .raise_node_to_type_expr(node)
-                    .expect("node must raise"),
+                    .expect("node must raise")
+                    .expr(),
             )
         };
 
-        // (1) Root IS a miss sentinel → both the node-domain fact and the
-        // TypeExpr oracle say true.
+        // (1) Root IS a typed miss degradation → the node-domain fact is true.
+        // The TypeExpr tree oracle is INERT by design: the compat tree spells
+        // the projection but no raw classification reads it back, so the tree
+        // side never reports a sentinel. Parity is SPLIT — typed node facts
+        // carry the classification, the tree is display bytes only.
         assert!(node_root_is_unmaterialized_sentinel_with_dispatch(
             &dispatch, miss
         ));
         assert!(
-            oracle(miss),
-            "TypeExpr oracle agrees the Miss root is a sentinel"
+            !oracle(miss),
+            "the compat tree is inert: no raw sentinel classification remains"
         );
 
         // (2) Root is a plain primitive → both false.
@@ -4787,10 +4983,10 @@ mod tests {
         );
     }
 
-    /// DIFFERENTIAL EQUIVALENCE + DISCRIMINATION for the whole-tree semantic-miss
-    /// node fact (`node_contains_semantic_miss_with_dispatch`): it equals
-    /// `type_expr_contains_semantic_miss(raise(node))` field-for-field, AND it is
-    /// the WHOLE-TREE `!materialized` question, NOT the root-only sentinel. The
+    /// DISCRIMINATION for the whole-tree semantic-miss
+    /// node fact (`node_contains_semantic_miss_with_dispatch`): it is the TYPED
+    /// WHOLE-TREE `!materialized` question, NOT the root-only sentinel (the
+    /// inert tree oracle is pinned false on every shape — the split parity). The
     /// discriminator is an `Array` whose ELEMENT is a miss: whole-tree miss is
     /// `true` (the element miss propagates) while root-sentinel is `false` (the
     /// root is the Array) — proving the two facts answer different questions.
@@ -4815,19 +5011,32 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let oracle = |node| {
             type_expr_contains_semantic_miss(
-                &dispatch
+                dispatch
                     .raise_node_to_type_expr(node)
-                    .expect("node must raise"),
+                    .expect("node must raise")
+                    .expr(),
             )
         };
 
-        // DIFFERENTIAL: the node fact equals the TypeExpr predicate on raise(node)
-        // for every shape (miss root, clean primitive, array-of-miss).
+        // SPLIT PARITY: the node-domain whole-tree miss fact is TYPED (a
+        // nested `Opaque(QueryError)` degrades the fold), while the compat
+        // tree is inert — the projection spellings carry no classification,
+        // so the tree oracle is false everywhere. The two answers differ BY
+        // DESIGN: classification lives in the typed domain only.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, miss),
+            Some(true),
+            "typed node fact: a Miss root is a whole-tree miss"
+        );
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, string),
+            Some(false),
+            "typed node fact: a clean primitive carries no miss"
+        );
         for node in [miss, string, array_of_miss] {
-            assert_eq!(
-                node_contains_semantic_miss_with_dispatch(&dispatch, node),
-                Some(oracle(node)),
-                "node-domain whole-tree miss must equal type_expr_contains_semantic_miss(raise(node))"
+            assert!(
+                !oracle(node),
+                "the compat tree is inert: no raw sentinel classification remains"
             );
         }
 
@@ -4861,8 +5070,9 @@ mod tests {
             .expect("primitive must raise");
 
         assert!(
-            matches!(expr, TypeExpr::Primitive(_)),
-            "primitive should round-trip, got {expr:?}"
+            matches!(expr.expr(), TypeExpr::Primitive(_)),
+            "primitive should round-trip, got {:?}",
+            expr.expr()
         );
     }
 
@@ -4934,7 +5144,8 @@ mod tests {
 
     /// FAIL-FIRST: hard-stop for `TemplateLiteral` —
     /// no dispatch variant exists, so the reducer must convert to
-    /// `Unknown { raw: "<unresolved template literal type>" }`.
+    /// `TypeExpr::Unknown(UnknownValue)` whose raw mentions the template
+    /// literal operator.
     #[test]
     fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
         use crate::semantic_query::ProjectionMode;
@@ -4955,10 +5166,10 @@ mod tests {
         );
 
         match &materialized {
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 assert!(
-                    raw.contains("template literal"),
-                    "template literal hard-stop should mention the operator, got {raw:?}"
+                    value.raw().contains("template literal"),
+                    "template literal hard-stop should mention the operator, got {value:?}"
                 );
             }
             other => panic!("expected Unknown hard-stop, got {other:?}"),
@@ -5008,10 +5219,10 @@ mod tests {
             // reducer accepts it and the raise yields Unknown. Both
             // outcomes prove the lazy carrier was visited; the test
             // discriminates on the absence of `graphNode` text.
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 assert!(
-                    !raw.starts_with("graphNode"),
-                    "raise must not emit graphNode placeholder, got {raw:?}"
+                    !value.raw().starts_with("graphNode"),
+                    "raise must not emit graphNode placeholder, got {value:?}"
                 );
             }
             other => panic!("expected Ref{{name=Unresolved}} or Unknown, got {other:?}"),
@@ -5039,8 +5250,8 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = &expr else {
-            panic!("expected IndexedAccess expr, got {expr:?}");
+        let TypeExpr::IndexedAccess { index, .. } = expr.expr() else {
+            panic!("expected IndexedAccess expr, got {:?}", expr.expr());
         };
         assert_eq!(
             **index,
@@ -5266,7 +5477,7 @@ mod tests {
         // IndexedAccess { object: concrete, index: TypeNode(open K) }.
         let indexed_open_key = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: concrete_object,
-            index: IndexKey::TypeNode(open_key),
+            index: IndexKey::Computed(open_key),
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(

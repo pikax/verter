@@ -21,48 +21,60 @@
 //!    variant identifiers scanned from the live `pub enum SemanticQueryKey`
 //!    source (fails when a variant is added/removed without regenerating).
 //! 3. **Per-row sanity** — every row is `Live`; every row carries the
-//!    `TypeNode` value domain EXCEPT `Relate` (`Relation`),
+//!    `TypeNode` value domain EXCEPT `ProjectObjectSpread`
+//!    (`ObjectProjection`), `Relate` (`Relation`),
 //!    `ResolveOverloadSet` (`OverloadSet`), `ClassifyBroadRuntime`
-//!    (`BroadRuntime`), and `FlowNarrowingAt` /
-//!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
-//!    and the
+//!    (`BroadRuntime`), `ClassifyMaterializationCycleGate`
+//!    (`MaterializationCycleGate`), `FlowNarrowingAt` /
+//!    `ContextualTypeAt` (`ProgramAnalysis`), `FlowReturn`
+//!    (`FlowReturn`), and `ResolveCall` (`ResolveCall`), which is the
+//!    current-tree truth, and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
 //!    set triangulates against both the spec set and the enum-scan set.
 //!
 //! # Current-tree honesty
 //!
 //! - Every live variant resolves to
-//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate`,
-//!   `ResolveOverloadSet`, `ClassifyBroadRuntime`, `FlowNarrowingAt`, and
+//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `ProjectObjectSpread`, `Relate`,
+//!   `ResolveOverloadSet`, `ClassifyBroadRuntime`,
+//!   `ClassifyMaterializationCycleGate`, `FlowNarrowingAt`, and
 //!   `ContextualTypeAt`:
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
+//!   `ProjectObjectSpread` records the dedicated
+//!   [`SemanticQueryValueTag::ObjectProjection`] domain; its ordered-effect
+//!   evaluator is LIVE (`build_project_object_spread`): it returns the
+//!   correlated formula (open alternatives carry their residual evidence in
+//!   the value, so open is honest, not a Miss), and only operational
+//!   failures (recursion / budget / miss) surface `Miss` as
+//!   `result_is_partial` + `cache_suppress`, never warm.
 //!   `Relate` records its value domain as
-//!   [`SemanticQueryValueTag::Relation`] — the tri-state assignability
-//!   classification. Its formal `execute` arm is non-producing: it returns
-//!   `QueryError::Miss` (`Opaque(Miss)`). The current PRODUCTION authority is
-//!   `ProjectSemanticDispatch::relate_nodes(source, target) ->
-//!   (RelationResult, DepSignature)`, which produces and dep-signature-fences
-//!   every judgement in the dedicated `SemanticGraphStore::relation_memo` —
-//!   NOT the family singleflight. That is why this row's `admission` is
-//!   [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
-//!   records [`SemanticQueryValueTag::OverloadSet`] as its LIVE value
-//!   domain: the execute arm projects the callee's ordered VISIBLE
-//!   signature group and the cold build converts the group-bearing node
-//!   into the memoized `OverloadSet(Arc<[SignatureRef]>)` value — a
-//!   signature-less callee is an honest `Miss`, never a fabricated empty
+//!   [`SemanticQueryValueTag::Relation`] — the public relation outcome
+//!   (`Assignable` / `NotAssignable` / `BudgetExceeded`, no public `Unknown`).
+//!   Its `execute` arm is the LIVE producer (`build_relate`) and the SOLE
+//!   relation authority: decided binary judgements admit through the family
+//!   singleflight, `BudgetExceeded` is ReturnOnly-but-public, undecided
+//!   judgements surface `Miss` and never admit. That is why this row's
+//!   `admission` is [`Singleflight`](AdmissionSpec::Singleflight). `ResolveOverloadSet`
 //!   set. `ClassifyBroadRuntime` records the live terminal
-//!   [`SemanticQueryValueTag::BroadRuntime`] domain. `FlowNarrowingAt`
+//!   [`SemanticQueryValueTag::BroadRuntime`] domain.
+//!   `ClassifyMaterializationCycleGate` records the live
+//!   [`SemanticQueryValueTag::MaterializationCycleGate`] domain; only its
+//!   `Decided` arm admits. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
 //!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
 //!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
-//!   until the flow-narrowing / contextual-type reducers land in U6. No
-//!   other value domain appears.
+//!   until the flow-narrowing / contextual-type reducers land in U6.
+//!   `FlowReturn` records the live
+//!   [`SemanticQueryValueTag::FlowReturn`] domain; only a COMPLETE
+//!   evaluation admits. `ResolveCall` records
+//!   [`SemanticQueryValueTag::ResolveCall`] as a live value domain: only a
+//!   fully discharged mixed-component result admits through singleflight.
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
-//!   `TypeOf` / `ProjectPath`) also branches on `ReductionDemand`
+//!   `TypeOf` / `ProjectObjectSpread` / `ProjectPath`) also branches on `ReductionDemand`
 //!   (`Published` / `StructuralTransit` / `MacroObjectSurface` /
 //!   `VueRuntimeObjectSurface`), but that is a four-way MEMO-SLOT-SELECTION
 //!   dimension resolved by `context_to_slot`
@@ -351,14 +363,6 @@ pub enum AdmissionSpec {
     /// / incomplete self-rooting) route through `ReturnOnly` without
     /// publishing.
     Singleflight,
-    /// Dedicated relation-memo path: the judgement is produced and cached by
-    /// `ProjectSemanticDispatch::relate_nodes`, which memoises every outcome in
-    /// the standalone `SemanticGraphStore::relation_memo` under dep-signature
-    /// fencing. The family `execute` path for `Relate` is intentionally
-    /// non-producing — it returns `QueryResult::Error(QueryError::Miss)`
-    /// (`Opaque(Miss)`) — so this key never flows through the `Singleflight`
-    /// family materialiser. Used by `Relate`.
-    RelationMemo,
     /// Honest non-producing arm: this key has NO `execute`-side producer.
     /// The `execute` build arm returns
     /// `QueryResult::Error(QueryError::Miss)` (`Opaque(Miss)`) verbatim —
@@ -368,10 +372,8 @@ pub enum AdmissionSpec {
     /// - `ResolveAmbientNamespace` → the namespace-analysis reducer.
     /// - `ResolveEnum` → the enum value/type-duality reducer.
     ///
-    /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
-    /// dedicated relation-memo producer) and
-    /// [`Singleflight`](Self::Singleflight) (implies a real materialiser).
-    /// This variant implies NO writer at all.
+    /// Distinct from [`Singleflight`](Self::Singleflight) (implies a real
+    /// materialiser). This variant implies NO writer at all.
     NonProducingPendingReducer,
 }
 
@@ -379,7 +381,6 @@ impl AdmissionSpec {
     fn render(self) -> &'static str {
         match self {
             AdmissionSpec::Singleflight => "Singleflight",
-            AdmissionSpec::RelationMemo => "RelationMemo",
             AdmissionSpec::NonProducingPendingReducer => "NonProducingPendingReducer",
         }
     }
@@ -688,6 +689,22 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
+        // ProjectObjectSpread { program, selector, context } — selector-aware
+        // projection over an already-lowered authored-effect program. The
+        // context carries R/T/L/J, substitution, exact optionality, and the
+        // full reduction context; only mode/demand select the memo slot.
+        // Ordered effect evaluation is a live correlated formula producer.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ProjectObjectSpread,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ObjectSpreadProjectionContext",
+            value_domain: SemanticQueryValueTag::ObjectProjection,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: reduction_axes,
+            cross_context_guard:
+                "project_object_spread_selector_and_context_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
         // ProjectPath { base, path, context } — path-precise projection over an
         // already-resolved base; branches on the reduction context plus the
         // Path axis it carries.
@@ -705,11 +722,11 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // inference_context, context } — full-identity relation judgement over
         // already-resolved nodes. Resolves to the `Relation` value domain
         // (`SemanticQueryValue::Relation(RelationPayload)`), NOT `TypeNode`.
-        // The family `execute` path is intentionally non-producing (returns
-        // `Opaque(Miss)`); the authoritative judgement is produced + cached by
-        // `relate_nodes` in the dedicated dep-signature-fenced `relation_memo`,
-        // now re-keyed on the full `RelateMemoKey` identity (admission
-        // `RelationMemo`, not the family singleflight). `env_dims` is `R T L J`:
+        // LIVE producer (`build_relate`): the sole relation authority rides the
+        // family singleflight — decided binary judgements admit into the
+        // `Relate` family slot, `BudgetExceeded` returns-but-never-admits,
+        // undecided judgements surface `Miss` and never admit. `env_dims` is
+        // `R T L J`:
         // the `RelationContext` carries the `R T L J` env the relation outcome
         // depends on (relating imported surfaces resolves their references on
         // the relation's own step — the `R` the bare `{source,target}` key
@@ -726,7 +743,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
-            admission: AdmissionSpec::RelationMemo,
+            admission: AdmissionSpec::Singleflight,
         },
         // ResolveMacroPayload { owner, macro_index, macro_kind, type_args,
         // context: MacroPayloadContext { resolve_env_hash, mode } } — resolves
@@ -842,11 +859,17 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // skeleton, so `T L J` (no `R`, no `P` — keying on either would be a
         // dead axis; the substitution axis rides on the `base` node, not a
         // separate field). The key has NO slot, so these env dims ride IN
-        // the context. Non-producing: the lib-member index reducer is
-        // unimplemented, so the execute arm returns Miss and never
-        // admits/caches (a fabricated apparent surface would be a stub). The
-        // member-facet demand the apparent surface implies is the mode-axis
-        // facet mask.
+        // the context, alongside the demand-scope witness: a ROOTLESS
+        // callable (no authored occurrence) is scoped by the lexical demand
+        // canonical the witness carries (content-free canonical identity,
+        // R6), and its value is built `cache_suppress` — never admitted.
+        // LIVE producer for the CALLABLE arm: a base carrying call
+        // signatures widens to the scoping project's registered ambient
+        // callable-function interface. Every other base kind (the
+        // primitive-to-wrapper widening) returns Miss from inside the
+        // producer and admits nothing — a fabricated apparent surface would
+        // be a stub. The member-facet demand the apparent surface implies is
+        // the mode-axis facet mask.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ApparentType,
             lifecycle: KeyLifecycle::Live,
@@ -855,7 +878,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: mode_axes,
             cross_context_guard: "apparent_type_do_not_warm_hit",
-            admission: AdmissionSpec::NonProducingPendingReducer,
+            admission: AdmissionSpec::Singleflight,
         },
         // TemplateLiteralReduce { pattern, args, context } — folds a
         // template-literal type to its surface through the shared deferred
@@ -948,6 +971,86 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "lower_locator_family_distinct_by_parse_env_and_locator",
             admission: AdmissionSpec::Singleflight,
         },
+        // ClassifyMaterializationCycleGate(key: MaterializationCycleGateKey)
+        // — the sealed materialization cycle gate: classifies whether the
+        // root declaration transitively reaches a cycle through a complex
+        // helper surface. The root slot carries `T L J`; `P` + `R` ride on
+        // the sealed key (the producer's per-hop `Instantiate` reads are
+        // file-backed and resolve imports), so the FULL `P R T L J` set.
+        // The remaining axes (args, demand, mode, policy, provenance) are
+        // FIXED inside the producer, so `allowed_demand` is empty and the
+        // family lives in the `Single` slot. Value domain is
+        // `MaterializationCycleGate` (NOT `TypeNode`) — the opaque
+        // Decided/LegacyFallback outcome. LIVE producer; only `Decided`
+        // admits through the family singleflight (`LegacyFallback` always
+        // suppresses), and the family carries the live-generation gate.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "MaterializationCycleGateKey",
+            value_domain: SemanticQueryValueTag::MaterializationCycleGate,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes",
+            admission: AdmissionSpec::Singleflight,
+        },
+        // FlowReturn(key: FlowReturnKey) — the whole-function return
+        // producer: evaluates the demanded function's complete body
+        // through the flow IR and admits the canonical whole-return node
+        // (+ fallthrough bit) ONLY on a complete evaluation. The full
+        // `P R T L J` env rides on `FlowReturnContext` (no slot —
+        // whole-function program analysis is the widest-env operation);
+        // the substitution axis is the TYPE-ONLY
+        // `CanonicalTypeSubstitution` on the same context; overload
+        // ordinal and function part ride on the function slot identity.
+        // The demand axis (`ReturnProjectionDemand`) and the input axis
+        // (`FlowInputContext`) are KEY-EMBEDDED fields of `FlowReturnKey`
+        // (whole-return / empty-input is the canonical production point),
+        // not slot-mode demands — `allowed_demand` stays empty and the
+        // family lives in the `Single` slot; the warm gate runs over the
+        // key's OWN demand point (`requested_demand_override`). Value
+        // domain is `FlowReturn` (NOT
+        // `TypeNode` — the canonical whole-return carrier + fallthrough
+        // bit; consumers project afterward under their own mode). Every
+        // degraded shape (Unsupported / Missing / Budget / EmptyCycle /
+        // Unresolved) is ReturnOnly and never admits.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::FlowReturn,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "FlowReturnContext",
+            value_domain: SemanticQueryValueTag::FlowReturn,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "flow_return_keys_do_not_warm_hit_across_env_axes",
+            admission: AdmissionSpec::Singleflight,
+        },
+        // ResolveCall(key: ResolveCallKey) — ONE typed query owning
+        // call/construct applicability, inference, overload ordering
+        // (declaration-order first-applicable), and call return selection.
+        // The full `P R T L J` env rides on `ResolveCallContext` (no slot —
+        // call resolution parses the call-site body and resolves the
+        // callee's imports, the widest-env operation) together with the
+        // full `CanonicalTypeSubstitution` axis. The key identity is the
+        // call-site program point + callee/receiver/argument nodes + kind
+        // + explicit type args + the SEALED-EMPTY flow axis — NO freshness
+        // field (derived at relation time from canonical excess-origin
+        // facts), NO contextual-result or candidate-target axis (excluded
+        // demands), NO budget (runtime state). No mode / demand axis
+        // (`allowed_demand` empty), so the family lives in the `Single`
+        // slot. Value domain is `ResolveCall` (NOT `TypeNode` — the
+        // selected-occurrence + final-substitution carrier, or genuine
+        // dynamic `any`). Only the mixed return-equation boundary can admit.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveCall,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ResolveCallContext",
+            value_domain: SemanticQueryValueTag::ResolveCall,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard:
+                "resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -977,11 +1080,15 @@ fn render_axis_mask(mask: AxisMask) -> String {
 fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
     match tag {
         SemanticQueryValueTag::TypeNode => "TypeNode",
+        SemanticQueryValueTag::ObjectProjection => "ObjectProjection",
         SemanticQueryValueTag::ProgramAnalysis => "ProgramAnalysis",
         SemanticQueryValueTag::DeclarationAnalysis => "DeclarationAnalysis",
         SemanticQueryValueTag::OverloadSet => "OverloadSet",
         SemanticQueryValueTag::Relation => "Relation",
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
+        SemanticQueryValueTag::MaterializationCycleGate => "MaterializationCycleGate",
+        SemanticQueryValueTag::FlowReturn => "FlowReturn",
+        SemanticQueryValueTag::ResolveCall => "ResolveCall",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

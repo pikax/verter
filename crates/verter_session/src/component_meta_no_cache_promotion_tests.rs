@@ -47,37 +47,43 @@ fn build_constrained_host() -> Arc<VerterHost> {
 /// walker can attempt to traverse: `deep_0 → deep_1 → deep_2`.
 fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let mut leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
-    // Build nested: leaf, then { deep_2: leaf }, then { deep_1: prev },
-    // then { deep_0: prev_2 } at the top.
-    for name in ["deep_2", "deep_1", "deep_0"] {
-        let member = SurfaceMember {
-            visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
-            value: leaf,
-            optional: false,
-            readonly: false,
-            is_method: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            spans: Default::default(),
-            declaration_origin: None,
-        };
-        leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(vec![member].into_boxed_slice()),
+    let mut leaf = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        }));
+        },
+    ));
+    // Build nested: leaf, then { deep_2: leaf }, then { deep_1: prev },
+    // then { deep_0: prev_2 } at the top.
+    for name in ["deep_2", "deep_1", "deep_0"] {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value: leaf,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        leaf = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(vec![member].into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ));
     }
     leaf
 }
@@ -93,12 +99,14 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
         has_index_signature: false,
     }));
     let member = SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value: leaf,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -493,9 +501,9 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -546,9 +554,9 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -593,9 +601,9 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -649,9 +657,9 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -709,9 +717,9 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -769,9 +777,9 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -829,9 +837,9 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -894,9 +902,9 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -1271,6 +1279,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: true,
+        partial_reasons: crate::semantic_query::PartialReasonSet::PROPAGATED,
     };
     assert!(
         !matches!(
@@ -1289,6 +1298,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: false,
+        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
     };
 
     // Gate behaviour for (2) — under its OWN request — must NOT suppress:
@@ -1378,6 +1388,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
         (
@@ -1388,6 +1399,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
         (
@@ -1398,6 +1410,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
     ];
@@ -1509,7 +1522,12 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
     // output by `build_project_path`.
     let projectpath_key = SemanticQueryKey::ProjectPath {
         base: instref,
-        path: Arc::from(vec![PathSegment::Member(Arc::from("x"))].into_boxed_slice()),
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("x"),
+            )]
+            .into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let read = dispatch.execute_read(projectpath_key.clone());
@@ -1659,8 +1677,9 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 ///
 /// A `Conditional` whose `check` / `extends` are identity carriers
 /// (`InstantiationRef` over the builtin `Partial`) forces
-/// `build_conditional` to fall through to the full `relate_nodes`
-/// authority. The relation's identity-carrier `Instantiate` unwrap
+/// `build_conditional` to fall through to the full
+/// `execute(SemanticQueryKey::Relate)` authority. The relation's
+/// identity-carrier `Instantiate` unwrap
 /// (`relation.rs:342`/`:433`) trips the projection-op budget; the
 /// chokepoint `execute_type_node` folds the partiality into the relation's
 /// cold-build-local frame, so the relation `Unknown` is refused admission
@@ -1669,7 +1688,8 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 ///
 /// Asserts: the `Conditional` dispatch read carries `result_is_partial =
 /// true` (does NOT warm component-meta) AND the relation judgement is
-/// refused relation-memo admission (a fresh `relate_nodes` cold-recomputes).
+/// refused relation-memo admission (a fresh `execute(SemanticQueryKey::Relate)`
+/// cold-recomputes).
 ///
 /// DISCRIMINATION: reverting the chokepoint fold (or the relation-memo
 /// partial-skip) makes the conditional a complete non-partial Value and/or
@@ -1760,13 +1780,13 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         "the relation-derived conditional partial MUST raise the component-meta warm-gate suppress flag"
     );
 
-    // Relation-memo non-admission: a fresh `relate_nodes(check, extends)`
-    // must cold-recompute (no warm relation hit on the partial-derived
-    // judgement). `get_relation` returning `None` proves the partial-derived
-    // judgement was never admitted.
+    // Relation-memo non-admission: a fresh `execute(SemanticQueryKey::Relate)`
+    // over `(check, extends)` must cold-recompute (no warm relation hit on the
+    // partial-derived judgement). `get_relation_payload` returning `None`
+    // proves the partial-derived judgement was never admitted.
     assert!(
         graph
-            .get_relation(host.as_ref(), &dispatch.relate_memo_key(check, extends))
+            .get_relation_payload(host.as_ref(), &dispatch.relate_key_for(check, extends),)
             .is_none(),
         "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
          relation memo (reverting the relation-memo partial-skip admits it here)"

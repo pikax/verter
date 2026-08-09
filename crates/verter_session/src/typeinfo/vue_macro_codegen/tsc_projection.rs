@@ -4,7 +4,8 @@
 //! Sibling half of the parent module `impl VerterHost` orchestrator.
 
 use super::runtime::{
-    authored_emit_anchor, authored_emit_order, partial_failure, resolution_failure,
+    authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
+    resolution_failure, MacroProjectionLane,
 };
 use super::*;
 
@@ -15,7 +16,7 @@ pub(super) fn render_tsc_node(
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
     let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
     rendered
@@ -28,6 +29,9 @@ pub(super) fn render_tsc_node(
 pub(super) fn tsc_scope_requirements(
     mac: &AnalyzedMacro,
     inventory: &TscScopeInventory<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     let macro_owner = tsc_script_owner(mac.owner)?;
     let mut required_imports = BTreeMap::new();
@@ -151,6 +155,9 @@ pub(super) fn tsc_scope_requirements(
                     entry.span,
                     entry.kind == LocalDeclarationKind::TypeAndValue,
                     inventory,
+                    ctx,
+                    dispatch,
+                    owner_canonical,
                 ) {
                     Ok(inferred) => (inferred.members, inferred.value_dependencies, None),
                     Err(failure) => (
@@ -378,6 +385,18 @@ struct InferredClassProjection {
     value_dependencies: BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
 }
 
+fn inferred_class_static_key_name(
+    key: &verter_type_expr::TypeAuthoredPropertyKey,
+) -> Option<String> {
+    match key {
+        verter_type_expr::AuthoredPropertyKey::String(name) => Some(name.to_string()),
+        verter_type_expr::AuthoredPropertyKey::Number(number) => Some(number.to_string()),
+        verter_type_expr::AuthoredPropertyKey::UniqueSymbol(_)
+        | verter_type_expr::AuthoredPropertyKey::Computed(_) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn inferred_class_members(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -385,6 +404,9 @@ fn inferred_class_members(
     declaration_span: verter_span::Span,
     include_static: bool,
     inventory: &TscScopeInventory<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
 ) -> Result<InferredClassProjection, ClassInferenceFailure> {
     fn collect_overload_groups(
         ty: &verter_type_expr::TypeExpr,
@@ -407,7 +429,10 @@ fn inferred_class_members(
                     for member in &object.properties {
                         if let verter_type_expr::ObjectMember::Method(method) = member {
                             if !method.has_implementation_body {
-                                groups.insert((method.name.clone(), is_static));
+                                let Some(name) = inferred_class_static_key_name(&method.key) else {
+                                    continue;
+                                };
+                                groups.insert((name, is_static));
                             }
                         }
                     }
@@ -432,24 +457,19 @@ fn inferred_class_members(
             value_dependencies: BTreeSet::new(),
         });
     }
-    let contributors = match inventory
+    let contributor_parts = match inventory
         .shallow_state
         .decl_bodies()
-        .transient_type_bodies_in(owner, name)
+        .transient_type_parts_in(owner, name)
     {
-        crate::decl_body_memo::DemandOutcome::Ready(Some(contributors)) => contributors,
+        crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => parts,
         _ => {
             return Err(ClassInferenceFailure::Unresolved(
                 UnresolvedReason::MissingDependency,
             ));
         }
     };
-    let Some(body) = contributors.get(contributor_ordinal) else {
-        return Err(ClassInferenceFailure::Unresolved(
-            UnresolvedReason::MissingDependency,
-        ));
-    };
-    let Some(contributor_fact) = lowered.contributor_facts.get(contributor_ordinal) else {
+    let Some(body) = contributor_parts.bodies.get(contributor_ordinal) else {
         return Err(ClassInferenceFailure::Unresolved(
             UnresolvedReason::MissingDependency,
         ));
@@ -457,12 +477,15 @@ fn inferred_class_members(
 
     struct Candidate<'a> {
         start: u32,
-        name: &'a str,
+        name: String,
         is_static: bool,
         position: TscInferredClassTypePosition,
         ty: Option<&'a verter_type_expr::TypeExpr>,
         has_implementation_body: bool,
-        return_inference: Option<verter_type_expr::facts::ReturnInferenceCompleteness>,
+        /// The served function position of a body-derived method return
+        /// (the extractor's mark on the transient IR) — demanded through
+        /// the sealed helper at the gate.
+        flow_return: Option<Box<verter_type_expr::facts::FlowFunctionReturnIdentity>>,
     }
 
     let mut overload_groups = BTreeSet::new();
@@ -473,7 +496,7 @@ fn inferred_class_members(
     while let Some(current) = pending.pop() {
         match current {
             verter_type_expr::TypeExpr::Object(object) => {
-                for (member_index, member) in object.properties.iter().enumerate() {
+                for member in &object.properties {
                     match member {
                         verter_type_expr::ObjectMember::Property(property)
                             if property.spans.type_annotation.is_none() =>
@@ -482,14 +505,21 @@ fn inferred_class_members(
                                 span.start >= declaration_span.start
                                     && span.end <= declaration_span.end
                             }) {
+                                let Some(member_name) =
+                                    inferred_class_static_key_name(&property.key)
+                                else {
+                                    return Err(ClassInferenceFailure::Unsupported(
+                                        UnsupportedReason::SemanticConstruct,
+                                    ));
+                                };
                                 candidates.push(Candidate {
                                     start: span.start,
-                                    name: &property.name,
+                                    name: member_name,
                                     is_static: false,
                                     position: TscInferredClassTypePosition::Property,
                                     ty: Some(&property.ty),
                                     has_implementation_body: false,
-                                    return_inference: None,
+                                    flow_return: None,
                                 });
                             }
                         }
@@ -507,12 +537,12 @@ fn inferred_class_members(
                                 ) {
                                     candidates.push(Candidate {
                                         start: span.start,
-                                        name,
+                                        name: name.to_owned(),
                                         is_static: false,
                                         position: TscInferredClassTypePosition::Parameter,
                                         ty: Some(&parameter.ty),
                                         has_implementation_body: method.has_implementation_body,
-                                        return_inference: None,
+                                        flow_return: None,
                                     });
                                 }
                             }
@@ -523,20 +553,21 @@ fn inferred_class_members(
                                     span.start >= declaration_span.start
                                         && span.end <= declaration_span.end
                                 }) {
+                                    let Some(member_name) =
+                                        inferred_class_static_key_name(&method.key)
+                                    else {
+                                        return Err(ClassInferenceFailure::Unsupported(
+                                            UnsupportedReason::SemanticConstruct,
+                                        ));
+                                    };
                                     candidates.push(Candidate {
                                         start: span.start,
-                                        name: &method.name,
+                                        name: member_name,
                                         is_static: false,
                                         position: TscInferredClassTypePosition::Return,
-                                        ty: method.function.return_type.as_deref(),
+                                        ty: None,
                                         has_implementation_body: method.has_implementation_body,
-                                        return_inference: u32::try_from(member_index)
-                                            .ok()
-                                            .and_then(|member_ordinal| {
-                                                let member_path = [member_ordinal];
-                                                contributor_fact
-                                                    .return_inference_for_member_path(&member_path)
-                                            }),
+                                        flow_return: method.function.flow_return.clone(),
                                     });
                                 }
                             }
@@ -554,18 +585,16 @@ fn inferred_class_members(
         }
     }
 
-    let static_decl = if include_static {
-        Some(
-            inventory
-                .shallow_state
-                .effective_value_decl_in(owner, name)
-                .ok_or(ClassInferenceFailure::Unresolved(
-                    UnresolvedReason::MissingDependency,
-                ))?,
-        )
-    } else {
-        None
-    };
+    if include_static
+        && inventory
+            .shallow_state
+            .effective_value_decl_in(owner, name)
+            .is_none()
+    {
+        return Err(ClassInferenceFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ));
+    }
     let static_parts = if include_static {
         match inventory
             .shallow_state
@@ -586,21 +615,13 @@ fn inferred_class_members(
         .as_ref()
         .and_then(|parts| parts.object_shape.as_ref())
     {
-        let Some(object_fact) = static_decl
-            .as_ref()
-            .and_then(|declaration| declaration.object_shape.as_ref())
-        else {
-            return Err(ClassInferenceFailure::Unresolved(
-                UnresolvedReason::MissingDependency,
-            ));
-        };
         collect_overload_groups(
             &verter_type_expr::TypeExpr::Object(object.clone().into()),
             true,
             &mut overload_groups,
         )
         .map_err(ClassInferenceFailure::InferenceUnavailable)?;
-        for (member_index, member) in object.properties.iter().enumerate() {
+        for member in &object.properties {
             match member {
                 verter_type_expr::ObjectMember::Property(property)
                     if property.spans.type_annotation.is_none() =>
@@ -608,14 +629,20 @@ fn inferred_class_members(
                     if let Some(span) = property.spans.declaration.filter(|span| {
                         span.start >= declaration_span.start && span.end <= declaration_span.end
                     }) {
+                        let Some(member_name) = inferred_class_static_key_name(&property.key)
+                        else {
+                            return Err(ClassInferenceFailure::Unsupported(
+                                UnsupportedReason::SemanticConstruct,
+                            ));
+                        };
                         candidates.push(Candidate {
                             start: span.start,
-                            name: &property.name,
+                            name: member_name,
                             is_static: true,
                             position: TscInferredClassTypePosition::Property,
                             ty: Some(&property.ty),
                             has_implementation_body: false,
-                            return_inference: None,
+                            flow_return: None,
                         });
                     }
                 }
@@ -633,12 +660,12 @@ fn inferred_class_members(
                         ) {
                             candidates.push(Candidate {
                                 start: span.start,
-                                name,
+                                name: name.to_owned(),
                                 is_static: true,
                                 position: TscInferredClassTypePosition::Parameter,
                                 ty: Some(&parameter.ty),
                                 has_implementation_body: method.has_implementation_body,
-                                return_inference: None,
+                                flow_return: None,
                             });
                         }
                     }
@@ -648,21 +675,20 @@ fn inferred_class_members(
                         if let Some(span) = method.spans.declaration.filter(|span| {
                             span.start >= declaration_span.start && span.end <= declaration_span.end
                         }) {
+                            let Some(member_name) = inferred_class_static_key_name(&method.key)
+                            else {
+                                return Err(ClassInferenceFailure::Unsupported(
+                                    UnsupportedReason::SemanticConstruct,
+                                ));
+                            };
                             candidates.push(Candidate {
                                 start: span.start,
-                                name: &method.name,
+                                name: member_name,
                                 is_static: true,
                                 position: TscInferredClassTypePosition::Return,
-                                ty: method.function.return_type.as_deref(),
+                                ty: None,
                                 has_implementation_body: method.has_implementation_body,
-                                return_inference: object_fact.members.get(member_index).and_then(
-                                    |member| match member {
-                                        verter_type_expr::facts::ObjectMemberFact::Method(
-                                            method,
-                                        ) => Some(method.function.return_inference),
-                                        _ => None,
-                                    },
-                                ),
+                                flow_return: method.function.flow_return.clone(),
                             });
                         }
                     }
@@ -681,12 +707,12 @@ fn inferred_class_members(
                         ) {
                             candidates.push(Candidate {
                                 start: span.start,
-                                name,
+                                name: name.to_owned(),
                                 is_static: false,
                                 position: TscInferredClassTypePosition::Parameter,
                                 ty: Some(&parameter.ty),
                                 has_implementation_body: false,
-                                return_inference: None,
+                                flow_return: None,
                             });
                         }
                     }
@@ -697,7 +723,7 @@ fn inferred_class_members(
     }
     candidates.retain(|candidate| {
         !(candidate.has_implementation_body
-            && overload_groups.contains(&(candidate.name.to_owned(), candidate.is_static)))
+            && overload_groups.contains(&(candidate.name.clone(), candidate.is_static)))
     });
     candidates.sort_by_key(|candidate| candidate.start);
 
@@ -705,24 +731,99 @@ fn inferred_class_members(
     let mut inferred = Vec::with_capacity(candidates.len());
     let mut value_dependencies = BTreeSet::new();
     for candidate in candidates {
+        // A body-derived method return is demanded from the whole-function
+        // producer through the ONE sealed helper (the exact contributor /
+        // member / overload slot the extractor marked). Every decision —
+        // the declaration-safety gate and the `typeof`-root dependency walk
+        // — runs on NODE-DOMAIN facts before any materialization; the
+        // returned node materializes ONCE at the pure terminal display sink
+        // for its splice text. Every degraded shape (typed failure, empty
+        // cycle, absent identity) fails closed here.
         if candidate.position == TscInferredClassTypePosition::Return {
-            let Some(completeness) = candidate.return_inference else {
+            let Some(mut identity) = candidate.flow_return else {
                 return Err(ClassInferenceFailure::Unsupported(
                     UnsupportedReason::SemanticConstruct,
                 ));
             };
-            match completeness {
-                verter_type_expr::facts::ReturnInferenceCompleteness::Unavailable(reason) => {
+            identity.anchor.canonical_id = std::sync::Arc::from(owner_canonical);
+            identity.anchor.owner = owner;
+            let (type_text, typeof_paths) = match dispatch.execute_function_return_source(
+                &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
+                owner_canonical,
+            ) {
+                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+                    // A DEGRADED SUCCESS never splices display text: this
+                    // projection is fail-closed (every degraded shape
+                    // refuses), and a modeled-`any` substitution is a
+                    // degraded shape even though it carries a usable value.
+                    if result.degradation().is_some() {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    }
+                    let Some((safe, typeof_paths)) =
+                        crate::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
+                            dispatch,
+                            result.return_type(),
+                        )
+                    else {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    };
+                    if !safe {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    }
+                    let Some(type_text) = crate::typeinfo::raise::render_node_display_with_ctx(
+                        ctx,
+                        result.return_type(),
+                    ) else {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    };
+                    (type_text, typeof_paths)
+                }
+                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    crate::semantic_query::FlowReturnFailure::Budget(reason),
+                ) => {
                     return Err(ClassInferenceFailure::InferenceUnavailable(reason));
                 }
-                verter_type_expr::facts::ReturnInferenceCompleteness::Unsupported(_) => {
+                // A call in the body did not resolve: the member is typed
+                // UNSUPPORTED and suppresses admission — never widened
+                // back to `any`.
+                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    crate::semantic_query::FlowReturnFailure::CallResolution(_),
+                ) => {
                     return Err(ClassInferenceFailure::Unsupported(
                         UnsupportedReason::SemanticConstruct,
                     ));
                 }
-                verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred
-                | verter_type_expr::facts::ReturnInferenceCompleteness::Complete { .. } => {}
-            }
+                _ => {
+                    return Err(ClassInferenceFailure::Unsupported(
+                        UnsupportedReason::SemanticConstruct,
+                    ));
+                }
+            };
+            value_dependencies.extend(typeof_paths);
+            let occurrence = occurrences
+                .entry((
+                    candidate.name.clone(),
+                    candidate.is_static,
+                    candidate.position,
+                ))
+                .or_insert(0_u32);
+            inferred.push(TscInferredClassMember {
+                name: candidate.name,
+                occurrence: *occurrence,
+                is_static: candidate.is_static,
+                position: candidate.position,
+                type_text: TscSpliceText::new(type_text),
+            });
+            *occurrence = occurrence.saturating_add(1);
+            continue;
         }
         let Some(candidate_type) = candidate.ty else {
             return Err(ClassInferenceFailure::Unsupported(
@@ -741,7 +842,11 @@ fn inferred_class_members(
             Err(reason) => return Err(ClassInferenceFailure::InferenceUnavailable(reason)),
         }
         let occurrence = occurrences
-            .entry((candidate.name, candidate.is_static, candidate.position))
+            .entry((
+                candidate.name.clone(),
+                candidate.is_static,
+                candidate.position,
+            ))
             .or_insert(0_u32);
         let type_text = verter_type_expr::render_type_expr_display(candidate_type)
             .map_err(|_| ClassInferenceFailure::Unsupported(UnsupportedReason::SemanticConstruct))?
@@ -752,7 +857,7 @@ fn inferred_class_members(
         )
         .map_err(ClassInferenceFailure::InferenceUnavailable)?;
         inferred.push(TscInferredClassMember {
-            name: candidate.name.to_owned(),
+            name: candidate.name,
             occurrence: *occurrence,
             is_static: candidate.is_static,
             position: candidate.position,
@@ -793,7 +898,7 @@ fn collect_local_declaration_closure(
         .shallow_state
         .type_deps_in(declaration_owner, name)
     else {
-        return Err(resolution_failure());
+        return Err(resolution_failure(MacroProjectionLane::Tsc));
     };
     if !deps.unroutable_declaration_dependencies.is_empty() || deps.has_unroutable_value_position {
         return Err(ProjectionFailure::Unsupported(
@@ -1059,12 +1164,15 @@ pub(super) fn tsc_emit_rows(
         .iter()
         .filter(|member| member.visibility.is_public())
     {
+        let Some(name) = member.published_name() else {
+            continue;
+        };
         let parameters = render_emit_payload_parameters(ctx, dispatch, member.value, counters)?;
         push_tsc_emit(
             &mut rows,
-            member.name.as_ref(),
+            name.as_ref(),
             parameters,
-            authored_emit_anchor(mac, payload_index, effective_index, member.name.as_ref()),
+            authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
         );
     }
 
@@ -1078,7 +1186,7 @@ pub(super) fn tsc_emit_rows(
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
 
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
     Ok(rows)
@@ -1114,21 +1222,24 @@ fn render_emit_payload_parameters(
         .normalize_node_for_structural_fact_demand(node, context)
         .into_complete_node()
     else {
-        return Err(
-            if crate::request_context::current_cold_compute_completeness().is_partial() {
-                partial_failure()
-            } else {
-                resolution_failure()
-            },
-        );
+        return Err(if macro_projection_faulted(MacroProjectionLane::Tsc) {
+            partial_failure()
+        } else {
+            resolution_failure(MacroProjectionLane::Tsc)
+        });
     };
     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             render_tuple_parameters(ctx, elements, counters)
         }
-        Some(SemanticNodeData::Function { params, .. }) => {
-            render_function_parameters(ctx, params, counters)
-        }
+        // CALL kind only: an emit payload replays a callback's parameters;
+        // a construct signature is not a callback shape and degrades to the
+        // honest open rest below.
+        Some(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            params,
+            ..
+        }) => render_function_parameters(ctx, params, counters),
         _ => Ok(TscSpliceText::new("...args: unknown[]")),
     }
 }

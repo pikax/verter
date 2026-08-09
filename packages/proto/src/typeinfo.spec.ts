@@ -17,16 +17,19 @@ import {
   GraphReductionDemand,
   GraphSignatureKind,
   GraphTypeNodeSchema,
-  GraphMemberNameKind,
+  GraphObjectMemberKind,
   GraphIndexKeyKind,
   GraphAccessibility,
   GraphVariance,
   GraphOperation,
   GraphMappedModifier,
+  GraphObjectExcessOrigin,
+  GraphObjectMergeRole,
   GraphSymbolNamespace,
   GraphDeclarationPartKind,
-  GraphRelationOutcome,
-  GraphRelationStepKind,
+  GraphRelationFailureCode,
+  GraphBudgetExceededKind,
+  GraphSubRelationPositionKind,
   GraphExactness,
   GraphOriginEdgeKind,
   FrameworkTag,
@@ -86,11 +89,11 @@ describe("typeinfo proto TS bindings", () => {
           value: {
             members: [
               {
-                name: "x",
-                nameKind: GraphMemberNameKind.IDENTIFIER,
                 value: primStringExpr(),
                 optionalMember: false,
                 readonly: false,
+                propertyKey: { key: { case: "stringValue", value: "x" } },
+                memberKind: GraphObjectMemberKind.PROPERTY,
               },
             ],
           },
@@ -205,14 +208,15 @@ describe("typeinfo proto TS bindings", () => {
           value: {
             members: [
               {
-                nameId: 1,
-                nameKind: GraphMemberNameKind.IDENTIFIER,
                 valueNodeId: 0,
                 optional: false,
                 readonly: true,
                 accessibility: GraphAccessibility.PUBLIC,
                 staticSide: false,
                 declarationSymbolId: 2,
+                propertyKey: { key: { case: "stringId", value: 1 } },
+                memberKind: GraphObjectMemberKind.PROPERTY,
+                hasImplementationBody: false,
               },
             ],
             indexSignatures: [
@@ -364,21 +368,6 @@ describe("typeinfo proto TS bindings", () => {
           value: { siteSpanRef: 18, contextualNodeId: 0 },
         },
       },
-      {
-        kind: {
-          case: "relationProof",
-          value: {
-            outcome: GraphRelationOutcome.TRUE,
-            steps: [
-              {
-                kind: GraphRelationStepKind.STRUCTURAL,
-                sourceNodeId: 0,
-                targetNodeId: 0,
-              },
-            ],
-          },
-        },
-      },
       { kind: { case: "inferNode", value: { nameId: 19, constraintNodeId: 0 } } },
       {
         kind: {
@@ -402,6 +391,83 @@ describe("typeinfo proto TS bindings", () => {
         },
       },
       { kind: { case: "cycle", value: { cycleRootNodeId: 0, participants: [22] } } },
+      {
+        kind: {
+          case: "objectSpreadProgram",
+          value: {
+            effects: [
+              {
+                kind: {
+                  case: "directProperty",
+                  value: {
+                    propertyKey: { key: { case: "computedNodeId", value: 4 } },
+                    valueNodeId: 5,
+                    optional: true,
+                    readonly: true,
+                    accessibility: GraphAccessibility.PROTECTED,
+                    spans: {
+                      declaration: { canonicalId: "/a.ts", start: 1, end: 9 },
+                      name: { canonicalId: "/a.ts", start: 1, end: 2 },
+                    },
+                    declarationOriginNameId: 3,
+                    hasDeclarationOrigin: true,
+                    declaredInMacroTypeArg: true,
+                    mergeRole: GraphObjectMergeRole.OWN_BODY,
+                    excessOrigin: GraphObjectExcessOrigin.FRESH_OWN,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directMethod",
+                  value: {
+                    propertyKey: { key: { case: "uniqueSymbolDeclId", value: 6 } },
+                    valueNodeId: 7,
+                    hasImplementationBody: true,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directGet",
+                  value: {
+                    propertyKey: { key: { case: "stringId", value: 8 } },
+                    valueNodeId: 9,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directSet",
+                  value: {
+                    propertyKey: { key: { case: "canonicalNumber", value: 10n } },
+                    valueNodeId: 11,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directIndex",
+                  value: { keyTypeNodeId: 12, valueTypeNodeId: 13, readonly: true },
+                },
+              },
+              {
+                kind: {
+                  case: "directCall",
+                  value: { signatureNodeId: 14 },
+                },
+              },
+              {
+                kind: {
+                  case: "directConstruct",
+                  value: { signatureNodeId: 15 },
+                },
+              },
+              { kind: { case: "spread", value: { operandNodeId: 16 } } },
+            ],
+          },
+        },
+      },
     ];
 
     expect(cases.length).toBe(32);
@@ -731,13 +797,73 @@ describe("typeinfo proto TS bindings", () => {
     expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("wire schema version is 4 with the framework-surface member default/origin fields", () => {
-    // Schema 3→4: the add-only `FrameworkSurfaceMember.default_value_id` +
-    // `origin` fields landed under a schema bump per the closed-enum rule
-    // (3 added the framework_surface response arm + per-kind status). The TS
+  it("wire schema version is 7 with canonical object-spread programs", () => {
+    // Schema 4→5: the `GraphTypeNode.relation_proof = 28` oneof arm is
+    // retired (tag + name reserved at message scope) and the relation-proof
+    // witness relocated OFF the type-values surface to the payload-side
+    // `SemanticTypeGraph.relation_proofs` table (field 13, add-only). The TS
     // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
     // lock-step.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(4);
+    // Schema 6 added typed member keys; schema 7 reserves tag 33 for the
+    // canonical source-ordered object-spread program.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(7);
+  });
+
+  it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {
+    // All four relation-proof shapes ride the payload-side table by opaque
+    // proof id — never a GraphTypeNode arm (tag 28 is reserved).
+    const graph = create(SemanticTypeGraphSchema, {
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      relationProofs: [
+        {
+          kind: {
+            case: "assignable",
+            value: {
+              subDerivations: [
+                {
+                  sourceNodeId: 0,
+                  targetNodeId: 1,
+                  positionKind: GraphSubRelationPositionKind.ROOT,
+                  positionNameId: 0,
+                  positionIndex: 0,
+                },
+              ],
+            },
+          },
+        },
+        {
+          kind: {
+            case: "notAssignable",
+            value: {
+              reason: GraphRelationFailureCode.PROPERTY_TYPE_MISMATCH,
+              failingSub: {
+                sourceNodeId: 2,
+                targetNodeId: 3,
+                positionKind: GraphSubRelationPositionKind.MEMBER,
+                positionNameId: 7,
+                positionIndex: 0,
+              },
+            },
+          },
+        },
+        {
+          kind: {
+            case: "budgetExceeded",
+            value: { kind: GraphBudgetExceededKind.RELATION_BUDGET, limit: 500 },
+          },
+        },
+        {
+          kind: { case: "coinductiveCycle", value: { keys: [0, 1, 2] } },
+        },
+      ],
+    });
+
+    const bytes = toBinary(SemanticTypeGraphSchema, graph);
+    const decoded = fromBinary(SemanticTypeGraphSchema, bytes);
+    // Deep equality across the whole proof table — every arm's nested
+    // payload must survive identically.
+    expect(decoded).toEqual(graph);
+    expect(decoded.relationProofs.length).toBe(4);
   });
 
   it("deep-equality roundtrip detects nested field corruption that case-match misses", () => {

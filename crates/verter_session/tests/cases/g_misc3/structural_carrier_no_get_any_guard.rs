@@ -152,8 +152,8 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
             signature: "fn base_node_origin_self_root(",
         },
         Scanned {
-            file: "component_meta_caches.rs",
-            signature: "fn ref_cycle_read_set(",
+            file: "project_semantic_dispatch/cycle_gate.rs",
+            signature: "pub(super) fn build_classify_materialization_cycle_gate(",
         },
         // Route-fact production moved from the retired
         // `current_route_surface_hash` helper onto the store-view

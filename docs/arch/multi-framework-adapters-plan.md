@@ -2163,7 +2163,7 @@ row to SUPPORTED — payload-precise, never the rejected loose `CustomEvent<any>
 slot-name-exactness contract is CONSOLIDATED here from §B8f (which deferred slot-NAME precision to an
 owner-gated `$slots` extension, the `$events` analogue). Both ride the EXISTING typeinfo wire kinds
 (`FRAMEWORK_SURFACE_KIND_EMITS` / `_SLOTS`) — NO proto variant, NO `SemanticTypeGraph.schema_version`
-bump (the EMITS/SLOTS graph nodes already carry the typed `payload_expr` / `binding_expr`). The only
+bump (the EMITS/SLOTS graph nodes already carry the typed payload / binding surfaces). The only
 new Rust-internal type is the closed `SvelteSurfaceSource::CallbackPropEvents` enum arm.
 
 **F13 — `$events` payload map (two models, one EmitsSurface).**

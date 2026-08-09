@@ -364,314 +364,90 @@ struct ComponentOutcome {
     /// `synthesis_should_suppress` for a successful resolve — `true` means
     /// a budget-tripped / partial `demand: Published` result.
     published_partial: bool,
-    /// Whether the actual PUBLISHED `ComponentMetaAnalysis` surface (props,
-    /// models, events, slots) leaks a `BudgetExceeded` partial sentinel in
-    /// any typed published field. Walked structurally over the typed-IR
-    /// (`TypeExpr`), NOT via `synthesis_should_suppress` — a leaked sentinel
-    /// can ride a published field WITHOUT the request-level suppress flag
-    /// being set (the masking case assertion #4 must catch).
-    published_surface_budget_exceeded: bool,
+    /// Whether ANY published field (props + models + events + slots) carries
+    /// typed degradation ON ITS PUBLISHED TREE (shallow, publication-side)
+    /// — the masking probe,
+    /// INDEPENDENT of the suppress flag AND of the non-cacheable note (read
+    /// from the fold + `from_parts` choke point, never re-derived from
+    /// `resolution.completeness`, which is suppress-derived and cannot see
+    /// the masking case).
+    published_surface_degraded: bool,
 }
 
-/// Structural typed-IR walk for a leaked budget-exceeded partial
-/// sentinel. A budget-tripped / partial early-exit that leaks onto a
-/// published surface surfaces as a `TypeExpr::Unknown { raw }` carrying
-/// the production `budgetExceeded(<Domain>)` spelling
-/// `semantic_query_error_raw` emits. The sentinel is recognized by the
-/// SAME shared `pub(crate)` production recognizer (re-exported via
-/// `verter_session::test_only::budget_sentinel`), so the test's spelling
-/// can never drift from the producer's. This walks every type-bearing
-/// arm of `TypeExpr` (NOT string matching on a rendered display string —
-/// the marker is read off the typed `Unknown.raw` field via the shared
-/// recognizer).
-fn type_expr_mentions_budget_exceeded(expr: &verter_type_expr::TypeExpr) -> bool {
-    use verter_session::test_only::budget_sentinel::is_budget_exceeded_sentinel;
-    use verter_type_expr::{ObjectMember, TypeExpr, TypeParam};
-
-    // The sole production spelling of a leaked budget sentinel is a
-    // `TypeExpr::Unknown { raw: "budgetExceeded(...)" }`; recognize it
-    // here through the shared production recognizer before structural
-    // recursion.
-    if is_budget_exceeded_sentinel(expr) {
-        return true;
-    }
-
-    fn type_param_mentions(p: &TypeParam) -> bool {
-        p.constraint
-            .as_ref()
-            .is_some_and(|c| type_expr_mentions_budget_exceeded(c))
-            || p.default
-                .as_ref()
-                .is_some_and(|d| type_expr_mentions_budget_exceeded(d))
-    }
-
-    fn function_mentions(f: &verter_type_expr::FunctionExpr) -> bool {
-        f.type_parameters.iter().any(type_param_mentions)
-            || f.parameters
-                .iter()
-                .any(|p| type_expr_mentions_budget_exceeded(&p.ty))
-            || f.return_type
-                .as_ref()
-                .is_some_and(|r| type_expr_mentions_budget_exceeded(r))
-    }
-
-    match expr {
-        // `ImportType`'s only nested `TypeExpr`-bearing field is
-        // `type_arguments` (`specifier`/`qualifier` are strings,
-        // `typeof_query` is a bool) — so the carrier surface is identical to
-        // `Ref`/`RecursiveRef` and folds into the same recursion.
-        TypeExpr::Ref { type_arguments, .. }
-        | TypeExpr::RecursiveRef { type_arguments, .. }
-        | TypeExpr::ImportType { type_arguments, .. } => type_arguments
-            .iter()
-            .any(type_expr_mentions_budget_exceeded),
-        // The leaked sentinel is recognized above via the shared
-        // recognizer; a non-sentinel `Unknown` carries no nested
-        // type-bearing surface.
-        TypeExpr::Unknown { .. } => false,
-        TypeExpr::TypeParameter(param) => type_param_mentions(param),
-        TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
-            ObjectMember::Property(p) => type_expr_mentions_budget_exceeded(&p.ty),
-            ObjectMember::IndexSignature(sig) => {
-                type_expr_mentions_budget_exceeded(&sig.key_type)
-                    || type_expr_mentions_budget_exceeded(&sig.value_type)
-            }
-            ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
-                function_mentions(f)
-            }
-            ObjectMember::Method(m) => function_mentions(&m.function),
-        }),
-        TypeExpr::Function(f) | TypeExpr::ConstructorType(f) => function_mentions(f),
-        TypeExpr::Array { element, .. } => type_expr_mentions_budget_exceeded(element),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|e| type_expr_mentions_budget_exceeded(&e.ty)),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-            arms.iter().any(type_expr_mentions_budget_exceeded)
-        }
-        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
-            type_expr_mentions_budget_exceeded(inner)
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            type_expr_mentions_budget_exceeded(object) || type_expr_mentions_budget_exceeded(index)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            type_expr_mentions_budget_exceeded(check)
-                || type_expr_mentions_budget_exceeded(extends)
-                || type_expr_mentions_budget_exceeded(true_type)
-                || type_expr_mentions_budget_exceeded(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            type_expr_mentions_budget_exceeded(source)
-                || type_expr_mentions_budget_exceeded(value)
-                || name_type
-                    .as_ref()
-                    .is_some_and(|n| type_expr_mentions_budget_exceeded(n))
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            expressions.iter().any(type_expr_mentions_budget_exceeded)
-        }
-        // Terminals with no nested TypeExpr to carry the sentinel.
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. }
-        | TypeExpr::SyntheticSlotBinding(_) => false,
-    }
-}
-
-/// Pins the gate-#4 walker to the REAL production spelling and proves it
-/// reaches a sentinel borne on a function type parameter's
-/// `constraint`/`default` (the traversal extended for FINDING 2). NON-hollow:
-/// every assertion would fail against the pre-fix walker (which keyed on
-/// capital-B `"BudgetExceeded"` and treated type parameters as terminal).
-#[test]
-fn gate4_walker_detects_production_sentinel_including_in_type_parameters() {
-    use std::sync::Arc;
-    use verter_type_expr::{FunctionExpr, TypeExpr, TypeParam};
-
-    let real_sentinel = || TypeExpr::Unknown {
-        raw: "budgetExceeded(ProjectionOperation)".into(),
-    };
-
-    // Bare production sentinel.
-    assert!(
-        type_expr_mentions_budget_exceeded(&real_sentinel()),
-        "walker MUST detect the production `budgetExceeded(...)` sentinel"
-    );
-
-    // The stale capital-B spelling never occurs in production and must NOT
-    // be what the walker keys on.
-    assert!(
-        !type_expr_mentions_budget_exceeded(&TypeExpr::Unknown {
-            raw: "BudgetExceeded".into()
-        }),
-        "walker must key on the production prefix, not the stale capital-B literal"
-    );
-
-    // Clean `Unknown` text does not fire.
-    assert!(
-        !type_expr_mentions_budget_exceeded(&TypeExpr::Unknown {
-            raw: "string".into()
-        }),
-        "walker MUST NOT fire on clean `Unknown` text"
-    );
-
-    // Sentinel borne on a function type parameter's CONSTRAINT (FINDING 2).
-    let fn_constraint = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-        Vec::new(),
-        None,
-        vec![TypeParam {
-            name: "T".into(),
-            constraint: Some(Arc::new(real_sentinel())),
-            default: None,
-        }],
-    )));
-    assert!(
-        type_expr_mentions_budget_exceeded(&fn_constraint),
-        "walker MUST detect a sentinel borne on a function type-parameter constraint"
-    );
-
-    // Sentinel borne on a type parameter's DEFAULT (FINDING 2).
-    let param_default = TypeExpr::TypeParameter(TypeParam {
-        name: "U".into(),
-        constraint: None,
-        default: Some(Arc::new(real_sentinel())),
-    });
-    assert!(
-        type_expr_mentions_budget_exceeded(&param_default),
-        "walker MUST detect a sentinel borne on a type-parameter default"
-    );
-
-    // A clean function with clean type parameters must not fire.
-    let clean_fn = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-        Vec::new(),
-        None,
-        vec![TypeParam {
-            name: "T".into(),
-            constraint: Some(Arc::new(TypeExpr::Primitive(
-                verter_type_expr::PrimitiveName::String,
-            ))),
-            default: None,
-        }],
-    )));
-    assert!(
-        !type_expr_mentions_budget_exceeded(&clean_fn),
-        "walker MUST NOT fire on a clean function / clean type parameters"
-    );
-}
-
-/// Pins the gate-#4 walker to the `TypeExpr::ImportType` carrier (the
-/// dynamic-import variant). NON-hollow and discriminating: the
-/// sentinel-bearing assertion fails against a lazy `ImportType { .. } =>
-/// false` arm, and the clean assertion fails against a blanket
-/// `ImportType { .. } => true` arm — so it proves the arm RECURSES into
-/// `type_arguments` rather than returning a constant. (Pre-fix, the match
-/// had no `ImportType` arm at all and the file did not compile under
-/// `--features external-corpus`.)
-#[test]
-fn gate4_walker_detects_production_sentinel_in_import_type_arguments() {
-    use std::sync::Arc;
-    use verter_type_expr::TypeExpr;
-
-    let real_sentinel = || TypeExpr::Unknown {
-        raw: "budgetExceeded(ProjectionOperation)".into(),
-    };
-
-    // `import("./m").Generic<budgetExceeded(...)>` — the sentinel rides a
-    // nested type argument of an `ImportType` carrier. The walker MUST
-    // recurse into `type_arguments`, exactly as it does for
-    // `Ref`/`RecursiveRef`.
-    let import_with_sentinel = TypeExpr::ImportType {
-        specifier: "./module_features_leaf".into(),
-        qualifier: Arc::from(vec![Arc::<str>::from("Generic")]),
-        typeof_query: false,
-        type_arguments: Arc::from(vec![real_sentinel()]),
-    };
-    assert!(
-        type_expr_mentions_budget_exceeded(&import_with_sentinel),
-        "walker MUST detect a sentinel borne on an ImportType type argument"
-    );
-
-    // A clean `ImportType` (sentinel-free nested arg) must NOT fire — proves
-    // the arm walks the real surface instead of blanket-returning true.
-    let import_clean = TypeExpr::ImportType {
-        specifier: "./module_features_leaf".into(),
-        qualifier: Arc::from(Vec::<Arc<str>>::new()),
-        typeof_query: true,
-        type_arguments: Arc::from(vec![TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String,
-        )]),
-    };
-    assert!(
-        !type_expr_mentions_budget_exceeded(&import_clean),
-        "walker MUST NOT fire on a clean ImportType carrier"
-    );
-}
-
-/// Materialize ONE published source position to its SHALLOW published shape
-/// and walk it for the sentinel.
-///
-/// The published surface is source-positioned and TypeExpr-free: a field
-/// carries a `SourcePosition` (`Absent` / `Present(SemanticTypeSource)` /
-/// `Failed`), never a `TypeExpr`. The sentinel therefore is not a field of the
-/// meta — it is what the published source RENDERS to. The probe raises the
-/// source through the ONE shared dispatch in its SHALLOW form (the published
-/// shape a consumer reads without demanding an expansion — carriers survive),
-/// which is exactly what the hermetic `Table.vue` / `ChatMessages.vue`
-/// trackers assert on.
-///
-/// `Absent` and `Failed` positions expose no source and are skipped here:
-/// neither can carry a sentinel (they carry no shape at all). A `Failed`
-/// position is the state a genuine partial materialization lands in — that
-/// class is covered by the `synthesis_should_suppress` half of assertion #4,
-/// not by this walker.
-fn source_position_carries_budget_exceeded(
+/// Whether a published type-bearing position carries typed degradation on
+/// the RAISE-TIME sidecar — read from the fold + `from_parts` choke point
+/// (`shallow_is_degraded`), NEVER from `resolution.completeness` (which is
+/// suppress-derived and structurally cannot see a contained masking
+/// degradation). A position with no present source, or a source that misses
+/// the shell raise entirely, reads DEGRADED (fail-closed).
+fn source_position_is_degraded(
     host: &VerterHost,
     owner_canonical: &str,
     position: &verter_type_expr::facts::SourcePosition,
 ) -> bool {
-    position.present().is_some_and(|source| {
-        verter_session::test_only::semantic_source_probe::shallow_type_expr(
-            host,
-            owner_canonical,
-            source,
-        )
-        .as_ref()
-        .is_some_and(type_expr_mentions_budget_exceeded)
-    })
+    use verter_type_expr::facts::SourcePosition;
+    match position {
+        // `Failed` (a REQUIRED position whose source construction failed) is
+        // degraded; `Absent` (a position PROVABLY carrying no source — e.g.
+        // an unannotated optional) is NOT a masked failure and is NOT
+        // degraded; only `Present` goes through the probe.
+        SourcePosition::Failed(_) => true,
+        SourcePosition::Absent(_) => false,
+        SourcePosition::Present(source) => {
+            verter_session::test_only::semantic_source_probe::shallow_is_degraded(
+                host,
+                owner_canonical,
+                source,
+            )
+            .unwrap_or(true)
+        }
+    }
 }
 
-/// Walk every PUBLISHED type-bearing surface of a resolved
-/// `ComponentMetaAnalysis` (props + models + events + slots) for a leaked
-/// budget-exceeded partial sentinel. `true` means at least one
-/// `demand: Published` field carries the marker — a silent correctness
-/// regression even when `synthesis_should_suppress` is `false`.
-fn published_surface_carries_budget_exceeded(
+/// A clean UNANNOTATED (`Absent`) position is provably source-free — never
+/// degraded (the pre-change walker SKIPPED non-present positions for the
+/// same reason). Pinned so a future collapse of `Absent` into the degraded
+/// class false-fails here.
+#[test]
+fn gate4_absent_position_is_not_degraded() {
+    let host = VerterHost::new_standalone(Default::default());
+    for position in [
+        verter_type_expr::facts::SourcePosition::unannotated(),
+        verter_type_expr::facts::SourcePosition::Absent(
+            verter_type_expr::facts::SchemaAbsence::Unannotated,
+        ),
+    ] {
+        assert!(
+            !source_position_is_degraded(&host, "/Any.vue", &position),
+            "an Absent position is provably source-free — never degraded"
+        );
+    }
+}
+
+/// Whether ANY published type-bearing surface of a resolved
+/// `ComponentMetaAnalysis` (props + models + events + slots) carries typed
+/// degradation ON THE PUBLISHED TREES — the masking probe (shallow,
+/// publication-side): `true` means at least one published field's own tree
+/// carries a degraded leaf. By construction this is a NEGATIVE gate: real
+/// surfaces keep structural carriers shallow-by-default, so a clean
+/// resolve probes `false` everywhere (see the honest contract on
+/// `shallow_semantic_source_is_degraded`); the masking case it pins absent
+/// is a degraded field riding a published tree while
+/// `synthesis_should_suppress` is `false`.
+fn published_surface_is_degraded(
     host: &VerterHost,
     owner_canonical: &str,
     meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) -> bool {
-    let carries =
-        |position| source_position_carries_budget_exceeded(host, owner_canonical, position);
-    let props = meta.props.iter().any(|p| carries(&p.type_source));
-    let models = meta.models.iter().any(|m| carries(&m.type_source));
-    let events = meta.events.iter().any(|e| carries(&e.payload));
+    let degraded = |position| source_position_is_degraded(host, owner_canonical, position);
+    let props = meta.props.iter().any(|p| degraded(&p.type_source));
+    let models = meta.models.iter().any(|m| degraded(&m.type_source));
+    let events = meta.events.iter().any(|e| degraded(&e.payload));
     let slots = meta.slots.iter().any(|s| {
         s.return_publication
             .as_ref()
-            .is_some_and(|publication| carries(&publication.source_position()))
-            || s.bindings.iter().any(|b| carries(&b.type_source))
+            .is_some_and(|publication| degraded(&publication.source_position()))
+            || s.bindings.iter().any(|b| degraded(&b.type_source))
     });
     props || models || events || slots
 }
@@ -685,46 +461,209 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
         .to_string_lossy()
         .to_string();
     let corpus_owned = corpus_root.to_path_buf();
-    // (resolved_ok, synthesis_should_suppress, published_surface_budget_exceeded)
+    // (resolved_ok, synthesis_should_suppress, published_surface_degraded)
     let (tx, rx) = mpsc::channel::<(bool, bool, bool)>();
     let start = Instant::now();
     // The host is built INSIDE the worker so the watchdog can abandon a
     // non-terminating build without a poisoned shared host. The published
-    // `ComponentMetaAnalysis` surface is walked here (the worker) before
+    // `ComponentMetaAnalysis` surface is probed here (the worker) before
     // sending the booleans back — the typed meta itself is not `Send`-
     // friendly across the channel and must be inspected in-thread.
     let _worker = std::thread::spawn(move || {
         let host = build_corpus_host(&corpus_owned);
         let resolved = host.get_component_meta_with_resolution(&canonical);
-        let (ok, published_partial, surface_budget_exceeded) = match resolved {
+        let (ok, published_partial, surface_degraded) = match resolved {
             Some((meta, resolution)) => (
                 true,
                 resolution.synthesis_should_suppress,
-                published_surface_carries_budget_exceeded(&host, &canonical, &meta),
+                published_surface_is_degraded(host.as_ref(), &canonical, &meta),
             ),
             None => (false, false, false),
         };
         // Receiver may already be gone (timeout) — ignore send error.
-        let _ = tx.send((ok, published_partial, surface_budget_exceeded));
+        let _ = tx.send((ok, published_partial, surface_degraded));
     });
     match rx.recv_timeout(PER_COMPONENT_HARD_BUDGET) {
-        Ok((resolved_ok, published_partial, published_surface_budget_exceeded)) => {
-            ComponentOutcome {
-                timed_out: false,
-                elapsed: start.elapsed(),
-                resolved_ok,
-                published_partial,
-                published_surface_budget_exceeded,
-            }
-        }
+        Ok((resolved_ok, published_partial, published_surface_degraded)) => ComponentOutcome {
+            timed_out: false,
+            elapsed: start.elapsed(),
+            resolved_ok,
+            published_partial,
+            published_surface_degraded,
+        },
         Err(_) => ComponentOutcome {
             timed_out: true,
             elapsed: start.elapsed(),
             resolved_ok: false,
             published_partial: false,
-            published_surface_budget_exceeded: false,
+            published_surface_degraded: false,
         },
     }
+}
+
+/// The masking case is UNREACHABLE on the typed rail, by construction: the
+/// shallow (publication-side) probe is `Some(false)` for every raisable
+/// authored source (the fold emits unmaterialized leaves only for
+/// reducer-interned `Opaque` nodes, synthetic member misses, or open
+/// keyspace placeholders — none reachable from authored lowering, per the
+/// honest contract on `shallow_semantic_source_is_degraded`), so the gate
+/// discriminates on its two real arms: `Some(false)` for clean published
+/// fields, and `None`→degraded (fail-closed) for an unraisable source. The
+/// REAL raise-time positive (a demanded reduction that misses) is pinned
+/// separately by `gate4_probe_reports_real_raise_time_degradation`. Any
+/// lost degradation at a terminal seam/unwrap notes
+/// `OutputMaterializationLoss` (NON-CACHEABLE), so a degraded surface is
+/// never admitted as a complete result.
+#[test]
+fn gate4_masking_case_is_unreachable_on_the_typed_rail() {
+    use verter_session::resolver_core::FactReadSetFinalise;
+
+    let project =
+        verter_session::meta::MetaProject::new(VerterHost::new_standalone(HostConfig::default()));
+    project
+        .upsert_base("/types.ts", "export interface Deep { a: string }\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/Masking.vue",
+            r#"<script setup lang="ts">
+import type { Deep } from './types'
+defineProps<{ present?: import('./types').Present, broken?: Deep['a'] }>()
+</script>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let canonical = "/Masking.vue";
+    let (resolved, facts) =
+        host.with_fact_tracer(|| host.get_component_meta_with_resolution(canonical));
+    let (meta, resolution) = resolved.expect("the clean resolve returns metadata");
+
+    // Every published field reads NOT-degraded on the independent probe
+    // (fold + `from_parts` choke point — never `resolution.completeness`,
+    // which is suppress-derived): the masking case is absent for a clean
+    // complete resolution.
+    assert!(
+        !published_surface_is_degraded(host, canonical, &meta),
+        "a clean complete resolution must publish NO degraded field"
+    );
+    assert!(
+        !resolution.synthesis_should_suppress,
+        "a clean resolve is not suppress-flagged"
+    );
+    assert!(
+        matches!(facts.finalise(), FactReadSetFinalise::Ok(_)),
+        "a clean resolve finalises Ok (no materialization loss)"
+    );
+
+    // Probe discrimination (not vacuously-quiet): an authored source whose
+    // declaration body cannot raise reads DEGRADED fail-closed (the raise
+    // returns None — never a clean Some(false)). THE PINNED PLANT CONTRACT:
+    // a `.map(|_| false)` plant on the probe passes (no shallow `Some(true)`
+    // positive exists BY CONSTRUCTION — the honest contract on
+    // `shallow_semantic_source_is_degraded`), while a plant that masks the
+    // `None` as a clean `Some(false)` turns THIS assertion RED (the
+    // fail-closed arm is the shallow gate's only discrimination, by design).
+    let missing_source = verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: std::sync::Arc::from("/definitely-missing.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: std::sync::Arc::from("NoSuchType"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            },
+        ),
+    );
+    assert!(
+        verter_session::test_only::semantic_source_probe::shallow_is_degraded(
+            host,
+            canonical,
+            &missing_source,
+        )
+        .unwrap_or(true),
+        "an unraisable source must read DEGRADED on the probe (fail-closed)"
+    );
+}
+
+/// The masking probe exercises the REAL raise + `from_parts` mapping: a
+/// PRESENT source whose demanded reduction misses degrades to a typed
+/// `Miss` leaf — the probe reports `Some(true)`. This is the positive side
+/// of the masking class: a constant-false plant on the probe goes RED here
+/// (proven by the flip evidence in the fix history). The shallow
+/// (publication-side) probe stays quiet for the SAME source — deferred
+/// carriers are legitimate shallow-by-default shapes, not leaks.
+#[test]
+fn gate4_probe_reports_real_raise_time_degradation() {
+    let project =
+        verter_session::meta::MetaProject::new(VerterHost::new_standalone(HostConfig::default()));
+    project
+        .upsert_base(
+            "/Masking.vue",
+            r#"<script setup lang="ts">
+defineProps<{ present?: string, broken?: DefinitelyMissingType['k'] }>()
+</script>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let session = project.open_session_batch().unwrap();
+    let meta = session
+        .get_component_meta("/Masking.vue")
+        .unwrap()
+        .expect("the fixture returns metadata");
+
+    let broken = meta
+        .props
+        .iter()
+        .find(|p| p.name == "broken")
+        .expect("the `broken` prop publishes");
+    let source = broken
+        .type_source
+        .present()
+        .expect("the `broken` prop carries a present source");
+
+    // POSITIVE (the real mapping): the demanded reduction of the missing
+    // root degrades to a typed `Miss` leaf — the probe reports it.
+    assert_eq!(
+        verter_session::test_only::semantic_source_probe::demand_is_degraded(
+            host,
+            "/Masking.vue",
+            source,
+        ),
+        Some(true),
+        "a Present source whose demanded reduction misses MUST report degraded (typed Miss leaf)"
+    );
+    // … and the publication-side probe stays quiet (the deferred carrier is
+    // a legitimate shallow-by-default shape, not a masking leak).
+    assert_eq!(
+        verter_session::test_only::semantic_source_probe::shallow_is_degraded(
+            host,
+            "/Masking.vue",
+            source,
+        ),
+        Some(false),
+        "the deferred carrier is clean at publication (not a masking case)"
+    );
+    // The clean sibling does NOT read degraded on either channel.
+    let present = meta
+        .props
+        .iter()
+        .find(|p| p.name == "present")
+        .expect("the `present` prop publishes");
+    let clean = present
+        .type_source
+        .present()
+        .expect("the `present` prop carries a present source");
+    assert_eq!(
+        verter_session::test_only::semantic_source_probe::demand_is_degraded(
+            host,
+            "/Masking.vue",
+            clean,
+        ),
+        Some(false),
+        "a resolved source must NOT read degraded"
+    );
 }
 
 /// Assertions #1 + #3 + #4 on a fresh host per component (the
@@ -756,16 +695,17 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
             unresolved.push(component);
             continue;
         }
-        // #4 — a GENUINELY-COMPLETE resolve must NOT carry a budget-tripped
-        // partial on its `demand: Published` surface. Two independent
-        // signals: the request-level `synthesis_should_suppress` flag, AND
-        // a leaked `BudgetExceeded` sentinel on the actual published typed
-        // surface (props + models + events + slots). The latter catches the
-        // masking case the flag misses — a sentinel riding a published
-        // field while `synthesis_should_suppress` is `false`. #4 is scoped
+        // #4 — a GENUINELY-COMPLETE resolve must NOT carry a degraded field
+        // on its `demand: Published` surface. Two independent signals: the
+        // request-level `synthesis_should_suppress` flag, AND the typed
+        // masking probe over the actual published surface (props + models +
+        // events + slots) — the latter catches the masking case the flag
+        // misses (a degraded field riding a published surface while
+        // `synthesis_should_suppress` is `false`, which the suppress-derived
+        // `resolution.completeness` structurally cannot see). #4 is scoped
         // to the genuinely-complete set (`COMPLETE_MANDATORY_COMPONENTS`).
         if COMPLETE_MANDATORY_COMPONENTS.contains(&component)
-            && (outcome.published_partial || outcome.published_surface_budget_exceeded)
+            && (outcome.published_partial || outcome.published_surface_degraded)
         {
             false_partials.push(component);
         }
@@ -787,9 +727,9 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
     // #4
     assert!(
         false_partials.is_empty(),
-        "#4 no `BudgetExceeded` on a `demand: Published` key (genuinely-complete set only): \
+        "#4 no degraded field on a published surface (genuinely-complete set only): \
          components surfaced a budget-tripped partial — either `synthesis_should_suppress=true` \
-         OR a `BudgetExceeded` sentinel leaked onto a published typed field \
+         OR a typed degradation leaked onto a published field (the masking probe) \
          (props/models/events/slots) — on their published surface: {false_partials:?}. A \
          genuinely-complete component must NOT manufacture a partial, and no published field may \
          carry the sentinel even when the request suppress flag is clear (the masking case)."
@@ -911,7 +851,7 @@ fn warm_pass_does_zero_cold_rebuilds_for_complete_components() {
 #[derive(Debug)]
 struct AuditedResolveStats {
     suppress: bool,
-    surface_sentinel: bool,
+    surface_degraded: bool,
     budget_diagnostics: usize,
     charges: u64,
     cold_builds: u64,
@@ -951,7 +891,10 @@ fn resolve_audited_stats(host: &Arc<VerterHost>, canonical: &str) -> AuditedReso
     };
     AuditedResolveStats {
         suppress: resolution.synthesis_should_suppress,
-        surface_sentinel: published_surface_carries_budget_exceeded(host, canonical, &meta),
+        // The masking probe over the published surface (fold + `from_parts`
+        // choke point) — NOT the suppress-derived `resolution.completeness`,
+        // which cannot see a contained masking degradation.
+        surface_degraded: published_surface_is_degraded(host.as_ref(), canonical, &meta),
         budget_diagnostics,
         charges,
         cold_builds: footprint.cache_outcomes.cold_builds as u64,
@@ -990,7 +933,7 @@ fn chat_messages_resolves_without_timeout() {
     );
     assert!(outcome.resolved_ok, "ChatMessages.vue must resolve");
     assert!(
-        !outcome.published_surface_budget_exceeded,
+        !outcome.published_surface_degraded,
         "ChatMessages.vue must publish NO BudgetExceeded sentinel on its typed surface"
     );
 
@@ -1003,10 +946,10 @@ fn chat_messages_resolves_without_timeout() {
         .to_string();
     let cold = resolve_audited_stats(&host, &canonical);
     assert!(
-        !cold.surface_sentinel && cold.budget_diagnostics == 0,
-        "ChatMessages.vue cold resolve must carry NO budget trip (sentinel {} / \
+        !cold.surface_degraded && cold.budget_diagnostics == 0,
+        "ChatMessages.vue cold resolve must carry NO budget trip (degraded {} / \
          budget diagnostics {})",
-        cold.surface_sentinel,
+        cold.surface_degraded,
         cold.budget_diagnostics
     );
     assert!(
@@ -1043,10 +986,10 @@ fn chat_messages_resolves_complete_without_false_partial() {
     let outcome = resolve_with_hard_budget(&corpus_root, "ChatMessages.vue");
     assert!(!outcome.timed_out && outcome.resolved_ok);
     assert!(
-        !outcome.published_partial && !outcome.published_surface_budget_exceeded,
-        "ChatMessages.vue must publish NO partial (suppress flag {} / sentinel {})",
+        !outcome.published_partial && !outcome.published_surface_degraded,
+        "ChatMessages.vue must publish NO partial (suppress flag {} / degraded {})",
         outcome.published_partial,
-        outcome.published_surface_budget_exceeded
+        outcome.published_surface_degraded
     );
 }
 
@@ -1080,11 +1023,11 @@ fn table_resolves_complete_and_warm() {
         outcome.resolved_ok
     );
     assert!(
-        !outcome.published_partial && !outcome.published_surface_budget_exceeded,
+        !outcome.published_partial && !outcome.published_surface_degraded,
         "Table.vue must publish NO budget-tripped partial (suppress flag {} / published \
-         sentinel {}) — the #4 genuinely-complete criterion",
+         degraded {}) — the #4 genuinely-complete criterion",
         outcome.published_partial,
-        outcome.published_surface_budget_exceeded
+        outcome.published_surface_degraded
     );
 
     // #2 membership criterion + audit-counter criteria: completeness
@@ -1097,11 +1040,11 @@ fn table_resolves_complete_and_warm() {
         .to_string();
     let cold = resolve_audited_stats(&host, &canonical);
     assert!(
-        !cold.suppress && !cold.surface_sentinel && cold.budget_diagnostics == 0,
-        "Table.vue cold resolve must be COMPLETE (suppress {} / sentinel {} / \
+        !cold.suppress && !cold.surface_degraded && cold.budget_diagnostics == 0,
+        "Table.vue cold resolve must be COMPLETE (suppress {} / degraded {} / \
          budget diagnostics {})",
         cold.suppress,
-        cold.surface_sentinel,
+        cold.surface_degraded,
         cold.budget_diagnostics
     );
     // Cold charge bound, anchored to the measured gate-path value:

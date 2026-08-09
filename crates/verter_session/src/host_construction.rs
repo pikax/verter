@@ -26,6 +26,32 @@ use crate::types::HostConfig;
 use crate::types::HostMetrics;
 use crate::{host_executor, VerterHost};
 
+/// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
+///
+/// - `force_overflow_observations`: test-injection for the cold relation
+///   judgement path — when `N > 0`, the cold compute observes `N` synthetic
+///   `FileWholeHash` facts onto the active tracer, forcing the relation
+///   memo's `FactReadSetFinalise::Overflow` non-admission (the judgement is
+///   returned to the caller but refused memo admission).
+/// - `force_budget_exhaustion`: trips the relation reducer's work budget on
+///   its first driver pass — the deterministic trigger for the typed
+///   `BudgetExceeded` public outcome and its three-layer non-admission (no
+///   warm memo entry, no fact signature, no reverse-index registration).
+/// - `strict_family_relax_bits` (RI-10): bit 0 relaxes `strictNullChecks`
+///   (null/undefined assignable to any non-`never` target); bit 1 relaxes
+///   `strictFunctionTypes` (bivariant function parameters); bit 2 enables
+///   `exactOptionalPropertyTypes` (authored `undefined` preserved in
+///   optional writes). Zero — the production default — is the TS-strict
+///   regime with exact optionality disabled. The relaxed configuration
+///   folds into the relation key's `type_env_hash`, so a relaxed judgement
+///   never warm-hits a strict request.
+#[derive(Debug, Default)]
+pub(crate) struct RelationHostKnobs {
+    pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,
+    pub(crate) force_budget_exhaustion: std::sync::atomic::AtomicBool,
+    pub(crate) strict_family_relax_bits: std::sync::atomic::AtomicU8,
+}
+
 pub(crate) fn next_host_instance_id() -> u64 {
     static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
@@ -133,11 +159,33 @@ pub(crate) struct WorkspaceSourceLoader {
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.workspace.read().read_file(canonical_id)
+        let workspace = self.workspace.read();
+        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
+        // IS the scheduler / dep-graph file id of a registered ambient lib.
+        // It is served from the ambient registry, which is the content
+        // authority for that id; the plain registration canonical stays
+        // invisible to `read_file` (a user file at that path shadows the
+        // lib instead).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace.read_ambient_lib(project, canonical.as_ref());
+        }
+        workspace.read_file(canonical_id)
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
-        self.workspace.read().file_exists(canonical_id)
+        let workspace = self.workspace.read();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace
+                .read_ambient_lib(project, canonical.as_ref())
+                .is_some();
+        }
+        workspace.file_exists(canonical_id)
     }
 
     fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {
@@ -397,14 +445,13 @@ impl VerterHost {
         Self {
             instance_id,
             config,
-            registered_source_authority,
-            carrier_grammar_authority,
-            carrier_publication_store,
-            block_content_state: default_shared(crate::block_content::BlockContentState::default()),
-            block_content_admission_fence: parking_lot::Mutex::new(()),
-            block_content_correlation_counter: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
-            block_content_admission_seam_hook: parking_lot::Mutex::new(None),
+            carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
+                source_authority: registered_source_authority,
+                grammar_authority: carrier_grammar_authority,
+                publication_store: carrier_publication_store,
+                envelope_ingest: registered_envelope_ingest,
+            },
+            block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
@@ -416,7 +463,6 @@ impl VerterHost {
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
-            registered_envelope_ingest,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),
@@ -480,7 +526,7 @@ impl VerterHost {
             materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool::new(
                 false,
             ),
-            relation_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
+            relation_knobs: RelationHostKnobs::default(),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]

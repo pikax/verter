@@ -55,7 +55,7 @@ pub(crate) fn project_props(
     //
     // Ref-carrier surfaces (cross-file generic payloads like
     // `defineProps<AccordionProps<T>>()`) lower to a `SemanticNodeData::Ref`
-    // shell where `read_surface_members` returns empty, so admission (and its
+    // shell where `read_positive_surface_members` returns empty, so admission (and its
     // edge record) fires ZERO times. That is the shallow-by-default (L1)
     // contract: the carrier is published symbolically and the consumer
     // re-resolves it on demand, so there are no eagerly-flattened members to
@@ -90,10 +90,12 @@ pub(crate) fn project_props(
         read_surface_member_candidates(ctx, &surface)
             .into_iter()
             .filter_map(|candidate| {
-                let analyzed = mac
-                    .prop_fields
-                    .iter()
-                    .find(|p| p.name == candidate.member().name.as_ref());
+                let analyzed = mac.prop_fields.iter().find(|p| {
+                    candidate
+                        .member()
+                        .string_name()
+                        .is_some_and(|name| p.name == name)
+                });
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
                 let shallow_payload = analyzed.and_then(|p| p.payload.clone());
                 let admitted = admit_published_member(candidate, &cursor, &dispatch)?;

@@ -38,7 +38,7 @@ fn semantic_key(canonical: &str, exporter: &str, name: &str) -> MemberSemanticFa
         parse_stable_hash: hash(0x10),
         parse_env_hash: hash(0x20),
         exporter: InternedName::from(exporter),
-        member_name: InternedName::from(name),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier(name),
         symbol_space: SymbolSpace::Type,
     }
 }
@@ -49,7 +49,7 @@ fn display_key(canonical: &str, exporter: &str, name: &str) -> MemberDisplayFact
         content_hash: hash(0x30),
         parse_env_hash: hash(0x20),
         exporter: InternedName::from(exporter),
-        member_name: InternedName::from(name),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier(name),
         symbol_space: SymbolSpace::Type,
     }
 }
@@ -58,7 +58,7 @@ fn dummy_fact(byte: u8, exporter: &str, name: &str) -> Arc<Fact> {
     Arc::new(Fact {
         key: FactKey::Member {
             exporter: InternedName::from(exporter),
-            name: InternedName::from(name),
+            name: verter_type_expr::facts::FactPropertyKey::identifier(name),
             space: SymbolSpace::Type,
         },
         semantic_hash: hash(byte),

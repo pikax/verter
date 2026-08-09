@@ -28,7 +28,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use super::family::{FamilyKey, MemoEntry, ModeSlot};
+use super::family::{FamilyKey, FamilySlots, MemoEntry, ModeSlot};
 use super::{CanonicalToEntries, RegisteredFacts};
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
@@ -180,4 +180,33 @@ fn register_single_canonical(
         (family.clone(), populated, admission_seq),
         Arc::clone(registered_facts),
     );
+}
+
+/// Prune every reverse-index registration a REMOVED family's slots hold.
+///
+/// Walks every candidate in every slot — a multi-view slot must drain
+/// registrations for each candidate, not just the first — over the SAME
+/// union [`register_reverse_index`] iterates (carrier `canonical_ids()`
+/// PLUS `dispatch_dep_signature`), so a dispatch-only registration
+/// cannot survive the removal. Returns whether at least one registration
+/// was pruned. The caller holds the family memo's `entries` `Mutex`.
+pub(super) fn drain_family_slots_registrations(
+    canonical_to_entries: &CanonicalToEntries,
+    family: &FamilyKey,
+    slots: &FamilySlots,
+) -> bool {
+    let mut pruned_any = false;
+    for (slot, entry) in slots.iter_populated_slots_all() {
+        let carrier_canonicals = entry.read_set_signature.canonical_ids();
+        let dispatch_canonicals = entry.dispatch_dep_signature.iter().map(|(c, _)| c);
+        for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
+            prune_reverse_index_registration(
+                canonical_to_entries,
+                canonical,
+                &(family.clone(), slot, entry.admission_seq),
+            );
+            pruned_any = true;
+        }
+    }
+    pruned_any
 }

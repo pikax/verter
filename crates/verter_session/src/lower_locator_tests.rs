@@ -25,14 +25,18 @@ use verter_type_expr::locators::{
     TypeParamBoundPosition,
 };
 use verter_type_expr::TopLevelOwnerId;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_type_expr::{
+    FunctionExpr, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, SpreadMember,
+    TupleElement, TypeExpr, TypeParam,
+};
 
 use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
 use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    MemberMergeRole, NodeScopeId, ProjectionMode, ProjectionReductionContext, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
+    DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
@@ -145,13 +149,13 @@ fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
     let module_surface = object_surface(&host, module);
     let instance_surface = object_surface(&host, instance);
     assert!(module_surface
-        .members
+        .positive_members()
         .iter()
-        .any(|member| member.name.as_ref() == "moduleOnly"));
+        .any(|member| member.string_name().expect("string-key fixture") == "moduleOnly"));
     assert!(instance_surface
-        .members
+        .positive_members()
         .iter()
-        .any(|member| member.name.as_ref() == "instanceOnly"));
+        .any(|member| member.string_name().expect("string-key fixture") == "instanceOnly"));
     assert_eq!(
         host.project_type_store()
             .semantic_graph()
@@ -213,9 +217,9 @@ fn object_surface(host: &VerterHost, node: SemanticNodeId) -> crate::semantic_qu
 
 fn member_value(surface: &crate::semantic_query::SurfaceView, name: &str) -> SemanticNodeId {
     surface
-        .members
+        .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == name)
+        .find(|m| m.string_name().expect("string-key fixture") == name)
         .unwrap_or_else(|| panic!("member `{name}` must be present"))
         .value
 }
@@ -358,12 +362,14 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "a".to_string(),
-            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "a".to_string().into(),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            ),
+        )],
     }));
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(OWNER_ID),
@@ -402,28 +408,533 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let stamped_surface = object_surface(&host, stamped);
     assert!(
-        stamped_surface.members[0].declared_in_macro_type_arg.get(),
+        stamped_surface.positive_members()[0]
+            .declared_in_macro_type_arg
+            .get(),
         "control: the OLD path under a macro-own-body context stamps \
          declared_in_macro_type_arg"
     );
     assert_eq!(
-        stamped_surface.members[0].merge_role,
+        stamped_surface.positive_members()[0].merge_role,
         MemberMergeRole::OwnBody,
         "control: the OLD path stamps the caller merge role"
     );
 
     let role_free_surface = object_surface(&host, role_free);
     assert!(
-        !role_free_surface.members[0]
+        !role_free_surface.positive_members()[0]
             .declared_in_macro_type_arg
             .get(),
         "the locator-shape entry must NOT stamp declared_in_macro_type_arg"
     );
     assert_eq!(
-        role_free_surface.members[0].merge_role,
+        role_free_surface.positive_members()[0].merge_role,
         MemberMergeRole::Authored,
         "the locator-shape entry must carry the neutral merge role"
     );
+}
+
+#[test]
+fn locator_shape_infer_identity_matches_eager_and_relowering() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: "RouteT".to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from("RouteT"),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let binder_of = |root| {
+        let extends = match graph.node_data(root).as_deref() {
+            Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+            other => panic!("expected conditional root, got {other:?}"),
+        };
+        match graph.node_data(extends).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+            other => panic!("expected infer declaration, got {other:?}"),
+        }
+    };
+
+    let locator_ctx = LocatorShapeCtx::new(&scope, &[], None, None);
+    let locator_first = dispatch.lower_type_expr_for_locator_shape(&expr, &locator_ctx);
+    let locator_second = dispatch.lower_type_expr_for_locator_shape(&expr, &locator_ctx);
+
+    let env = rustc_hash::FxHashMap::default();
+    let name_resolution = rustc_hash::FxHashMap::default();
+    let shadowing = ScopeShadowing::empty();
+    let mut substitutions = Vec::new();
+    let _eager = dispatch.shallow_lower_type_expr_with_context(
+        &expr,
+        &env,
+        &scope,
+        &name_resolution,
+        None,
+        &shadowing,
+        &mut substitutions,
+        ProjectionReductionContext::structural_transit(),
+    );
+    let expected = binder_of(locator_first);
+    assert_eq!(
+        binder_of(locator_second),
+        expected,
+        "re-lowering through the locator route preserves exact authored identity"
+    );
+    let route_binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
+        .filter_map(
+            |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
+                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "RouteT" => {
+                    Some(binder.clone())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        route_binders.len(),
+        1,
+        "locator and eager lowering must mint one exact authored identity even \
+         when eager conditional reduction returns the selected branch"
+    );
+    assert!(route_binders.contains(&expected));
+}
+
+#[test]
+fn authored_infer_identity_uses_locator_and_exact_path_not_body_text() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: "Anchored".to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from("Anchored"),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let first_source = decl_body_locator(OWNER_ID, "First");
+    let second_source = decl_body_locator(OWNER_ID, "Second");
+    let binder_of = |root| {
+        let extends = match graph.node_data(root).as_deref() {
+            Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+            other => panic!("expected conditional root, got {other:?}"),
+        };
+        match graph.node_data(extends).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+            other => panic!("expected infer declaration, got {other:?}"),
+        }
+    };
+
+    let first_ctx = LocatorShapeCtx::new(&scope, &[], None, None).with_infer_source(&first_source);
+    let second_ctx =
+        LocatorShapeCtx::new(&scope, &[], None, None).with_infer_source(&second_source);
+    let first = dispatch.lower_type_expr_for_locator_shape(&expr, &first_ctx);
+    let repeated = dispatch.lower_type_expr_for_locator_shape(&expr, &first_ctx);
+    let second = dispatch.lower_type_expr_for_locator_shape(&expr, &second_ctx);
+
+    assert_eq!(
+        binder_of(first),
+        binder_of(repeated),
+        "the same authored locator and typed path are stable across re-lowering"
+    );
+    assert_ne!(
+        binder_of(first),
+        binder_of(second),
+        "identical bodies at distinct declaration anchors must not alias"
+    );
+}
+
+#[test]
+fn eager_and_locator_routes_share_authored_infer_identity() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: "CrossRoute".to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from("CrossRoute"),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let source = decl_body_locator(OWNER_ID, "CrossRouteOwner");
+    let locator_ctx = LocatorShapeCtx::new(&scope, &[], None, None).with_infer_source(&source);
+    let _ = dispatch.lower_type_expr_for_locator_shape(&expr, &locator_ctx);
+
+    let mut substitutions = Vec::new();
+    let _ = dispatch.shallow_lower_type_expr_with_context_at_locator(
+        &expr,
+        &source,
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut substitutions,
+        ProjectionReductionContext::structural_transit(),
+    );
+    let binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
+        .filter_map(
+            |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
+                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "CrossRoute" => {
+                    Some(binder.clone())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        binders.len(),
+        1,
+        "eager and locator routes must mint one locator+path binder identity"
+    );
+}
+
+#[test]
+fn spread_fragments_keep_the_authored_root_and_member_path() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let conditional = |name: &str| TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: name.to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "left".to_string().into(),
+                conditional("SpreadLeft"),
+                false,
+                false,
+            )),
+            ObjectMember::Spread(SpreadMember::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: Vec::new(),
+            })))),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "right".to_string().into(),
+                conditional("SpreadRight"),
+                false,
+                false,
+            )),
+        ],
+    }));
+    let source = decl_body_locator(OWNER_ID, "SpreadIdentity");
+    let locator_ctx = LocatorShapeCtx::new(&scope, &[], None, None).with_infer_source(&source);
+    let _ = dispatch.lower_type_expr_for_locator_shape(&expr, &locator_ctx);
+    let mut substitutions = Vec::new();
+    let _ = dispatch.shallow_lower_type_expr_with_context_at_locator(
+        &expr,
+        &source,
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut substitutions,
+        ProjectionReductionContext::structural_transit(),
+    );
+    for expected_name in ["SpreadLeft", "SpreadRight"] {
+        let binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
+            .filter_map(
+                |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
+                    Some(SemanticNodeData::Infer { name, binder })
+                        if name.as_ref() == expected_name =>
+                    {
+                        Some(binder.clone())
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(
+            binders.len(),
+            1,
+            "spread splitting and ordinary lowering must share `{expected_name}` identity"
+        );
+    }
+}
+
+#[test]
+fn locator_predeclares_carrier_template_and_signature_bound_infers() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let carrier_infer = TypeExpr::Ref {
+        name: Arc::from("Box"),
+        type_arguments: Arc::from(
+            vec![TypeExpr::Infer {
+                name: "CarrierP".to_string(),
+            }]
+            .into_boxed_slice(),
+        ),
+    };
+    let template_infer = TypeExpr::TemplateLiteral {
+        quasis: vec![String::new(), String::new()],
+        expressions: Arc::from(
+            vec![TypeExpr::Infer {
+                name: "TemplateP".to_string(),
+            }]
+            .into_boxed_slice(),
+        ),
+    };
+    let pattern = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+        Vec::new(),
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Unknown))),
+        vec![TypeParam {
+            name: "Head".to_string(),
+            constraint: Some(Arc::new(carrier_infer)),
+            default: Some(Arc::new(template_infer)),
+            is_const: false,
+        }],
+    )));
+    let true_type = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "carrier".to_string().into(),
+                TypeExpr::Ref {
+                    name: Arc::from("CarrierP"),
+                    type_arguments: verter_type_expr::empty_type_args(),
+                },
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "template".to_string().into(),
+                TypeExpr::Ref {
+                    name: Arc::from("TemplateP"),
+                    type_arguments: verter_type_expr::empty_type_args(),
+                },
+                false,
+                false,
+            )),
+        ],
+    }));
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(pattern),
+        true_type: Arc::new(true_type),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let source = decl_body_locator(OWNER_ID, "PredeclareEveryChild");
+    let ctx = LocatorShapeCtx::new(&scope, &[], None, None).with_infer_source(&source);
+    let root = dispatch.lower_type_expr_for_locator_shape(&expr, &ctx);
+    let true_branch = match graph.node_data(root).as_deref() {
+        Some(SemanticNodeData::Conditional {
+            true_branch_ref, ..
+        }) => *true_branch_ref,
+        other => panic!("expected conditional shell, got {other:?}"),
+    };
+    let surface = object_surface(&host, true_branch);
+    for name in ["carrier", "template"] {
+        assert!(
+            matches!(
+                graph.node_data(member_value(&surface, name)).as_deref(),
+                Some(SemanticNodeData::InferRef { .. })
+            ),
+            "true-branch `{name}` must bind the exact predeclared infer reference"
+        );
+    }
+}
+
+#[test]
+fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let outer_u = graph.intern_node_with_scope(
+        SemanticNodeData::TypeParam {
+            decl: DeclIdentity::from_scope(&scope, Arc::from("OuterU")),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("U"),
+        },
+        scope.clone(),
+    );
+    let mut outer = LocatorBinderFrame::default();
+    outer.bind(Arc::from("U"), outer_u);
+    let frames = [outer];
+    let ctx = LocatorShapeCtx::new(&scope, &frames, None, None);
+    let pattern = TypeExpr::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: None,
+                    ty: TypeExpr::Infer {
+                        name: "U".to_string(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: None,
+                    ty: TypeExpr::Ref {
+                        name: Arc::from("U"),
+                        type_arguments: verter_type_expr::empty_type_args(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(pattern),
+        true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let root = dispatch.lower_type_expr_for_locator_shape(&expr, &ctx);
+    let extends = match graph.node_data(root).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        other => panic!("expected conditional, got {other:?}"),
+    };
+    let elements = match graph.node_data(extends).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        other => panic!("expected tuple pattern, got {other:?}"),
+    };
+    assert!(matches!(
+        graph.node_data(elements[0].value).as_deref(),
+        Some(SemanticNodeData::Infer { .. })
+    ));
+    assert_eq!(
+        elements[1].value, outer_u,
+        "ordinary sibling `U` resolves through the ordinary outer frame, \
+         never the hidden infer declaration table"
+    );
+}
+
+#[test]
+fn locator_spread_shape_is_one_ordered_program() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let property = |name: &str| {
+        ObjectMember::Property(ObjectProperty::synthetic_public_key(
+            name.to_string().into(),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            false,
+            false,
+        ))
+    };
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            property("a"),
+            ObjectMember::Spread(SpreadMember::new(TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            })),
+            property("x"),
+        ],
+    }));
+    let binders = Vec::<LocatorBinderFrame>::new();
+    let context = LocatorShapeCtx::new(&scope, &binders, None, None);
+    let node = dispatch.lower_type_expr_for_locator_shape(&expr, &context);
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph.node_data(node).expect("locator spread program");
+    let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
+        panic!("locator spread must lower to ObjectSpreadProgram, got {data:?}");
+    };
+    let [ObjectConstructionEffect::DirectProperty(a), ObjectConstructionEffect::Spread(operand), ObjectConstructionEffect::DirectProperty(x)] =
+        program.effects.as_ref()
+    else {
+        panic!("locator spread must retain exact source-ordered effects: {program:?}");
+    };
+    assert_eq!(a.key.as_string(), Some("a"));
+    assert_eq!(x.key.as_string(), Some("x"));
+    assert!(matches!(
+        graph.node_data(*operand).as_deref(),
+        Some(SemanticNodeData::BareRef(_))
+    ));
 }
 
 /// Declared type parameters stay `TypeParam` SHELLS: the generic decl's own
@@ -574,7 +1085,7 @@ fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
     assert!(
         obj.properties
             .iter()
-            .any(|m| matches!(m, ObjectMember::Property(p) if p.name == "row")),
+            .any(|m| matches!(m, ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "row")),
         "the hydrated body is the authored `{{ row: string }}` annotation"
     );
     assert!(
@@ -710,7 +1221,11 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
         other => panic!("the typedef locator must lower, got {other:?}"),
     };
     let surface = object_surface(&host, node);
-    let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let mut names: Vec<&str> = surface
+        .positive_members()
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1052,6 +1567,52 @@ fn lower_locator_constraint_binds_full_sibling_frame() {
              sibling shell as a TypeParam — a prefix-truncated frame leaves it \
              a BareRef; got {other:?}"
         ),
+    }
+
+    // Whole-body demand: the body-binder construction consumes the SAME
+    // transient sibling list the explicit-bound demand observed — every
+    // member type that names a declared parameter binds its FINAL binder
+    // (a `TypeParam` node carrying the declared ordinal), never a BareRef
+    // and never an outer capture.
+    let bar_body = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Bar")) {
+        QueryResult::Value(id) => id,
+        other => panic!("whole-body lower_locator must produce a value, got {other:?}"),
+    };
+    let bar_body_data = graph.node_data(bar_body);
+    let Some(SemanticNodeData::Object(view)) = bar_body_data.as_deref() else {
+        panic!(
+            "Bar's whole body must lower to its Object surface, got {:?}",
+            bar_body_data.as_deref()
+        )
+    };
+    for (member_name, expected_display, expected_ordinal) in [("x", "T", 0u16), ("y", "U", 1u16)] {
+        let member = view
+            .positive_members()
+            .iter()
+            .find(|member| member.string_name().expect("string-key fixture") == member_name)
+            .unwrap_or_else(|| panic!("member `{member_name}` must exist on Bar's body"));
+        match graph.node_data(member.value).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                display_name,
+                param_index,
+                ..
+            }) => {
+                assert_eq!(
+                    display_name.as_ref(),
+                    expected_display,
+                    "member `{member_name}` must bind its declared parameter binder"
+                );
+                assert_eq!(
+                    *param_index, expected_ordinal,
+                    "member `{member_name}` must bind the declared ordinal-{expected_ordinal} \
+                     binder identity"
+                );
+            }
+            other => panic!(
+                "member `{member_name}` must bind a final TypeParam binder from the \
+                 transient sibling list — got {other:?}"
+            ),
+        }
     }
 }
 

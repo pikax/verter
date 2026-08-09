@@ -3,7 +3,7 @@
 
 use super::support::*;
 use crate::VerterHost;
-use verter_type_expr::LiteralValue;
+use verter_type_expr::{LiteralValue, ObjectMember};
 
 const SYNTHETIC_FLOW_VALUES_PACKAGE_JSON: &str = r#"{
   "name": "synthetic-flow-values",
@@ -532,17 +532,15 @@ fn flow_return_cf13_labeled_break_current_return_collection() {
     });
 }
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl01_widens_primitive_literal_return,
     "BL01",
-    "typeinfo currently preserves a numeric literal from an unannotated function body instead of applying TypeScript return-literal widening; keep as the future BL01 widening contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl02_widens_object_return_properties_selectively,
     "BL02",
-    "typeinfo currently collects object return shape but does not apply TypeScript property-level return widening while preserving explicit const assertions; keep as the future BL02 object widening contract",
     |expr| {
         let props = assert_object_has_props(expr, &["count", "kind"]);
         assert_string_literal(&props["kind"].ty, "ok");
@@ -589,10 +587,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl09_preserves_readonly_tuple_const_return,
     "BL09",
-    "typeinfo currently does not infer readonly tuple shapes from array literals under function-body as const returns; keep as the future BL09 const-tuple contract",
     |expr| {
         let TypeExpr::Tuple { elements, readonly } = expr else {
             panic!("expected readonly tuple, got {expr:?}");
@@ -627,19 +624,19 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl12_models_bare_return_as_void,
     "BL12",
-    "typeinfo currently ignores bare return statements with no expression instead of normalizing the function return to void; keep as the future BL12 bare-return contract",
     |expr| assert_primitive(expr, PrimitiveName::Void)
 );
 
-future_catalog_contract!(
-    flow_return_bl13_models_unannotated_throw_only_as_void,
-    "BL13",
-    "typeinfo currently has no TypeScript-compatible no-return-expression fallback for unannotated throw-only bodies; keep as the future BL13 throw-only fallback contract",
-    |expr| assert_primitive(expr, PrimitiveName::Void)
-);
+#[test]
+fn flow_return_bl13_throw_only_body_is_never() {
+    // A body that terminates with NO contribution and no hold is `never`
+    // (tsc's answer for a throw-only function) — not the empty-cycle
+    // failure, not `void`.
+    assert_catalog_alias("BL13", |expr| assert_primitive(expr, PrimitiveName::Never));
+}
 
 future_catalog_contract!(
     flow_return_bl15_models_divergent_loop_as_void,
@@ -696,10 +693,14 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+// LR07 — `lr07(x: { a: { b: string } }) { return x.a.b }` returns `string`. The
+// whole-function producer projects the nested parameter member path through the
+// parameter's object type, so the return is the terminal `string` primitive
+// rather than an unresolved typeof path. The assertion discriminates: an
+// unprojected return does not reduce to `Primitive(String)`.
+catalog_contract!(
     flow_return_lr07_projects_nested_parameter_member_path,
     "LR07",
-    "typeinfo currently lowers nested parameter member returns to typeof paths instead of projecting through the parameter object type; keep as the future LR07 member-path contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
@@ -1048,12 +1049,10 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
-    flow_return_cg10_terminates_recursive_return_inference,
-    "CG10",
-    "typeinfo currently does not use an in-flight function-return memo or recursion sentinel for self-recursive calls; keep as the future CG10 recursion contract",
-    |expr| assert_primitive(expr, PrimitiveName::Number)
-);
+#[test]
+fn flow_return_cg10_terminates_recursive_return_inference() {
+    assert_catalog_alias("CG10", |expr| assert_primitive(expr, PrimitiveName::Number));
+}
 
 future_catalog_contract!(
     flow_return_cg11_lowers_constructor_call_to_instance_type,
@@ -1186,9 +1185,19 @@ catalog_contract!(
     flow_return_ob02_materializes_spread_override_order,
     "OB02",
     |expr| {
+        let TypeExpr::Object(object) = expr else {
+            panic!("OB02 must materialize as an object, got {expr:?}");
+        };
         let props = assert_object_has_props(expr, &["a", "b"]);
         assert_number_literal(&props["a"].ty, 1.0);
         assert_string_literal(&props["b"].ty, "y");
+        assert!(
+            object
+                .properties
+                .iter()
+                .all(|member| !matches!(member, ObjectMember::Spread(_))),
+            "closed projection must materialize through its closed witness"
+        );
     }
 );
 
@@ -1274,14 +1283,48 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+// OB12 — a `unique symbol` computed key keeps the literal's SHAPE: one
+// property, provisioned under a computed key.
+//
+// The nominal identity of the key is a RECORDED divergence, asserted in
+// the body so it cannot drift unnoticed. The object literal lowers
+// structurally (which is what keeps a call-sourced spread beside a
+// computed key reducing at all — see `value_inference::
+// object_return_entry_forms_lower_structurally_over_a_call_spread`), and
+// the structural path names a key from its evaluated VALUE. The flow
+// evaluator flattens a `unique symbol` binding's value to the bare
+// `symbol` primitive, so the identity that IS the name does not survive
+// the value channel, and the authored `typeof ob12Key` carrier reduces to
+// the same primitive through the shared type lowering.
+//
+// The trade is deliberate and bounded: the member SET stays complete (the
+// property is present, under a computed key the downstream key reader can
+// still carry), rather than the whole return failing closed. Carrying the
+// nominal identity needs the symbol's uniqueness on the evaluator's value
+// channel, which is the same missing fact both channels hit.
+catalog_contract!(
     flow_return_ob12_keeps_unique_symbol_computed_key_shape,
     "OB12",
-    "typeinfo currently does not bridge unique-symbol value identity into computed object keys or emit an explicit computed-key fallback; keep as the future OB12 unique-symbol-key contract",
     |expr| {
-        let TypeExpr::Object(_) = expr else {
+        let TypeExpr::Object(object) = expr else {
             panic!("expected computed-key object shape, got {expr:?}");
         };
+        let [ObjectMember::Property(property)] = object.properties.as_slice() else {
+            panic!(
+                "expected one symbol-keyed property, got {:?}",
+                object.properties
+            );
+        };
+        assert!(
+            matches!(
+                &property.key,
+                verter_type_expr::AuthoredPropertyKey::Computed(_)
+            ),
+            "the member survives under a COMPUTED key; the nominal `ob12Key` identity is the \
+             recorded divergence — flip this to `UniqueSymbol` when the evaluator's value \
+             channel carries symbol uniqueness. Got {:?}",
+            property.key
+        );
     }
 );
 

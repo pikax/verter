@@ -121,7 +121,7 @@ message ObjectNode {
 
 message ObjectMember {
   ObjectMemberKind kind = 1;
-  uint32 name_id = 2;
+  reserved 2;
   uint32 type_node_id = 3;
   bool optional = 4;
   bool readonly = 5;
@@ -129,6 +129,32 @@ message ObjectMember {
   uint32 key_type_node_id = 7;
   uint32 value_type_node_id = 8;
   uint32 function_node_id = 9;
+  ComponentPropertyKey property_key = 10;
+  ComponentObjectMethodKind method_kind = 11;
+  bool has_implementation_body = 12;
+}
+
+message ComponentPropertyKey {
+  oneof key {
+    uint32 string_id = 1;
+    sint64 canonical_number = 2;
+    GraphUniqueSymbolKey unique_symbol = 3;
+    uint32 computed_node_id = 4;
+  }
+}
+
+message GraphUniqueSymbolKey {
+  uint32 canonical_id = 1;
+  uint32 owner_kind = 2;
+  uint32 owner_ordinal = 3;
+  uint32 symbol = 4;
+  repeated uint32 member_path = 5;
+}
+
+enum ComponentObjectMethodKind {
+  COMPONENT_OBJECT_METHOD_KIND_METHOD = 0;
+  COMPONENT_OBJECT_METHOD_KIND_GET = 1;
+  COMPONENT_OBJECT_METHOD_KIND_SET = 2;
 }
 
 message FunctionNode {
@@ -1089,6 +1115,9 @@ enum ObjectMemberKind {
   OBJECT_MEMBER_KIND_CALL_SIGNATURE = 3;
   OBJECT_MEMBER_KIND_CONSTRUCT_SIGNATURE = 4;
   OBJECT_MEMBER_KIND_METHOD = 5;
+  // Object-literal spread entry (pre-fold ordered IR): the spread OPERAND
+  // rides the member's type_node_id slot. Additive — tags 0..=5 are frozen.
+  OBJECT_MEMBER_KIND_SPREAD = 6;
 }
 
 enum MappedModifier {

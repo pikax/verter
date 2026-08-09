@@ -68,11 +68,6 @@ mod slot_binding_graph_tests;
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
 pub(crate) use dep_signature::emit_dispatch_dep_signature_facts;
-#[cfg(test)]
-pub(crate) use dep_signature::{
-    bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test,
-    with_bfs_child_refs_observer_for_test, with_visited_counter,
-};
 // Consumed by the Vue/Svelte normalizers in §5a SP2/SP3; the re-export lands now
 // (substrate-first) but has no production caller yet, so the import is unused on
 // the lib build until each method is wired.
@@ -87,7 +82,7 @@ pub(crate) use dispatch_helpers::{
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
     extract_route_root_identity_node, node_package_backed_object_like_root_with_fence,
-    node_root_reaches_transitive_cycle_with_fence, ref_root_reaches_transitive_cycle_node,
+    node_root_reaches_transitive_cycle_with_fence,
 };
 // / clippy cleanup — these graph-native predicates
 // have no non-test consumers in the landed tree but are exercised by
@@ -97,8 +92,7 @@ pub(crate) use graph_predicates::{
 // contract.
 #[cfg(test)]
 pub(crate) use graph_predicates::{
-    collect_ref_identities_node, declaration_body_prefers_inline_materialization_node,
-    type_node_has_package_backed_root,
+    declaration_body_prefers_inline_materialization_node, type_node_has_package_backed_root,
 };
 // `jsdoc_resolve` source moved to
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the

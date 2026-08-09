@@ -397,12 +397,14 @@ fn w_type_body_path_step(step: &TypeBodyPathStep) {
     match step {
         TypeBodyPathStep::MergedContributor { ordinal }
         | TypeBodyPathStep::IntersectionArm { ordinal }
+        | TypeBodyPathStep::TypeArgument { ordinal }
         | TypeBodyPathStep::Member { ordinal }
         | TypeBodyPathStep::FunctionParam { ordinal }
         | TypeBodyPathStep::ValueSignature { ordinal }
         | TypeBodyPathStep::UnionArm { ordinal }
         | TypeBodyPathStep::TupleElement { ordinal } => key_safe(ordinal),
-        TypeBodyPathStep::MemberValue
+        TypeBodyPathStep::MemberKey
+        | TypeBodyPathStep::MemberValue
         | TypeBodyPathStep::FunctionReturn
         | TypeBodyPathStep::MappedSource
         | TypeBodyPathStep::MappedValue

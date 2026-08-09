@@ -102,10 +102,39 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // The temporary `typeexpr_root_reaches_transitive_cycle` adapter
     // (a TypeExpr→graph-native cycle bridge) is deleted. Production
     // callers route through the node-domain front
-    // `node_root_reaches_transitive_cycle_with_fence`; the graph-native
-    // primitive `ref_root_reaches_transitive_cycle_node` is the
-    // canonical cycle-detection authority.
+    // `node_root_reaches_transitive_cycle_with_fence`, which aggregates
+    // the sealed `ClassifyMaterializationCycleGate` semantic query —
+    // the SOLE materialization cycle-gate authority.
     "typeexpr_root_reaches_transitive_cycle",
+    // The standalone cycle-gate authority is RETIRED: the
+    // `RefCycleResultDb` host-owned cache, its content-free key/entry
+    // types, its peek/get_or_compute helpers, the bespoke BFS it
+    // wrapped, and its dedicated counters are all replaced by the
+    // sealed `ClassifyMaterializationCycleGate` semantic-query family
+    // (see `project_semantic_dispatch::cycle_gate`). Re-introducing any
+    // of these symbols would resurrect a second cycle-gate authority.
+    "RefCycleResultDb",
+    "RefCycleResultKey",
+    "RefCycleEntry",
+    "REF_CYCLE_RESULT_VERSION",
+    "ref_cycle_db",
+    "ref_cycle_db_peek",
+    "ref_cycle_db_get_or_compute",
+    "ref_cycle_read_set",
+    "ref_root_reaches_transitive_cycle_node",
+    "bfs_compute_inner",
+    "body_contains_recursive_ref_to_name",
+    "has_complex_cycle_guard_surface_node",
+    "collect_ref_identities_node",
+    "ref_cycle_fact_tracer_installs",
+    "ref_cycle_overflow_refusals",
+    "with_visited_counter",
+    "with_bfs_child_refs_observer_for_test",
+    "BFS_COMPUTE_COUNTER",
+    "BFS_VISITED_COUNTER",
+    "BFS_CHILD_REFS_OBSERVER",
+    "FORCE_REF_CYCLE_RETURN_ONLY",
+    "ForceRefCycleReturnOnlyGuard",
     // Legacy parser-side slot-binding enrichment helpers superseded by
     // graph-native synthesis
     // (`slot_binding_graph::resolve_slot_bindings_graph_native`).

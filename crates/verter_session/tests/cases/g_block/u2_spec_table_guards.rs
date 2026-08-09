@@ -16,15 +16,20 @@
 //!    the live `pub enum SemanticQueryKey { … }` source. Fails when a variant
 //!    is added/removed without regenerating.
 //! 3. **Per-row sanity** — every row is `Live`; the value domain is `TypeNode`
-//!    for every variant EXCEPT `Relate` (`Relation` — its execute arm is
-//!    non-producing and its judgement lives in the dedicated relation_memo),
+//!    for every variant EXCEPT `ProjectObjectSpread` (`ObjectProjection`),
+//!    `Relate` (`Relation` — its execute arm is
+//!    non-producing and its judgement lives in the family memo's `Relate`
+//!    family, the rehomed relation memo),
 //!    `ResolveOverloadSet` (`OverloadSet` — the LIVE ordered visible
 //!    signature group), `ClassifyBroadRuntime` (`BroadRuntime` — the LIVE
 //!    terminal constructor classification), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis` — forward-declared value domains
 //!    whose non-producing execute arms return `Miss` until the reducers land in
-//!    U6), and `SemanticQueryKeyTag::ALL` triangulates against both the spec set
-//!    and the enum-scan set.
+//!    U6), `FlowReturn` (`FlowReturn` — the canonical whole-return carrier),
+//!    and `ResolveCall` (`ResolveCall` — the forward-declared selected-call
+//!    carrier whose non-producing execute arm returns `Miss` until the
+//!    applicability executor lands), and `SemanticQueryKeyTag::ALL`
+//!    triangulates against both the spec set and the enum-scan set.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -83,7 +88,7 @@ fn scan_item_enum_variants(items: &[syn::Item], ident: &str) -> BTreeSet<String>
 // ---------------------------------------------------------------------------
 
 #[test]
-fn semantic_query_key_spec_table_equals_enum() {
+pub(crate) fn semantic_query_key_spec_table_equals_enum() {
     let specs = semantic_query_key_specs();
 
     // (1) FRESHNESS — in-memory render byte-equals the committed artifact.
@@ -123,7 +128,8 @@ fn semantic_query_key_spec_table_equals_enum() {
     // (3) PER-ROW SANITY + triangulation against SemanticQueryKeyTag::ALL.
     // Every row is `Live`. The value-domain mapping is:
     //   - `Relate`            → `Relation` (execute arm non-producing; the
-    //                            tri-state judgement lives in `relation_memo`).
+    //                            tri-state judgement lives in the family memo's
+    //                            `Relate` family, the rehomed relation memo).
     //   - `ResolveOverloadSet`→ `OverloadSet` (LIVE producer: the ordered
     //                            VISIBLE signature group; a signature-less
     //                            callee is an honest `Miss`, NEVER a fake
@@ -135,6 +141,8 @@ fn semantic_query_key_spec_table_equals_enum() {
     //                            non-producing execute arm returns `Miss` until
     //                            the contextual-type reducer lands in U6).
     //   - `ClassifyBroadRuntime` → `BroadRuntime`.
+    //   - `ProjectObjectSpread`  → `ObjectProjection` (forward-declared
+    //                              ordered-effect evaluator).
     //   - everything else     → `TypeNode`.
     // This three-way assertion is discriminating: it FAILS if `Relate` is
     // mislabeled back to `TypeNode`, if `ResolveOverloadSet` is mislabeled
@@ -153,11 +161,22 @@ fn semantic_query_key_spec_table_equals_enum() {
             SemanticQueryKeyTag::Relate => SemanticQueryValueTag::Relation,
             SemanticQueryKeyTag::ResolveOverloadSet => SemanticQueryValueTag::OverloadSet,
             SemanticQueryKeyTag::ClassifyBroadRuntime => SemanticQueryValueTag::BroadRuntime,
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => {
+                SemanticQueryValueTag::MaterializationCycleGate
+            }
+            SemanticQueryKeyTag::ProjectObjectSpread => SemanticQueryValueTag::ObjectProjection,
             // Flow narrowing + contextual typing carry the program-analysis
             // value domain (the narrowed / contextual node), NOT `TypeNode`.
             SemanticQueryKeyTag::FlowNarrowingAt | SemanticQueryKeyTag::ContextualTypeAt => {
                 SemanticQueryValueTag::ProgramAnalysis
             }
+            // The whole-function return carries its own value domain (the
+            // canonical whole-return carrier + fallthrough bit).
+            SemanticQueryKeyTag::FlowReturn => SemanticQueryValueTag::FlowReturn,
+            // The call / construct resolution carries its own value domain
+            // (the selected occurrence + final substitution, or genuine
+            // dynamic `any`).
+            SemanticQueryKeyTag::ResolveCall => SemanticQueryValueTag::ResolveCall,
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(
@@ -166,7 +185,9 @@ fn semantic_query_key_spec_table_equals_enum() {
             "value-domain mismatch for `{}`: `Relate` must be `Relation`, \
              `ResolveOverloadSet` must be `OverloadSet`, `FlowNarrowingAt` / \
              `ContextualTypeAt` must be `ProgramAnalysis`, `ClassifyBroadRuntime` \
-             must be `BroadRuntime`, and every other \
+             must be `BroadRuntime`, `ClassifyMaterializationCycleGate` must be \
+             `MaterializationCycleGate`, `ProjectObjectSpread` must be \
+             `ObjectProjection`, and every other \
              live key must be `TypeNode`",
             spec.variant.name()
         );

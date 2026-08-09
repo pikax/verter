@@ -597,6 +597,7 @@ fn resolve_named_symbol_in_current_view(
             canonical_id: Arc::clone(&scope_arc),
             owner: entry_owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(entry_owner),
         },
         name: Arc::from(name),
     });
@@ -869,6 +870,10 @@ pub(crate) fn materialize_through_aliases(
                                     canonical_id: Arc::clone(&identity.canonical_id),
                                     owner: identity.owner,
                                     local_scope: None,
+                                    binder_scope_id:
+                                        crate::semantic_query::BinderScopeId::file_scope(
+                                            identity.owner,
+                                        ),
                                 },
                                 name: Arc::clone(&identity.decl_name),
                             }),

@@ -2,9 +2,11 @@
 //!
 //! # Why this module exists
 //!
-//! The component-meta publication boundary publishes member `TypeExpr`s into
-//! `ExpandedField` DTOs (consumers read `ExpandedField.r#type` by design). The
-//! invariant this module enforces is INPUT AUTHORITY, not DTO readability:
+//! The component-meta publication boundary publishes content-free member
+//! sources into `ExpandedField` DTOs (`ExpandedField.r#type` is a
+//! `SourcePosition`, not a stored `TypeExpr`; consumers read the position and
+//! the output sink materializes `TypeExpr` on demand). The invariant this
+//! module enforces is INPUT AUTHORITY, not DTO readability:
 //! outside the terminal publication sink, non-sink production code must NOT be
 //! able to choose a raw semantic-graph subject ([`SemanticNodeId`]), forge a
 //! surface/member wrapper ([`SurfaceMember`]), pair it with its own
@@ -396,15 +398,15 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// MOVING each [`SurfaceMember`] out of the enumerated vector.
 ///
 /// AUTHORITY-PRIVATE enumeration: wraps the single shared
-/// [`super::read_surface_members`] node→members reader (this is NOT a second
-/// `read_surface_members` definition — it is the candidate-tokenising wrapper
+/// [`super::read_positive_surface_members`] node→members reader (this is NOT a
+/// second reader — it is the candidate-tokenising wrapper
 /// over that one reader). Each candidate carries the surface's derived kind so
 /// admission can compare against the cursor's surface kind.
 pub(crate) fn read_surface_member_candidates(
     ctx: &dyn ResolverContext,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
-    let members = super::read_surface_members(ctx, surface.node);
+    let members = super::read_positive_surface_members(ctx, surface.node);
     members
         .into_iter()
         .map(|member| SurfaceMemberCandidate {
@@ -445,6 +447,11 @@ pub(crate) fn admit_published_member<'a>(
     if !candidate.member.visibility.is_public() {
         return None;
     }
+    // The published surface is string-NAMED: an ordinary string key
+    // publishes verbatim, a numeric literal key publishes under its
+    // canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
+    // and a symbol / computed key has no published name — not admitted.
+    let member_name: Arc<str> = candidate.member.published_name()?;
     // (2) Derived-kind / cursor match: the descending cursor must address the
     // SAME published surface the candidate was enumerated from. The cursor
     // carries `surface: &PublishedSurfaceKind`; compare it against the
@@ -455,7 +462,11 @@ pub(crate) fn admit_published_member<'a>(
     }
     // (3) Descend into the published member. `None` ⇒ the member is out of the
     // demanded surface (a narrowed projection that does not admit this name).
-    let member_cursor = cursor.descend_published_member(candidate.member.name.as_ref())?;
+    // The descent key is the PUBLISHED name: the publication surface is
+    // string-named, and member lookup coerces the numeric spelling to the
+    // same property by JS property identity.
+    let member_key = crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name));
+    let member_cursor = cursor.descend_published_member(&member_key)?;
     // (4) Record the published-field origin edge BEFORE the mint. This is the
     // semantic-provenance rail (`MemberEdgeProvenance::PublishedField`) the
     // Rule-5 compliance validator reads; recording it here covers every macro
@@ -464,7 +475,7 @@ pub(crate) fn admit_published_member<'a>(
         &candidate.owner,
         candidate.surface_node,
         candidate.member.value,
-        &candidate.member.name,
+        &member_name,
     );
     Some(AdmittedPublishedMember {
         owner: candidate.owner,
@@ -500,11 +511,13 @@ mod tests {
     /// (both gates short-circuit before any node materialisation).
     fn member_with_visibility(visibility: MemberVisibility) -> SurfaceMember {
         SurfaceMember {
-            name: Arc::from("foo"),
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
             value: SemanticNodeId(0),
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility,
             spans: Default::default(),
             declaration_origin: None,

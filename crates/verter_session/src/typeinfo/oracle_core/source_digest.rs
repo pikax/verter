@@ -27,7 +27,7 @@ use verter_parser::utils::oxc::script::raw_surface::{
 };
 
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
-use crate::types::{HostConfig, UpsertRequest};
+use crate::types::UpsertRequest;
 use crate::VerterHost;
 
 use super::admission::{SourceContributor, SourceWalkResult};
@@ -80,11 +80,7 @@ pub(crate) fn source_side_walk(spec: &QuerySpec) -> SourceWalkResult {
 /// the walk runs, but the snapshot's `host_setup_kind` will fail the
 /// `standalone_host_is_default_canonical_config` guard.
 pub(crate) fn build_source_host(spec: &QuerySpec) -> Arc<VerterHost> {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        footprint_capture: true,
-        ..HostConfig::default()
-    }));
+    let host = super::standalone_host::standalone_footprint_host();
     for f in spec.workspace_files {
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(f.path.to_string()),

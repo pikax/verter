@@ -7,6 +7,12 @@ use verter_semantic::analysis::type_eval::ValueDeclKind;
 
 use super::*;
 
+// The prepared-bundle script-setup binding is a name + ordinal FACT pair —
+// bound content is re-borrowed lease-only from the pinned artifact at
+// query time, never stored as typed IR. Compile witness: the binding owns
+// no transitive `TypeExpr`.
+static_assertions::assert_impl_all!(TypeParamBinding: verter_no_typeexpr::NoTypeExpr);
+
 /// Shared test pool: prepare fns intern identities through it.
 fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
     Arc::new(crate::identity_interner::IdentityInterner::with_default_budget())
@@ -46,7 +52,9 @@ fn prepares_local_exported_type_decl_from_shallow_file_state() {
 
     // Member index should be auto-populated for interface with properties
     assert!(
-        prepared.member_index.contains_key("label"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
         "member index should contain 'label' property"
     );
 }
@@ -126,7 +134,7 @@ export interface Props { variant: Ref<'primary' | 'secondary'>; plain: string }
 
     let variant = prepared
         .member_index
-        .get("variant")
+        .get(&verter_type_expr::PropertyKey::from("variant"))
         .expect("variant member indexed");
     let AuthoredReferenceHeadFact::Bare { local_name, args } = &variant.reference_head else {
         panic!(
@@ -158,7 +166,7 @@ export interface Props { variant: Ref<'primary' | 'secondary'>; plain: string }
     // An authored NON-reference annotation is a complete non-reference proof.
     let plain = prepared
         .member_index
-        .get("plain")
+        .get(&verter_type_expr::PropertyKey::from("plain"))
         .expect("plain member indexed");
     assert_eq!(
         plain.reference_head,
@@ -207,7 +215,7 @@ export interface Props { second: Ref<'b'> }
     for name in ["first", "second"] {
         let member = prepared
             .member_index
-            .get(name)
+            .get(&verter_type_expr::PropertyKey::from(name))
             .expect("merged contributor member indexed");
         let Some(TypeBodyPathStep::MergedContributor { ordinal }) = member.ty.path.first().copied()
         else {
@@ -484,11 +492,15 @@ export interface Props { child: Inner; data: Local }
 
     // Should have a member index for 'child' and 'data'
     assert!(
-        prepared.member_index.contains_key("child"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("child")),
         "member index should contain 'child'"
     );
     assert!(
-        prepared.member_index.contains_key("data"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("data")),
         "member index should contain 'data'"
     );
 }
@@ -1057,7 +1069,9 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .get("SideMenuProps")
         .expect("an unrelated unresolved import must not fail strict preparation")
         .expect("SideMenuProps is an authored declaration");
-    assert!(prepared.member_index.contains_key("visible"));
+    assert!(prepared
+        .member_index
+        .contains_key(&crate::semantic_query::PropertyKey::identifier("visible")));
     assert!(
         cache.slot_committed_for_test("SideMenuProps"),
         "a complete exact declaration must be admitted to its write-once slot"
@@ -1067,7 +1081,9 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .get("Menu.NamespacedProps")
         .expect("the private namespace table must omit the same unrelated unresolved import")
         .expect("Menu.NamespacedProps is an authored declaration");
-    assert!(namespaced.member_index.contains_key("open"));
+    assert!(namespaced
+        .member_index
+        .contains_key(&crate::semantic_query::PropertyKey::identifier("open")));
     assert!(cache.slot_committed_for_test("Menu.NamespacedProps"));
 }
 
@@ -1444,8 +1460,6 @@ interface Shared { instance: InstanceOnly }
         TypeParamBinding {
             name: Arc::from("SetupGeneric"),
             ordinal: 0,
-            constraint: None,
-            default: None,
         },
     );
 

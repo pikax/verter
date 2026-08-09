@@ -209,6 +209,13 @@ impl<K: NoTypeExprWitness, V: NoTypeExprWitness, S: NoTypeExprWitness> NoTypeExp
 {
 }
 
+// --- HashSet: same rule as HashMap — the element and the hasher `S` are both
+//     OWNED STATE and must both be bounded. ---
+impl<T: NoTypeExprWitness, S: NoTypeExprWitness> NoTypeExprWitness
+    for std::collections::HashSet<T, S>
+{
+}
+
 // The concrete hashers used across the workspace, so `FxHashMap<K, V>` and the
 // std default `HashMap<K, V>` are covered.
 impl NoTypeExprWitness for rustc_hash::FxBuildHasher {}

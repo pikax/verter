@@ -84,6 +84,7 @@ impl<'a> BatchAuditAggregator<'a> {
         let mut bundler_batch_count: u32 = 0;
         let mut custom_count: u32 = 0;
         let mut typeinfo_graph_count: u32 = 0;
+        let mut flow_return_inference_count: u32 = 0;
         let mut total_duration_ms: f64 = 0.0;
         let mut total_bytes_parsed: u64 = 0;
         let mut from_cache_count: u32 = 0;
@@ -124,6 +125,9 @@ impl<'a> BatchAuditAggregator<'a> {
                 RequestKind::Custom { .. } => custom_count = custom_count.saturating_add(1),
                 RequestKind::TypeInfoGraph => {
                     typeinfo_graph_count = typeinfo_graph_count.saturating_add(1)
+                }
+                RequestKind::FlowReturnInference => {
+                    flow_return_inference_count = flow_return_inference_count.saturating_add(1)
                 }
             }
             total_duration_ms += record.timings.total_ms;
@@ -173,6 +177,7 @@ impl<'a> BatchAuditAggregator<'a> {
             bundler_batch_count,
             custom_count,
             typeinfo_graph_count,
+            flow_return_inference_count,
             total_duration_ms,
             total_bytes_parsed,
             from_cache_count,
@@ -337,16 +342,18 @@ mod tests {
                     ),
                 ),
                 (now, record(5, RequestKind::TypeInfoGraph, 1.0, false)),
+                (now, record(6, RequestKind::FlowReturnInference, 1.0, false)),
             ],
         };
         let agg = BatchAuditAggregator::new(&source, BundlerKindTag::Vite);
         let payload = agg.summarize(None);
-        assert_eq!(payload.total_records, 5);
+        assert_eq!(payload.total_records, 6);
         assert_eq!(payload.component_meta_count, 1);
         assert_eq!(payload.type_resolution_count, 1);
         assert_eq!(payload.semantic_analysis_count, 1);
         assert_eq!(payload.compile_count, 1);
         assert_eq!(payload.typeinfo_graph_count, 1);
+        assert_eq!(payload.flow_return_inference_count, 1);
         let sum = payload.component_meta_count
             + payload.compile_count
             + payload.type_resolution_count
@@ -356,7 +363,8 @@ mod tests {
             + payload.mcp_count
             + payload.bundler_batch_count
             + payload.custom_count
-            + payload.typeinfo_graph_count;
+            + payload.typeinfo_graph_count
+            + payload.flow_return_inference_count;
         assert_eq!(sum, payload.total_records);
     }
 }

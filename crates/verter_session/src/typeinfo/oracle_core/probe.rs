@@ -117,6 +117,9 @@ pub(crate) struct SynthesizedProbe {
 /// The synthesized text is `base` (with a guaranteed trailing newline) followed
 /// by the probe header on its own line, so the probe never merges into a
 /// trailing token of `base`.
+// Callers are the `#[cfg(test)]` spike + probe guards; the `oracle-gen`
+// non-test build goes through `append_probe_with_scaffold` directly.
+#[allow(dead_code)]
 pub(crate) fn append_probe(base: &str, ordinal: u16, rhs: &str) -> SynthesizedProbe {
     append_probe_with_scaffold(base, ordinal, rhs, None)
 }

@@ -48,6 +48,11 @@ pub struct BundlerBatchPayload {
     pub custom_count: u32,
     /// Records with `kind == RequestKind::TypeInfoGraph`.
     pub typeinfo_graph_count: u32,
+    /// Records with `kind == RequestKind::FlowReturnInference`.
+    /// Serde-default for back-compat with payloads emitted before
+    /// this additive counter landed.
+    #[serde(default)]
+    pub flow_return_inference_count: u32,
     /// Sum of `RequestTimingAudit::total_ms` across the batch.
     pub total_duration_ms: f64,
     /// Sum of `RequestMemoryAudit::bytes_parsed` across the batch.

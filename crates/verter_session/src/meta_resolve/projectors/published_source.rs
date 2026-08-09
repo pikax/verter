@@ -176,7 +176,7 @@ pub(crate) enum MemberValuePosition {
 pub(crate) fn structural_member_value_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-    member_name: &str,
+    member_key: &crate::semantic_query::PropertyKey,
     type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
@@ -200,7 +200,7 @@ pub(crate) fn structural_member_value_source(
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
             base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
-            path: std::sync::Arc::from(vec![member_name.to_string()].into_boxed_slice()),
+            path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))
 }

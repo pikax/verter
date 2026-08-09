@@ -189,6 +189,9 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
             canonical_id: Arc::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("UIMessage"),
     });
@@ -284,6 +287,9 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
             canonical_id: Arc::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("UIMessage"),
     });

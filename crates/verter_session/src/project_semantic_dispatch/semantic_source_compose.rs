@@ -176,19 +176,27 @@ impl ProjectSemanticDispatch<'_> {
                 let members: Vec<SurfaceMember> = members
                     .iter()
                     .map(|member| SurfaceMember {
-                        name: Arc::from(member.name.as_str()),
+                        key: crate::semantic_query::AuthoredPropertyKey::string(
+                            member.name.as_str(),
+                        ),
                         value: self.raise_required_interior(
                             ctx,
                             scope,
-                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                                member.name.as_str(),
-                            )),
+                            crate::meta_resolve::InteriorSourceStep::Member(
+                                verter_type_expr::facts::FactAuthoredPropertyKey::string(
+                                    member.name.as_str(),
+                                ),
+                            ),
                             || self.raise_leaf_fact(&member.ty, ctx),
                         ),
                         optional: member.optional,
                         readonly: false,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -217,17 +225,25 @@ impl ProjectSemanticDispatch<'_> {
                 let members: Vec<SurfaceMember> = members
                     .iter()
                     .map(|member| SurfaceMember {
-                        name: Arc::from(member.name.as_str()),
+                        key: crate::semantic_query::AuthoredPropertyKey::string(
+                            member.name.as_str(),
+                        ),
                         value: ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                                member.name.as_str(),
-                            )),
+                            crate::meta_resolve::InteriorSourceStep::Member(
+                                verter_type_expr::facts::FactAuthoredPropertyKey::string(
+                                    member.name.as_str(),
+                                ),
+                            ),
                             || self.raise_fact_or_locator(&member.ty, ctx, &scope),
                         ),
                         optional: member.optional,
                         readonly: false,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -277,21 +293,43 @@ impl ProjectSemanticDispatch<'_> {
         ctx: &SourceRaiseContext<'_>,
     ) -> HotTypeRef {
         let scope = self.raise_scope(ctx);
+        // A spread-bearing shape materializes through the shared spread
+        // materializer's fold: direct runs compose as plain shapes, spread
+        // operands raise through their body slots — never a silently
+        // spread-less surface.
+        if object
+            .members
+            .iter()
+            .any(|m| matches!(m, ObjectMemberFact::Spread(_)))
+        {
+            return self.compose_spread_object_fact_node(object, ctx, &scope);
+        }
         let mut entries = Vec::with_capacity(object.members.len());
         let mut call_ordinal = 0_u32;
         let mut construct_ordinal = 0_u32;
         let mut index_ordinal = 0_u32;
         for member in object.members.iter() {
             match member {
+                // Unreachable by construction: the spread-bearing check above
+                // routes the whole object through the spread fold before this
+                // plain member loop runs.
+                ObjectMemberFact::Spread(_) => {}
                 ObjectMemberFact::Property(property) => {
+                    let key = property.key.clone().map(
+                        |slot| {
+                            self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                                .at_optional_boundary()
+                                .map(HotTypeRef::node)
+                                .unwrap_or_else(|| self.miss_node(&scope))
+                        },
+                        |identity| identity,
+                    );
                     entries.push(SurfaceEntry::Member(SurfaceMember {
-                        name: Arc::from(property.name.as_str()),
+                        key,
                         value: self.raise_required_interior(
                             ctx,
                             &scope,
-                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                                property.name.as_str(),
-                            )),
+                            crate::meta_resolve::InteriorSourceStep::Member(property.key.clone()),
                             || {
                                 self.raise_body_slot(&property.ty, ctx.scope_canonical_id)
                                     .at_optional_boundary()
@@ -299,29 +337,43 @@ impl ProjectSemanticDispatch<'_> {
                         ),
                         optional: property.optional,
                         readonly: property.readonly,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: property.visibility,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
                             crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                    }))
+                    }));
                 }
                 ObjectMemberFact::Method(method) => {
                     let value = ctx.with_interior_step(
-                        crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                            method.name.as_str(),
-                        )),
+                        crate::meta_resolve::InteriorSourceStep::Member(method.key.clone()),
                         || self.compose_function_fact_node(&method.function, ctx, false),
                     );
                     entries.push(SurfaceEntry::Member(SurfaceMember {
-                        name: Arc::from(method.name.as_str()),
+                        key: method.key.clone().map(
+                            |slot| {
+                                self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                                    .at_optional_boundary()
+                                    .map(HotTypeRef::node)
+                                    .unwrap_or_else(|| self.miss_node(&scope))
+                            },
+                            |identity| identity,
+                        ),
                         value: value.node(),
                         optional: method.optional,
                         readonly: false,
-                        is_method: true,
+                        method_kind: Some(method.method_kind),
+                        has_implementation_body: method.function.has_implementation_body,
                         visibility: method.visibility,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -388,6 +440,63 @@ impl ProjectSemanticDispatch<'_> {
         ))
     }
 
+    /// Compose a spread-bearing fact into its canonical ordered program.
+    fn compose_spread_object_fact_node(
+        &self,
+        object: &ObjectShapeFact,
+        ctx: &SourceRaiseContext<'_>,
+        scope: &NodeScopeId,
+    ) -> HotTypeRef {
+        let mut effects = Vec::new();
+        let mut run: Vec<ObjectMemberFact> = Vec::new();
+        let flush_run =
+            |run: &mut Vec<ObjectMemberFact>,
+             effects: &mut Vec<crate::semantic_query::ObjectConstructionEffect>| {
+                if run.is_empty() {
+                    return;
+                }
+                let run_fact = ObjectShapeFact {
+                    members: Arc::from(std::mem::take(run).into_boxed_slice()),
+                };
+                let node = self.compose_object_fact_node(&run_fact, ctx).node();
+                let Some(SemanticNodeData::Object(surface)) =
+                    self.graph().node_data(node).as_deref().cloned()
+                else {
+                    return;
+                };
+                effects.extend(
+                    super::object_spread_program_lowering::direct_effects_from_surface(&surface),
+                );
+            };
+        for member in object.members.iter() {
+            match member {
+                ObjectMemberFact::Spread(spread) => {
+                    flush_run(&mut run, &mut effects);
+                    let operand = match self
+                        .raise_body_slot(&spread.ty, ctx.scope_canonical_id)
+                        .at_optional_boundary()
+                    {
+                        Some(hot) => hot.node(),
+                        // An unresolvable operand fails the whole shape
+                        // closed — never a silently spread-less surface.
+                        None => return HotTypeRef::new(self.miss_node(scope)),
+                    };
+                    effects.push(crate::semantic_query::ObjectConstructionEffect::Spread(
+                        operand,
+                    ));
+                }
+                other => run.push(other.clone()),
+            }
+        }
+        flush_run(&mut run, &mut effects);
+        HotTypeRef::new(self.graph().intern_node_with_scope(
+            SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                effects: Arc::from(effects),
+            }),
+            scope.clone(),
+        ))
+    }
+
     /// Compose a projected whole-surface fact into an `Object` carrier node.
     pub(in crate::project_semantic_dispatch) fn compose_projected_surface_node(
         &self,
@@ -399,13 +508,19 @@ impl ProjectSemanticDispatch<'_> {
             .members
             .iter()
             .map(|member| SurfaceMember {
-                name: Arc::from(member.name.as_str()),
+                key: member.key.clone().map(
+                    |slot| {
+                        self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                            .at_optional_boundary()
+                            .map(HotTypeRef::node)
+                            .unwrap_or_else(|| self.miss_node(&scope))
+                    },
+                    |identity| identity,
+                ),
                 value: self.raise_required_interior(
                     ctx,
                     &scope,
-                    crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                        member.name.as_str(),
-                    )),
+                    crate::meta_resolve::InteriorSourceStep::Member(member.key.clone()),
                     || {
                         self.raise_body_slot(&member.ty, ctx.scope_canonical_id)
                             .at_optional_boundary()
@@ -413,8 +528,12 @@ impl ProjectSemanticDispatch<'_> {
                 ),
                 optional: member.optional,
                 readonly: member.readonly,
-                is_method: member.is_method,
+                method_kind: member.method_kind,
+                has_implementation_body: member.has_implementation_body,
                 visibility: member.visibility,
+                // Fact rehydration (declaration domain) is never a literal
+                // origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 spans: verter_type_expr::MemberSpans::default(),
                 declaration_origin: declaration_origin_file(&member.declaration_origin),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
@@ -550,8 +669,8 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// Compose a function-signature fact into a `Function` carrier node
-    /// (wrapped in `ConstructorType` for a construct signature). Parameter /
+    /// Compose a function-signature fact into a `Signature` carrier node
+    /// (`kind: Construct` for a construct signature). Parameter /
     /// return positions with authored slots lower through the memoized locator
     /// query; slot-less positions (unannotated / rest parameters, inferred
     /// returns) intern the typed miss the whole-signature demand re-derives.
@@ -592,32 +711,71 @@ impl ProjectSemanticDispatch<'_> {
                 span: None,
             })
             .collect();
-        let return_type = match signature.return_ty.as_ref() {
-            Some(slot) => self.raise_required_interior(
-                ctx,
-                &scope,
-                crate::meta_resolve::InteriorSourceStep::ReturnType,
-                || {
-                    self.raise_body_slot(slot, ctx.scope_canonical_id)
-                        .at_optional_boundary()
-                },
+        let (return_type, return_carrier) = match &signature.return_source {
+            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
+                let return_type = self.raise_required_interior(
+                    ctx,
+                    &scope,
+                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    || {
+                        self.raise_body_slot(locator.slot(), ctx.scope_canonical_id)
+                            .at_optional_boundary()
+                    },
+                );
+                (
+                    return_type,
+                    crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+                )
+            }
+            // A body-derived return is demanded from the whole-function
+            // producer through the sealed helper — NEVER the absent-slot
+            // arm. A degraded evaluation marks the enclosing composition
+            // partial / ReturnOnly. The carrier records the SAME served
+            // position.
+            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                );
+                let return_type = match ctx.with_interior_step(
+                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    || {
+                        self.execute_function_return_source(
+                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                            ctx.scope_canonical_id,
+                        )
+                    },
+                ) {
+                    super::flow_return::FunctionReturnNode::Flow(result) => result.return_type(),
+                    super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
+                    super::flow_return::FunctionReturnNode::DeclaredMiss
+                    | super::flow_return::FunctionReturnNode::NoValue(_) => {
+                        ctx.record_interior_failure();
+                        self.miss_node(&scope)
+                    }
+                    super::flow_return::FunctionReturnNode::Absent => self.miss_node(&scope),
+                };
+                (return_type, carrier)
+            }
+            verter_type_expr::facts::FunctionReturnSource::Absent => (
+                self.miss_node(&scope),
+                crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Absent,
+                ),
             ),
-            None => self.miss_node(&scope),
         };
         let type_parameters: Vec<crate::semantic_query::TypeParamDecl> =
             signature
                 .type_parameters
                 .iter()
                 .enumerate()
-                .map(|(ordinal, param)| crate::semantic_query::TypeParamDecl {
-                    name: Arc::from(param.name.as_str()),
+                .map(|(ordinal, param)| {
                     // A PRESENT constraint/default slot whose raise fails keeps
                     // the historical `None` node shape (no fabricated miss) —
                     // the strict path records the failure instead; a successful
                     // deref whose raised body materializes an
                     // unknown-materializing failure records the conservative
                     // typed failure.
-                    constraint: param.constraint.as_ref().and_then(|slot| {
+                    let constraint = param.constraint.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::TypeParamConstraint {
                                 ordinal: ordinal as u32,
@@ -634,8 +792,8 @@ impl ProjectSemanticDispatch<'_> {
                                 raised.map(HotTypeRef::node)
                             },
                         )
-                    }),
-                    default: param.default.as_ref().and_then(|slot| {
+                    });
+                    let default = param.default.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::TypeParamDefault {
                                 ordinal: ordinal as u32,
@@ -652,29 +810,54 @@ impl ProjectSemanticDispatch<'_> {
                                 raised.map(HotTypeRef::node)
                             },
                         )
-                    }),
+                    });
+                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let param_node = self.graph().intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl: crate::semantic_query::DeclIdentity::from_scope(
+                                &scope,
+                                Arc::clone(&display_name),
+                            ),
+                            // The shared signature-scoped binder convention
+                            // (`BinderIdentityMode::Signature`): display-name-keyed
+                            // at ordinal 0.
+                            param_index: 0,
+                            constraint,
+                            default,
+                            display_name: Arc::clone(&display_name),
+                        },
+                        scope.clone(),
+                    );
+                    crate::semantic_query::TypeParamDecl {
+                        name: display_name,
+                        param: param_node,
+                        constraint,
+                        default,
+                        is_const: param.is_const,
+                    }
                 })
                 .collect();
-        let function = self.graph().intern_node_with_scope(
-            SemanticNodeData::Function {
+        let kind = if construct {
+            crate::semantic_query::SignatureKind::Construct
+        } else {
+            crate::semantic_query::SignatureKind::Call
+        };
+        HotTypeRef::new(self.graph().intern_node_with_scope(
+            SemanticNodeData::Signature {
+                kind,
                 params: Arc::from(params.into_boxed_slice()),
                 return_type,
                 type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                // The fact-composition path does not carry occurrence-grade
+                // provenance today; the overload-set producer treats an
+                // occurrence-less candidate as an honest `Miss`.
+                occurrence: None,
+                return_carrier,
                 signature_span: None,
                 return_type_span: None,
             },
-            scope.clone(),
-        );
-        if construct {
-            HotTypeRef::new(self.graph().intern_node_with_scope(
-                SemanticNodeData::ConstructorType {
-                    signature: function,
-                },
-                scope,
-            ))
-        } else {
-            HotTypeRef::new(function)
-        }
+            scope,
+        ))
     }
 
     /// Compose a tuple payload fact into a `Tuple` carrier node.

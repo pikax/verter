@@ -284,8 +284,8 @@ fn assert_parity(resolution: &FixtureResolution, assertion: ParityAssertion<'_>)
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
-                    ObjectMember::Method(m) => Some(m.name.as_str()),
+                    ObjectMember::Property(p) => p.string_name(),
+                    ObjectMember::Method(m) => m.string_name(),
                     _ => None,
                 })
                 .collect();
@@ -313,8 +313,8 @@ fn assert_parity(resolution: &FixtureResolution, assertion: ParityAssertion<'_>)
             }
             for (name, expected_kind) in *member_kinds {
                 let member = object.properties.iter().find(|m| match m {
-                    ObjectMember::Property(p) => p.name == *name,
-                    ObjectMember::Method(m) => m.name == *name,
+                    ObjectMember::Property(p) => p.string_name() == Some(*name),
+                    ObjectMember::Method(m) => m.string_name() == Some(*name),
                     _ => false,
                 });
                 if let Some(ObjectMember::Property(p)) = member {
@@ -329,7 +329,7 @@ fn assert_parity(resolution: &FixtureResolution, assertion: ParityAssertion<'_>)
             for name in *optional_members {
                 if let Some(ObjectMember::Property(p)) = object.properties.iter().find(|m| {
                     matches!(m,
-                    ObjectMember::Property(p) if p.name == *name)
+                    ObjectMember::Property(p) if p.string_name() == Some(*name))
                 }) {
                     assert!(p.optional, "{}: {name} must be optional", assertion.fixture);
                 }
@@ -337,7 +337,7 @@ fn assert_parity(resolution: &FixtureResolution, assertion: ParityAssertion<'_>)
             for name in *required_members {
                 if let Some(ObjectMember::Property(p)) = object.properties.iter().find(|m| {
                     matches!(m,
-                    ObjectMember::Property(p) if p.name == *name)
+                    ObjectMember::Property(p) if p.string_name() == Some(*name))
                 }) {
                     assert!(
                         !p.optional,

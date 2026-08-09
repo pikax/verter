@@ -110,7 +110,7 @@ fn vue_public_type_carries_synthesized_instance_members_without_component_meta()
     let mut members: Vec<&str> = public_surface
         .members
         .iter()
-        .map(|m| m.name.as_ref())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
     members.sort_unstable();
     assert_eq!(
@@ -168,7 +168,7 @@ fn query_level_public_vs_full_metadata_produce_distinct_surfaces() {
     let public_members: std::collections::BTreeSet<&str> = public_surface
         .members
         .iter()
-        .map(|m| m.name.as_ref())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
 
     let full_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
@@ -179,7 +179,7 @@ fn query_level_public_vs_full_metadata_produce_distinct_surfaces() {
         .surface
         .members
         .iter()
-        .map(|m| m.name.as_ref())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
 
     assert!(
@@ -560,6 +560,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     let TypeInfoSurface {
         entries,
         members,
+        members_complete,
         call_signatures,
         construct_signatures,
         index_signatures,
@@ -568,6 +569,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     } = &surface.surface;
     let _entries: &Arc<[crate::typeinfo::surface::TypeInfoSurfaceEntry]> = entries;
     let _members: &Arc<[TypeInfoSurfaceMember]> = members;
+    let _members_complete: &bool = members_complete;
     let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
     let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;
     let _index_signatures: &Arc<[TypeInfoIndexSignature]> = index_signatures;
@@ -576,23 +578,26 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
 
     for member in members.iter() {
         let TypeInfoSurfaceMember {
-            name,
+            key,
             name_span,
             value,
             type_annotation_span,
             optional,
             readonly,
-            is_method,
+            method_kind,
+            has_implementation_body,
             visibility,
             declared_in_macro_type_arg,
             jsdoc_description_span,
             jsdoc_tag_spans,
             origin,
         } = member;
-        // Interned name (not an owned type body) + node-id value (not an
+        // Typed key (not an owned type body) + node-id value (not an
         // expanded body).
-        let _name: &Arc<str> = name;
+        let _key: &crate::semantic_query::AuthoredPropertyKey = key;
         let _value: &crate::semantic_query::SemanticNodeId = value;
+        let _method_kind: &Option<verter_type_expr::ObjectMethodKind> = method_kind;
+        let _has_implementation_body: &bool = has_implementation_body;
         // Every text-bearing field is a SPAN (`CanonicalSpan`), never a
         // `String`. The type annotations below would fail to compile if any
         // field were widened to an owned `String`.
@@ -603,7 +608,6 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         // Flags are `bool`.
         let _optional: &bool = optional;
         let _readonly: &bool = readonly;
-        let _is_method: &bool = is_method;
         // Visibility is a small `Copy` enum (a declared-accessibility fact),
         // never an owned `String`.
         let _visibility: &verter_type_expr::MemberVisibility = visibility;

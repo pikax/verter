@@ -27,13 +27,13 @@ use verter_session::for_tests::{
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
     BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
-    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, NoInferMask,
-    OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
-    RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationProofId,
-    RelationProofTable, RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition,
-    SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
+    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey,
+    InferencePassKind, NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext,
+    RelationFailureCode, RelationKind, RelationOutcome, RelationPayload, RelationPolicy,
+    RelationProof, RelationProofId, RelationProofTable, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag,
+    SubRelationPosition, SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -84,7 +84,7 @@ fn relate_key(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_key_covers_relation_kind_policy_freshness_and_context() {
+pub(crate) fn relate_key_covers_relation_kind_policy_freshness_and_context() {
     let s = SemanticNodeId(1);
     let t = SemanticNodeId(2);
     let base = relate_key(
@@ -290,18 +290,24 @@ fn relate_key_covers_relation_kind_policy_freshness_and_context() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
+pub(crate) fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
+    // The seed payload is a DECIDED outcome: under the
+    // `execute(SemanticQueryKey::Relate)` authority `Unknown` is never
+    // admitted to the relation memo (the
+    // retired `RelationResult::Unknown` seed has no admissible form). These guards assert
+    // memo SLOT COUNTS only — the outcome value is irrelevant to the
+    // re-keying discrimination.
     let publish = |key: RelateMemoKey| {
-        graph.insert_relation(
+        graph.insert_relation_payload_for_tests(
             key,
             ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
-            RelationResult::Unknown,
+            graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
         );
     };
@@ -477,25 +483,31 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
 // ---------------------------------------------------------------------------
 // (3) RELATION MEMO RE-KEY: same nodes, different inference context occupy
 //     DISTINCT memo slots — the inference session a relation runs within is
-//     part of identity. Each of the six content-free session axes
-//     (inferable_params / variance_phase / candidate_priority / no_infer_mask /
-//     const_param_policy / contextual_inference_mode) is a distinct
+//     part of identity. Each of the seven content-free session axes
+//     (inferable_params / variance_phase / pass_kind / candidate_priority /
+//     no_infer_mask / const_param_policy / contextual_inference_mode) is a distinct
 //     discriminator.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
+pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
+    // The seed payload is a DECIDED outcome: under the
+    // `execute(SemanticQueryKey::Relate)` authority `Unknown` is never
+    // admitted to the relation memo (the
+    // retired `RelationResult::Unknown` seed has no admissible form). These guards assert
+    // memo SLOT COUNTS only — the outcome value is irrelevant to the
+    // re-keying discrimination.
     let publish = |key: RelateMemoKey| {
-        graph.insert_relation(
+        graph.insert_relation_payload_for_tests(
             key,
             ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
-            RelationResult::Unknown,
+            graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
         );
     };
@@ -542,13 +554,20 @@ fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 
     // Each remaining session axis, mutated one at a time off `session`, is a
     // distinct discriminator — same nodes, distinct memo slot.
-    let axis_mutations: [(InferenceContextKey, &str); 5] = [
+    let axis_mutations: [(InferenceContextKey, &str); 6] = [
         (
             InferenceContextKey {
                 variance_phase: VariancePhase::Contravariant,
                 ..session.clone()
             },
             "variance_phase",
+        ),
+        (
+            InferenceContextKey {
+                pass_kind: InferencePassKind::ReverseHomomorphicMapped,
+                ..session.clone()
+            },
+            "pass_kind",
         ),
         (
             InferenceContextKey {
@@ -661,9 +680,10 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_query_value_carries_relation_proof_and_budget_state() {
+pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
     let binding = verter_session::semantic_query::InferBinding {
         name: Arc::from("T"),
+        param: SemanticNodeId(2),
         bound: SemanticNodeId(3),
     };
     let payload = RelationPayload {
@@ -965,7 +985,7 @@ fn relate_maps_to_dedicated_relate_family_not_indexed_access() {
     );
     let indexed = SemanticQueryKey::IndexedAccess {
         base: s,
-        index: IndexKey::TypeNode(t),
+        index: IndexKey::Computed(t),
         mode: ProjectionMode::Shallow,
     };
 

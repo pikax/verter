@@ -67,7 +67,7 @@ pub use crate::semantic_query_memo::{
 /// Carrier type for cache-entry dependency signatures. Integration
 /// tests construct `ReadSetSignature` directly when seeding
 /// fixtures into `ComponentMetaResultEntry` / `MaterializeStructureEntry` /
-/// `OwnerImportSurface` / `RefCycleEntry` / `MemoEntry`.
+/// `OwnerImportSurface` / `MemoEntry`.
 pub use crate::fact_signature_helpers::ReadSetSignature;
 
 /// Re-export the cooperative-admission outcome enum so integration
@@ -301,7 +301,7 @@ pub fn relation_force_overflow_observations_for_tests(
 
 /// Host-scoped RAII guard that arms and clears the per-host relation-memo
 /// fact-injection knob
-/// [`crate::VerterHost::relation_force_overflow_observations`].
+/// the host's `relation_knobs.force_overflow_observations` knob.
 ///
 /// When the knob is set to `N > 0`, the relation engine's cold-compute path
 /// observes `N` synthetic `FileWholeHash` facts before finalising the
@@ -316,7 +316,8 @@ pub struct RelationForceOverflowGuard<'h> {
 impl<'h> RelationForceOverflowGuard<'h> {
     /// Set `host`'s forced observation count to `n` and return the guard.
     fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
-        host.relation_force_overflow_observations
+        host.relation_knobs
+            .force_overflow_observations
             .store(n, std::sync::atomic::Ordering::Relaxed);
         Self { host }
     }
@@ -325,7 +326,8 @@ impl<'h> RelationForceOverflowGuard<'h> {
 impl Drop for RelationForceOverflowGuard<'_> {
     fn drop(&mut self) {
         self.host
-            .relation_force_overflow_observations
+            .relation_knobs
+            .force_overflow_observations
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -611,6 +613,19 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
 ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
     crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
+}
+
+/// Drive the family-A `BinderIdentityFacts` production producer
+/// ([`crate::binder_identity_facts::produce_binder_identity_facts`])
+/// from integration tests. The producer takes a `&dyn ResolverContext`
+/// internally (per the seal contract); this wrapper accepts a concrete
+/// `&VerterHost` so `tests/cases/**` can drive the demand-produced
+/// artifact end-to-end (warm hit / cold recompute / invalidation).
+pub fn binder_identity_facts_get_or_compute_for_tests(
+    host: &crate::VerterHost,
+    canonical: &str,
+) -> Option<std::sync::Arc<crate::binder_identity_facts::BinderIdentityFactsEntry>> {
+    crate::binder_identity_facts::produce_binder_identity_facts(host, canonical)
 }
 
 /// Return the published `ComponentMetaResultEntry`'s

@@ -165,7 +165,13 @@ fn proto_enum_variants(source: &str, name: &str) -> BTreeSet<String> {
 
 // ───────────────────────────── node taxonomy ─────────────────────────────
 
-/// The closed `GraphTypeNode.kind` oneof — exactly these 32 arms.
+/// The closed `GraphTypeNode.kind` oneof — exactly these 32 arms. The
+/// tag-28 `relation_proof` arm is RETIRED (schema 5): the relation-proof
+/// witness moved OFF the type-values surface to the payload-side
+/// `SemanticTypeGraph.relation_proofs` table, and the tag + name are
+/// reserved at `GraphTypeNode` scope. The tag-33 `object_spread_program`
+/// arm carries the canonical ordered construction program for every
+/// spread-bearing object.
 const NODE_TAXONOMY_ARMS: &[&str] = &[
     "primitive",
     "literal",
@@ -173,6 +179,7 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
     "union",
     "intersection",
     "object",
+    "object_spread_program",
     "array",
     "tuple",
     "reference",
@@ -194,7 +201,6 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
     "global_augmentation",
     "flow_narrowing",
     "contextual_type",
-    "relation_proof",
     "infer_node",
     "enum_node",
     "opaque",
@@ -202,9 +208,9 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
 ];
 
 #[test]
-fn node_taxonomy_complete() {
+pub(crate) fn node_taxonomy_complete() {
     // The `GraphTypeNode.kind` oneof is the closed node taxonomy. This
-    // guard pins the EXACT arm set (32 arms) plus the `reserved 33 to 100`
+    // guard pins the EXACT arm set (32 arms) plus the `reserved 34 to 100`
     // additive window. Discriminating: add, drop, or rename any arm and
     // the set comparison fails.
     let proto = read_proto();
@@ -230,9 +236,89 @@ fn node_taxonomy_complete() {
     // is a deliberate schema_version bump, not a silent tag grab.
     let body = proto_block_body(&proto, "message", "GraphTypeNode");
     assert!(
-        body.contains("reserved 33 to 100;"),
+        body.contains("reserved 34 to 100;"),
         "GraphTypeNode must reserve the additive `oneof kind` tag window \
-         (`reserved 33 to 100;`) at the enclosing message level",
+         (`reserved 34 to 100;`) at the enclosing message level",
+    );
+}
+
+// ───────────────────── relation proofs (schema 5) ─────────────────────
+
+/// The retired `GraphTypeNode.relation_proof = 28` arm stays retired: the
+/// node taxonomy carries NO relation-proof arm, and tag 28 + the
+/// `relation_proof` name are RESERVED at `GraphTypeNode` scope so neither
+/// is ever reused (proto3 forbids `reserved` inside the `oneof`, so the
+/// directives sit beside `reserved 34 to 100;` at message level).
+///
+/// Discriminating: reintroducing a relation-proof arm (at ANY tag) grows
+/// the oneof arm set and fails the arm-name check; reoccupying tag 28 or
+/// the `relation_proof` name trips the reserved-statement checks; editing
+/// either reserved directive out fails the contains checks.
+#[test]
+pub(crate) fn relation_proofs_not_graph_type_nodes() {
+    let proto = read_proto();
+    let arms = proto_oneof_arms(&proto, "GraphTypeNode", "kind");
+    assert!(
+        !arms.contains("relation_proof"),
+        "GraphTypeNode must NOT carry a relation-proof arm — the proof witness rides the \
+         payload-side `SemanticTypeGraph.relation_proofs` table by opaque proof id, never the \
+         type-values surface",
+    );
+    let body = proto_block_body(&proto, "message", "GraphTypeNode");
+    assert!(
+        body.contains("reserved 28;"),
+        "GraphTypeNode must reserve the retired relation-proof tag (`reserved 28;`) at the \
+         enclosing message level so the tag is never reused",
+    );
+    assert!(
+        body.contains("reserved \"relation_proof\";"),
+        "GraphTypeNode must reserve the retired relation-proof field name \
+         (`reserved \"relation_proof\";`) so the name is never reused",
+    );
+    // Tag 28 must appear ONLY inside the reserved directive — never as a
+    // field assignment.
+    let stripped = strip_proto_comments(body);
+    for stmt in stripped.split(';') {
+        let stmt = stmt.trim();
+        assert!(
+            !stmt.ends_with("= 28") && !stmt.contains("= 28 "),
+            "tag 28 is reserved and must never be assigned to a field: `{stmt}`",
+        );
+    }
+}
+
+/// The relation payload's proof witness is exposed on the payload-side
+/// `SemanticTypeGraph.relation_proofs` table (field 13) — a repeated
+/// `GraphRelationProofEntry` carrying the FOUR proof shapes — never on a
+/// `GraphTypeNode` arm.
+///
+/// Discriminating: dropping/renaming/retagging field 13, or narrowing the
+/// four-shape `GraphRelationProofEntry.kind` oneof, fails the checks.
+#[test]
+pub(crate) fn typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node() {
+    let proto = read_proto();
+    let body = proto_block_body(&proto, "message", "SemanticTypeGraph");
+    let stripped = strip_proto_comments(body);
+    assert!(
+        stripped.contains("repeated GraphRelationProofEntry relation_proofs = 13;"),
+        "SemanticTypeGraph must expose the payload-side relation-proof table as \
+         `repeated GraphRelationProofEntry relation_proofs = 13;` (schema 5, add-only)",
+    );
+    // The table entry carries exactly the four proof shapes.
+    let entry_arms = proto_oneof_arms(&proto, "GraphRelationProofEntry", "kind");
+    let expected: BTreeSet<String> = [
+        "assignable",
+        "not_assignable",
+        "budget_exceeded",
+        "coinductive_cycle",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert_eq!(
+        entry_arms, expected,
+        "GraphRelationProofEntry.kind must carry exactly the four relation-proof shapes \
+         (assignable / not_assignable / budget_exceeded / coinductive_cycle)",
     );
 }
 

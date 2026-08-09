@@ -79,8 +79,14 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
         FactVersionRef::FileSourceEnv {
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
-        // Neither is file-scoped: both are whole-project scalars naming no
-        // canonical, so neither can reference one.
+        FactVersionRef::ProgramAnalysis(fact) => match fact {
+            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
+                function.canonical_id.as_ref() == canonical_id
+            }
+        },
+        // None is file-scoped: each is a whole-project scalar, a
+        // whole-domain aggregate, or a strict self-root world witness —
+        // all name no canonical, so none can reference one.
         FactVersionRef::ProjectGeneration { .. }
         | FactVersionRef::DomainGeneration(_)
         | FactVersionRef::StrictSelfRootWorld(_) => false,

@@ -92,7 +92,9 @@ fn collect_property_names(expr: &TypeExpr, out: &mut Vec<String>) {
         TypeExpr::Object(obj) => {
             for member in obj.properties.iter() {
                 if let ObjectMember::Property(p) = member {
-                    out.push(p.name.to_string());
+                    if let Some(name) = p.string_name() {
+                        out.push(name.to_string());
+                    }
                     collect_property_names(&p.ty, out);
                 }
             }

@@ -80,8 +80,12 @@ pub(crate) mod locator_deref;
 pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 /// The lazily lowered body of one TYPE declaration group (all same-name
-/// contributors folded, exactly as the whole-env walk would fold them).
-#[derive(Debug, Clone)]
+/// contributors folded, exactly as the whole-env walk would fold them). No
+/// `TypeExpr` is stored (compile-witnessed by the `NoTypeExpr` derive):
+/// authored contributor bodies and header-parameter BOUNDS are re-borrowed
+/// lease-only from the retained snapshot on demand; the memo stores the
+/// content-free mirror facts only.
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct LoweredTypeDecl {
     pub kind: TypeDeclKind,
     /// Content-free facts retained per exact source contributor. Member return
@@ -99,9 +103,6 @@ pub struct LoweredTypeDecl {
     /// ([`DeclBodyMemo::compat_type_body_hash_input`]) return this stored
     /// fact — no locator deref, no query-time re-lowering.
     pub body_hash: HashOutcome,
-    /// Generic type parameters, unioned across contributors in source
-    /// order.
-    pub type_parameters: Vec<TypeParam>,
     /// Semantic declaration-dependency segment identities. The root local
     /// binding and member path remain separate through classification.
     pub dependency_paths: FxHashSet<TypeDependencyPathFact>,
@@ -121,8 +122,10 @@ pub struct LoweredTypeDecl {
     pub typeof_root_names: Vec<String>,
     /// The NARROW type-parameter facts (name + ordinal + content-free bound
     /// locators), unioned first-seen-by-name across contributors in source
-    /// order — the fact mirror of [`type_parameters`](Self::type_parameters)
-    /// the prepared-decl builder copies (`PreparedTypeDecl.type_parameters`).
+    /// order — the content-free mirror of the transient typed-IR parameter
+    /// union (the lease-only re-borrow serves bound CONTENT on demand). The
+    /// prepared-decl builder copies this mirror
+    /// (`PreparedTypeDecl.type_parameters`).
     pub narrow_type_parameters: Vec<NarrowTypeParam>,
     /// Exact typed `@vue-ignore` heritage identities copied from the shallow
     /// declaration header. Consumers apply them only under an explicit Vue
@@ -136,7 +139,7 @@ pub struct LoweredTypeDecl {
     /// locators carry their `MergedContributor` path step. The session
     /// prepared-decl builder COPIES these facts; it never re-classifies or
     /// derefs a locator at prepare time.
-    pub member_index: FxHashMap<String, PreparedMemberFact>,
+    pub member_index: FxHashMap<verter_type_expr::facts::FactPropertyKey, PreparedMemberFact>,
     /// The prepared structural-wrapper classification FACT, classified at
     /// this lazy lowering from the primary transient body
     /// ([`PreparedTypeDecl::classify_wrapper_shape`]).
@@ -168,8 +171,9 @@ pub struct LoweredTypeDecl {
 }
 
 /// The memo-owned VALUE-body fingerprint FACT — the [`HashOutcome`] fields
-/// carried NoTypeExpr-witnessed (the lower-crate outcome struct predates the
-/// witness derive and cannot be annotated from the session). Lossless
+/// carried NoTypeExpr-witnessed. ([`HashOutcome`] now derives the witness
+/// itself; this memo-local record stays the VALUE-side storage so the
+/// record shape and its budget-bit doc convention do not move.) Lossless
 /// bijection with [`HashOutcome`] via
 /// [`from_outcome`](Self::from_outcome) / [`to_outcome`](Self::to_outcome).
 #[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
@@ -519,6 +523,14 @@ pub struct DeclBodyMemo {
     aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
     aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
+    /// The per-file function program index — a DEMAND product: exact
+    /// function identities + body locators, binding/reference inventory,
+    /// return sites, writes/effects, the control-region skeleton, exact
+    /// direct local call targets, and whole-function stable hashes.
+    /// Arena-free, no lowered types; built once through the retained
+    /// snapshot on first Flow demand.
+    function_program_index:
+        OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
     raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
 
@@ -576,6 +588,7 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
+            function_program_index: OnceLock::new(),
             raw_surfaces: DashMap::default(),
         }
     }
@@ -609,6 +622,7 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
+            function_program_index: OnceLock::new(),
             raw_surfaces: DashMap::default(),
         };
 
@@ -1132,6 +1146,247 @@ impl DeclBodyMemo {
         }
         // Commit only the REAL env (idempotent — a cold race loses harmlessly).
         self.whole_env.get_or_init(|| Arc::new(env)).clone()
+    }
+
+    /// The per-file function program index — a DEMAND product built ONCE
+    /// through the retained parse snapshot (the same lease-only run every
+    /// other body product uses) and memoized. The semantic walk returns
+    /// structural per-function hashes; this boundary folds the parser /
+    /// language / parse-env identity into each entry's
+    /// `flow_body_stable_hash` so a parse-env move or a parser/language
+    /// flip misses exactly the affected artifact slots. Unrelated
+    /// functions are not lowered — the index is structural only.
+    pub fn function_program_index(
+        &self,
+    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+        if let Some(cached) = self.function_program_index.get() {
+            return cached.clone();
+        }
+        let Some(service) = self.service.as_ref() else {
+            // Seeded memos carry no parse to walk; the empty index is the
+            // CORRECT value (a genuine miss, not a lease-pin break).
+            return self
+                .function_program_index
+                .get_or_init(Default::default)
+                .clone();
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
+        let canonical = Arc::clone(&self.key.canonical);
+        let Some(index) = service.run_leased(&self.key, move |program| {
+            program.map(|p| {
+                verter_semantic::analysis::function_program::build_function_program_index(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    owner_table.as_ref(),
+                    Arc::clone(&canonical),
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
+            // the empty index — a retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        let Some(index) = index else {
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        let folded =
+            fold_flow_body_env_identity(&index, &self.key.parse_env_hash, self.source_type);
+        self.function_program_index
+            .get_or_init(|| Arc::new(folded))
+            .clone()
+    }
+
+    /// The OWNED slice content of one demanded flow evaluation: the
+    /// slice-gated expression content of `entry`'s body, lowered through
+    /// the same lease-only retained-snapshot run every other body product
+    /// uses (pure job, owned output, no host re-entry). NOT memoized:
+    /// content is per-demand (the selection is demand identity) and the
+    /// family memo's warm hit already prevents same-demand recomputation.
+    /// Returns `None` on a locator miss (a typed miss, never a panic) or
+    /// on a seeded memo / broken lease pin.
+    pub(crate) fn flow_slice_content(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        selection: crate::flow_slice_content::FlowSliceSelection,
+        skeleton: Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let entry = entry.clone();
+        let Some(node) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                crate::flow_slice_content::build_flow_slice_content(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    &entry,
+                    &selection,
+                    &skeleton,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        node.map(Arc::new)
+    }
+
+    /// The OWN type-parameter clause of one indexed function, lowered
+    /// through the same lease-only retained-snapshot run every other body
+    /// product uses (pure job, owned output, no host re-entry).
+    ///
+    /// NOT memoized: a caller demands it only for a clause the shallow
+    /// index already flagged as carrying a DEFAULT, which is rare, and
+    /// the caller's own family memo prevents same-demand recomputation.
+    /// Returns `None` on a locator miss (a typed miss, never a panic) or
+    /// on a seeded memo / broken lease pin.
+    pub(crate) fn function_type_param_clause(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let entry = entry.clone();
+        let Some(clause) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                crate::flow_slice_content::build_function_type_param_clause(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    &entry,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        clause
+    }
+
+    /// The arena-free [`FunctionBodySkeleton`] of one indexed function —
+    /// the demand-sliced flow substrate's structural input, built through
+    /// the same lease-only retained-snapshot run every other body product
+    /// uses (pure job, owned output, no host re-entry). NOT memoized
+    /// here: the project-global `FunctionFlowGraphStore` is the
+    /// once-per-content-version authority and consults this producer at
+    /// most once per pinned content version. Returns `None` on a locator
+    /// miss (a typed miss, never a panic) or on a seeded memo / broken
+    /// lease pin.
+    ///
+    /// [`FunctionBodySkeleton`]: verter_semantic::analysis::flow::FunctionBodySkeleton
+    pub fn function_body_skeleton(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let entry = entry.clone();
+        let Some(skeleton) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                use verter_semantic::analysis::flow::{
+                    build_function_body_skeleton, FunctionBodySource,
+                };
+                use verter_semantic::analysis::function_program::{
+                    resolve_function_node, FunctionNode,
+                };
+                let resolved = resolve_function_node(p.borrow_dependent(), &entry.locator)?;
+                let source = match &resolved.node {
+                    FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
+                    FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                };
+                Some(build_function_body_skeleton(&source))
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        skeleton
+    }
+
+    /// Transient typed IR for one indexed declaration expression. The retained
+    /// AST is reborrowed on demand; no body `TypeExpr` is memo-owned.
+    pub fn indexed_program_expression_ir(
+        &self,
+        record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        let service = self.service.as_ref()?;
+        self.ensure_lease();
+        let record = record.clone();
+        let node = service.run_leased(&self.key, move |program| {
+            program.and_then(|parsed| {
+                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
+                    parsed.borrow_dependent(),
+                    parsed.source_str(),
+                    &record,
+                )
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    /// Transient typed IR for one authored call expression, re-read from
+    /// the retained snapshot at `span`. The call's served-function entry
+    /// is found through the program index (a flow-selected call is inside
+    /// a served function by construction); no body `TypeExpr` is
+    /// memo-owned.
+    pub fn indexed_call_expression_at(
+        &self,
+        span: verter_span::Span,
+    ) -> Option<Arc<verter_type_expr::IndexedValueCall>> {
+        let service = self.service.as_ref()?;
+        self.ensure_lease();
+        let index = self.function_program_index();
+        let node = service.run_leased(&self.key, move |program| {
+            program.and_then(|parsed| {
+                let call = verter_semantic::analysis::function_program::call_expression_at(
+                    parsed.borrow_dependent(),
+                    &index,
+                    span,
+                )?;
+                Some(
+                    verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
+                        call,
+                        parsed.source_str(),
+                    ),
+                )
+            })
+        })??;
+        Some(Arc::new(node))
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -1750,6 +2005,10 @@ pub(crate) struct TransientValueParts {
     pub(crate) type_annotation: Option<TypeExpr>,
     pub(crate) object_shape: Option<ObjectExpr>,
     pub(crate) signatures: Vec<LoweredSignatureParts>,
+    /// The owning declaration's kind (strict last-wins, the annotation rule)
+    /// — the whole-signature recovery reads it to name the served function
+    /// position of a body-derived return (declaration body vs initializer).
+    pub(crate) kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
     /// The owning declaration's HEADER type parameters — populated for a
     /// dual-space declaration (a `class K<T>` whose VALUE side's constructor
     /// shape references `T`) from the SAME statements' type-side parts,
@@ -1757,25 +2016,51 @@ pub(crate) struct TransientValueParts {
     pub(crate) type_parameters: Vec<TypeParam>,
 }
 
+/// Owned TRANSIENT type-declaration parts of one demanded symbol, re-lowered
+/// from the retained snapshot by [`DeclBodyMemo::transient_type_parts_in`]
+/// for the locator-deref worker: the ordered contributor bodies (source /
+/// binder order, a JSDoc-`@typedef` payload appended) plus the header type
+/// parameters unioned first-seen-by-name across contributors in that same
+/// order — the SAME union the demanded lowering folded. Fact-production
+/// intermediates — returned owned, never stored.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TransientTypeParts {
+    pub(crate) bodies: Vec<TypeExpr>,
+    pub(crate) type_parameters: Vec<TypeParam>,
+}
+
+/// Union one contributor's header type parameters into the transient list,
+/// first-seen by name — the shared fold the file-scope, augmentation, and
+/// `export default` alias branches all apply so the re-borrowed union can
+/// never drift from the demanded lowering's.
+fn union_type_params_first_seen(type_parameters: &mut Vec<TypeParam>, params: &[TypeParam]) {
+    for param in params {
+        if !type_parameters.iter().any(|p| p.name == param.name) {
+            type_parameters.push(param.clone());
+        }
+    }
+}
+
 impl DeclBodyMemo {
-    /// TYPE-space transient contributor BODIES of one demanded file-scope
-    /// symbol (source order; a JSDoc-`@typedef` name appends its re-derived
-    /// payload body), re-lowered from the retained snapshot in a LEASE-ONLY
-    /// job for the locator-deref worker. The demand cells are NOT touched and
+    /// TYPE-space transient contributor parts of one demanded file-scope
+    /// symbol (bodies in source order — a JSDoc-`@typedef` name appends its
+    /// re-derived payload body — plus the unioned header type parameters),
+    /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
+    /// locator-deref worker. The demand cells are NOT touched and
     /// nothing is committed — the graph-tier `LowerLocator` memo owns caching
     /// the lowered product per `(locator, content)`; this service is its
     /// authored-body borrow. `Ready(None)` = not inventoried / no service /
     /// fatal parse (genuine, cacheable); `LeaseMiss` = broken lease pin
     /// (transient ReturnOnly).
-    pub(crate) fn transient_type_bodies(&self, name: &str) -> DemandOutcome<Vec<TypeExpr>> {
-        self.transient_type_bodies_in(TopLevelOwnerId::ordinary_file(), name)
+    pub(crate) fn transient_type_parts(&self, name: &str) -> DemandOutcome<TransientTypeParts> {
+        self.transient_type_parts_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    pub(crate) fn transient_type_bodies_in(
+    pub(crate) fn transient_type_parts_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some((contributors, jsdoc_typedef)) = self
             .header_index
             .type_header_in(owner, name)
@@ -1783,7 +2068,7 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(
+        self.transient_type_parts_for(
             DeclBindingKey::new(owner, name),
             &contributors,
             jsdoc_typedef,
@@ -1791,13 +2076,13 @@ impl DeclBodyMemo {
         )
     }
 
-    /// Augmentation-scoped sibling of [`Self::transient_type_bodies_in`].
-    pub(crate) fn transient_augmentation_type_bodies_in(
+    /// Augmentation-scoped sibling of [`Self::transient_type_parts_in`].
+    pub(crate) fn transient_augmentation_type_parts_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some(contributors) = self
             .header_index
             .augmentation_type_header_in(scope, owner, name)
@@ -1805,7 +2090,7 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(
+        self.transient_type_parts_for(
             DeclBindingKey::new(owner, name),
             &contributors,
             None,
@@ -1817,13 +2102,13 @@ impl DeclBodyMemo {
     /// contributing statements. `aug_scope` selects the augmentation-scoped
     /// parts vector; `None` reads the file-scope parts (plus the
     /// `export default interface/class` mirror and the JSDoc-typedef payload).
-    fn transient_type_bodies_for(
+    fn transient_type_parts_for(
         &self,
         key: DeclBindingKey,
         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         aug_scope: Option<&AugmentationScopeKind>,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some(service) = self.service.as_ref() else {
             // Seeded memo: locator-only groups retain no authored source to
             // re-borrow — a genuine, cacheable body-less miss.
@@ -1837,7 +2122,7 @@ impl DeclBodyMemo {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            let mut bodies: Vec<TypeExpr> = Vec::new();
+            let mut parts_out = TransientTypeParts::default();
             for contributor in &contributors {
                 let Some(stmt) = program
                     .body
@@ -1850,25 +2135,38 @@ impl DeclBodyMemo {
                     Some(scope) => {
                         for (part_scope, decl) in &parts.aug_type_decls {
                             if part_scope == scope && decl.name == key.name.as_ref() {
-                                bodies.push(decl.body.clone());
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
                             }
                         }
                     }
                     None => {
                         for decl in &parts.type_decls {
                             if decl.name == key.name.as_ref() {
-                                bodies.push(decl.body.clone());
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
                             }
                         }
                         // `export default interface I` / `export default
                         // class C` mirrors the declared-name symbol under
-                        // `default` — mirror the transient bodies the same
-                        // way (see the demanded-lowering path).
+                        // `default` — mirror the transient bodies AND the
+                        // unioned header parameters the same way (see the
+                        // demanded-lowering path).
                         if key.name.as_ref() == "default" {
                             if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
                                 for decl in &parts.type_decls {
                                     if decl.name == alias_from {
-                                        bodies.push(decl.body.clone());
+                                        parts_out.bodies.push(decl.body.clone());
+                                        union_type_params_first_seen(
+                                            &mut parts_out.type_parameters,
+                                            &decl.type_parameters,
+                                        );
                                     }
                                 }
                             }
@@ -1887,10 +2185,10 @@ impl DeclBodyMemo {
                     &build_ctx,
                     &mut scratch,
                 ) {
-                    bodies.push(typedef.body);
+                    parts_out.bodies.push(typedef.body);
                 }
             }
-            Some(bodies)
+            Some(parts_out)
         });
         match outcome {
             // Broken lease pin: the job ran nothing — transient ReturnOnly.
@@ -1904,14 +2202,14 @@ impl DeclBodyMemo {
             }
             // Fatal parse: a genuine, cacheable body-less miss.
             Some(None) => DemandOutcome::Ready(None),
-            Some(Some(bodies)) => DemandOutcome::Ready(Some(Arc::new(bodies))),
+            Some(Some(parts)) => DemandOutcome::Ready(Some(Arc::new(parts))),
         }
     }
 
     /// The re-derived JSDoc-`@typedef` payload body of one demanded typedef
     /// alias — the [`AuthoredBodyLocator::JsdocTypedefBody`] deref source.
     /// Lease-only; same outcome semantics as
-    /// [`Self::transient_type_bodies`]. Serves ONLY the typedef payload
+    /// [`Self::transient_type_parts`]. Serves ONLY the typedef payload
     /// (never a same-name TS declaration's statement body — the typedef
     /// locator addresses the comment-derived payload specifically).
     pub(crate) fn transient_jsdoc_typedef_body_in(
@@ -1968,7 +2266,7 @@ impl DeclBodyMemo {
     /// The re-derived `$props()` binding-annotation payload at one demanded
     /// macro ordinal — the [`MacroPayloadPosition::TypeAnnotation`] deref
     /// source. Lease-only; same outcome semantics as
-    /// [`Self::transient_type_bodies`].
+    /// [`Self::transient_type_parts`].
     ///
     /// The position replays the capture's shared macro-ordinal walk
     /// ([`lower_props_annotation_at`]) over THIS memo's retained snapshot;
@@ -2074,7 +2372,7 @@ impl DeclBodyMemo {
     /// The re-derived authored PER-FIELD macro payload at one demanded
     /// `(macro ordinal, field ordinal)` — the
     /// [`MacroPayloadPosition::Field`] deref source. Lease-only; same
-    /// outcome semantics as [`Self::transient_type_bodies`].
+    /// outcome semantics as [`Self::transient_type_parts`].
     ///
     /// The position replays the analyzer's OWN macro assembly
     /// ([`verter_semantic::analysis::lower_macro_field_payload_at`] — one
@@ -2195,7 +2493,7 @@ impl DeclBodyMemo {
     /// (last-wins annotation / object shape; GROUP-ordered signature IR),
     /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
     /// locator-deref worker. Same outcome semantics as
-    /// [`Self::transient_type_bodies`].
+    /// [`Self::transient_type_parts`].
     pub(crate) fn transient_value_parts_in(
         &self,
         owner: TopLevelOwnerId,
@@ -2244,6 +2542,7 @@ impl DeclBodyMemo {
                     merged.type_annotation = decl.type_annotation.clone();
                     merged.object_shape = decl.object_shape.clone();
                     merged.signatures.extend(decl.signatures.iter().cloned());
+                    merged.kind = Some(decl.kind);
                 }
                 // A dual-space declaration's HEADER type parameters (a
                 // `class K<T>` constructor shape references `T`) ride the
@@ -2518,7 +2817,10 @@ fn lowered_type_decl_from_group(
             // sub-positions through a contributor step first). Duplicate names
             // fold with FIRST-contributor precedence — the MergedDecl peer-merge
             // property rule the legacy eager fold applied.
-            let mut merged_index: FxHashMap<String, PreparedMemberFact> = FxHashMap::default();
+            let mut merged_index: FxHashMap<
+                verter_type_expr::facts::FactPropertyKey,
+                PreparedMemberFact,
+            > = FxHashMap::default();
             for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
                 let mut per_contributor =
                     PreparedTypeDecl::new(root_identity.clone(), primary.kind);
@@ -2626,7 +2928,6 @@ fn lowered_type_decl_from_group(
         contributor_facts: Arc::from(group.contributors().to_vec().into_boxed_slice()),
         body,
         body_hash,
-        type_parameters: retained.type_parameters.clone(),
         dependency_paths: dependencies.full.clone(),
         structural_dependency_paths: dependencies.structural.clone(),
         declaration_carrier_paths: dependencies.declaration_carrier.clone(),
@@ -2771,8 +3072,9 @@ fn fold_lowered_value_decl(
 /// classification for a type with no authored `TSType` node): authored member
 /// payloads inside it stay content-free locators lowered on demand through
 /// the one dispatch, never eagerly. The construct signature is honest to the
-/// vocabulary: no parameters, no type parameters, and `return_ty: None` (the
-/// return is the synthesized annotation source, not an authored position).
+/// vocabulary: no parameters, no type parameters, and an ABSENT return source
+/// (the return is the synthesized annotation source, not an authored
+/// position).
 ///
 /// Fingerprinting routes through the SAME shared fold as the group producer:
 /// a transient-less record with a classified annotation carries the honest
@@ -2792,16 +3094,17 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
     fold_lowered_value_decl(
         ValueDeclKind::Class,
         verter_type_expr::facts::ValueTypeAnnotationFact {
+            is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+            expression_source: None,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
             parameters: Arc::from(Vec::new().into_boxed_slice()),
-            return_ty: None,
-            return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+            return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
             // A synthesised default-export constructor has no authored return
             // annotation at all.
             return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
@@ -2863,4 +3166,26 @@ fn collect_augmentation_statement_dependencies(
                 .extend(deps);
         }
     }
+}
+
+/// Fold the parser / language / parse-env identity into a freshly built
+/// function program index's structural per-function hashes. The semantic
+/// walk's `flow_body_stable_hash` covers body content only; this boundary
+/// mix is what makes a parse-env move or a parser/language flip miss
+/// exactly the affected artifact slots without re-walking the body.
+fn fold_flow_body_env_identity(
+    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
+    parse_env_hash: &crate::types::Hash16,
+    source_type: oxc_span::SourceType,
+) -> verter_semantic::analysis::function_program::FunctionProgramIndex {
+    const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
+    index.map_stable_hashes(|stable| {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(SALT);
+        buf.extend_from_slice(stable);
+        buf.extend_from_slice(parse_env_hash);
+        buf.extend_from_slice(&crate::file_artifact_store::CURRENT_PARSER_VERSION.to_le_bytes());
+        buf.extend_from_slice(format!("{source_type:?}").as_bytes());
+        crate::hash::hash_16(&buf)
+    })
 }

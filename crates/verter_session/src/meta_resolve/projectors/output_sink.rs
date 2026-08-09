@@ -40,11 +40,11 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
 use verter_semantic::analysis::type_expand::{ExpandedField, ExpansionExecutionStatus};
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TypeExpr, UnknownValue};
 
 use crate::meta_resolve::exactness::classify_node;
 use crate::project_semantic_dispatch::output_materialization::{
-    wrap_output_type_expr, MaterializedOutputTypeExpr, OutputProjector,
+    wrap_degraded_output, wrap_output_type_expr, MaterializedOutputTypeExpr, OutputProjector,
 };
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -101,7 +101,18 @@ fn raise_node_to_sealed_carrier(
     let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
-        None => wrap_output_type_expr(&cap, TypeExpr::Unknown { raw: String::new() }),
+        None => {
+            if crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).is_none() {
+                // GENUINE absence (no typed payload minted for this id): the
+                // exact `missing_output` — NON-partial.
+                wrap_output_type_expr(&cap, TypeExpr::Unknown(UnknownValue::missing_output()))
+            } else {
+                // PRESENT-BUT-UNRAISABLE (the node minted but a required child
+                // failed): degrade as the typed unmaterialized `Miss` carrier —
+                // PARTIAL at the choke point, never admitted complete.
+                wrap_degraded_output(&cap, crate::semantic_query::QueryError::Miss)
+            }
+        }
     };
     MaterializedOutputTypeExpr::from_parts(Some(node), sealed, dep_signature, false)
 }
@@ -347,7 +358,7 @@ fn member_shape_peek_or_compute(
             // member value's carrier head through the shared carrier resolver
             // (`node_root_identity` -> `resolve_carrier_subject_node`), which rides
             // `ensure_indexed_ready_serve`. The enclosing cacheability scope already covers
-            // it — as it covers the key classification, the peek, the cycle BFS, the shell
+            // it — as it covers the key classification, the peek, the cycle gate, the shell
             // raises, and the cold reduce — so every admission arm below reads ONE verdict
             // off `probe` instead of stitching per-step tracer bits together.
             let (route_is_package_backed, package_backed_fence_opt) =
@@ -386,9 +397,9 @@ fn member_shape_peek_or_compute(
             let gates = super::classify_node_reduction_gates(ctx, member_value);
 
             // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
-            // so the BFS fires lazily on that fact. A recursive parameterised helper stays
+            // so the gate fires lazily on that fact. A recursive parameterised helper stays
             // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
-            // peeks skip the BFS. The BFS resolves carrier heads through the same shared
+            // peeks skip the gate. The gate resolves carrier heads through the same shared
             // resolver; the enclosing cacheability scope observes those serves.
             let cycle_fence: crate::semantic_query::DepSignature = if gates
                 .generic_instantiation_ref
@@ -400,7 +411,7 @@ fn member_shape_peek_or_compute(
                         member_value,
                     );
                 if reaches_cycle {
-                    // Combine both gate fences (package-backed + cycle BFS) so the
+                    // Combine both gate fences (package-backed + cycle gate) so the
                     // admit's `fact_dep_signature` invalidates on edits to any visited
                     // declaration file.
                     let combined_fence =
@@ -704,6 +715,9 @@ pub(crate) fn surface_member_to_expanded_field(
     // public visibility, the derived-kind/cursor match, `descend_published_member`
     // success, and the recorded published-field edge.
     let member: &SurfaceMember = admitted.member();
+    let member_name = member
+        .published_name()
+        .expect("publication authority admits only members with a published name");
     let ctx: &dyn ResolverContext = query_engine.ctx;
     // The publication mode comes from the admitted token's descended member
     // cursor. `Navigate` (carrier) mode means the member's type body is
@@ -765,7 +779,10 @@ pub(crate) fn surface_member_to_expanded_field(
                 .and_then(|node| {
                     crate::meta_resolve::arg_preserving_member_use_site_slot(
                         &dispatch,
-                        member.name.as_ref(),
+                        &member
+                            .key
+                            .cloned_known()
+                            .expect("publication authority admits only known string keys"),
                         member.declaration_origin.as_deref(),
                         node,
                     )
@@ -835,7 +852,10 @@ pub(crate) fn surface_member_to_expanded_field(
                         let structural = structural_member_value_source(
                             &dispatch,
                             member.value,
-                            member.name.as_ref(),
+                            &member
+                                .key
+                                .cloned_known()
+                                .expect("publication authority admits only known string keys"),
                             type_arg_base,
                         );
                         match structural {
@@ -875,7 +895,7 @@ pub(crate) fn surface_member_to_expanded_field(
                 crate::authored_evidence_producer::from_admitted_member(admitted, locator, text)
             });
     ExpandedField::from_source_position(
-        member.name.as_ref().to_string(),
+        member_name.to_string(),
         r#type,
         authored_evidence,
         member.optional,
@@ -1007,7 +1027,8 @@ pub(crate) fn project_model(
     // terminal carrier cursor. `project_model` raises a single payload
     // (no surface walk) so the carrier mode does not gate a per-member
     // breadth loop here — the descend gate IS the load-bearing use.
-    let _member_cursor = cursor.descend_published_member(&model_name)?;
+    let model_key = crate::semantic_query::PropertyKey::identifier(model_name.as_str());
+    let _member_cursor = cursor.descend_published_member(&model_key)?;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
     let (payload_node, presence_outcome, exactness, contains_reducible) = {
@@ -1127,7 +1148,7 @@ pub(crate) fn project_model(
 /// source through THIS function — absence semantics are session-owned and
 /// decided in exactly one place, never re-derived per lane or at the wire.
 fn missing_source_output_type_expr() -> TypeExpr {
-    TypeExpr::Unknown { raw: String::new() }
+    TypeExpr::Unknown(UnknownValue::missing_output())
 }
 
 /// Materialize ONE present output source to its wire `TypeExpr` at this

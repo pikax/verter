@@ -159,7 +159,8 @@ pub enum FunctionSpansOrigin {
     NoStoredSpan,
 )]
 pub enum FunctionParamSelector {
-    /// A positional parameter (`params.items[ordinal]`).
+    /// A positional parameter, in LOWERED order: an authored `this` receiver
+    /// leads the list at ordinal 0 and `params.items` follows.
     Positional { ordinal: u32 },
     /// The rest parameter (`params.rest`).
     Rest,

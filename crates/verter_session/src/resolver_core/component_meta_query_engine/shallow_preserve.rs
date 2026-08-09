@@ -102,7 +102,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return true;
         };
-        let Some(member) = prepared.member_index.get(field_name.as_ref()) else {
+        let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
+        let Some(member) = prepared.member_index.get(&field_key) else {
             return true;
         };
         let param_names: FxHashSet<&str> = prepared
@@ -248,7 +249,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         root_identity.owner,
                         &root_identity.symbol_name,
                     )?;
-                    let member = prepared.member_index.get(member_name.as_ref())?.clone();
+                    let member_key =
+                        verter_type_expr::facts::FactPropertyKey::identifier(member_name.as_ref());
+                    let member = prepared.member_index.get(&member_key)?.clone();
                     let param_names: FxHashSet<&str> = prepared
                         .type_parameters
                         .iter()
@@ -408,11 +411,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .top_level_owner()?;
         let data = crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
-            return surface
-                .members
-                .iter()
-                .find(|member| member.name.as_ref() == field_name.as_ref())
-                .map(|member| crate::semantic_query::HotTypeRef::new(member.value));
+            return match surface.project_string_key(field_name.as_ref()) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                    Some(crate::semantic_query::HotTypeRef::new(member.value))
+                }
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+            };
         }
         let (name, _) = data.bare_ref_head()?;
         if !data.carrier_type_args().is_empty() {
@@ -429,7 +433,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             root_identity.owner,
             &root_identity.symbol_name,
         )?;
-        let member = prepared.member_index.get(field_name.as_ref())?;
+        let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
+        let member = prepared.member_index.get(&field_key)?;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
         dispatch
             .raise_authored_locator_to_hot(
@@ -536,7 +541,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 )
             }),
             SemanticNodeData::Object(surface) => {
-                surface.members.iter().any(|member| {
+                surface.positive_members().iter().any(|member| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
                         scope_owner,
@@ -571,7 +576,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 })
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -590,13 +595,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     depth + 1,
                 )
             }
-            SemanticNodeData::ConstructorType { signature } => self
-                .node_contains_imported_utility_route(
-                    scope_canonical_id,
-                    scope_owner,
-                    *signature,
-                    depth + 1,
-                ),
             SemanticNodeData::Alias(inner) => self.node_contains_imported_utility_route(
                 scope_canonical_id,
                 scope_owner,
@@ -952,7 +950,7 @@ fn node_references_type_param_names(
         SemanticNodeData::KeyOf { base } => recur(*base),
         SemanticNodeData::IndexedAccess { object, index } => {
             recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
         SemanticNodeData::Union(members)
@@ -961,7 +959,7 @@ fn node_references_type_param_names(
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
@@ -969,12 +967,11 @@ fn node_references_type_param_names(
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
         } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
-        SemanticNodeData::ConstructorType { signature } => recur(*signature),
         SemanticNodeData::Conditional {
             check,
             extends,

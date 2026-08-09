@@ -1,7 +1,7 @@
 //! Cross-consumer × fact-kind matrix completeness arch guard.
 //!
 //! This test enforces that every (consumer, fact-kind) cell on the
-//! 10 × 4 cross-consumer matrix has a discriminating slice file under
+//! 9 × 4 cross-consumer matrix has a discriminating slice file under
 //! `crates/verter_session/tests/fact_matrix/`. Adding a new
 //! cache-bearing consumer to the substrate WITHOUT extending the
 //! matrix would let a fact-kind regression land silently for that
@@ -9,8 +9,8 @@
 //!
 //! `REQUIRED_CONSUMERS` is the union of:
 //!
-//! - the 5 caches wired under `fact_matrix/`
-//!   (`materialize_structure`, `ref_cycle`, `memo_entry`,
+//! - the 4 caches wired under `fact_matrix/`
+//!   (`materialize_structure`, `memo_entry`,
 //!   `app_config_proof`, `owner_import_surface`); and
 //! - the 5 caches wired in the top-level
 //!   slices (`compile_tier`, `component_meta`, `fallthrough`,
@@ -69,7 +69,6 @@ use std::path::Path;
 const REQUIRED_CONSUMERS: &[&str] = &[
     // Caches in `fact_matrix/`.
     "materialize_structure",
-    "ref_cycle",
     "memo_entry",
     "app_config_proof",
     "owner_import_surface",
@@ -128,15 +127,19 @@ fn cross_consumer_matrix_completeness() {
 
 #[test]
 fn cross_consumer_matrix_grid_size_matches_expected() {
-    // Negative invariant: the grid is exactly 10 \u{00d7} 4 = 40 cells.
+    // Negative invariant: the grid is exactly 9 \u{00d7} 4 = 36 cells.
     // A regression that silently drops a consumer (e.g. removing
     // `slot_binding_graph` from REQUIRED_CONSUMERS to "make the test
     // pass" when a slice goes missing) would shrink the grid; this
-    // sibling guard catches that.
+    // sibling guard catches that. The grid is 9 — the tenth slot was
+    // the retired `RefCycleResultDb`; its replacement (the
+    // `ClassifyMaterializationCycleGate` family) rides the
+    // `SemanticGraphStore` memo substrate already covered by
+    // `memo_entry`.
     assert_eq!(
         REQUIRED_CONSUMERS.len(),
-        10,
-        "REQUIRED_CONSUMERS must list the 10 cache-bearing \
+        9,
+        "REQUIRED_CONSUMERS must list the 9 cache-bearing \
          consumers. Shrinking the \
          list bypasses the completeness guard."
     );
@@ -151,8 +154,8 @@ fn cross_consumer_matrix_grid_size_matches_expected() {
     );
     let cells = REQUIRED_CONSUMERS.len() * REQUIRED_FACT_KINDS.len();
     assert_eq!(
-        cells, 40,
-        "cross-consumer matrix size must be 10\u{00d7}4 = 40; \
+        cells, 36,
+        "cross-consumer matrix size must be 9\u{00d7}4 = 36; \
          observed {cells}. A regression that drops a consumer OR a \
          LIVE fact-kind reduces the grid below this floor."
     );

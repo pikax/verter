@@ -9,16 +9,35 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+mod work_credit;
+
+use work_credit::ConnectedWorkCredit;
+
+#[cfg(test)]
+std::thread_local! {
+    static MAPPED_AFTER_SOURCE_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn mapped_after_source_visits_for_tests() -> usize {
+    MAPPED_AFTER_SOURCE_VISITS.get()
+}
+
+#[cfg(test)]
+fn record_mapped_after_source_visit_for_tests() {
+    MAPPED_AFTER_SOURCE_VISITS.set(MAPPED_AFTER_SOURCE_VISITS.get() + 1);
+}
+
 use super::carrier::{CarrierArgsContinuation, CarrierResolutionPlan, CarrierResolverContext};
 use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    may_reduce_operator, DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey,
-    MemberMergeRole, NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, QueryResult, ReductionDemand, ResolveDeclKey,
-    ResultCompleteness, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView, TupleElement, TypeParamDecl,
-    ValueRootKey,
+    may_reduce_operator, FunctionParam, IndexKey, IndexSignature, MapperKey, MemberMergeRole,
+    NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ResultCompleteness, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SurfaceMember, SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 #[must_use]
@@ -147,62 +166,6 @@ enum ProjectionChildPlan<'a> {
     },
 }
 
-/// Panic-safe local accounting for one explicit projection worklist. Structural
-/// traversal consumes this local credit and synchronizes it before any nested
-/// semantic query can observe or join the connected demand. Drop commits on
-/// unwind as well.
-struct ConnectedWorkCredit<'dispatch, 'ctx> {
-    dispatch: &'dispatch ProjectSemanticDispatch<'ctx>,
-    window_start: usize,
-    remaining: usize,
-}
-
-impl<'dispatch, 'ctx> ConnectedWorkCredit<'dispatch, 'ctx> {
-    fn new(
-        dispatch: &'dispatch ProjectSemanticDispatch<'ctx>,
-    ) -> Result<Self, crate::semantic_query::PartialReasonSet> {
-        let available = dispatch.connected_work_available()?;
-        Ok(Self {
-            dispatch,
-            window_start: available,
-            remaining: available,
-        })
-    }
-
-    #[inline(always)]
-    fn consume(&mut self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        if self.remaining == 0 {
-            self.settle();
-            return self.dispatch.charge_connected_work();
-        }
-        self.remaining -= 1;
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn settle(&mut self) {
-        self.dispatch
-            .commit_connected_work(self.window_start - self.remaining);
-        self.window_start = 0;
-        self.remaining = 0;
-    }
-
-    fn refresh(&mut self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        debug_assert_eq!(self.window_start, 0);
-        debug_assert_eq!(self.remaining, 0);
-        let available = self.dispatch.connected_work_available()?;
-        self.window_start = available;
-        self.remaining = available;
-        Ok(())
-    }
-}
-
-impl Drop for ConnectedWorkCredit<'_, '_> {
-    fn drop(&mut self) {
-        self.settle();
-    }
-}
-
 impl<'a> ProjectSemanticDispatch<'a> {
     #[inline(always)]
     fn active_decl_recursion_sentinel(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
@@ -214,11 +177,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         )
-        .then(|| {
-            self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&identity.decl_name),
-            })
-        })
+        .then(|| self.recursive_ref_sentinel(identity))
     }
 
     fn plan_reference_projection(
@@ -266,7 +225,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let segments: Arc<[PathSegment]> = Arc::from(
                         path[consumed_rest..]
                             .iter()
-                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .map(|segment| {
+                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                    Arc::clone(segment),
+                                ))
+                            })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
@@ -298,9 +261,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
-                    return ReferenceProjectionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&identity.decl_name),
-                    }));
+                    return ReferenceProjectionPlan::Ready(self.recursive_ref_sentinel(identity));
                 }
                 if matches!(
                     context.mode,
@@ -314,6 +275,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             canonical_id: Arc::clone(&identity.canonical_id),
                             owner: identity.owner,
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                identity.owner,
+                            ),
                         },
                         name: Arc::clone(&identity.decl_name),
                     })) {
@@ -405,6 +369,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 memo.insert((root, root_context), root);
                 return ProjectedViewOutcome::complete(root);
@@ -497,7 +462,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let Some((child, child_context)) =
                             self.projection_child_from_plan(&child_plan, cursor)
                         else {
-                            let synchronize = projection_finish_may_dispatch(data.as_ref());
+                            let synchronize =
+                                projection_finish_may_dispatch(data.as_ref(), context);
                             if synchronize {
                                 work_credit.settle();
                             }
@@ -700,6 +666,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     data,
                     source,
                 } => {
+                    #[cfg(test)]
+                    record_mapped_after_source_visit_for_tests();
                     let SemanticNodeData::Mapped { mapper, .. } = data.as_ref() else {
                         unreachable!("mapped staging frame must carry a mapped node")
                     };
@@ -709,7 +677,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(SemanticNodeData::KeyOf { base }) if *base == source
                     );
                     let key_space = if keyof_sourced {
-                        if may_reduce_operator(context) {
+                        // The exact `keyof infer T` descriptor is open only
+                        // until the enclosing conditional relation fixes T.
+                        // Reducing it during locator-view projection can only
+                        // turn the authored `KeyOf` carrier into `Miss`,
+                        // making the reverse-homomorphic pattern
+                        // unrecognizable. Preserve that exact selected Infer
+                        // operand in every projection mode; concrete sources
+                        // keep the established eager `KeyOf` path.
+                        let selected_base_is_infer = matches!(
+                            self.graph().node_data(source_id).as_deref(),
+                            Some(SemanticNodeData::Infer { .. })
+                        );
+                        if may_reduce_operator(context) && !selected_base_is_infer {
                             work_credit.settle();
                             let result = match self.execute_type_node(SemanticQueryKey::KeyOf {
                                 base: source_id,
@@ -887,6 +867,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 work_credit.consume()?;
                 crate::loop5_instrumentation::watchdog_beat();
@@ -960,6 +941,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
                     work_credit.consume()?;
                     crate::loop5_instrumentation::watchdog_beat();
@@ -1019,7 +1001,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
 
-        let synchronize = projection_finish_may_dispatch(data.as_ref());
+        let synchronize = projection_finish_may_dispatch(data.as_ref(), context);
         if synchronize {
             work_credit.settle();
         }
@@ -1097,6 +1079,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 memo.insert((node, context), node);
                 Ok(false)
@@ -1218,34 +1201,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::TemplateLiteral { expressions, .. } => expressions
                 .get(index)
                 .map(|expression| (*expression, context)),
-            SemanticNodeData::Object(view) => {
-                let mut remaining = index;
-                if let Some(member) = view.members.get(remaining) {
-                    return Some((member.value, context.into_structural_provenance()));
-                }
-                remaining = remaining.saturating_sub(view.members.len());
-                if let Some(signature) = view.call_signatures.get(remaining) {
-                    return Some((*signature, context));
-                }
-                remaining = remaining.saturating_sub(view.call_signatures.len());
-                if let Some(signature) = view.construct_signatures.get(remaining) {
-                    return Some((*signature, context));
-                }
-                remaining = remaining.saturating_sub(view.construct_signatures.len());
-                let index_signature = remaining / 2;
-                if let Some(signature) = view.index_signatures.get(index_signature) {
-                    return Some(if remaining.is_multiple_of(2) {
-                        (signature.key_type, context)
-                    } else {
-                        (signature.value_type, context)
-                    });
-                }
-                remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                view.keyspace
-                    .filter(|_| remaining == 0)
-                    .map(|keyspace| (keyspace, context))
-            }
-            SemanticNodeData::Function {
+            SemanticNodeData::Object(view) => object_projection_child(view, context, index),
+            SemanticNodeData::ObjectSpreadProgram(program) => program
+                .child_nodes()
+                .nth(index)
+                .map(|child| (child, context)),
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -1261,6 +1222,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 remaining -= 1;
                 for parameter in type_parameters.iter() {
+                    if remaining == 0 {
+                        return Some((parameter.param, context));
+                    }
+                    remaining -= 1;
                     if let Some(constraint) = parameter.constraint {
                         if remaining == 0 {
                             return Some((constraint, context));
@@ -1275,9 +1240,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 None
-            }
-            SemanticNodeData::ConstructorType { signature } => {
-                (index == 0).then_some((*signature, context))
             }
             SemanticNodeData::KeyOf { base } => (index == 0).then_some((*base, context)),
             SemanticNodeData::IndexedAccess {
@@ -1294,7 +1256,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 match (index, index_key) {
                     (0, _) => Some((*object, object_context)),
-                    (1, IndexKey::TypeNode(index)) => Some((*index, context)),
+                    (1, IndexKey::Computed(index)) => Some((*index, context)),
                     _ => None,
                 }
             }
@@ -1308,7 +1270,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
@@ -1340,7 +1304,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context: context.into_structural_provenance(),
             },
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -1366,31 +1330,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 children.get(index).map(|child| (*child, *context))
             }
             ProjectionChildPlan::Object { view, context } => {
-                let mut remaining = index;
-                if let Some(member) = view.members.get(remaining) {
-                    return Some((member.value, context.into_structural_provenance()));
-                }
-                remaining = remaining.saturating_sub(view.members.len());
-                if let Some(signature) = view.call_signatures.get(remaining) {
-                    return Some((*signature, *context));
-                }
-                remaining = remaining.saturating_sub(view.call_signatures.len());
-                if let Some(signature) = view.construct_signatures.get(remaining) {
-                    return Some((*signature, *context));
-                }
-                remaining = remaining.saturating_sub(view.construct_signatures.len());
-                let index_signature = remaining / 2;
-                if let Some(signature) = view.index_signatures.get(index_signature) {
-                    return Some(if remaining.is_multiple_of(2) {
-                        (signature.key_type, *context)
-                    } else {
-                        (signature.value_type, *context)
-                    });
-                }
-                remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                view.keyspace
-                    .filter(|_| remaining == 0)
-                    .map(|keyspace| (keyspace, *context))
+                object_projection_child(view, *context, index)
             }
             ProjectionChildPlan::Function {
                 params,
@@ -1408,6 +1348,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 remaining -= 1;
                 for parameter in type_parameters.iter() {
+                    if remaining == 0 {
+                        return Some((parameter.param, *context));
+                    }
+                    remaining -= 1;
                     if let Some(constraint) = parameter.constraint {
                         if remaining == 0 {
                             return Some((constraint, *context));
@@ -1431,7 +1375,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 mod finish;
-fn projection_finish_may_dispatch(data: &SemanticNodeData) -> bool {
+fn projection_finish_may_dispatch(
+    data: &SemanticNodeData,
+    context: ProjectionReductionContext,
+) -> bool {
+    let _ = context;
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
@@ -1448,4 +1396,76 @@ fn projected(
     *memo
         .get(&(node, context))
         .unwrap_or_else(|| panic!("projection child {node:?} was not completed before its parent"))
+}
+
+#[inline(always)]
+fn object_projection_child(
+    view: &SurfaceView,
+    context: ProjectionReductionContext,
+    index: usize,
+) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
+    let member_context = context.into_structural_provenance();
+    let mut remaining = index;
+    for member in view.positive_members() {
+        if let verter_type_expr::AuthoredPropertyKey::Computed(key) = &member.key {
+            if remaining == 0 {
+                return Some((*key, member_context));
+            }
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            return Some((member.value, member_context));
+        }
+        remaining -= 1;
+    }
+    if let Some(signature) = view.call_signatures.get(remaining) {
+        return Some((*signature, context));
+    }
+    remaining = remaining.saturating_sub(view.call_signatures.len());
+    if let Some(signature) = view.construct_signatures.get(remaining) {
+        return Some((*signature, context));
+    }
+    remaining = remaining.saturating_sub(view.construct_signatures.len());
+    let index_signature = remaining / 2;
+    if let Some(signature) = view.index_signatures.get(index_signature) {
+        return Some(if remaining.is_multiple_of(2) {
+            (signature.key_type, context)
+        } else {
+            (signature.value_type, context)
+        });
+    }
+    remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
+    if let Some(keyspace) = view.keyspace {
+        if remaining == 0 {
+            return Some((keyspace, context));
+        }
+    }
+    let _ = remaining;
+    None
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::{mapped_after_source_visits_for_tests, record_mapped_after_source_visit_for_tests};
+
+    #[test]
+    fn mapped_after_source_witness_is_test_thread_local() {
+        let main_before = mapped_after_source_visits_for_tests();
+        std::thread::spawn(|| {
+            let child_before = mapped_after_source_visits_for_tests();
+            record_mapped_after_source_visit_for_tests();
+            assert_eq!(
+                mapped_after_source_visits_for_tests(),
+                child_before + 1,
+                "the executing test thread observes its own production-path witness"
+            );
+        })
+        .join()
+        .expect("witness worker must finish");
+        assert_eq!(
+            mapped_after_source_visits_for_tests(),
+            main_before,
+            "a parallel test thread must not mutate this test's witness"
+        );
+    }
 }

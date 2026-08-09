@@ -11,12 +11,25 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
-# Exposes test-only HostCpuPool internals (per-pool identity token TLS,
+# Exposes this crate's test-only instrumentation to cross-crate test code:
+# the HostCpuPool internals (per-pool identity token TLS,
 # `HostCpuPool::pool_id`, `HostCpuPool::build_count`, the
-# `host_cpu_pool_token` re-export) to cross-crate test code. Production
-# binaries MUST NOT enable this feature; downstream crates that need it
-# for their own tests should add `features = ["test-support"]` only in
-# `[dev-dependencies]`.
+# `host_cpu_pool_token` re-export) and the `Scheduler::test_*` hooks
+# (dispatch pause, batch-admit seam, per-admit epoch trace, analysis-snapshot
+# clear) together with the fields and firing sites they need.
+#
+# This feature — never a build profile — is the sole declared availability
+# contract for those items. A `cfg(debug_assertions)` gate would be a
+# profile accident: the predicate is evaluated per compilation unit, so a
+# dependent crate compiling its own tests under a profile with debug
+# assertions off would see the items vanish from this crate while its test
+# code still referenced them, and the same gate silently changes what is
+# compiled between a dependent's debug and release builds.
+#
+# Production binaries MUST NOT enable this feature; downstream crates that
+# need it for their own tests add `features = ["test-support"]` only in
+# `[dev-dependencies]`, which Cargo unifies into their test/bench/example
+# targets and not into a production build.
 test-support = []
 
 [dependencies]

@@ -141,8 +141,12 @@ fn hash_index_key<H: std::hash::Hasher>(key: &crate::semantic_query::IndexKey, h
             1u8.hash(h);
             value.hash(h);
         }
-        IndexKey::TypeNode(id) => {
+        IndexKey::UniqueSymbol(identity) => {
             2u8.hash(h);
+            identity.hash(h);
+        }
+        IndexKey::Computed(id) => {
+            3u8.hash(h);
             id.0.hash(h);
         }
     }
@@ -164,9 +168,9 @@ fn hash_origin_meta(meta: &OriginMeta) -> u64 {
             1u8.hash(&mut h);
             b.hash(&mut h);
         }
-        OriginMeta::ProjectedMember { name, provenance } => {
+        OriginMeta::ProjectedMember { key, provenance } => {
             2u8.hash(&mut h);
-            name.as_ref().hash(&mut h);
+            key.hash(&mut h);
             (*provenance as u8).hash(&mut h);
         }
         OriginMeta::AliasName(name) => {
@@ -324,7 +328,7 @@ impl KeyFamily {
                 path.iter()
                     .zip(hops.iter())
                     .all(|(seg, expected)| match seg {
-                        PathSegment::Member(member) => member.as_ref() == *expected,
+                        PathSegment::Member(member) => member.as_string() == Some(*expected),
                         PathSegment::Index(_) => false,
                     })
             }

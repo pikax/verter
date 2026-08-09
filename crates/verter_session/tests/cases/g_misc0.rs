@@ -56,6 +56,8 @@ mod env_hash_isolation;
 mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
+#[path = "g_misc0/flow_return_audit_tls_propagation.rs"]
+mod flow_return_audit_tls_propagation;
 #[path = "g_misc0/framework_adapter_guards.rs"]
 mod framework_adapter_guards;
 #[path = "g_misc0/framework_carrier_compiler_guards.rs"]
@@ -94,6 +96,8 @@ mod mcp_audit_e2e;
 mod mcp_audit_tls_propagation;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
+#[path = "g_misc0/no_depth_sentinel_on_flow_return_path.rs"]
+pub(crate) mod no_depth_sentinel_on_flow_return_path;
 #[path = "g_misc0/no_legacy_compile_many_upsert_fanout.rs"]
 mod no_legacy_compile_many_upsert_fanout;
 #[path = "g_misc0/no_legacy_walker.rs"]

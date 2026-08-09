@@ -43,9 +43,11 @@
 //! | `ShapeCacheDb`             | `component_meta_caches.rs`      |
 //! | `MaterializeStructureDb`   | `component_meta_caches.rs`      |
 //!
-//! `RefCycleResultDb` (`component_meta_caches.rs`) is intentionally NOT
-//! enrolled — it caches booleans / cycle identities only and carries no
-//! analyzer-published typed fields.
+//! The retired `RefCycleResultDb` was intentionally NOT enrolled — it
+//! cached booleans / cycle identities only and carried no
+//! analyzer-published typed fields. Its replacement (the
+//! `ClassifyMaterializationCycleGate` semantic-query family) lives in
+//! the semantic memo, which is likewise outside this cluster.
 
 /// Workspace-wide cache-cluster schema version.
 ///
@@ -84,7 +86,15 @@
 /// - `8` — authored-only import targets. Version `7` shallow artifacts may
 ///   retain a resolved canonical beside the authored source specifier, creating
 ///   a second import-resolution authority; version `8` removes that field.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 8;
+/// - `9` — canonical ordered object-spread programs replace cached eager/open
+///   surface materializations. Version `8` entries cannot distinguish ordered
+///   direct effects, correlated alternatives, or raw residual operands.
+/// - `10` — indexed call-site / program-expression records on the function
+///   program index, the `expression_source` value-annotation fact, and the
+///   per-parameter `<const T>` fact. Version `9` entries lack these fact
+///   shapes and must fail closed rather than serve a call surface without
+///   its expression identity.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 10;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

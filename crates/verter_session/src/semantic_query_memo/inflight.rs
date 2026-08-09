@@ -95,6 +95,16 @@ pub(super) struct InflightState {
     /// warm gate suppresses the outer result. `false` for the abort/retry
     /// path. Distinct from [`Self::cache_suppress`] (memo admission only).
     pub(super) result_is_partial: bool,
+    /// The winner build's partial CLASSES — see
+    /// [`crate::semantic_query::CacheRead::partial_reasons`]. Published
+    /// alongside [`Self::result_is_partial`] and returned verbatim to a
+    /// joiner, so a rendezvous does not launder a named class into the
+    /// anonymous bridge on the follower's side.
+    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// The generation-qualified execution owner that claimed this flight.
+    /// Joiners register a temporary wait-for edge to this owner before
+    /// parking, allowing cross-thread cycles to escape through ReturnOnly.
+    pub(super) owner: Option<super::wait_cycle::ExecutionOwner>,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,
@@ -172,9 +182,14 @@ impl Drop for RecursionStackGuard {
 /// callers start a new build.
 pub(super) struct InflightPanicGuard<'a> {
     inflight: Arc<InflightEntry>,
-    inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+    registration: InflightRegistration<'a>,
     key: PreparedKeyHandle,
     finished: bool,
+}
+
+enum InflightRegistration<'a> {
+    Joining(&'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>),
+    Independent(&'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>),
 }
 
 impl<'a> InflightPanicGuard<'a> {
@@ -185,7 +200,20 @@ impl<'a> InflightPanicGuard<'a> {
     ) -> Self {
         Self {
             inflight,
-            inflight_table,
+            registration: InflightRegistration::Joining(inflight_table),
+            key,
+            finished: false,
+        }
+    }
+
+    pub(super) fn new_independent(
+        inflight: Arc<InflightEntry>,
+        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>,
+        key: PreparedKeyHandle,
+    ) -> Self {
+        Self {
+            inflight,
+            registration: InflightRegistration::Independent(inflight_table),
             key,
             finished: false,
         }
@@ -222,12 +250,25 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         // a joiner cannot have forked off THIS build — but the guard
         // stays `ptr_eq`-correct for defence in depth and parity with
         // the normal-return step-7 retire.)
-        let mut table = self.inflight_table.lock();
-        if table
-            .get(&self.key)
-            .is_some_and(|entry| Arc::ptr_eq(entry, &self.inflight))
-        {
-            table.remove(&self.key);
+        match &self.registration {
+            InflightRegistration::Joining(table) => {
+                let mut table = table.lock();
+                if table
+                    .get(&self.key)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &self.inflight))
+                {
+                    table.remove(&self.key);
+                }
+            }
+            InflightRegistration::Independent(table) => {
+                let mut table = table.lock();
+                if let Some(entries) = table.get_mut(&self.key) {
+                    entries.retain(|entry| !Arc::ptr_eq(entry, &self.inflight));
+                    if entries.is_empty() {
+                        table.remove(&self.key);
+                    }
+                }
+            }
         }
     }
 }

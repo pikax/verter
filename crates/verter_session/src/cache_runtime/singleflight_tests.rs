@@ -1532,7 +1532,7 @@ fn return_only_reason_propagates_only_transitive_hazards() {
 /// during publication.
 ///
 /// This is the exact shape of the two budgeted unified consumers
-/// (`MaterializeStructureDb` / `RefCycleResultDb`): their `post_publish`
+/// (`MaterializeStructureDb`): their `post_publish`
 /// runs `register_post_publish` → `evict_budget_victim` →
 /// `entries.remove_if(victim)` on the SAME `DashMap` the entry was just
 /// published into. If the publish holds the map's shard WRITE guard across

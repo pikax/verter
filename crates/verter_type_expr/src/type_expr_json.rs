@@ -295,12 +295,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             )))
         }
         "unknown" => {
-            let raw = v.get("raw")?.as_str()?.to_string();
-            Some(TypeExpr::Unknown { raw })
+            let raw = v.get("raw")?.as_str()?;
+            Some(TypeExpr::Unknown(UnknownValue::wire_opaque(raw)))
         }
-        _ => Some(TypeExpr::Unknown {
-            raw: kind.to_string(),
-        }),
+        _ => Some(TypeExpr::Unknown(UnknownValue::wire_opaque(kind))),
     }
 }
 
@@ -324,17 +322,73 @@ fn member_visibility_from_json(v: &serde_json::Value) -> MemberVisibility {
     }
 }
 
+/// The wire string for a member's excess-property origin (serialized only for
+/// non-`NonLiteral` values; absence parses back as `NonLiteral`).
+fn excess_origin_wire_str(origin: ExcessPropertyOrigin) -> &'static str {
+    match origin {
+        ExcessPropertyOrigin::FreshOwn => "freshOwn",
+        ExcessPropertyOrigin::SpreadTainted => "spreadTainted",
+        ExcessPropertyOrigin::NonLiteral => "nonLiteral",
+    }
+}
+
+fn excess_origin_from_json(v: &serde_json::Value) -> ExcessPropertyOrigin {
+    match v.get("excessOrigin").and_then(|o| o.as_str()) {
+        Some("freshOwn") => ExcessPropertyOrigin::FreshOwn,
+        Some("spreadTainted") => ExcessPropertyOrigin::SpreadTainted,
+        _ => ExcessPropertyOrigin::NonLiteral,
+    }
+}
+
+fn authored_property_key_from_json(v: &serde_json::Value) -> Option<TypeAuthoredPropertyKey> {
+    match v.get("kind")?.as_str()? {
+        "string" => Some(AuthoredPropertyKey::String(Arc::from(
+            v.get("value")?.as_str()?,
+        ))),
+        "number" => Some(AuthoredPropertyKey::Number(
+            CanonicalIndexInt::from_canonical_i64(v.get("value")?.as_i64()?)?,
+        )),
+        "uniqueSymbol" => Some(AuthoredPropertyKey::UniqueSymbol(
+            serde_json::from_value(v.get("identity")?.clone()).ok()?,
+        )),
+        "computed" => Some(AuthoredPropertyKey::Computed(type_expr_from_json(
+            v.get("expression")?,
+        )?)),
+        _ => None,
+    }
+}
+
+fn authored_property_key_to_json(key: &TypeAuthoredPropertyKey) -> serde_json::Value {
+    match key {
+        AuthoredPropertyKey::String(value) => {
+            serde_json::json!({ "kind": "string", "value": value })
+        }
+        AuthoredPropertyKey::Number(value) => {
+            serde_json::json!({ "kind": "number", "value": value.get() })
+        }
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            serde_json::json!({ "kind": "uniqueSymbol", "identity": identity })
+        }
+        AuthoredPropertyKey::Computed(expression) => {
+            serde_json::json!({ "kind": "computed", "expression": expression.to_json_value() })
+        }
+    }
+}
+
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
-        "property" => Some(ObjectMember::Property(ObjectProperty::with_visibility(
-            v.get("name")?.as_str()?.to_string(),
-            type_expr_from_json(v.get("ty")?)?,
-            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-            v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
-            member_visibility_from_json(v),
-            MemberSpans::default(),
-        ))),
+        "property" => Some(ObjectMember::Property(
+            ObjectProperty::with_key_visibility(
+                authored_property_key_from_json(v.get("key")?)?,
+                type_expr_from_json(v.get("ty")?)?,
+                v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+                v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
+                member_visibility_from_json(v),
+                MemberSpans::default(),
+            )
+            .with_excess_origin(excess_origin_from_json(v)),
+        )),
         "indexSignature" => Some(ObjectMember::IndexSignature(IndexSignature::synthetic(
             v.get("keyName")?.as_str()?.to_string(),
             type_expr_from_json(v.get("keyType")?)?,
@@ -347,12 +401,18 @@ fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
         "constructSignature" => Some(ObjectMember::ConstructSignature(json_to_function_expr(
             v.get("function")?,
         )?)),
-        "method" => Some(ObjectMember::Method(MethodSignature::with_visibility(
-            v.get("name")?.as_str()?.to_string(),
-            json_to_function_expr(v.get("function")?)?,
-            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-            member_visibility_from_json(v),
-            MemberSpans::default(),
+        "method" => Some(ObjectMember::Method(
+            MethodSignature::with_key_visibility(
+                authored_property_key_from_json(v.get("key")?)?,
+                json_to_function_expr(v.get("function")?)?,
+                v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+                member_visibility_from_json(v),
+                MemberSpans::default(),
+            )
+            .with_excess_origin(excess_origin_from_json(v)),
+        )),
+        "spread" => Some(ObjectMember::Spread(SpreadMember::new(
+            type_expr_from_json(v.get("ty")?)?,
         ))),
         _ => None,
     }
@@ -424,6 +484,10 @@ fn json_to_type_param(v: &serde_json::Value) -> Option<TypeParam> {
                 }
             })
             .map(Arc::new),
+        is_const: v
+            .get("isConst")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -494,7 +558,7 @@ impl TypeExpr {
                     ObjectMember::Property(p) => {
                         let mut member = json!({
                             "memberKind": "property",
-                            "name": p.name,
+                            "key": authored_property_key_to_json(&p.key),
                             "ty": p.ty.to_json_value(),
                             "optional": p.optional,
                             "readonly": p.readonly
@@ -505,6 +569,12 @@ impl TypeExpr {
                         // marker-only-for-non-public hash scheme.
                         if !p.visibility.is_public() {
                             member["visibility"] = json!(p.visibility.as_wire_str());
+                        }
+                        // Serialize `excessOrigin` ONLY when non-NonLiteral so
+                        // pre-freshness JSON is byte-unchanged and a missing
+                        // field parses back as `NonLiteral`.
+                        if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                            member["excessOrigin"] = json!(excess_origin_wire_str(p.excess_origin));
                         }
                         member
                     }
@@ -526,15 +596,22 @@ impl TypeExpr {
                     ObjectMember::Method(m) => {
                         let mut member = json!({
                             "memberKind": "method",
-                            "name": m.name,
+                            "key": authored_property_key_to_json(&m.key),
                             "function": Self::function_to_json(&m.function),
                             "optional": m.optional
                         });
                         if !m.visibility.is_public() {
                             member["visibility"] = json!(m.visibility.as_wire_str());
                         }
+                        if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                            member["excessOrigin"] = json!(excess_origin_wire_str(m.excess_origin));
+                        }
                         member
                     }
+                    ObjectMember::Spread(s) => json!({
+                        "memberKind": "spread",
+                        "ty": s.ty.to_json_value()
+                    }),
                 }).collect::<Vec<_>>()
             }),
             Self::Function(func) => {
@@ -659,7 +736,7 @@ impl TypeExpr {
                 "bindingName": key.binding_name.as_ref(),
                 "valueNode": key.value_node.to_string(),
             }),
-            Self::Unknown { raw } => json!({ "kind": "unknown", "raw": raw }),
+            Self::Unknown(value) => json!({ "kind": "unknown", "raw": value.raw() }),
         }
     }
 
@@ -692,6 +769,9 @@ impl TypeExpr {
         }
         if let Some(ref default) = param.default {
             obj["default"] = default.to_json_value();
+        }
+        if param.is_const {
+            obj["isConst"] = serde_json::Value::Bool(true);
         }
         obj
     }

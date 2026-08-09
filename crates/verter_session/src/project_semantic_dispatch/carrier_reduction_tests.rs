@@ -77,6 +77,9 @@ fn typeof_carrier_node(
             canonical_id: Arc::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     };
@@ -101,7 +104,8 @@ fn function_shape(
     let graph = dispatch.graph();
     let data = graph.node_data(node)?;
     match data.as_ref() {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..
@@ -217,7 +221,12 @@ fn walk_typeof_carrier_applies_instantiation_args() {
     let resolved = crate::project_semantic_dispatch::walk::probe_walk_typeof_resolved(
         &dispatch,
         carrier,
-        Arc::from(vec![PathSegment::Member(Arc::from("__probe__"))].into_boxed_slice()),
+        Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("__probe__"),
+            )]
+            .into_boxed_slice(),
+        ),
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     )
     .expect("the PathWalker's TypeOf arm must fire for a carrier reached mid-walk");
@@ -280,6 +289,9 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
             canonical_id: Arc::from("/holder.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("C"),
     };
@@ -296,7 +308,12 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
         crate::project_semantic_dispatch::walk::probe_walk_typeof_internal_path_mode(
             &dispatch,
             carrier,
-            Arc::from(vec![PathSegment::Member(Arc::from("__probe__"))].into_boxed_slice()),
+            Arc::from(
+                vec![PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier("__probe__"),
+                )]
+                .into_boxed_slice(),
+            ),
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         )
         .expect("the PathWalker's TypeOf arm must fire and project a non-empty internal path");
@@ -485,6 +502,9 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
             canonical_id: Arc::from("/one.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("g"),
     };

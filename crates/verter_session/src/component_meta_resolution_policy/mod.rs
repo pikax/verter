@@ -459,9 +459,9 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
                 // function-shaped, not role-bearing composition.
                 worklist.extend(
                     surface
-                        .members
+                        .positive_members()
                         .iter()
-                        .filter(|member| !member.is_method)
+                        .filter(|member| member.method_kind.is_none())
                         .map(|member| member.value),
                 );
             }
@@ -470,7 +470,11 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
             // harvested. `IndexKey` deliberately unused.
             SemanticNodeData::IndexedAccess {
                 object: _,
-                index: IndexKey::String(_) | IndexKey::Number(_) | IndexKey::TypeNode(_),
+                index:
+                    IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)
+                    | IndexKey::Computed(_),
             } => {}
             // STOP — no other construct surfaces role-bearing composition
             // references (function parameter/return types, mapped /

@@ -291,7 +291,10 @@ mod tests {
         // return slot.
         let sig = sym.signatures.first().expect("construct signature fact");
         assert!(sig.parameters.is_empty());
-        assert!(sig.return_ty.is_none());
+        assert!(matches!(
+            sig.return_source,
+            verter_type_expr::facts::FunctionReturnSource::Absent
+        ));
     }
 
     #[test]

@@ -57,7 +57,7 @@
 //! The skeleton folds header SHAPE only — it never inspects declaration
 //! bodies (no member value types, no lowered clauses).
 
-use verter_semantic::analysis::decl_headers::{MemberHeader, MemberHeaderKind};
+use verter_semantic::analysis::decl_headers::MemberHeader;
 use verter_semantic::analysis::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -117,9 +117,14 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         }
         // Emit member skeleton: name + header SHAPE (kind, optional,
         // readonly). Member VALUE types are body data, lowered on demand
-        // — NOT folded here. Sorted by name so source order is cosmetic.
+        // — NOT folded here. Sorted by the encoded key so source order is
+        // cosmetic for distinct keys; the sort is STABLE, so duplicate
+        // properties and getter/setter pairs retain their authored
+        // relative order within one key.
         let mut members: Vec<&MemberHeader> = header.member_headers.iter().collect();
-        members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        members.sort_by_cached_key(|member| {
+            serde_json::to_vec(&member.key).expect("authored property keys are serializable")
+        });
         for m in members {
             write_member_header(&mut buf, m);
         }
@@ -143,10 +148,13 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         // Object-literal / class-static member headers: name + header
         // SHAPE (kind, optional, readonly). The old hash folded NOTHING
         // about value members, so an object-member add/remove/rename or
-        // header-flag change was invisible. Sorted by name (source order
-        // cosmetic).
+        // header-flag change was invisible. Sorted by the encoded key
+        // (source order cosmetic for distinct keys); STABLE, so duplicates
+        // and accessor pairs are not collapsed.
         let mut members: Vec<&MemberHeader> = header.object_member_headers.iter().collect();
-        members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        members.sort_by_cached_key(|member| {
+            serde_json::to_vec(&member.key).expect("authored property keys are serializable")
+        });
         for m in members {
             write_member_header(&mut buf, m);
         }
@@ -296,11 +304,16 @@ fn write_owner(buf: &mut Vec<u8>, owner: verter_type_expr::TopLevelOwnerId) {
 /// flags. Member VALUE types are body data and are NOT folded.
 fn write_member_header(buf: &mut Vec<u8>, member: &MemberHeader) {
     buf.extend_from_slice(b"m:");
-    buf.extend_from_slice(member.name.as_bytes());
+    let encoded_key =
+        serde_json::to_vec(&member.key).expect("authored property keys are serializable");
+    buf.extend_from_slice(&(encoded_key.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&encoded_key);
     buf.push(SEP);
-    buf.push(match member.kind {
-        MemberHeaderKind::Property => b'p',
-        MemberHeaderKind::Method => b'm',
+    buf.push(match member.method_kind {
+        None => b'p',
+        Some(verter_type_expr::ObjectMethodKind::Method) => b'm',
+        Some(verter_type_expr::ObjectMethodKind::Get) => b'g',
+        Some(verter_type_expr::ObjectMethodKind::Set) => b's',
     });
     buf.push(u8::from(member.optional));
     buf.push(u8::from(member.readonly));

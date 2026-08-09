@@ -101,6 +101,7 @@ pub(crate) fn node_contains_reducible_operator(
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
         // An import-type raises to `TypeExpr::ImportType` — the unconditional-true
         // arm of the `TypeExpr` predicate.
         | SemanticNodeData::ImportType(_) => true,
@@ -130,7 +131,7 @@ pub(crate) fn node_contains_reducible_operator(
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
@@ -138,12 +139,11 @@ pub(crate) fn node_contains_reducible_operator(
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
         } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
-        SemanticNodeData::ConstructorType { signature } => recur(*signature),
         SemanticNodeData::TemplateLiteral { expressions, .. } => {
             expressions.iter().any(|&e| recur(e))
         }

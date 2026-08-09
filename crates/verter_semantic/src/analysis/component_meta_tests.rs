@@ -3928,6 +3928,7 @@ fn root_reachability_dynamic_component_static_is_is_not_thrown_away() {
             constness: crate::analysis::template::PropValueConstness::Dynamic,
             referenced_bindings: vec!["showNative".to_string(), "Child".to_string()],
             expression: Some("showNative ? 'div' : Child".to_string()),
+            expression_locator: None,
             from_spread: false,
             span: verter_span::Span::default(),
             name_span: verter_span::Span::default(),

@@ -599,6 +599,8 @@ fn finish_materialize_admission(
                 cache_suppress: true,
                 result_is_partial: crate::request_context::current_cold_compute_completeness()
                     .is_partial(),
+                partial_reasons: crate::request_context::current_cold_compute_completeness()
+                    .reasons(),
             },
             reason: crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
         };
@@ -624,6 +626,8 @@ fn finish_materialize_admission(
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: true,
+                partial_reasons: crate::request_context::current_cold_compute_completeness()
+                    .reasons(),
             },
             reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
         };
@@ -667,6 +671,8 @@ fn finish_materialize_admission(
                     cache_suppress: true,
                     result_is_partial: crate::request_context::current_cold_compute_completeness()
                         .is_partial(),
+                    partial_reasons: crate::request_context::current_cold_compute_completeness()
+                        .reasons(),
                 },
                 reason,
             }
@@ -1003,6 +1009,7 @@ pub(crate) fn materialize_component_meta_structure(
             // Same-key re-entry is a structurally-incomplete (recursive)
             // partial — gate it out of the MaterializeStructure warm cache.
             result_is_partial: true,
+            partial_reasons: crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
         };
     }
 
@@ -1015,6 +1022,7 @@ pub(crate) fn materialize_component_meta_structure(
             cache_suppress: false,
             // Depth-fuse abort yields a degraded (tainted) partial.
             result_is_partial: true,
+            partial_reasons: crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
         };
     }
 
@@ -1040,6 +1048,7 @@ pub(crate) fn materialize_component_meta_structure(
             cache_suppress: false,
             // Valid complete passthrough (package-ref / function skip).
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
     }
 
@@ -1053,7 +1062,7 @@ pub(crate) fn materialize_component_meta_structure(
         if let Some(data) = graph.node_data(key.base) {
             if matches!(
                 data.as_ref(),
-                crate::semantic_query::SemanticNodeData::Function { .. }
+                crate::semantic_query::SemanticNodeData::Signature { .. }
             ) {
                 crate::host_manage::emit_policy_skip(
                     key.base,
@@ -1067,6 +1076,7 @@ pub(crate) fn materialize_component_meta_structure(
                     cache_suppress: false,
                     // Valid complete passthrough (function-shape skip).
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 };
             }
         }
@@ -1183,11 +1193,19 @@ pub(crate) fn materialize_component_meta_structure(
             crate::meta_resolve::extract_route_root_identity_node(graph, key_for_compute.base, 0)
         {
             // Cycle guard on the actual root (Foo / Foo<T>'s base),
-            // not the wrapping Pick. See R8-2.
-            if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
-                &extraction.root_identity,
-                ctx,
+            // not the wrapping Pick. See R8-2. The sealed
+            // materialization cycle gate is the sole authority; the
+            // guard branches on the carried verdict (both outcome arms).
+            let cycle_gate_read =
+                dispatch.classify_materialization_cycle_gate(&extraction.root_identity);
+            crate::request_context::observe_component_meta_read_suppress(&cycle_gate_read);
+            crate::component_meta_audit::merge_dep_signature_into_local_fence(
                 &mut local_fence,
+                &cycle_gate_read.dep_signature,
+            );
+            if matches!(
+                cycle_gate_read.value.verdict(),
+                crate::semantic_query::MaterializationCycleGateVerdict::Stop
             ) {
                 crate::host_manage::emit_policy_skip(
                     key_for_compute.base,
@@ -1261,7 +1279,16 @@ pub(crate) fn materialize_component_meta_structure(
                     // body_id + keys in caller's mode. Caller's
                     // mode (typically Expanded) drives the final
                     // projection's expansion behavior.
-                    let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys.as_slice());
+                    let Some(keys_node) =
+                        crate::meta_resolve::build_keys_union_node(graph, keys.as_slice())
+                    else {
+                        return finish_materialize_admission(
+                            MaterializeOutcome::Value(key_for_compute.base),
+                            local_fence,
+                            base_origin_self_root.as_ref(),
+                            validated_at_generation,
+                        );
+                    };
                     let pick_or_omit_name = match &extraction.route {
                         RouteDemand::Pick(_) => "Pick",
                         RouteDemand::Omit(_) => "Omit",
@@ -1325,10 +1352,18 @@ pub(crate) fn materialize_component_meta_structure(
                 _ => None,
             };
         if let Some(identity) = recursive_helper_identity {
-            if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
-                &identity,
-                ctx,
+            // The sealed materialization cycle gate is the sole
+            // authority; the guard branches on the carried verdict
+            // (both outcome arms).
+            let cycle_gate_read = dispatch.classify_materialization_cycle_gate(&identity);
+            crate::request_context::observe_component_meta_read_suppress(&cycle_gate_read);
+            crate::component_meta_audit::merge_dep_signature_into_local_fence(
                 &mut local_fence,
+                &cycle_gate_read.dep_signature,
+            );
+            if matches!(
+                cycle_gate_read.value.verdict(),
+                crate::semantic_query::MaterializationCycleGateVerdict::Stop
             ) {
                 crate::host_manage::emit_policy_skip(
                     key_for_compute.base,
@@ -1536,6 +1571,7 @@ pub(crate) fn materialize_component_meta_structure(
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: true,
                         result_is_partial: false,
+                        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     }
                 }
             }
@@ -1623,6 +1659,9 @@ where
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: true,
                         result_is_partial,
+                        partial_reasons: crate::request_context::current_cold_compute_completeness(
+                        )
+                        .reasons(),
                     },
                     reason,
                 }
@@ -1653,6 +1692,9 @@ where
                             walker_diagnostics: Arc::from([]),
                             cache_suppress: true,
                             result_is_partial: true,
+                            partial_reasons:
+                                crate::request_context::current_cold_compute_completeness()
+                                    .reasons(),
                         },
                         reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
                     }
@@ -1770,6 +1812,9 @@ where
                             // overflowed stays true so it never warms.
                             cache_suppress: true,
                             result_is_partial,
+                            partial_reasons:
+                                crate::request_context::current_cold_compute_completeness()
+                                    .reasons(),
                         },
                         reason,
                     }
@@ -1810,6 +1855,7 @@ fn run_uncached_materialisation(
             walker_diagnostics: Arc::from([]),
             cache_suppress: true,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         },
         ComputeAdmission::ReturnOnly { value: read, .. } => read,
         ComputeAdmission::Failed => crate::semantic_query::CacheRead {
@@ -1818,6 +1864,7 @@ fn run_uncached_materialisation(
             walker_diagnostics: Arc::from([]),
             cache_suppress: true,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         },
     }
 }
@@ -1847,6 +1894,7 @@ fn self_root_conflict_return_only(
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: false,
+        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
     }
 }
 
@@ -1892,24 +1940,27 @@ fn materialize_object_surface(
     surface: &crate::semantic_query::SurfaceView,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
-    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember};
     let graph = ctx.project_type_store().semantic_graph();
 
-    let mut new_members = Vec::with_capacity(surface.members.len());
+    let mut new_members = Vec::with_capacity(surface.positive_members().len());
     let mut any_changed = false;
-    for member in surface.members.iter() {
+    for member in surface.positive_members().iter() {
         let (sub_id, changed) = materialize_child_at_nested(ctx, key, member.value, local_fence);
         any_changed |= changed;
         new_members.push(SurfaceMember {
-            name: Arc::clone(&member.name),
+            key: member.key.clone(),
             value: sub_id,
             optional: member.optional,
             readonly: member.readonly,
-            is_method: member.is_method,
+            method_kind: member.method_kind,
+            has_implementation_body: member.has_implementation_body,
             // Materialisation preserves member structure — only the value is
-            // materialised; the member's declared accessibility is carried
-            // through unchanged from the upstream `SurfaceMember`.
+            // materialised; the member's declared accessibility and
+            // excess-property provenance are carried through unchanged from
+            // the upstream `SurfaceMember`.
             visibility: member.visibility,
+            excess_origin: member.excess_origin,
             // Materialisation preserves member structure — only the
             // value is materialised, the structural fact (the member's
             // OXC spans and its declaration file) is carried through
@@ -1958,7 +2009,6 @@ fn materialize_object_surface(
         }
         None => None,
     };
-
     if !any_changed {
         return MaterializeOutcome::Value(key.base);
     }
@@ -1995,7 +2045,11 @@ fn materialize_object_surface(
             }
         })
         .collect();
-    let new_surface = SurfaceView::from_entries(entries, new_keyspace, surface.has_index_signature);
+    let new_surface = crate::semantic_query::SurfaceView::from_entries(
+        entries,
+        new_keyspace,
+        surface.has_known_index_signature(),
+    );
     let new_id = graph.intern_preserving_scope(key.base, SemanticNodeData::Object(new_surface));
     MaterializeOutcome::Value(new_id)
 }
@@ -2285,6 +2339,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         let outcome = convert_dispatch_result(read, dummy_node(7), &mut fence);
         match outcome {
@@ -2307,6 +2362,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Value(id) => assert_eq!(id, dummy_node(42)),
@@ -2323,6 +2379,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Error(QueryError::Miss) => {}
@@ -2377,6 +2434,9 @@ mod tests {
                 canonical_id: Arc::from("/x.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("Foo"),
         };
@@ -2384,16 +2444,11 @@ mod tests {
     }
 
     // =====================================================================
-    // 7 RED-first tests for the legacy-parity cycle BFS
-    // (`ref_root_reaches_transitive_cycle_node`). All tests drive through
+    // Materialiser + cycle-gate consumer tests. All tests drive through
     // a real `MetaProject` so the dispatch path matches production usage.
-    //
-    // Predicates remain `#[allow(dead_code)]`; downstream wiring pulls them into
-    // the materialiser registry-route + recursive-helper guards.
     // =====================================================================
 
     use crate::meta::MetaProject;
-    use crate::meta_resolve::{ref_root_reaches_transitive_cycle_node, with_visited_counter};
     use crate::semantic_query::DeclIdentity;
     use crate::types::HostConfig;
     use crate::VerterHost;
@@ -2429,211 +2484,6 @@ mod tests {
     fn a0_ms_cache_key(host: &VerterHost, key: &MaterializeRuntimeKey) -> MaterializationCacheKey {
         derive_materialization_subject(host, key)
             .expect("decl-rooted base canonicalises to a MaterializationCacheKey subject")
-    }
-
-    /// Productive object recursion: `type Tree = { children: Tree[] }`.
-    /// The body is plain Object (not complex) and the self-ref is bare
-    /// (no type args), so legacy parity says NO cycle. This is the
-    /// productive-recursion shape — keeping false here lets recursive
-    /// data structures expand normally.
-    #[test]
-    fn cycle_bfs_returns_false_on_productive_object_recursion() {
-        let project = a0_make_project();
-        project
-            .upsert_base("/types.ts", "export type Tree = { children: Tree[] }")
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "Tree");
-        let mut fence = Vec::new();
-        assert!(
-            !ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
-            "Productive Object self-recursion (Tree -> Tree[]) must NOT trigger \
-             — body is plain Object and self-ref is bare; legacy parity"
-        );
-    }
-
-    /// JSONValue legacy parity: `string | { [k: string]: JSONValue } | JSONValue[]`.
-    /// The body's union has non-Object arms (Primitive(String), Array of
-    /// JSONValue) — this triggers `has_complex_cycle_guard_surface_node`,
-    /// so the path carries complex_signal. Dispatch publishes the
-    /// recursive `JSONValue` back-edge as `Opaque(RecursiveRef)`, which
-    /// the BFS detects via `body_contains_recursive_ref_to_name`.
-    #[test]
-    fn cycle_bfs_returns_true_on_jsonvalue_recursion_via_complex_union() {
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                "export type JSONValue = string | { [k: string]: JSONValue } | JSONValue[]",
-            )
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "JSONValue");
-        let mut fence = Vec::new();
-        assert!(
-            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
-            "JSONValue's complex union (Primitive String + Array) triggers \
-             complex_signal; self-rediscovery must return true (legacy parity)"
-        );
-    }
-
-    /// Generic-helper self-cycle with type args: `GetItemKeys<T>` aliases
-    /// to `DotPathKeys<T>` which Conditional-recurses through
-    /// `GetItemKeys<T>` again. Both bodies have generic refs (type args)
-    /// AND complex shapes (Conditional), so the cycle fires.
-    #[test]
-    fn cycle_bfs_returns_true_on_generic_helper_self_cycle_with_type_args() {
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/u.ts",
-                r#"
-export type GetItemKeys<T> = DotPathKeys<T>
-export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/u.ts", "GetItemKeys");
-        let mut fence = Vec::new();
-        assert!(
-            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
-            "GetItemKeys<T> -> DotPathKeys<T> -> GetItemKeys<T> with type args must \
-             return true via complex_signal composition"
-        );
-    }
-
-    /// Intermediate-complex-hop carry: a path through a complex
-    /// intermediate body must carry complex_signal forward so the
-    /// eventual self-rediscovery fires even if other hops are plain.
-    /// Here `A` body is plain Object referencing `B`, but `B` is a
-    /// keyof-of-`A` (a complex shape per legacy parity), and `B` goes
-    /// back to `A`. The keyof on `B` is the complex hop that composes
-    /// the signal; the BFS sees `A → B → A` and reports cyclic.
-    #[test]
-    fn cycle_bfs_carries_complex_signal_through_intermediate_object_hop() {
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                r#"
-export type A = { kids: B }
-export type B = keyof A
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
-        let mut fence = Vec::new();
-        assert!(
-            ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence),
-            "A -> B (KeyOf) -> A must trigger: B's body is complex (KeyOf), \
-             carrying the complex_signal through the intermediate hop \
-             until A is rediscovered"
-        );
-    }
-
-    /// Diamond path first-visit-wins: when the same decl is reachable
-    /// via multiple paths, the BFS visits it only once. The visited
-    /// counter must be bounded by the number of distinct decls in the
-    /// diamond.
-    #[test]
-    fn cycle_bfs_diamond_path_first_visit_wins() {
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                r#"
-export type Root = { left: A, right: B }
-export type A = X
-export type B = X
-export type X = number
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id_root = a0_make_decl_identity(host, "/types.ts", "Root");
-        let mut fence = Vec::new();
-        let (visited_count, _) = with_visited_counter(|| {
-            ref_root_reaches_transitive_cycle_node(&id_root, host, &mut fence)
-        });
-        // Distinct decls reachable: Root, A, B, X. First-visit-wins
-        // bounds the BFS at 4 visits — diamond convergence dedupes.
-        assert!(
-            visited_count <= 5,
-            "first-visit-wins must bound visited count for the diamond Root/A/B/X; got {visited_count}"
-        );
-    }
-
-    /// Long non-cyclic chain through Object hops: each body is a plain
-    /// Object (not complex per legacy parity), and each ref is bare
-    /// (no type args). The BFS exhausts the hop budget without
-    /// accumulating any complex signal, so it must return false even
-    /// when the chain is longer than `MAX_HOPS`.
-    #[test]
-    fn cycle_bfs_returns_false_on_long_non_cyclic_chain() {
-        let mut fixture = String::new();
-        for i in 0..200 {
-            fixture.push_str(&format!("export type A_{i} = {{ x: A_{} }}\n", i + 1));
-        }
-        fixture.push_str("export type A_200 = { x: string }\n");
-        let project = a0_make_project();
-        project.upsert_base("/chain.ts", &fixture).unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/chain.ts", "A_0");
-        let mut fence = Vec::new();
-        let (count, result) =
-            with_visited_counter(|| ref_root_reaches_transitive_cycle_node(&id, host, &mut fence));
-        assert!(
-            !result,
-            "non-cyclic chain through Object hops must return false even when \
-             length exceeds the hop budget — bodies are plain Object, refs are \
-             bare; no complex signal accumulates"
-        );
-        assert!(
-            count <= 64,
-            "visited count must not exceed MAX_HOPS=64 (got {count})"
-        );
-    }
-
-    /// Recursive-helper guard fires for
-    /// plain DeclRef shapes whose body cycles via a complex helper.
-    /// The materialiser must keep the input symbolic and (when an
-    /// audit accumulator is installed) emit a
-    /// `MaterializeStructurePolicySkip { reason: RecursiveHelperCycleGuard }`
-    /// event. This test exercises the guard path through the full
-    /// materialiser entry — no audit accumulator is installed, so we
-    /// assert the BFS-side observable: the predicate returns true on
-    /// the recursive-helper fixture (matching A0's discrimination).
-    /// A separate audit test exercises the event emission once an
-    /// audit harness is wired downstream.
-    #[test]
-    fn recursive_helper_cycle_guard_predicate_fires_on_dot_path_keys_helper() {
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/u.ts",
-                r#"
-export type DotPathKeys<T> = T extends object
-  ? { [K in keyof T & string]: K | `${K}.${DotPathKeys<NonNullable<T[K]>>}` }[keyof T & string]
-  : never
-export type GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
-        let mut fence = Vec::new();
-        // The recursive-helper guard predicate is the same one the
-        // registry materialiser calls (ref_root_reaches_transitive_cycle_node).
-        // Asserting it returns true on this fixture verifies the
-        // gate would fire when reached through the materialiser
-        // entry.
-        assert!(
-            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
-            "DotPathKeys's complex Mapped/Conditional/IndexedAccess body \
-             must trigger the recursive-helper cycle guard predicate"
-        );
     }
 
     /// Registry-route extraction recurses into
@@ -2695,35 +2545,6 @@ export type Recur = { kids: Recur[] | null }
         // through the registry materialiser branch in production.
     }
 
-    /// Long cyclic chain via Object hops: A_0 -> A_1 -> ... -> A_199
-    /// -> A_0 (200-decl ring). Each body is an Object referencing the
-    /// next via a bare DeclRef. The hop budget caps the BFS at 64
-    /// visits before it can rediscover A_0 by traversing the full
-    /// 200-decl ring; without complex_signal accumulation, the BFS
-    /// exhausts hops and returns false (legacy parity hop-cap
-    /// fallback).
-    #[test]
-    fn cycle_bfs_terminates_at_64_hops_on_long_cyclic_chain() {
-        let mut fixture = String::new();
-        for i in 0..200 {
-            fixture.push_str(&format!(
-                "export type A_{i} = {{ x: A_{} }}\n",
-                (i + 1) % 200
-            ));
-        }
-        let project = a0_make_project();
-        project.upsert_base("/chain.ts", &fixture).unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/chain.ts", "A_0");
-        let mut fence = Vec::new();
-        let (count, _) =
-            with_visited_counter(|| ref_root_reaches_transitive_cycle_node(&id, host, &mut fence));
-        assert!(
-            count <= 64,
-            "BFS must terminate at MAX_HOPS=64 on a cyclic chain longer than the budget; got {count}"
-        );
-    }
-
     // =================================================================
     // Skeleton-mode instantiation tests.
     //
@@ -2751,14 +2572,14 @@ export type Recur = { kids: Recur[] | null }
     /// `T` (no default) → body lowering walks `prepared.body` with no env
     /// binding → T-refs resolve as `Opaque(Miss)` → outer `IsPlainObject<Opaque>`
     /// Conditional collapses to False/never → True branch with recursive ref
-    /// is never lowered → `collect_ref_identities_node` finds zero children.
+    /// is never lowered → the cycle-gate ref collector finds zero children.
     ///
     /// **Current behavior** (Skeleton + args=[]):
     /// `build_instantiate`'s param-binding loop synthesizes `TypeParam`
     /// shells for unbound params → body lowering produces TypeParam graph
     /// nodes for T-refs → relation engine treats TypeParam as deferred →
     /// preserves both Conditional branches → recursive ref visible to
-    /// `collect_ref_identities_node`.
+    /// the cycle-gate producer's ref collector.
     #[test]
     fn instantiate_skeleton_mode_synthesizes_typeparam_for_unbound_args() {
         use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
@@ -2780,7 +2601,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
 
         // Skeleton mode + args=[] preserves T as a TypeParam shell so the
         // Conditional doesn't collapse → recursive GetItemKeys ref is
-        // visible to collect_ref_identities_node.
+        // visible to the cycle-gate ref collector.
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 dotpathkeys_id.to_type_slot_unscoped(),
@@ -2799,11 +2620,12 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
             other => panic!("Skeleton should return Value; got {other:?}"),
         };
         let mut child_refs_skeleton = Vec::new();
-        crate::meta_resolve::collect_ref_identities_node(
+        let mut scan_reasons = Vec::new();
+        crate::project_semantic_dispatch::cycle_gate::cycle_gate_collect_ref_identities_for_test(
             host.project_type_store().semantic_graph(),
             body_skeleton,
             &mut child_refs_skeleton,
-            0,
+            &mut scan_reasons,
         );
         assert!(
             !child_refs_skeleton.is_empty(),
@@ -2897,128 +2719,14 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         );
     }
 
-    /// Canonical nuxt-ui `DotPathKeys` shape exercising the
-    /// conditional-collapse path. Mirrors the workspace fixture at
-    /// `meta_tests.rs:11136`.
-    ///
-    /// Discriminating: lowering `DotPathKeys`'s body via an `Instantiate`
-    /// in `ProjectionMode::Skeleton` keeps unbound type parameters as
-    /// `TypeParam` shells, so the outer Conditional's branches survive and
-    /// the recursive `DotPathKeys` ref is visible to
-    /// `collect_ref_identities_node` (`child_refs.len() > 0` at the
-    /// `DotPathKeys` hop). A `Navigate`-mode lowering collapses the
-    /// Conditional to `never` and produces 0 child refs at that hop, so
-    /// the assertion discriminates Skeleton-mode lowering from
-    /// Navigate-mode lowering.
-    ///
-    /// The test also drives the BFS with the
-    /// `with_bfs_child_refs_observer_for_test` instrumentation installed to
-    /// confirm the observer plumbing records child-ref counts per visited
-    /// identity.
-    #[test]
-    fn cycle_bfs_returns_true_on_canonical_nuxt_ui_dotpathkeys_shape_with_discriminating_assertion()
-    {
-        use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/u.ts",
-                r#"
-type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
-  ? true
-  : false
-type IsPlainObject<T> = IsPrimitive<T> extends true
-  ? false
-  : T extends readonly any[] | ((...args: any[]) => any)
-    ? false
-    : T extends object ? true : false
-type DotPathKeys<T> = IsPlainObject<T> extends true
-  ? {
-      [K in keyof T & string]:
-      IsPlainObject<NonNullable<T[K]>> extends true
-        ? K | `${K}.${DotPathKeys<NonNullable<T[K]>>}`
-        : K
-    }[keyof T & string]
-  : never
-export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
-export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
-    (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let dispatch = ProjectSemanticDispatch::new(host);
-
-        // Lower DotPathKeys directly via Skeleton mode and assert the
-        // recursive DotPathKeys ref is visible to collect_ref_identities_node.
-        // This is the discriminating mechanical proof that Skeleton-mode
-        // lowering preserves the Conditional branches.
-        let dotpathkeys_id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
-        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                dotpathkeys_id.to_type_slot_unscoped(),
-                StdArc::from(Vec::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Skeleton,
-                    ),
-                    Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
-                ),
-            ),
-        ));
-        let body_skeleton = match skeleton_read.value {
-            QueryResult::Value(id) => id,
-            other => panic!("Skeleton should return Value; got {other:?}"),
-        };
-        let mut child_refs = Vec::new();
-        crate::meta_resolve::collect_ref_identities_node(
-            host.project_type_store().semantic_graph(),
-            body_skeleton,
-            &mut child_refs,
-            0,
-        );
-        assert!(
-            !child_refs.is_empty(),
-            "BFS at DotPathKeys hop must observe ≥1 child ref via Skeleton mode. \
-             Navigate mode produces 0 (conditional collapse). \
-             Skeleton mode produces ≥1 (TypeParam shells \
-             preserve Conditional branches → recursive DotPathKeys ref visible)."
-        );
-        let names: Vec<&str> = child_refs
-            .iter()
-            .map(|(id, _)| id.decl_name.as_ref())
-            .collect();
-        assert!(
-            names.contains(&"DotPathKeys"),
-            "Skeleton-mode lowering of DotPathKeys's body must expose the \
-             recursive DotPathKeys ref (via InstantiationRef carrier in the \
-             True branch of the outer Conditional); got {names:?}"
-        );
-
-        // Helper instrumentation: verify the
-        // `with_bfs_child_refs_observer_for_test` plumbing observes BFS
-        // hops. Run BFS with the observer installed; the helper records
-        // child_refs.len() per visited identity name. The observer
-        // returning Some(_) for any identity proves the instrumentation
-        // is wired correctly.
-        let id = a0_make_decl_identity(host, "/u.ts", "GetItemKeys");
-        let mut fence = Vec::new();
-        let _ = crate::meta_resolve::with_bfs_child_refs_observer_for_test("GetItemKeys", || {
-            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence)
-        });
-    }
-
     // =================================================================
-    // 5 tests covering:
+    // 4 tests covering:
     //   1. DeclRef materialisation dispatches Instantiate (not ResolveDecl)
-    //   2. Cycle gate visited-set short-circuits
-    //   3. Cycle BFS dispatches through execute_read for each decl
-    //   4. Materialize publish-after-invalidation revalidates + skips
-    //   5. Materialize orphan entry caught on next peek
+    //   2. Materialize publish-after-invalidation revalidates + skips
+    //   3. Materialize orphan entry caught on next peek
+    //   4. Warm materialize consumer misses after a gate-helper edit
     //
-    // Tests 4+5 verify the orphan-skip behavior in
+    // Tests 2+3 verify the orphan-skip behavior in
     // MaterializeStructureDb::peek: a stale candidate fails strict
     // self-root validation and is skipped on read (it stays resident for
     // other views; reclamation is the FIFO budget / per-canonical drain).
@@ -3070,74 +2778,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         );
     }
 
-    /// #2 — cycle BFS visited-set short-circuits.
-    /// Visiting the same DeclIdentity twice would inflate visited
-    /// count beyond the BFS's 2-decl bound for a 2-cycle.
-    #[test]
-    fn cycle_gate_visits_visited_set_short_circuits() {
-        use crate::meta_resolve::with_visited_counter;
-
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                r#"
-export type A = B
-export type B = A
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
-        let mut fence = Vec::new();
-        let (visited_count, _) = with_visited_counter(|| {
-            ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence)
-        });
-        assert!(
-            visited_count <= 4,
-            "BFS visited count must be bounded by visited-set short-circuit; got {visited_count}"
-        );
-    }
-
-    /// #3 — cycle BFS dispatches Instantiate per visited decl.
-    /// For the 3-cycle A -> B -> C -> A, the BFS should issue at least
-    /// 3 Instantiate dispatches (one per visited identity).
-    #[test]
-    fn cycle_gate_bfs_dispatches_through_execute_read_for_each_decl() {
-        use crate::project_semantic_dispatch::raise::{
-            enable_dispatch_trace_for_test, DISPATCH_TRACE,
-        };
-
-        let project = a0_make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                r#"
-export type A<T> = B<T>
-export type B<T> = C<T>
-export type C<T> = A<T>
-"#,
-            )
-            .unwrap();
-        let host = project.host();
-        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
-        let mut fence = Vec::new();
-        let _trace_guard = enable_dispatch_trace_for_test();
-        let result = ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence);
-        assert!(
-            result,
-            "A<T> -> B<T> -> C<T> -> A<T> is a cycle with type args"
-        );
-        let trace = DISPATCH_TRACE.with(|t| t.borrow().clone());
-        let instantiate_count = trace.iter().filter(|s| ***s == *"Instantiate").count();
-        assert!(
-            instantiate_count >= 3,
-            "BFS must dispatch Instantiate for A, B, C (≥ 3 dispatches); got \
-             {instantiate_count} (trace={trace:?})"
-        );
-    }
-
-    /// #4 — orphan entry (stale dep_signature) is caught
+    /// #2 — publish-after-invalidation: a stale candidate is caught
     /// on the next `peek` and skipped on read (it stays resident for other
     /// views; reclamation is the FIFO budget / per-canonical drain). This
     /// exercises the strict self-root validation path in
@@ -3254,376 +2895,94 @@ export type C<T> = A<T>
         );
     }
 
-    // =====================================================================
-    // R — RefCycleResultDb cache integration tests.
-    //
-    // 7 tests covering: warm-fast-path skips dispatch; per-canonical
-    // invalidation decrements live_counter; dep_signature captures
-    // every visited canonical; cooperative-admission collapses
-    // concurrent BFS computes onto ONE winner; project-generation bump
-    // invalidates; saturating-subtract preserves shared counter on
-    // invalidate_all.
-    // =====================================================================
-
-    use crate::meta_resolve::{bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test};
-    use crate::project_semantic_dispatch::raise::{enable_dispatch_trace_for_test, DISPATCH_TRACE};
-
-    /// Test 1 — a warm `RefCycleResultDb` hit skips `Instantiate`
-    /// dispatch and the BFS body.
-    ///
-    /// Cold call publishes the cache entry. The second call within the
-    /// same `content_generation` is a warm `peek` hit: the entry's
-    /// carrier strict-validates, so `peek` returns the cached bool
-    /// WITHOUT running `bfs_compute_inner` or dispatching any
-    /// `Instantiate` query. Discriminating: pre-cache every call
-    /// re-walks the BFS and dispatches; with the cache the second
-    /// call's dispatch trace is empty and its BFS compute count is 0.
+    /// #4 — warm consumer after a gate-helper edit: the registry-route
+    /// cycle guard reads the sealed materialization cycle gate and
+    /// merges the family's dep signature into the materialise fence, so
+    /// a content edit to a VISITED helper rejects the published
+    /// materialise entry — no stale outer hit. Mutation recipe: a
+    /// consumer that drops the gate read's `dep_signature` (instead of
+    /// merging it into `local_fence`) keeps serving the stale entry and
+    /// fails the post-edit `peek().is_none()` assertion.
     #[test]
-    fn cycle_bfs_cache_hit_avoids_dispatch_on_warm_hit() {
+    fn cycle_gate_warm_materialize_consumer_misses_after_helper_edit() {
+        use crate::semantic_query::ProjectionMode;
+
         let project = a0_make_project();
         project
             .upsert_base(
-                "/types.ts",
-                "export type GetKeys<T> = T extends object ? GetKeys<T> : never;",
+                "/helper.ts",
+                "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
             )
             .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "GetKeys");
-
-        // Cold call — exercises the BFS body once.
-        reset_bfs_compute_counter_for_test();
-        let _trace = enable_dispatch_trace_for_test();
-        let mut fence1 = Vec::new();
-        let result1 = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence1);
-        let dispatches_first =
-            DISPATCH_TRACE.with(|t| t.borrow().iter().filter(|s| **s == "Instantiate").count());
-        let computes_first = bfs_compute_counter_for_test();
-        assert!(
-            dispatches_first >= 1,
-            "cold path must dispatch at least one Instantiate query"
-        );
-        assert_eq!(
-            computes_first, 1,
-            "cold path must run bfs_compute_inner exactly once"
-        );
-
-        // Warm call — a validating `peek` hit skips dispatch entirely.
-        DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
-        reset_bfs_compute_counter_for_test();
-        let mut fence2 = Vec::new();
-        let result2 = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence2);
-        let dispatches_second =
-            DISPATCH_TRACE.with(|t| t.borrow().iter().filter(|s| **s == "Instantiate").count());
-        let computes_second = bfs_compute_counter_for_test();
-
-        assert_eq!(
-            result1, result2,
-            "cached result must equal cold-path result"
-        );
-        assert_eq!(
-            dispatches_second, 0,
-            "a warm `peek` hit must skip Instantiate dispatch"
-        );
-        assert_eq!(
-            computes_second, 0,
-            "a warm `peek` hit must not run bfs_compute_inner"
-        );
-    }
-
-    /// Test 2 — `invalidate_for_canonical` drains the
-    /// reverse-index AND decrements `live_counter`.
-    ///
-    /// Discriminating: a cold call publishes 1 entry (live=1);
-    /// invalidating "/types.ts" via the reverse-index drains it (live=0).
-    /// Without the reverse-index decrement the counter would stay at 1.
-    #[test]
-    fn cycle_bfs_cache_invalidates_on_canonical_change() {
-        let project = a0_make_project();
-        project
-            .upsert_base("/types.ts", "export type Foo = { x: number };")
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "Foo");
-        let mut fence = Vec::new();
-        let _ = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence);
-
-        let db = host.project_type_store().ref_cycle_db();
-        let live_before = db.live_counter_for_test();
-        assert!(
-            live_before >= 1,
-            "cold path published at least 1 entry (live_counter = {live_before})"
-        );
-
-        // Invalidate /types.ts via the reverse-index.
-        db.invalidate_for_canonical("/types.ts");
-
-        let live_after = db.live_counter_for_test();
-        assert_eq!(
-            live_after,
-            live_before - 1,
-            "invalidate_for_canonical must decrement live_counter exactly once per drained entry"
-        );
-    }
-
-    /// Test 3 — `dep_signature` captures every canonical the
-    /// BFS visits, so per-canonical invalidation reaches every cached
-    /// entry that depends on the changed file.
-    ///
-    /// Discriminating: with a transitive helper chain (A → B), the
-    /// BFS visits both. The cached entry's dep_signature must include
-    /// both canonicals so an edit to either invalidates the cache
-    /// entry.
-    #[test]
-    fn cycle_bfs_cache_dep_signature_includes_all_visited_canonicals() {
-        let project = a0_make_project();
         project
             .upsert_base(
-                "/a.ts",
-                "import type { B } from './b'; export type A<T> = B<T>;",
+                "/props.ts",
+                "import type { Helper } from './helper';\nexport type Props = Helper<number>;\n",
             )
             .unwrap();
-        project
-            .upsert_base("/b.ts", "export type B<T> = T;")
-            .unwrap();
         let host = project.host();
-        let id_a = a0_make_decl_identity(host, "/a.ts", "A");
+        assert!(host.ensure_indexed_ready("/helper.ts").is_some());
+        assert!(host.ensure_indexed_ready("/props.ts").is_some());
 
-        let mut fence = Vec::new();
-        let _ = ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence);
-
-        let canonicals: rustc_hash::FxHashSet<&str> =
-            fence.iter().map(|(c, _)| c.as_ref()).collect();
+        let dispatch = ProjectSemanticDispatch::new(host);
+        // `Pick<Props, 'wrapped'>` — a builtin registry route whose
+        // actual root is `Props`; the route guard classifies `Props`
+        // through the sealed cycle gate (Stop — `Helper<T>` recurses
+        // through a complex helper surface) and keeps the shape
+        // symbolic.
+        let pick_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/props.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Pick"),
+                    type_arguments: StdArc::from(
+                        vec![
+                            verter_type_expr::TypeExpr::Ref {
+                                name: StdArc::from("Props"),
+                                type_arguments: StdArc::from(Vec::new()),
+                            },
+                            verter_type_expr::TypeExpr::Literal(
+                                verter_type_expr::LiteralValue::String("wrapped".to_string()),
+                            ),
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Pick<Props, 'wrapped'> must succeed");
+        let key = MaterializeRuntimeKey {
+            scope_canonical_id: StdArc::from("/props.ts"),
+            base: pick_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let outcome = materialize_component_meta_structure(host, key.clone());
         assert!(
-            canonicals.contains("/a.ts"),
-            "fence must capture /a.ts (the BFS root canonical); fence canonicals = {canonicals:?}"
+            matches!(outcome.value, MaterializeOutcome::Value(_)),
+            "the cycle guard keeps the Pick route symbolic (Value), got {outcome:?}"
         );
-        // A's body references B<T>, so the BFS visits B too — its
-        // canonical must appear in the dep_signature.
+        let db = host.project_type_store().materialize_structure_db();
         assert!(
-            canonicals.contains("/b.ts"),
-            "fence must capture /b.ts (visited via the A → B helper hop); fence canonicals = {canonicals:?}"
+            db.peek(&a0_ms_cache_key(host, &key), host).is_some(),
+            "fixture: the symbolic materialise entry published"
         );
-    }
 
-    /// Test 4 — `invalidate_all` saturating-subtracts the
-    /// DB's contribution to the shared `component_meta_cache_live`
-    /// counter, preserving sibling DBs' contributions.
-    ///
-    /// Discriminating: a `store(0, Relaxed)` would zero the shared
-    /// counter on any `invalidate_all`, corrupting every other DB's live
-    /// entry count. The saturating-subtract removes only this DB's
-    /// contribution.
-    #[test]
-    fn ref_cycle_result_db_live_counter_saturating_subtracts_on_invalidate_all() {
-        let project = a0_make_project();
+        // Edit ONLY the visited helper. The gate read's dep signature
+        // covers the helper, so the outer entry's carrier must reject.
         project
-            .upsert_base("/a.ts", "export type A = { x: number };")
+            .upsert_base(
+                "/helper.ts",
+                "export type Helper<T> = { wrapped: T; sibling: string; next: Helper<T> };\n",
+            )
             .unwrap();
-        project
-            .upsert_base("/b.ts", "export type B = { y: number };")
-            .unwrap();
-        let host = project.host();
-        let id_a = a0_make_decl_identity(host, "/a.ts", "A");
-        let id_b = a0_make_decl_identity(host, "/b.ts", "B");
+        assert!(host.ensure_indexed_ready("/helper.ts").is_some());
 
-        let mut fence = Vec::new();
-        let _ = ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence);
-        let _ = ref_root_reaches_transitive_cycle_node(&id_b, host, &mut fence);
-
-        let db = host.project_type_store().ref_cycle_db();
-        let live_before = db.live_counter_for_test();
-        let shared_before = host
-            .project_type_store()
-            .counters
-            .component_meta_cache_live
-            .load(std::sync::atomic::Ordering::Relaxed);
         assert!(
-            live_before >= 2,
-            "two cold publishes should leave at least 2 entries; live_counter = {live_before}"
-        );
-
-        db.invalidate_all();
-
-        let shared_after = host
-            .project_type_store()
-            .counters
-            .component_meta_cache_live
-            .load(std::sync::atomic::Ordering::Relaxed);
-        // R8-5 invariant: shared counter MUST drop by at most this DB's
-        // contribution (live_before), NOT be zeroed (which would
-        // corrupt sibling DBs' contributions). The exact drop depends
-        // on whether the shared counter holds OTHER DBs' contributions
-        // at this point — at minimum, the drop equals live_before.
-        assert!(
-            shared_before >= shared_after,
-            "shared counter must not increase on invalidate_all"
-        );
-        assert_eq!(
-            shared_before - shared_after,
-            live_before,
-            "invalidate_all must subtract exactly this DB's contribution \
-             (live_before = {live_before}), preserving sibling DBs' contributions; \
-             actual drop = {}",
-            shared_before - shared_after,
-        );
-    }
-
-    /// Test 5 — the authority-reset evict wipes the cycle-BFS cache.
-    ///
-    /// `bump_project_generation_and_evict` is the wide AUTHORITY-RESET
-    /// cascade reserved for content-authority swaps (`set_workspace`,
-    /// `close`); a project-config change (`configure_projects`) is
-    /// stamp-only — retained entries miss by validation instead. The
-    /// cycle-BFS cache must be among the layers the wide evict wipes —
-    /// entries depend on routes / intrinsics that do not survive an
-    /// authority swap.
-    #[test]
-    fn cycle_bfs_cache_invalidates_on_project_generation_bump() {
-        let project = a0_make_project();
-        project
-            .upsert_base("/types.ts", "export type Foo = { x: number };")
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "Foo");
-
-        let mut fence = Vec::new();
-        let _ = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence);
-
-        let db = host.project_type_store().ref_cycle_db();
-        let live_before = db.live_counter_for_test();
-        assert!(
-            live_before >= 1,
-            "cold path published at least 1 entry (live_counter = {live_before})"
-        );
-
-        host.project_type_store()
-            .bump_project_generation_and_evict();
-
-        let live_after = db.live_counter_for_test();
-        assert_eq!(
-            live_after, 0,
-            "ref_cycle_db must be wired into bump_project_generation_and_evict — \
-             live_counter must drop to 0"
-        );
-    }
-
-    /// Test 6 — a second `RefCycleResultDb` read within the same
-    /// `content_generation` is served from the warm cache without
-    /// re-running the BFS body. Every `peek` strict-validates the
-    /// entry's carrier; on a passing validation the cached bool is
-    /// returned and `bfs_compute_inner` does not run.
-    ///
-    /// Discriminating relative to a "publish/recompute on every call"
-    /// bug: the second call's BFS compute count is 0.
-    #[test]
-    fn cycle_bfs_cache_second_read_skips_recompute_within_generation() {
-        let project = a0_make_project();
-        project
-            .upsert_base("/types.ts", "export type Foo = { x: number };")
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "Foo");
-
-        // Cold call publishes entry at gen=G0.
-        let mut fence1 = Vec::new();
-        let result1 = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence1);
-
-        let db = host.project_type_store().ref_cycle_db();
-        let live_after_cold = db.live_counter_for_test();
-        assert!(
-            live_after_cold >= 1,
-            "cold publish must put 1 entry in the cache"
-        );
-
-        // A second call within the SAME generation must not re-publish.
-        // Discriminating relative to a "publish-on-every-call" bug.
-        reset_bfs_compute_counter_for_test();
-        let mut fence2 = Vec::new();
-        let result2 = ref_root_reaches_transitive_cycle_node(&id, host, &mut fence2);
-        assert_eq!(
-            result1, result2,
-            "second call within same generation must return same result"
-        );
-        assert_eq!(
-            bfs_compute_counter_for_test(),
-            0,
-            "second call within same generation must not re-run bfs_compute_inner",
-        );
-    }
-
-    /// Test 7 — `peek` skips a stale candidate on read and leaves the
-    /// shared live_counter untouched: the candidate stays resident for
-    /// other views, so the counter still tracks it. Reclamation (and the
-    /// matching decrement) happens later through the FIFO budget /
-    /// per-canonical drain, never on the read path.
-    #[test]
-    fn ref_cycle_result_db_peek_skips_stale_candidate_without_touching_live_counter() {
-        let project = a0_make_project();
-        project
-            .upsert_base("/types.ts", "export type Foo = { x: number };")
-            .unwrap();
-        let host = project.host();
-        let id = a0_make_decl_identity(host, "/types.ts", "Foo");
-
-        // Insert a synthetic entry whose fact carrier is stale: it
-        // carries a self-root `FileWholeHash` for `/nonexistent.ts`, a
-        // canonical the host's `FileArtifactStore` does not track. The
-        // strict `validate_with_self_roots` rejects an untracked
-        // self-root; peek skips the candidate on read (it stays resident).
-        let stale_carrier =
-            crate::fact_signature_helpers::ReadSetSignature::new(std::sync::Arc::from(
-                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/nonexistent.ts".to_string(),
-                    hash: [7u8; 16],
-                }]
-                .into_boxed_slice(),
-            ));
-        let db = host.project_type_store().ref_cycle_db();
-        db.insert_for_test(
-            &id,
-            host,
-            false,
-            stale_carrier,
-            // `/nonexistent.ts` listed as a self-root so the strict
-            // validator routes its `FileWholeHash` through
-            // `validates_self_root_whole_hash`, which rejects an untracked
-            // self-root canonical.
-            std::sync::Arc::from(vec![std::sync::Arc::<str>::from("/nonexistent.ts")]),
-            // Current project generation — this candidate's staleness is
-            // exercised through the carrier rail, not the generation gate,
-            // so it must match the live generation here.
-            host.project_type_store().current_project_generation(),
-        );
-        let live_before = db.live_counter_for_test();
-        assert_eq!(live_before, 1, "synthetic insert should leave live=1");
-
-        // Peek must return None — every peek validates the carrier
-        // strictly, and the self-root `FileWholeHash` for the untracked
-        // `/nonexistent.ts` fails `validates_self_root_whole_hash`. The
-        // store SKIPS the stale candidate on read (it keeps it for other
-        // views; routine reclamation is the FIFO budget + per-canonical
-        // drain), so peek misses WITHOUT reaping.
-        let peek_result = db.peek(&id, host);
-        assert!(
-            peek_result.is_none(),
-            "a candidate whose strict self-root fails must miss on peek (never served stale)"
-        );
-        assert_eq!(
-            db.live_counter_for_test(),
-            1,
-            "the store does not reap a stale candidate on peek — it stays \
-             for other views and for budget / per-canonical reclamation",
-        );
-
-        // The stale candidate is reclaimed by per-canonical invalidation
-        // of the canonical its carrier references — and that decrements
-        // the live counter exactly once.
-        db.invalidate_for_canonical("/nonexistent.ts");
-        assert_eq!(
-            db.live_counter_for_test(),
-            0,
-            "per-canonical invalidation reclaims the stale candidate and \
-             decrements the live counter exactly once",
+            db.peek(&a0_ms_cache_key(host, &key), host).is_none(),
+            "a warm materialise entry whose cycle-gate read covered the edited \
+             helper must miss — the family dep signature bubbled into the \
+             materialise fence (no stale outer hit)"
         );
     }
 
@@ -4307,46 +3666,6 @@ export type C<T> = A<T>
         assert!(
             db.peek(&cache_key, host).is_none(),
             "STALE-GENERATION READ: `MaterializeStructureDb::peek` served a \
-             candidate whose `validated_at_generation` is superseded — a \
-             `ProjectGeneration` reset bumps no file content, so the \
-             carrier check alone cannot detect it. `peek` must reject a \
-             candidate whose generation stamp no longer matches.",
-        );
-    }
-
-    /// `RefCycleResultDb::peek` rejects a candidate whose
-    /// `validated_at_generation` no longer equals the live project
-    /// generation. Mirror of the `MaterializeStructureDb` test.
-    #[test]
-    fn ref_cycle_peek_rejects_entry_from_superseded_generation() {
-        use crate::component_meta_caches::ref_cycle_db_peek;
-
-        let project = a0_make_project();
-        let host = project.host();
-        let db = host.project_type_store().ref_cycle_db();
-
-        let id = a0_make_decl_identity(host, "/gen_peek_cycle.ts", "Helper");
-        let gen0 = host.project_type_store().current_project_generation();
-        db.insert_for_test(
-            &id,
-            host,
-            true,
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
-            StdArc::from(Vec::<StdArc<str>>::new()),
-            gen0,
-        );
-
-        assert!(
-            ref_cycle_db_peek(db, &id, host).is_some(),
-            "a candidate with a valid carrier and a matching project \
-             generation must warm-hit",
-        );
-
-        host.project_type_store().bump_project_generation();
-
-        assert!(
-            ref_cycle_db_peek(db, &id, host).is_none(),
-            "STALE-GENERATION READ: `RefCycleResultDb::peek` served a \
              candidate whose `validated_at_generation` is superseded — a \
              `ProjectGeneration` reset bumps no file content, so the \
              carrier check alone cannot detect it. `peek` must reject a \

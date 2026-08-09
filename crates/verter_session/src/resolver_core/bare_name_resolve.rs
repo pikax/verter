@@ -606,8 +606,6 @@ export const defaults = { label: 'ok' }
             TypeParamBinding {
                 name: Arc::from("T"),
                 ordinal: 0,
-                constraint: None,
-                default: None,
             },
         );
         let bundle = Arc::new(build_prepared_decl_bundle(

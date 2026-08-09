@@ -205,7 +205,7 @@ fn fixture_key_source_lookup(file: &MockFile, name: &str) -> KeySourceLookup {
         return KeySourceLookup::MissingTypeSymbol;
     }
     let mut visited = FxHashSet::default();
-    let mut keys: Vec<String> = Vec::new();
+    let mut keys: Vec<verter_type_expr::facts::FactPropertyKey> = Vec::new();
     let mut pending = vec![name.to_string()];
     visited.insert(name.to_string());
     while let Some(current) = pending.pop() {
@@ -367,7 +367,7 @@ mod golden {
         match (a, b) {
             (RouteDemand::Whole, _) | (_, RouteDemand::Whole) => RouteDemand::Whole,
             (RouteDemand::MemberPath(pa), RouteDemand::MemberPath(pb)) => {
-                let common: Vec<String> = pa
+                let common: Vec<verter_type_expr::facts::FactPropertyKey> = pa
                     .iter()
                     .zip(pb.iter())
                     .take_while(|(l, r)| l == r)
@@ -388,7 +388,8 @@ mod golden {
             }
             (RouteDemand::MemberPath(p), RouteDemand::Pick(ps))
             | (RouteDemand::Pick(ps), RouteDemand::MemberPath(p)) => {
-                let mut merged: Vec<String> = ps.as_slice().to_vec();
+                let mut merged: Vec<verter_type_expr::facts::FactPropertyKey> =
+                    ps.as_slice().to_vec();
                 merged.extend(p.first().cloned());
                 if merged.is_empty() {
                     RouteDemand::Whole
@@ -397,7 +398,8 @@ mod golden {
                 }
             }
             (RouteDemand::Pick(a), RouteDemand::Pick(b)) => {
-                let mut merged: Vec<String> = a.as_slice().to_vec();
+                let mut merged: Vec<verter_type_expr::facts::FactPropertyKey> =
+                    a.as_slice().to_vec();
                 merged.extend(b.iter().cloned());
                 RouteDemand::pick(merged)
             }
@@ -535,7 +537,7 @@ mod golden {
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     if let ObjectMember::Property(prop) = member {
-                        if seen.insert(prop.name.clone()) {
+                        if seen.insert(prop.string_name().expect("string-key fixture").to_owned()) {
                             out.push(prop);
                         }
                     }
@@ -554,13 +556,13 @@ mod golden {
     fn direct_object_property<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a ObjectProperty> {
         direct_object_properties(body)
             .into_iter()
-            .find(|prop| prop.name == name)
+            .find(|prop| prop.string_name().expect("string-key fixture") == name)
     }
 
     fn direct_object_member_names(body: &TypeExpr) -> Option<Vec<String>> {
         let names = direct_object_properties(body)
             .into_iter()
-            .map(|prop| prop.name.clone())
+            .map(|prop| prop.string_name().expect("string-key fixture").to_owned())
             .collect::<Vec<_>>();
         (!names.is_empty()).then_some(names)
     }
@@ -577,7 +579,10 @@ mod golden {
                 let mut refs = Vec::new();
                 collect_type_refs(&prop.ty, &mut refs);
                 if !refs.is_empty() {
-                    result.insert(prop.name.clone(), refs);
+                    result.insert(
+                        prop.string_name().expect("string-key fixture").to_owned(),
+                        refs,
+                    );
                 }
             }
         }
@@ -627,6 +632,9 @@ mod golden {
                             }
                             ObjectMember::IndexSignature(sig) => {
                                 self.collect_whole_route_refs(&sig.value_type, Ctx::LeafProperty)
+                            }
+                            ObjectMember::Spread(spread) => {
+                                self.collect_whole_route_refs(&spread.ty, Ctx::LeafProperty)
                             }
                             ObjectMember::CallSignature(func)
                             | ObjectMember::ConstructSignature(func) => {
@@ -806,10 +814,18 @@ mod golden {
                                 let mut seed_external = Acc::default();
                                 let mut seen_symbols = FxHashSet::default();
                                 let lookup = lookup_body(bodies);
+                                let string_path = path
+                                    .iter()
+                                    .map(|key| {
+                                        key.as_string()
+                                            .expect("golden route fixture uses string keys")
+                                            .to_owned()
+                                    })
+                                    .collect::<Vec<_>>();
                                 let found_path = collect_member_path_seed_names(
                                     self.state,
                                     &lookup,
-                                    path,
+                                    &string_path,
                                     &mut seed_names,
                                     &mut seed_external,
                                     &mut seen_symbols,
@@ -919,7 +935,16 @@ mod golden {
                 TypeExpr::IndexedAccess { .. } => {
                     let (base_expr, route) = self.extract_indexed_access_route(expr)?;
                     match route {
-                        RouteDemand::MemberPath(path) => Some((base_expr, path.to_vec())),
+                        RouteDemand::MemberPath(path) => Some((
+                            base_expr,
+                            path.iter()
+                                .map(|key| {
+                                    key.as_string()
+                                        .expect("golden indexed-access fixture uses string keys")
+                                        .to_owned()
+                                })
+                                .collect(),
+                        )),
                         _ => None,
                     }
                 }
@@ -1289,12 +1314,28 @@ mod golden {
     ) -> GoldenClosureOut {
         match route {
             RouteDemand::Whole => whole_route_closure(state, symbol_name, budget),
-            RouteDemand::MemberPath(path) if !path.is_empty() => {
-                member_path_route_closure(state, symbol_name, path, budget)
-            }
+            RouteDemand::MemberPath(path) if !path.is_empty() => member_path_route_closure(
+                state,
+                symbol_name,
+                &path
+                    .iter()
+                    .map(|key| {
+                        key.as_string()
+                            .expect("golden member-path fixture uses string keys")
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>(),
+                budget,
+            ),
             RouteDemand::MemberPath(_) => local_closure_inner(state, symbol_name, budget),
             RouteDemand::Pick(members) => {
-                let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+                let refs: Vec<&str> = members
+                    .iter()
+                    .map(|key| {
+                        key.as_string()
+                            .expect("golden pick fixture uses string keys")
+                    })
+                    .collect();
                 member_route_closure(state, symbol_name, &refs, budget)
             }
             RouteDemand::Omit(omitted) => {
@@ -1307,7 +1348,9 @@ mod golden {
                 };
                 let remaining = members
                     .into_iter()
-                    .filter(|name| !omitted.contains(name.as_str()))
+                    .filter(|name| {
+                        !omitted.contains(&verter_type_expr::PropertyKey::identifier(name.as_str()))
+                    })
                     .collect::<Vec<_>>();
                 if remaining.is_empty() {
                     return GoldenClosureOut {
@@ -1390,8 +1433,8 @@ fn obj(props: Vec<(&str, TypeExpr)>) -> TypeExpr {
         properties: props
             .into_iter()
             .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    name.to_string(),
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    name.into(),
                     ty,
                     false,
                     false,
@@ -1402,8 +1445,8 @@ fn obj(props: Vec<(&str, TypeExpr)>) -> TypeExpr {
 }
 
 fn method_member(name: &str, params: Vec<(&str, TypeExpr)>) -> ObjectMember {
-    ObjectMember::Method(MethodSignature::synthetic_public(
-        name.to_string(),
+    ObjectMember::Method(MethodSignature::synthetic_public_key(
+        name.into(),
         FunctionExpr::synthetic(
             params
                 .into_iter()
@@ -1988,11 +2031,14 @@ fn produce_key_source_fact_is_flat_local_and_non_transitive() {
     };
     assert_eq!(
         literals.as_ref(),
-        ["b".to_string(), "a".to_string()],
+        [
+            verter_type_expr::PropertyKey::identifier("b"),
+            verter_type_expr::PropertyKey::identifier("a"),
+        ],
         "literal arms flatten in SOURCE order (paren erased), unsorted"
     );
     assert!(
-        !literals.contains(&"z".to_string()),
+        !literals.contains(&verter_type_expr::PropertyKey::identifier("z")),
         "NON-TRANSITIVE: the alias target's literal must not leak into the produced fact"
     );
     assert_eq!(

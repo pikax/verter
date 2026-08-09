@@ -72,6 +72,9 @@ pub fn compaction_domain(fact: &FactVersionRef) -> CompactionDomain {
         // A strict self-root world is a terminal witness for the structural
         // self-root axis, not a bucket eligible for domain compaction.
         FactVersionRef::StrictSelfRootWorld(_) => CompactionDomain::Content,
+        // Whole-function body facts derive from file content; their validity
+        // moves with the content generation.
+        FactVersionRef::ProgramAnalysis(_) => CompactionDomain::Content,
     }
 }
 
@@ -849,6 +852,37 @@ pub struct RouteSurfaceFactRef {
     pub expected_hash: FactHash16,
 }
 
+/// The exact function identity of a program-analysis `FlowBody` fact:
+/// canonical + owner + merged name + space + function part + overload
+/// ordinal. Content-free and env-free like every fact reference — the
+/// slot env tail is a query-key dimension, never a validation input.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProgramAnalysisFunctionRef {
+    pub canonical_id: std::sync::Arc<str>,
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    pub merged_symbol_name: std::sync::Arc<str>,
+    pub symbol_space: crate::fact_registry::SymbolSpace,
+    pub function_part: verter_type_expr::facts::FunctionPartIdentity,
+    pub overload_ordinal: u32,
+}
+
+/// Program-analysis-domain fact reference. The `FlowBody` rail roots a
+/// whole-function body demand on its exact function identity plus the
+/// `flow_body_stable_hash` the producing read observed — content-free
+/// view-agnostic like every `FactVersionRef` (the overlay/base
+/// distinction lives on the validation side).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProgramAnalysisFactRef {
+    /// One served function position's whole-body stable hash, observed
+    /// from the per-file `FunctionProgramIndex`.
+    FlowBody {
+        /// The exact function identity.
+        function: ProgramAnalysisFunctionRef,
+        /// The observed whole-body stable hash.
+        flow_body_stable_hash: FactHash16,
+    },
+}
+
 /// Collision-free identity of the exact world in which a structural cache
 /// entry's self-roots were strictly validated before their precise
 /// `FileWholeHash` facts were collapsed.
@@ -881,6 +915,7 @@ pub enum FactVersionRef {
     Parse(ParseFactRef),
     ResolveImports(ResolveImportsFactRef),
     RouteSurface(RouteSurfaceFactRef),
+    ProgramAnalysis(ProgramAnalysisFactRef),
     FileSourceEnv {
         canonical_id: String,
         parse_env_hash: ParseEnvHash,
@@ -952,6 +987,11 @@ impl FactVersionRef {
                 None => FactAttribution::ProjectScalar,
             },
             Self::RouteSurface(fact) => FactAttribution::Canonical(&fact.canonical_id),
+            Self::ProgramAnalysis(fact) => match fact {
+                ProgramAnalysisFactRef::FlowBody { function, .. } => {
+                    FactAttribution::Canonical(function.canonical_id.as_ref())
+                }
+            },
             Self::ProjectGeneration { .. } => FactAttribution::ProjectScalar,
             Self::DomainGeneration(aggregate) => FactAttribution::DomainAggregate(aggregate.domain),
             Self::StrictSelfRootWorld(_) => FactAttribution::StrictSelfRootWorld,

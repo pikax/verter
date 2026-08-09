@@ -268,6 +268,7 @@ impl SemanticNodeData {
             // variant forces a compile error at this accessor (see docstring).
             Self::Alias(_)
             | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
             | Self::Intersection(_)
             | Self::Primitive(_)
@@ -281,13 +282,14 @@ impl SemanticNodeData {
             | Self::Mapped { .. }
             | Self::TypeParam { .. }
             | Self::Infer { .. }
+            | Self::InferRef { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::Function { .. }
+            | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
-            | Self::ConstructorType { .. }
+            | Self::DeferredCallable(_)
             | Self::SyntheticBinding { .. } => &[],
         }
     }
@@ -389,6 +391,7 @@ impl SemanticNodeData {
             // docstring); mirrors `carrier_type_args`.
             Self::Alias(_)
             | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
             | Self::Intersection(_)
             | Self::Primitive(_)
@@ -402,13 +405,14 @@ impl SemanticNodeData {
             | Self::Mapped { .. }
             | Self::TypeParam { .. }
             | Self::Infer { .. }
+            | Self::InferRef { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::Function { .. }
+            | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
-            | Self::ConstructorType { .. }
+            | Self::DeferredCallable(_)
             | Self::SyntheticBinding { .. } => None,
         }
     }

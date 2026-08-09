@@ -10,17 +10,18 @@
 
 use indexmap::IndexSet;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::sync::Arc;
 use verter_semantic::analysis::template::TemplatePropUsage;
 use verter_semantic::analysis::type_eval::EvalEnv;
 use verter_semantic::analysis::types::AnalyzedImport;
-use verter_type_expr::{LiteralValue, TypeExpr};
+use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression, LiteralValue, TypeExpr};
 
 use super::ComponentMetaQueryEngine;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::fallthrough::{
-    component_import_candidate_for_binding, intersect_known_spread_keys,
-    normalize_public_spread_key, structural_substitute_typeof_refs, DynamicRootCandidate,
-    FallthroughPropOverrideSet, KnownSpreadKeys,
+    collect_dynamic_root_candidates_from_type, component_import_candidate_for_binding,
+    intersect_known_spread_keys, normalize_public_spread_key, structural_substitute_typeof_refs,
+    DynamicRootCandidate, FallthroughPropOverrideSet, KnownSpreadKeys,
 };
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
@@ -95,7 +96,7 @@ fn exit_node<T: Clone>(
 }
 
 impl ComponentMetaQueryEngine<'_> {
-    /// Evaluate a fallthrough value expression to its resolved value NODE,
+    /// Evaluate an indexed fallthrough value expression to its resolved value NODE,
     /// entirely in node domain.
     ///
     /// Resolution order: (1) override forwarding — a bare single-segment
@@ -105,22 +106,29 @@ impl ComponentMetaQueryEngine<'_> {
     /// (2) runtime-value env substitution — `structural_substitute_typeof_refs`
     /// folds imported value bindings, and a changed shape (a concrete value
     /// type) lowers to a node directly; (3) node Class-A projection of the
-    /// lowered expression. `None` when the expression neither parses nor
-    /// projects.
+    /// lowered expression. `None` when the indexed expression is unsupported
+    /// or does not project.
     pub(crate) fn evaluate_fallthrough_value_node(
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        expression: &str,
+        expression: &IndexedValueExpression,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<SemanticNodeId> {
-        let lowered =
-            verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)?;
+        let IndexedValueExpression::Value(lowered) = expression else {
+            return self.evaluate_indexed_semantic_call_node(
+                scope_canonical_id,
+                scope_owner,
+                expression,
+                env,
+                overrides,
+            );
+        };
 
         // (1) Override forwarding: a bare single-segment `typeof <name>` whose
         // name is a propagated override resolves to the override value node.
-        if let TypeExpr::TypeOf(value_ref) = &lowered {
+        if let TypeExpr::TypeOf(value_ref) = lowered {
             if value_ref.path.len() == 1 {
                 if let Some(node) = overrides.and_then(|set| set.lookup(value_ref.path[0].as_str()))
                 {
@@ -134,8 +142,8 @@ impl ComponentMetaQueryEngine<'_> {
         // (2) Runtime-value env substitution. A changed shape is already a
         // concrete value type; lower it to a node directly (Navigate).
         if let Some(env) = env {
-            let substituted = structural_substitute_typeof_refs(&lowered, scope_owner, env);
-            if substituted != lowered {
+            let substituted = structural_substitute_typeof_refs(lowered, scope_owner, env);
+            if substituted != *lowered {
                 return dispatch.lower_type_expr_in_owner_scope_with_mode(
                     scope_canonical_id,
                     scope_owner,
@@ -151,7 +159,7 @@ impl ComponentMetaQueryEngine<'_> {
             Some(self),
             scope_canonical_id,
             scope_owner,
-            &lowered,
+            lowered,
         ) {
             return Some(admitted.node());
         }
@@ -165,7 +173,7 @@ impl ComponentMetaQueryEngine<'_> {
         dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
             scope_owner,
-            &lowered,
+            lowered,
             ProjectionMode::Expanded,
         )
     }
@@ -177,7 +185,7 @@ impl ComponentMetaQueryEngine<'_> {
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        expression: &str,
+        expression: &IndexedValueExpression,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<KnownSpreadKeys> {
@@ -198,32 +206,49 @@ impl ComponentMetaQueryEngine<'_> {
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        expression: &str,
+        expression: &IndexedValueExpression,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
         imports: &[AnalyzedImport],
     ) -> Vec<DynamicRootCandidate> {
-        let Some(node) = self.evaluate_fallthrough_value_node(
+        // Preserve authored import identities before node evaluation resolves
+        // `typeof Child` into the imported component's value shape. Indexed
+        // records retain this syntax-level candidate channel; resolved and
+        // override-driven candidates still come from the node evaluator.
+        let mut candidates = match expression {
+            IndexedValueExpression::Value(lowered) => {
+                collect_dynamic_root_candidates_from_type(lowered, imports)
+            }
+            IndexedValueExpression::Call(_) | IndexedValueExpression::UnsupportedCall { .. } => {
+                Vec::new()
+            }
+        };
+        if let Some(node) = self.evaluate_fallthrough_value_node(
             scope_canonical_id,
             scope_owner,
             expression,
             env,
             overrides,
-        ) else {
-            return Vec::new();
-        };
-        collect_dynamic_root_candidates_from_node(self.ctx, node, imports)
+        ) {
+            candidates.extend(collect_dynamic_root_candidates_from_node(
+                self.ctx, node, imports,
+            ));
+        }
+        candidates.sort_by(|left, right| left.ordering(right));
+        candidates.dedup();
+        candidates
     }
 
     /// Build the override value NODE for one component-usage prop: an unbound
     /// prop lowers its literal string / `true`; a bound / shorthand prop
-    /// evaluates its expression to a node (env + override aware), falling back
-    /// to lowering the bare parse. `None` when the prop contributes no override.
+    /// evaluates its indexed expression to a node (env + override aware).
+    /// `None` when the prop contributes no indexed override.
     pub(crate) fn value_expression_override_node(
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         prop: &TemplatePropUsage,
+        indexed_expression: Option<&IndexedValueExpression>,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<SemanticNodeId> {
@@ -239,7 +264,7 @@ impl ComponentMetaQueryEngine<'_> {
             return self.lower_value_literal_node(scope_canonical_id, scope_owner, &literal);
         }
 
-        if let Some(expression) = &prop.expression {
+        if let Some(expression) = indexed_expression {
             if let Some(node) = self.evaluate_fallthrough_value_node(
                 scope_canonical_id,
                 scope_owner,
@@ -249,28 +274,21 @@ impl ComponentMetaQueryEngine<'_> {
             ) {
                 return Some(node);
             }
-            if let Some(parsed) =
-                verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)
-            {
-                return self.lower_value_literal_node(scope_canonical_id, scope_owner, &parsed);
-            }
         }
 
         if prop.is_shorthand {
-            if let Some(node) = self.evaluate_fallthrough_value_node(
+            let shorthand =
+                IndexedValueExpression::Value(TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec![prop.name.clone()],
+                    type_args: Vec::new(),
+                }));
+            return self.evaluate_fallthrough_value_node(
                 scope_canonical_id,
                 scope_owner,
-                &prop.name,
+                &shorthand,
                 env,
                 overrides,
-            ) {
-                return Some(node);
-            }
-            if let Some(parsed) =
-                verter_semantic::analysis::type_eval_build::parse_value_expression_type(&prop.name)
-            {
-                return self.lower_value_literal_node(scope_canonical_id, scope_owner, &parsed);
-            }
+            );
         }
 
         None
@@ -290,6 +308,89 @@ impl ComponentMetaQueryEngine<'_> {
             expr,
             ProjectionMode::Navigate,
         )
+    }
+
+    fn evaluate_indexed_semantic_call_node(
+        &mut self,
+        scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
+        expression: &IndexedValueExpression,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<SemanticNodeId> {
+        let IndexedValueExpression::Call(call) = expression else {
+            crate::request_context::mark_request_result_partial();
+            return None;
+        };
+        let callee = self.evaluate_fallthrough_value_node(
+            scope_canonical_id,
+            scope_owner,
+            &call.callee,
+            env,
+            overrides,
+        )?;
+        let receiver = call.receiver.as_deref().and_then(|receiver| {
+            self.evaluate_fallthrough_value_node(
+                scope_canonical_id,
+                scope_owner,
+                receiver,
+                env,
+                overrides,
+            )
+        });
+        let mut args = Vec::with_capacity(call.args.len());
+        for argument in call.args.iter() {
+            let ty = self.evaluate_fallthrough_value_node(
+                scope_canonical_id,
+                scope_owner,
+                &argument.expression,
+                env,
+                overrides,
+            )?;
+            args.push(crate::semantic_query::CallArgKey::Eager {
+                ty,
+                spread: argument.spread,
+                context_sensitive: argument.context_sensitive,
+                literal_mode: match argument.literal_mode {
+                    verter_type_expr::IndexedValueLiteralMode::Widened => {
+                        crate::semantic_query::ArgumentLiteralMode::Widened
+                    }
+                    verter_type_expr::IndexedValueLiteralMode::Literal => {
+                        crate::semantic_query::ArgumentLiteralMode::Literal
+                    }
+                },
+            });
+        }
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+        let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
+        for argument in call.explicit_type_args.iter() {
+            explicit_type_args.push(dispatch.lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                argument,
+                ProjectionMode::Navigate,
+            )?);
+        }
+        let result = dispatch.execute_indexed_resolve_call(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from(scope_canonical_id),
+                offset: call.point,
+            },
+            callee,
+            kind: match call.kind {
+                IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+            },
+            receiver,
+            args: Arc::from(args.into_boxed_slice()),
+            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
+            context: dispatch.resolve_call_context_for(scope_canonical_id),
+        });
+        if result.is_none() {
+            crate::request_context::mark_request_result_partial();
+        }
+        result
     }
 }
 
@@ -397,14 +498,18 @@ fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) 
         exact: true,
         ..KnownSpreadKeys::default()
     };
-    for member in surface.members.iter() {
-        normalize_public_spread_key(
-            member.name.as_ref(),
-            &mut result.attrs,
-            &mut result.listeners,
-        );
+    for member in surface.positive_members().iter() {
+        // The PUBLISHED name classifies: a numeric literal key is the
+        // property under its canonical string spelling, exactly like a
+        // string key; a symbol / computed key has no published name and
+        // marks the surface inexact, as before.
+        if let Some(name) = member.published_name() {
+            normalize_public_spread_key(name.as_ref(), &mut result.attrs, &mut result.listeners);
+        } else {
+            result.exact = false;
+        }
     }
-    if surface.has_index_signature
+    if surface.has_known_index_signature()
         || !surface.index_signatures.is_empty()
         || !surface.call_signatures.is_empty()
         || !surface.construct_signatures.is_empty()

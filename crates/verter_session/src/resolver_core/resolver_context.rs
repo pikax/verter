@@ -691,7 +691,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// Reach the concrete `VerterHost` underneath this context.
     ///
     /// Used by Family B/C/D producers (`MaterializeStructureDb`,
-    /// `RefCycleResultDb`, `AppConfigNoOverrideProofDb`,
+    /// `AppConfigNoOverrideProofDb`,
     /// `OwnerImportSurfaceDb`) to call
     /// [`crate::VerterHost::with_fact_tracer`] from inside their
     /// cooperative-admission cold-compute closures. The seal trait
@@ -1323,6 +1323,13 @@ pub(crate) enum NonCacheableReadReason {
     /// failed slot remains vacant and any Option-shaped caller may serve the
     /// failure only as ReturnOnly; it must never publish it as real absence.
     PreparationFailure,
+    /// A terminal output-materialization LOST typed degradation: a
+    /// present-but-unraisable fold (`None`) or a non-empty degradation
+    /// sidecar discarded at the capability-gated terminal unwrap. The
+    /// compat tree may still be published for display, but the compute must
+    /// never be warm-admitted as a complete result. Orthogonal to
+    /// completeness: the result is NOT partial, it is non-cacheable.
+    OutputMaterializationLoss,
 }
 
 impl NonCacheableReadReason {
@@ -1337,7 +1344,10 @@ impl NonCacheableReadReason {
             | Self::UnrootableRoute
             | Self::UnobservableSource
             | Self::InferenceBudgetExceeded
-            | Self::PreparationFailure => super::fact_read_set::NonCacheablePropagation::Transitive,
+            | Self::PreparationFailure
+            | Self::OutputMaterializationLoss => {
+                super::fact_read_set::NonCacheablePropagation::Transitive
+            }
         }
     }
 
@@ -1369,6 +1379,11 @@ impl NonCacheableReadReason {
             Self::LeaseMiss | Self::InferenceBudgetExceeded | Self::PreparationFailure => {
                 super::reuse::RequestReuse::Transient
             }
+            // A materialization loss is a definite answer under the
+            // request's immutable view: the same fold loses the same
+            // degradation sidecar on every re-run, so only warm
+            // PUBLICATION is refused, never intra-request reuse.
+            Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
         }
     }
 }

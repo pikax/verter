@@ -76,7 +76,7 @@ fn resolver_coverage_mapped_types_exclude_distributes() {
 
 /// Walks a `TypeExpr` collecting every string-literal payload reached
 /// through `Union` / `Intersection` / `Alias`-equivalent shells. Returns
-/// `Vec<String>` so callers can sort and compare. An `Unknown { raw }`
+/// `Vec<String>` so callers can sort and compare. A `TypeExpr::Unknown(UnknownValue)`
 /// produces no literals — this is what discriminates pre-fix from
 /// post-fix.
 fn collect_string_literals(expr: &TypeExpr) -> Vec<String> {

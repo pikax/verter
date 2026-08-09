@@ -111,18 +111,38 @@ schema retag and version bump still owed after early landing.
 
 ---
 
-### P1 — Graph-native residual body readers
+### P1 — Graph-native residual body readers (CLOSED)
 
-**Problem.** Authored-shape and some graph-backed-PENDING readers still decide
-from lower-crate `TypeExpr`. Correctly deferred (no reverse
-`HotTypeRef → TypeExpr → semantic decision` bridge), but not final-state.
+**Problem — CLOSED at the terminal partition.** The authored-shape and
+graph-backed-pending reader classes are EMPTY (the heritage/closedness cluster
+went fact-native; the value-annotation, imported-registry, and locator-native
+arms landed). The residual body-reader ledger stands at 1 migrated anchor + 6
+`ProducerLowering` (permanent transient ingress, not on a path to zero) + 5
+`GraphFreeDto` (below-graph, content-free facts/locators — except:
+`route_closure`'s lease-reborrowed key-source mint, TRANSIENT ingress
+(authored contributor bodies passed as `&[TypeExpr]` to
+`produce_key_source_fact`,
+`crates/verter_session/src/resolver_core/shallow_file_state.rs:2609` →
+`crates/verter_semantic/src/facts/route_facts.rs:220`; never stored), and the
+two external-frontier rows' read of the STORED
+`LoweredTypeDecl.type_parameters` pocket — the terminal-storage violation
+owned by the type-parameter-bound confinement block). No reverse
+`HotTypeRef → TypeExpr → semantic decision` bridge exists.
 
-**Required direction.**
+**Required direction — landed / superseded.**
 
-- Graph-native closedness / key-domain classifiers over `SemanticNodeData`.
-- Explicit authored-shape surface where the decision is intrinsically syntactic
-  (no materialize-then-decide).
-- Clear residual inventory; do not expand the residual set.
+- Graph-native closedness / key-domain classifiers over `SemanticNodeData` —
+  LANDED (`KeyDomainClosednessFact` minted at lazy decl-body lowering,
+  evaluated dispatch-side over recipes + nodes).
+- Explicit authored-shape surface — SUPERSEDED by the permanent-ingress ruling:
+  producer boundaries transiently consume lease-only authored `TypeExpr` to
+  mint graph, fact, or locator outputs and may not retain it.
+- Residual inventory — landed as a permanent curated ratchet
+  (`crates/verter_session/tests/cases/residual_type_expr_body_reader_inventory.rs`);
+  do not expand the residual set. The open storage pockets (memoized
+  `LoweredTypeDecl.type_parameters: Vec<TypeParam>`; `TypeParamBinding.constraint/default`
+  `Arc<TypeExpr>` bounds in cached prepared decl bundles) are owned by the separate
+  type-parameter-bound confinement block, not by this item.
 
 **Tracks:** [`../authored-shape-graph-native-migration-deferral.md`](../authored-shape-graph-native-migration-deferral.md).
 
@@ -218,8 +238,11 @@ Do **not**:
 ## Suggested execution order
 
 1. **P0** interactive readiness predicate + stop unread speculative publish.
-2. **P1** U10 store consolidation + U8 wire finality + residual graph-native
-   readers (can parallelize across owners).
+2. **P1** U10 store consolidation + U8 wire finality (can parallelize across
+   owners). Graph-native residual body readers are CLOSED at the terminal
+   partition (1 migrated anchor / 6 `ProducerLowering` permanent ingress /
+   0 `AuthoredShape` / 5 `GraphFreeDto` named residual / 0 `GraphBackedPending`)
+   — not outstanding work.
 3. **P2** provider priority finish + session modularization discipline + gate
    integrity block.
 4. **P3** cache-admission class + product-boundary promotions as evidence lands.

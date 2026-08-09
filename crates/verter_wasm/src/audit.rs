@@ -101,20 +101,13 @@ pub(crate) fn parse_compile_target_wasm(name: &str) -> Result<CompileTarget, JsV
 }
 
 /// Match the textual `kind` filter against a `RequestKind`.
+///
+/// Delegates to [`RequestKind::matches_filter`] so the WASM surface
+/// recognises exactly the same kind set as every other transport
+/// (NAPI / LSP / CLI) — a local copy of the matcher drifts when a
+/// kind variant is added.
 pub(crate) fn kind_matches_wasm(filter: &str, kind: &RequestKind) -> bool {
-    matches!(
-        (filter, kind),
-        ("ComponentMeta", RequestKind::ComponentMeta)
-            | ("TypeResolution", RequestKind::TypeResolution)
-            | ("SemanticAnalysis", RequestKind::SemanticAnalysis)
-            | ("Compile", RequestKind::Compile { .. })
-            | ("Workspace", RequestKind::Workspace { .. })
-            | ("Lsp", RequestKind::Lsp { .. })
-            | ("Mcp", RequestKind::Mcp { .. })
-            | ("BundlerBatch", RequestKind::BundlerBatch { .. })
-            | ("Custom", RequestKind::Custom { .. })
-            | ("TypeInfoGraph", RequestKind::TypeInfoGraph)
-    )
+    kind.matches_filter(filter)
 }
 
 /// Map a textual bundler-kind tag.

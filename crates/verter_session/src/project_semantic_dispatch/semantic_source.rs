@@ -626,7 +626,10 @@ impl ProjectSemanticDispatch<'_> {
             canonical,
             payload.macro_index as usize,
         )?;
-        let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(member_name)).collect();
+        let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier(member_name),
+        ))
+        .collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: product.hot.node(),
             path,
@@ -689,7 +692,7 @@ impl ProjectSemanticDispatch<'_> {
     fn raise_projected_member_path(
         &self,
         base: &AuthoredBodyLocator,
-        path: &Arc<[String]>,
+        path: &Arc<[verter_type_expr::facts::FactPropertyKey]>,
         ctx: &SourceRaiseContext<'_>,
     ) -> SourceRaiseOutcome {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
@@ -702,7 +705,7 @@ impl ProjectSemanticDispatch<'_> {
                     .surface
                     .members
                     .iter()
-                    .find(|member| member.name.as_ref() == path[0].as_str())
+                    .find(|member| member.key.cloned_known().as_ref() == Some(&path[0]))
                 else {
                     return SourceRaiseOutcome::Absent;
                 };
@@ -730,7 +733,7 @@ impl ProjectSemanticDispatch<'_> {
     fn raise_projected_path_from_node(
         &self,
         base: SemanticNodeId,
-        path: &[String],
+        path: &[verter_type_expr::facts::FactPropertyKey],
         ctx: &SourceRaiseContext<'_>,
     ) -> SourceRaiseOutcome {
         if path.is_empty() {
@@ -741,10 +744,7 @@ impl ProjectSemanticDispatch<'_> {
             ctx.check_raised_unknown_materializing(self, Some(&hot));
             return SourceRaiseOutcome::Raised(hot);
         }
-        let segments: Arc<[PathSegment]> = path
-            .iter()
-            .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
-            .collect();
+        let segments: Arc<[PathSegment]> = path.iter().cloned().map(PathSegment::Member).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: segments,
@@ -829,11 +829,15 @@ impl ProjectSemanticDispatch<'_> {
             };
             signature.node
         } else {
-            let callable =
-                match self.raise_projected_member_path(base, &Arc::from(occurrence.path()), ctx) {
-                    SourceRaiseOutcome::Raised(hot) => hot.node(),
-                    other => return other,
-                };
+            let occurrence_path: Arc<[verter_type_expr::facts::FactPropertyKey]> = occurrence
+                .path()
+                .iter()
+                .map(|segment| verter_type_expr::facts::FactPropertyKey::from(segment.clone()))
+                .collect();
+            let callable = match self.raise_projected_member_path(base, &occurrence_path, ctx) {
+                SourceRaiseOutcome::Raised(hot) => hot.node(),
+                other => return other,
+            };
             if !occurrence.matches_subject(callable.0) {
                 return SourceRaiseOutcome::Absent;
             }
@@ -1297,7 +1301,11 @@ impl ProjectSemanticDispatch<'_> {
                 let path: Arc<[PathSegment]> = demand
                     .member_role_path
                     .iter()
-                    .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
+                    .map(|segment| {
+                        PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                            Arc::from(segment.as_str()),
+                        ))
+                    })
                     .collect();
                 if path.is_empty() {
                     return Some(base.hot);
@@ -1509,6 +1517,18 @@ pub fn shallow_semantic_source_type_expr(
         }
         _ => {}
     }
+    shallow_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.type_expr_for_test().clone())
+}
+
+/// The shared shallow materialization of a published source into its sealed
+/// output carrier (the raise-time sidecar intact — nothing unwrapped).
+#[cfg(any(test, feature = "test-support"))]
+fn shallow_semantic_source_carrier(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
     let dispatch = ProjectSemanticDispatch::new(host);
     let context = ProjectionReductionContext::structural_transit_with_mode(
         crate::semantic_query::ProjectionMode::Navigate,
@@ -1525,13 +1545,75 @@ pub fn shallow_semantic_source_type_expr(
         )
         .at_optional_boundary()?;
     let sealed = dispatch.output_shell_raise_sealed(hot.node())?;
-    let carrier = super::output_materialization::MaterializedOutputTypeExpr::from_parts(
-        Some(hot.node()),
-        sealed,
-        Arc::from(Vec::new().into_boxed_slice()),
-        false,
-    );
-    Some(carrier.type_expr_for_test().clone())
+    Some(
+        super::output_materialization::MaterializedOutputTypeExpr::from_parts(
+            Some(hot.node()),
+            sealed,
+            Arc::from(Vec::new().into_boxed_slice()),
+            false,
+        ),
+    )
+}
+
+/// Whether a published source's raised payload carries ANY typed degradation
+/// — the raise-time sidecar's partial bit, read BEFORE any terminal unwrap.
+/// This is the typed masking probe: a degraded field reads `true` here even
+/// when the request-level `synthesis_should_suppress` flag is `false` (the
+/// channel is the fold + `from_parts` choke point, never the suppress flag).
+#[cfg(any(test, feature = "test-support"))]
+pub fn shallow_semantic_source_is_degraded(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<bool> {
+    shallow_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.result_is_partial())
+}
+
+/// Whether a published source's DEMAND-walk (Published(Expanded)) payload
+/// carries ANY typed degradation — the raise-time sidecar's partial bit,
+/// read BEFORE any terminal unwrap. This is the typed masking probe over the
+/// full consumer walk (fold + `from_parts` choke point, never the suppress
+/// flag).
+#[cfg(any(test, feature = "test-support"))]
+pub fn demand_semantic_source_is_degraded(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<bool> {
+    demand_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.result_is_partial())
+}
+
+/// The shared demand-walk carrier extraction (sidecar intact — nothing
+/// unwrapped).
+#[cfg(any(test, feature = "test-support"))]
+fn demand_semantic_source_carrier(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let context =
+        ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded);
+    let raise_context = match source {
+        SemanticTypeSource::Closed(_) => ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        ),
+        _ => context,
+    };
+    let hot = dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            SourceRaiseContext {
+                scope_canonical_id: owner_canonical,
+                scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                context: raise_context,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()?;
+    Some(dispatch.raise_and_reduce_observation(hot.node(), context, owner_canonical))
 }
 
 #[cfg(test)]

@@ -214,7 +214,7 @@ fn cross_project_augmenter_isolation() {
 // ────────────────────────────────────────────────────────────────
 
 #[test]
-fn session_overlay_augmenter_isolated_from_base_index() {
+pub(crate) fn session_overlay_augmenter_isolated_from_base_index() {
     use verter_session::file_artifact_store::AugmentationPopulation;
 
     let store = FileArtifactStore::new();

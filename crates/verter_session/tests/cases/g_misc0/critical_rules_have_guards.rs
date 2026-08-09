@@ -167,6 +167,12 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // env-bearing `type_slot_for` / `builtin_type_slot`; the
             // zero-env fixture-only constructors are a forbidden bypass.
             "no_production_caller_of_zero_env_slot_constructors",
+            // No depth sentinel on the whole-function FlowReturn
+            // evaluation path (recursion discharges coinductively; the
+            // only budget is the shallow leaf lowering's own, the
+            // planner's typed slice budget, and the connected-demand
+            // cap).
+            "no_depth_sentinel_on_flow_return_path",
             // §3.4 materialised-record-point satisfaction: the two-gate
             // warm hit keys on a candidate's RECORDED `satisfied_projection`
             // (path-exact dominance), never its nominal slot mode; backfill
@@ -175,6 +181,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "cache_satisfaction_is_materialized_point_not_nominal_demand",
             "cache_satisfaction_requires_path_exact_not_prefix",
             "backfill_writes_only_recorded_materialized_points",
+            // U3.ADAPTIVE_FAMILY_RETENTION — per-family bounded
+            // retention on the family memo's multi-candidate slots:
+            // exhaustive per-family `candidate_cap()` (floor 4, higher
+            // for inference/substitution-heavy live families),
+            // invalid-first then LRU-by-valid-hit eviction, always-admit
+            // after local eviction.
+            "cache_candidate_cap_is_per_family_not_uniform",
+            "family_eviction_prefers_invalid_then_lru_valid_hit",
             // R6/R21 direct guards for the four migrated query-identity
             // cache keys (`crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs`):
             // each key is a content-free slot (R6 — no whole_hash /
@@ -193,11 +207,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "barrel_surface_key_carries_split_env_and_no_content_hash",
             "route_db_does_not_key_routes_or_barrels_on_bare_strings",
             "route_keys_env_axes_discriminate",
-            // (3) RefCycleResultDb — content-free `ResolvedDeclSlotIdentity`
-            //     slot, never the versioned `DeclIdentity` (whole_hash).
-            "ref_cycle_result_key_is_content_free_slot_keyed",
-            "ref_cycle_db_is_keyed_on_content_free_slot_not_decl_identity",
-            "ref_cycle_result_key_is_content_free_and_env_discriminating",
+            // (3) ClassifyMaterializationCycleGate — content-free
+            //     `ResolvedDeclSlotIdentity` slot + P/R, never the versioned
+            //     `DeclIdentity` (whole_hash), a generation, or an
+            //     algorithm version.
+            "materialization_cycle_gate_key_is_content_free_slot_keyed",
+            "materialization_cycle_gate_key_is_content_free_and_env_discriminating",
+            "materialization_cycle_gate_key_slot_env_axes_discriminate",
             // (4) MaterializeStructureDb — content-free canonical-subject
             //     `MaterializationCacheKey`, never the graph-instance
             //     `MaterializeRuntimeKey` (base: SemanticNodeId) subject.
@@ -493,11 +509,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `macro_type_arg_hot_ref` + `MacroHotMirror`, so a SECOND
             // structural-carrier producer is UNREPRESENTABLE BY CONSTRUCTION: no
             // foreign module can NAME the private builders (a compile error, E0603 /
-            // E0433), and the producer is COLLAPSED into one module so no same-owner
-            // file can name them either (a third caller is a compile error). The
-            // MODULE-PRIVATE lowerer guard + the PARENT-SHAPE narrowness guard (the
-            // owner directory holds ONLY `macro_arg_producer.rs`, mod.rs, and tests —
-            // so there is no other file that could name the private builders) together
+            // E0433), and producer-capable code is COLLAPSED into one child module.
+            // The only non-test sibling is the typed-IR-only
+            // `infer_binder_names.rs` walker, which cannot name that child's private
+            // builders. The MODULE-PRIVATE lowerer guard + the PARENT-SHAPE
+            // narrowness guard (the
+            // owner directory holds ONLY `macro_arg_producer.rs`, the non-producer
+            // binder walker, mod.rs, and tests) together
             // are the compiler-enforced LOAD-BEARING confinement. The SMALL
             // EXPANSION-SURFACE backstop (`macro_arg_producer.rs` declares NO
             // production item-position/expr/statement macro / `macro_rules!` /
@@ -1648,7 +1666,7 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
             for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim_start();
                 let after_async = trimmed.strip_prefix("async ").unwrap_or(trimmed);
-                let after_pub = after_async.strip_prefix("pub ").unwrap_or(after_async);
+                let after_pub = strip_visibility_qualifier(after_async);
                 let after_async = after_pub.strip_prefix("async ").unwrap_or(after_pub);
                 let after_const = after_async.strip_prefix("const ").unwrap_or(after_async);
                 let after_fn = match after_const.strip_prefix("fn ") {
@@ -1710,6 +1728,22 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
     }
 
     names
+}
+
+/// Strip a leading visibility qualifier (`pub `, `pub(crate) `,
+/// `pub(super) `, `pub(in path) `) from a trimmed declaration line. A
+/// `#[test]` fn keeps its libtest identity under ANY visibility, so the
+/// fn-declaration parser must not reject qualified forms.
+fn strip_visibility_qualifier(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("pub ") {
+        return rest;
+    }
+    if let Some(rest) = line.strip_prefix("pub(") {
+        if let Some(close) = rest.find(')') {
+            return rest[close + 1..].trim_start();
+        }
+    }
+    line
 }
 
 /// Returns `true` when `line` (a trimmed source line starting with

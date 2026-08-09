@@ -11,6 +11,15 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Test-only observability accessors: the flow-slice hash invocation
+# counter behind the hash-then-lower behavioral guard
+# (`compute_flow_slice_hash_thread_invocations`). Enabled by consumers'
+# DEV-dependency edges only (the session crate binds the guard from its
+# test targets) — never on the default/production closure, so release
+# builds compile `compute_flow_slice_hash` without the counter TLS or
+# its increment. Plain `#[cfg(test)]` cannot gate this: the consumer is
+# a different crate, where this crate's `test` cfg is false.
+test-support = []
 
 [dependencies]
 verter_span = { path = "../verter_span" }
@@ -36,6 +45,7 @@ oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
 sha2 = { workspace = true }
 bitflags = "2.11"
 

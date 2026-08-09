@@ -597,7 +597,7 @@ fn named_type_argument_member_head(
         .prepared_type_decl(canonical, props_decl.owner, props_decl.name.as_str())
         .ok()
         .flatten()?
-        .member(member)?
+        .member(&verter_type_expr::PropertyKey::from(member))?
         .reference_head
         .clone();
     Some(head)

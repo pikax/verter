@@ -475,7 +475,8 @@ pub(crate) fn slot_param_root_is_symbolic_only(
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::Infer { .. } => true,
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. } => true,
         SemanticNodeData::InstantiationRef { base, args } => {
             // Skeleton-instantiate the carrier under its OWN `(base, args)` so the
             // substitution actually binds — but unbound parameters become
@@ -557,7 +558,9 @@ fn node_contains_free_type_param(
         return false;
     };
     match data.as_ref() {
-        SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. } => true,
+        SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. } => true,
         SemanticNodeData::Alias(inner) => {
             node_contains_free_type_param(dispatch, *inner, depth + 1)
         }
@@ -571,7 +574,7 @@ fn node_contains_free_type_param(
             .iter()
             .any(|e| node_contains_free_type_param(dispatch, e.value, depth + 1)),
         SemanticNodeData::Object(view) => view
-            .members
+            .positive_members()
             .iter()
             .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1)),
         SemanticNodeData::KeyOf { base } => {
@@ -985,7 +988,7 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = super::projectors::read_surface_members(ctx, slot_surface);
+    let slot_members = super::projectors::read_positive_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -993,6 +996,9 @@ pub(crate) fn compute_bindings_via_graph(
         if !slot_member.visibility.is_public() {
             continue;
         }
+        let Some(slot_name) = slot_member.string_name() else {
+            continue;
+        };
         // Realize the slot member value through the callable-
         // realization substrate before the `Function`-arm match.
         // Under transit-shallow macro publication the slot value may
@@ -1013,10 +1019,17 @@ pub(crate) fn compute_bindings_via_graph(
         )
         .unwrap_or(slot_member.value);
 
-        // Step 4: read Function.params[0].ty.
+        // Step 4: read Function.params[0].ty. CALL kind only — a construct
+        // signature is not a callable slot shape and synthesizes no
+        // bindings (the realize fallback above hands back the raw member
+        // value, so the kind must be re-asserted here).
         let param0_ty =
             match crate::project_semantic_dispatch::node_data_for(ctx, realized).as_deref() {
-                Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+                Some(SemanticNodeData::Signature {
+                    kind: crate::semantic_query::SignatureKind::Call,
+                    params,
+                    ..
+                }) => match params.first() {
                     Some(p) => p.ty,
                     None => continue,
                 },
@@ -1036,7 +1049,7 @@ pub(crate) fn compute_bindings_via_graph(
         if slot_param_root_is_symbolic_only(dispatch, param0_ty, 0) {
             tracing::trace!(
                 target: "verter::meta_resolve::slot_binding",
-                slot = %slot_member.name,
+                slot = %slot_name,
                 "graph_native_skip_symbolic_param_root",
             );
             continue;
@@ -1050,7 +1063,7 @@ pub(crate) fn compute_bindings_via_graph(
                 MacroExpansionKind::DefineSlots,
                 format!(
                     "synthesis-step-budget-exceeded@param-surface::slot={}::steps={}::cap={:?}",
-                    slot_member.name, *synthesis_steps_executed, synthesis_step_budget,
+                    slot_name, *synthesis_steps_executed, synthesis_step_budget,
                 ),
             ));
             return out;
@@ -1083,7 +1096,7 @@ pub(crate) fn compute_bindings_via_graph(
                 diag_sink.push(macro_expansion_for_cycle(
                     owner_macro.macro_index,
                     MacroExpansionKind::DefineSlots,
-                    format!("cyclic-slot-param@{}", slot_member.name),
+                    format!("cyclic-slot-param@{slot_name}"),
                 ));
                 continue;
             }
@@ -1094,12 +1107,12 @@ pub(crate) fn compute_bindings_via_graph(
                 diag_sink.push(macro_expansion_for_query_error(
                     owner_macro.macro_index,
                     MacroExpansionKind::DefineSlots,
-                    format!("slot-param-error::{}::{:?}", slot_member.name, e),
+                    format!("slot-param-error::{slot_name}::{e:?}"),
                 ));
                 continue;
             }
         };
-        let binding_members = super::projectors::read_surface_members(ctx, param_surface);
+        let binding_members = super::projectors::read_positive_surface_members(ctx, param_surface);
 
         for binding in binding_members.iter() {
             // Public-only publication: a navigated class param's `private` /
@@ -1107,6 +1120,9 @@ pub(crate) fn compute_bindings_via_graph(
             if !binding.visibility.is_public() {
                 continue;
             }
+            let Some(binding_name) = binding.string_name() else {
+                continue;
+            };
             // Dep-observation: an unresolved-reference binding VALUE carrier
             // (`BareRef` / `ImportType`) head-resolves HERE, at the
             // publication walk, so the cross-file declaration dependency is
@@ -1152,14 +1168,17 @@ pub(crate) fn compute_bindings_via_graph(
             // value shape (one bounded node peek, no dispatch).
             let value_use_site = crate::meta_resolve::arg_preserving_member_use_site_slot(
                 dispatch,
-                binding.name.as_ref(),
+                &binding
+                    .key
+                    .cloned_known()
+                    .expect("string-name slot binding has a known key"),
                 binding.declaration_origin.as_deref(),
                 value_node,
             );
             out.push(ResolvedSlotBinding {
                 owner_macro: owner_macro.clone(),
-                slot_name: slot_member.name.clone(),
-                binding_name: binding.name.clone(),
+                slot_name: Arc::from(slot_name),
+                binding_name: Arc::from(binding_name),
                 value_node,
                 value_use_site,
                 optional: binding.optional,
@@ -1314,7 +1333,9 @@ fn closed_member_path_route_source(
                     IndexKey::String(key) => rev_keys.push(key.as_ref().to_string()),
                     // Numeric / type-node keys require evaluation to
                     // enumerate — fail closed.
-                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                    IndexKey::Number(_) | IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => {
+                        return None;
+                    }
                 }
                 current = *object;
             }
@@ -1401,7 +1422,10 @@ fn owner_local_member_reaches_non_owner_ref(
     ) else {
         return false;
     };
-    let Some(member) = prepared.member_index.get(member_name) else {
+    let Some(member) = prepared
+        .member_index
+        .get(&verter_type_expr::PropertyKey::identifier(member_name))
+    else {
         return false;
     };
     let Some(member_node) = dispatch
@@ -1464,7 +1488,7 @@ fn node_reaches_non_owner_ref(
         SemanticNodeData::KeyOf { base } => recur(*base),
         SemanticNodeData::IndexedAccess { object, index } => {
             recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
         SemanticNodeData::Union(members)
@@ -1473,7 +1497,7 @@ fn node_reaches_non_owner_ref(
             contributors: members,
         } => members.iter().copied().any(recur),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
@@ -1481,7 +1505,7 @@ fn node_reaches_non_owner_ref(
                 || surface.call_signatures.iter().copied().any(recur)
                 || surface.construct_signatures.iter().copied().any(recur)
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
@@ -1568,23 +1592,23 @@ pub(crate) fn publish_merged_bindings(
     // `tests/cases/g_misc0/slot_binding_shallow_publication_tests.rs` characterises
     // the carrier-vs-expansion boundary.
     //
-    // The producer-shallow contract here is variant-dispatched on the
-    // availability of a parser-path binding for the `(slot, binding)`
-    // key:
+    // Live publication authority for a slot binding (verified):
+    // analyzer assembly leaves `AnalyzedSlotFieldBinding.payload: None`
+    // because the flat `macros[i].slot_fields[j]` locator vocabulary
+    // cannot address a nested `(slot, binding)` position. Display text
+    // may ride on `type_annotation` (paired scope when present); typed
+    // demand is host-raised from the graph-native value node.
+    // Publication selects among, in order:
     //
-    //   - Parser path available: the authored payload POSITION
-    //     (`AnalyzedSlotFieldBinding.payload`) is the typed authority.
-    //     The published `r#type` is that authored source; the demand
-    //     side re-raises it through the one shared dispatch.
+    //   1. CLOSED symbolic indexed-access route → `Closed(IndexedAccess)`
+    //   2. ARGUMENT-BEARING named-reference use-site → `Authored(DeclBody)`
+    //   3. NAMED reference head → shallow closed `Ref` carrier
+    //   4. OTHERWISE → first-class `SyntheticSlotBinding` carrier
     //
-    //   - No parser path: a SESSION-RAISED row — the published source
-    //     is the PRODUCING macro TYPE-ARGUMENT payload position (the
-    //     lower-neutral carrier of a session-raised value). The
-    //     deepening route for a session-raised binding is the
-    //     content-free synthetic-binding identity
-    //     (`ShapeCacheKey::synthetic_binding_whole`, consulted through
-    //     `ShapeCacheDb`). The `binding_name` is NOT a registry-lookup
-    //     target.
+    // Deepening a synthetic row routes through the content-free
+    // synthetic-binding identity (`ShapeCacheKey::synthetic_binding_whole`,
+    // consulted through `ShapeCacheDb`). The `binding_name` is NOT a
+    // registry-lookup target.
     //
     // Downstream consumers (`reduce_published_field_types`,
     // `collect_component_meta_registry_public_field_refs`) recognise
@@ -1729,13 +1753,13 @@ pub(crate) fn publish_merged_bindings(
     }
 
     // Publish parser-path-only bindings (those without a graph-native
-    // counterpart). Parser-path bindings keep `ExactConcrete`
-    // exactness — the source-text annotation is the authority.
-    //
-    // Parser-path-only bindings NEVER mint a synthetic carrier —
-    // their `binding_expr` is the OXC-lowered authoritative form, not
-    // a symbolic stand-in. Their published `r#type` is therefore
-    // never a `TypeExpr::SyntheticSlotBinding` variant.
+    // counterpart). Live truth: analyzer assembly leaves
+    // `AnalyzedSlotFieldBinding.payload: None` (flat locators cannot
+    // address nested `(slot, binding)` positions). These rows keep
+    // `ExactConcrete` exactness from the display `type_annotation` when
+    // present; the published source is either a residual stamped
+    // MacroPayload position or the centralized unannotated
+    // schema-absence — never a synthetic carrier.
     let mut parser_only_keys: Vec<(Arc<str>, Arc<str>)> = parser_index.keys().cloned().collect();
     parser_only_keys.sort();
     for key in parser_only_keys {
@@ -1749,13 +1773,12 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
         let raw_type = pb.type_annotation.clone();
-        // Typed-IR-Only Resolver Rule: `binding.payload` is the authoritative
-        // typed position when a producer stamped one; the demand side
-        // re-raises it through the one shared dispatch. No reparse of
-        // `type_annotation`. A payload-less parser row is a PROVEN
-        // unannotated schema absence (the parser saw no annotation) —
-        // rendered as the centralized typed `unknown`, never a fabricated
-        // reference and never a failure.
+        // Live analyzer assembly leaves `payload: None` for nested
+        // bindings; a residual stamped payload (if ever present) is
+        // re-raised through the one shared dispatch. No reparse of
+        // `type_annotation`. A payload-less parser-only row is a PROVEN
+        // unannotated schema absence — centralized typed `unknown`,
+        // never a fabricated reference and never a failure.
         let shallow_source = pb
             .payload
             .clone()

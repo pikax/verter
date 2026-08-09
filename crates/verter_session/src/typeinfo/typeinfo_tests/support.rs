@@ -43,6 +43,7 @@ pub(super) const EXPANSION_SELECTED: &str = include_str!("fixtures/expansion_sel
 pub(super) const EXPANSION_UNSELECTED: &str = include_str!("fixtures/expansion_unselected.ts");
 pub(super) const VALUE_INFERENCE: &str = include_str!("fixtures/value_inference.ts");
 pub(super) const FLOW_RETURN_CATALOG: &str = include_str!("fixtures/flow_return_catalog.ts");
+pub(super) const FLOW_RETURN_SUBSTRATE: &str = include_str!("fixtures/flow_return_substrate.ts");
 pub(super) const FLOW_RETURN_EDGE_CATALOG: &str =
     include_str!("fixtures/flow_return_edge_catalog.ts");
 pub(super) const FLOW_RETURN_EDGE_CROSS: &str = include_str!("fixtures/flow_return_edge_cross.ts");
@@ -85,12 +86,12 @@ pub(super) const FLOW_RETURN_PACKAGE_DECLARATIONS: &str =
 pub(super) const FLOW_RETURN_EDGE_PACKAGE_DECLARATIONS: &str =
     include_str!("fixtures/flow_return_edge_package_declarations.ts");
 
+/// The standalone typeinfo host, built by the ONE shared owner
+/// ([`crate::typeinfo::oracle_core::standalone_host`]) so the rows' tests and
+/// the oracle harness's source-side walk / reducer preflight resolve the SAME
+/// program.
 pub(crate) fn make_host_with_footprint() -> Arc<VerterHost> {
-    Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        footprint_capture: true,
-        ..HostConfig::default()
-    }))
+    crate::typeinfo::oracle_core::standalone_host::standalone_footprint_host()
 }
 
 pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {
@@ -177,6 +178,9 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     })) {
@@ -265,13 +269,21 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
             for member in &object.properties {
                 match member {
                     ObjectMember::Property(prop) => {
-                        props.insert(prop.name.clone(), prop.clone());
+                        props.insert(
+                            prop.string_name()
+                                .expect("object_props only accepts string-key fixtures")
+                                .to_owned(),
+                            prop.clone(),
+                        );
                     }
                     ObjectMember::Method(method) => {
                         props.insert(
-                            method.name.clone(),
-                            ObjectProperty::synthetic_public(
-                                method.name.clone(),
+                            method
+                                .string_name()
+                                .expect("object_props only accepts string-key fixtures")
+                                .to_owned(),
+                            ObjectProperty::synthetic_public_key(
+                                method.key.clone(),
                                 TypeExpr::Function(Arc::new(method.function.clone())),
                                 method.optional,
                                 false,
@@ -280,7 +292,8 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
                     }
                     ObjectMember::IndexSignature(_)
                     | ObjectMember::CallSignature(_)
-                    | ObjectMember::ConstructSignature(_) => {}
+                    | ObjectMember::ConstructSignature(_)
+                    | ObjectMember::Spread(_) => {}
                 }
             }
         }

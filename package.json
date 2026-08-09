@@ -47,6 +47,8 @@
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
+    "oracle:lift": "cargo run -p verter_session --features oracle-lift --bin oracle_lift --",
+    "oracle:lift:check": "cargo run -p verter_session --features oracle-lift --bin oracle_lift -- --check",
     "gen:typeinfo-manifest": "node scripts/gen-typeinfo-ignore-manifest.mjs",
     "gen:typeinfo-manifest:check": "node scripts/gen-typeinfo-ignore-manifest.mjs --check",
     "gen:vue-goldens": "node packages/vue-conformance-oracle/gen-vue-goldens.mjs",

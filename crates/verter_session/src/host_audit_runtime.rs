@@ -91,9 +91,10 @@ pub struct HostAuditRuntime {
     /// (observable stays `false`) and a panicked sampler join (also
     /// `false`) from a clean join (observable flips `true`) for THIS
     /// host alone — immune to concurrent samplers spawned/joined by
-    /// sibling tests. Gated to debug/test builds (the same support gate
-    /// the test probe uses), so a release host never carries the slot.
-    #[cfg(all(not(target_arch = "wasm32"), any(test, debug_assertions)))]
+    /// sibling tests. Gated to `test` / the opt-in `test-support` feature
+    /// (the same support gate the test probe uses), so no production build
+    /// — debug or release — carries the slot.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     sampler_join_observed: std::sync::OnceLock<Arc<AtomicBool>>,
 }
 
@@ -124,7 +125,7 @@ impl HostAuditRuntime {
             sampler_started: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             sampler_thread: parking_lot::Mutex::new(None),
-            #[cfg(all(not(target_arch = "wasm32"), any(test, debug_assertions)))]
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             sampler_join_observed: std::sync::OnceLock::new(),
         }
     }
@@ -133,9 +134,9 @@ impl HostAuditRuntime {
     /// sampler thread (the `sampler_started` latch has fired). Used by
     /// the host-drop test to assert the sampler spawned for an
     /// audit-enabled host, reading only this runtime's per-host latch.
-    /// Gated to debug/test builds, so it is not part of the release
-    /// public surface.
-    #[cfg(all(not(target_arch = "wasm32"), any(test, debug_assertions)))]
+    /// Gated to `test` / the opt-in `test-support` feature, so it is not
+    /// part of the public surface of any production build.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     #[must_use]
     pub fn sampler_spawned(&self) -> bool {
         self.sampler_started.load(Ordering::Acquire)
@@ -149,9 +150,9 @@ impl HostAuditRuntime {
     /// is what arms the `Drop`-side flip — a host whose observer is never
     /// requested allocates nothing and `Drop` skips the flip. Immune to
     /// concurrent samplers in sibling tests because it observes only this
-    /// host's join. Gated to debug/test builds, so it is not part of the
-    /// release public surface.
-    #[cfg(all(not(target_arch = "wasm32"), any(test, debug_assertions)))]
+    /// host's join. Gated to `test` / the opt-in `test-support` feature,
+    /// so it is not part of the public surface of any production build.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     #[must_use]
     pub fn sampler_join_observer(&self) -> Arc<AtomicBool> {
         Arc::clone(
@@ -361,9 +362,10 @@ impl Drop for HostAuditRuntime {
             // legs). The flip only happens when a test SEEDED the
             // observable via `sampler_join_observer()` (the slot is
             // `Some`); an un-observed host allocated nothing and is
-            // skipped. Whole block is gated to debug/test builds so a
-            // release host carries neither the slot nor this flip.
-            #[cfg(all(not(target_arch = "wasm32"), any(test, debug_assertions)))]
+            // skipped. Whole block is gated to `test` / the opt-in
+            // `test-support` feature so a production host carries neither
+            // the slot nor this flip.
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             if _joined_cleanly {
                 if let Some(observed) = self.sampler_join_observed.get() {
                     observed.store(true, Ordering::Release);

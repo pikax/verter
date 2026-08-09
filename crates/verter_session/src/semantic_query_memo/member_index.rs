@@ -31,14 +31,14 @@ use std::sync::Arc;
 use dashmap::mapref::entry::Entry;
 
 use super::SemanticGraphStore;
-use crate::semantic_query::{SemanticNodeId, SurfaceView};
+use crate::semantic_query::{PropertyKey, SemanticNodeId, SurfaceView};
 
 /// Name → FIRST-occurrence member ordinal for one interned `Object`
 /// surface. First occurrence matches the walker's linear
 /// `members.iter().find(..)` semantics exactly — a duplicate name maps to
 /// its earliest ordinal, and any post-lookup filtering (e.g. the public-
 /// visibility gate) applies to that same member the scan would have found.
-pub type MemberOrdinalIndex = HashMap<Arc<str>, u32>;
+pub type MemberOrdinalIndex = HashMap<PropertyKey, u32>;
 
 /// FIFO retention cap for the member-ordinal sidecar. Sized for the
 /// working set of wide surfaces a session actually path-hops (hundreds
@@ -50,6 +50,7 @@ pub(super) const MEMBER_ORDINAL_INDEX_RETENTION_CAP: usize = 16_384;
 /// name lookups faster by scanning than through the sidecar (hash + lock
 /// overhead dominates below it). Callers consult the sidecar only ABOVE
 /// this count.
+#[allow(dead_code)]
 pub const MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX: usize = 16;
 
 impl SemanticGraphStore {
@@ -72,13 +73,13 @@ impl SemanticGraphStore {
         if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
             return Arc::clone(existing.value());
         }
-        let mut index = MemberOrdinalIndex::with_capacity(view.members.len());
-        for (ordinal, member) in view.members.iter().enumerate() {
+        let mut index = MemberOrdinalIndex::with_capacity(view.positive_members().len());
+        for (ordinal, member) in view.positive_members().iter().enumerate() {
             // First occurrence wins — `or_insert` keeps the earliest
             // ordinal for a duplicated name, matching linear-scan `find`.
-            index
-                .entry(Arc::clone(&member.name))
-                .or_insert(ordinal as u32);
+            if let Some(key) = member.key.cloned_known() {
+                index.entry(key).or_insert(ordinal as u32);
+            }
         }
         let built = Arc::new(index);
         match self.member_ordinal_index_memo.entry(id) {
@@ -113,12 +114,14 @@ mod tests {
 
     fn member(name: &str, value: SemanticNodeId) -> SurfaceMember {
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -127,7 +130,7 @@ mod tests {
     }
 
     fn object_view(members: Vec<SurfaceMember>) -> SurfaceView {
-        crate::test_surface_view! {
+        crate::semantic_query::surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -151,10 +154,22 @@ mod tests {
         let id = store.intern_node(SemanticNodeData::Object(view.clone()));
 
         let index = store.member_ordinal_index(id, &view);
-        assert_eq!(index.get("alpha"), Some(&0));
-        assert_eq!(index.get("beta"), Some(&1));
-        assert_eq!(index.get("gamma"), Some(&2));
-        assert_eq!(index.get("missing"), None);
+        assert_eq!(
+            index.get(&crate::semantic_query::PropertyKey::identifier("alpha")),
+            Some(&0)
+        );
+        assert_eq!(
+            index.get(&crate::semantic_query::PropertyKey::identifier("beta")),
+            Some(&1)
+        );
+        assert_eq!(
+            index.get(&crate::semantic_query::PropertyKey::identifier("gamma")),
+            Some(&2)
+        );
+        assert_eq!(
+            index.get(&crate::semantic_query::PropertyKey::identifier("missing")),
+            None
+        );
     }
 
     /// A duplicated member name maps to its FIRST ordinal — the exact
@@ -174,11 +189,14 @@ mod tests {
 
         let index = store.member_ordinal_index(id, &view);
         assert_eq!(
-            index.get("dup"),
+            index.get(&crate::semantic_query::PropertyKey::identifier("dup")),
             Some(&0),
             "duplicate name must map to its FIRST ordinal (find semantics)"
         );
-        assert_eq!(index.get("solo"), Some(&1));
+        assert_eq!(
+            index.get(&crate::semantic_query::PropertyKey::identifier("solo")),
+            Some(&1)
+        );
     }
 
     /// The index is built once per node id and shared: a second read
@@ -235,6 +253,10 @@ mod tests {
             !Arc::ptr_eq(&first_arc, &rebuilt),
             "an evicted entry rebuilds on demand with a fresh Arc"
         );
-        assert_eq!(rebuilt.get("m0"), Some(&0), "rebuild is content-identical");
+        assert_eq!(
+            rebuilt.get(&crate::semantic_query::PropertyKey::identifier("m0")),
+            Some(&0),
+            "rebuild is content-identical"
+        );
     }
 }

@@ -91,8 +91,10 @@ fn derivation_subgraph_serde_round_trips_nodes_and_edges_preserving_node_ids() {
             kind: OriginEdgeKind::ProjectMember,
             sources: vec![NodeId(0)],
             meta: OriginEdgeMetaDto::ProjectMember {
-                member_name: Arc::from("foo"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                member_key: verter_audit::AuditPropertyKey::String {
+                    value: Arc::from("foo"),
+                },
             },
         }],
     };
@@ -497,7 +499,7 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
         .filter(|e| e.kind == OriginEdgeKind::ProjectMember)
         .filter_map(|e| match &e.meta {
             OriginEdgeMetaDto::ProjectMember {
-                member_name,
+                member_key: verter_audit::AuditPropertyKey::String { value: member_name },
                 provenance,
             } if *provenance == verter_audit::MemberEdgeProvenance::PublishedField => {
                 Some(member_name.as_ref().to_string())

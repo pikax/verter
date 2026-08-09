@@ -336,7 +336,10 @@ impl ProjectSemanticDispatch<'_> {
         matches!(
             path,
             [PathSegment::Index(
-                IndexKey::String(_) | IndexKey::Number(_) | IndexKey::TypeNode(_)
+                IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)
+                    | IndexKey::Computed(_)
             )]
         )
     }
@@ -506,7 +509,7 @@ impl ProjectSemanticDispatch<'_> {
     /// [`Mapped`](SemanticNodeData::Mapped) source + mapper node ids, a
     /// [`TypeParam`](SemanticNodeData::TypeParam) constraint/default, a
     /// [`MergedDecl`](SemanticNodeData::MergedDecl)'s contributors, and a
-    /// [`Function`](SemanticNodeData::Function)'s param / return / type-param
+    /// [`Function`](SemanticNodeData::Signature)'s param / return / type-param
     /// node ids, and the three unresolved carriers that apply type arguments
     /// ([`BareRef`](SemanticNodeData::BareRef) `Foo<infer U>`,
     /// [`TypeOf`](SemanticNodeData::TypeOf) `typeof make<infer U>`,
@@ -543,7 +546,9 @@ impl ProjectSemanticDispatch<'_> {
             };
             match &*data {
                 // The target: an `infer X` placeholder anywhere in the subtree.
-                SemanticNodeData::Infer { .. } => return true,
+                SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
+                    return true
+                }
 
                 // ── Composite carriers: recurse into EVERY child node id. ──
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
@@ -554,7 +559,7 @@ impl ProjectSemanticDispatch<'_> {
                     stack.extend(contributors.iter().copied());
                 }
                 SemanticNodeData::Object(surface) => {
-                    stack.extend(surface.members.iter().map(|m| m.value));
+                    stack.extend(surface.positive_members().iter().map(|m| m.value));
                     stack.extend(surface.call_signatures.iter().copied());
                     stack.extend(surface.construct_signatures.iter().copied());
                     for sig in surface.index_signatures.iter() {
@@ -562,6 +567,9 @@ impl ProjectSemanticDispatch<'_> {
                         stack.push(sig.value_type);
                     }
                     stack.extend(surface.keyspace);
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {
@@ -573,7 +581,7 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let IndexKey::TypeNode(idx) = index {
+                    if let IndexKey::Computed(idx) = index {
                         stack.push(*idx);
                     }
                 }
@@ -604,7 +612,7 @@ impl ProjectSemanticDispatch<'_> {
                     stack.push(*true_branch_ref);
                     stack.push(*false_branch_ref);
                 }
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,
@@ -632,7 +640,6 @@ impl ProjectSemanticDispatch<'_> {
                 | SemanticNodeData::BareRef(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());
                 }
-                SemanticNodeData::ConstructorType { signature } => stack.push(*signature),
 
                 // ── Leaf carriers: no child node id can hold a nested `infer`
                 //    (TS rejects `infer` outside conditional `extends`, and
@@ -646,6 +653,10 @@ impl ProjectSemanticDispatch<'_> {
                 // infer-bearing child node id.
                 | SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::RawFallback { .. }
+                // The sealed callable carrier never carries an `infer`
+                // placeholder: it is composed from an indexed function
+                // position's lowered parameters, not from a conditional.
+                | SemanticNodeData::DeferredCallable(_)
                 | SemanticNodeData::SyntheticBinding { .. } => {}
             }
         }

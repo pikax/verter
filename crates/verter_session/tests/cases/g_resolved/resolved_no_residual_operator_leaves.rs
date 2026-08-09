@@ -5,7 +5,7 @@
 //! `TemplateLiteral` / `Infer` / `Rest` operator leaves at any nested
 //! position EXCEPT under three documented exceptions:
 //!
-//! - (a) The operator is replaced by `TypeExpr::Unknown { raw }` —
+//! - (a) The operator is replaced by `TypeExpr::Unknown(UnknownValue)` —
 //!   represented by the absence of the operator from the tree, since `Unknown`
 //!   does not carry nested `TypeExpr`.
 //! - (b) Inside the `type_arguments` / `conditional_context` of a
@@ -107,6 +107,7 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
         }
         TypeExpr::Object(obj) => obj.properties.iter().any(|m| match m {
             ObjectMember::Property(prop) => contains_free_type_parameter(&prop.ty),
+            ObjectMember::Spread(spread) => contains_free_type_parameter(&spread.ty),
             ObjectMember::Method(method) => {
                 method
                     .function
@@ -197,7 +198,7 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
 /// each prefixed with `prop_name :: path`.
 ///
 /// The walker honors the three documented exception classes:
-/// - (a) `Unknown { raw }` is a sink (no recursion).
+/// - (a) `TypeExpr::Unknown(UnknownValue)` is a sink (no recursion).
 /// - (b) `RecursiveRef.type_arguments` / `conditional_context` are NOT
 ///   recursed into (the recursive context is allowed to retain operator
 ///   forms — they encode the cycle).
@@ -294,14 +295,38 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
             for (i, m) in obj.properties.iter().enumerate() {
                 match m {
                     ObjectMember::Property(prop) => {
-                        walk(&prop.ty, &format!("{path}.{}", prop.name), out);
+                        walk(
+                            &prop.ty,
+                            &format!(
+                                "{path}.{}",
+                                prop.string_name().unwrap_or("<non-string-key>")
+                            ),
+                            out,
+                        );
+                    }
+                    ObjectMember::Spread(spread) => {
+                        walk(&spread.ty, &format!("{path}[spread{i}]"), out);
                     }
                     ObjectMember::Method(method) => {
                         for (j, p) in method.function.parameters.iter().enumerate() {
-                            walk(&p.ty, &format!("{path}.{}.param{j}", method.name), out);
+                            walk(
+                                &p.ty,
+                                &format!(
+                                    "{path}.{}.param{j}",
+                                    method.string_name().unwrap_or("<non-string-key>")
+                                ),
+                                out,
+                            );
                         }
                         if let Some(ret) = method.function.return_type.as_deref() {
-                            walk(ret, &format!("{path}.{}.return", method.name), out);
+                            walk(
+                                ret,
+                                &format!(
+                                    "{path}.{}.return",
+                                    method.string_name().unwrap_or("<non-string-key>")
+                                ),
+                                out,
+                            );
                         }
                     }
                     ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {

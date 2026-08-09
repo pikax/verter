@@ -42,7 +42,7 @@ fn cached_fallthrough_signature_carries_member() {
         canonical_id: "/src/types.ts".to_owned(),
         key: FactKey::Member {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from("a"),
+            name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
             space: SymbolSpace::Type,
         },
         lane: FactLane::Semantic,

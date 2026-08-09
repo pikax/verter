@@ -231,12 +231,67 @@ pub fn mark_request_result_partial() {
     mark_request_result_partial_with(PartialReasonSet::PROPAGATED);
 }
 
+/// The READ-propagation mark: a consumer folding a partial CHILD into its
+/// own request-result completeness.
+///
+/// Marks the request sticky unconditionally, and folds `reasons` into the
+/// active per-cold-compute scope.
+///
+/// A NAMED set is folded verbatim — that is the whole point of carrying the
+/// classes across the query/build boundary (see
+/// [`crate::semantic_query::CacheRead::partial_reasons`]), and it is
+/// unconditional: a consumer that treats one class as CONTAINED must see
+/// the class regardless of what the scope already holds.
+///
+/// An EMPTY set is the BOOLEAN BRIDGE — the caller observed a partial child
+/// but has only a `bool` to carry, so it can name no reason of its own. It
+/// records [`PartialReasonSet::PROPAGATED`] ONLY when the scope carries no
+/// reason yet. A child that already bubbled its OWN named class into this
+/// scope must not then have the generic bridge stacked on top of it: a
+/// consumer that treats one class as CONTAINED cannot tell a contained-only
+/// observation from a mixed one once the unclassified bit is present, so the
+/// bridge would silently un-contain every named class in the tree. Adding
+/// `PROPAGATED` to an already-partial scope changes no `is_partial()`
+/// answer — only the reason set — so nothing else observes the difference.
+pub fn mark_request_result_partial_from_read_with(reasons: PartialReasonSet) {
+    if let Some(ctx) = current_request_context() {
+        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
+    }
+    if !reasons.is_empty() {
+        fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
+        return;
+    }
+    if current_cold_compute_completeness().is_partial() {
+        return;
+    }
+    fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
+}
+
 /// Mark a locally exhausted semantic-inference budget without erasing its
 /// structural partial-reason class. This is separate from propagated
 /// partiality because macro handoff consumers classify budget exhaustion
 /// deterministically.
 pub(crate) fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
+}
+
+/// Mark the active result partial under an EXPLICIT reason set — the
+/// classifying producers' entry.
+///
+/// The flow-return consumer entry is the caller, over three classes that
+/// differ in what a value-reading consumer can still do with the result. A
+/// degraded success whose published surface is FAITHFUL rides
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`], and one whose member set
+/// is complete but whose member types may be wrong rides
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — both leave a COMPLETE
+/// member set, so both are contained by every Vue macro codegen consumer.
+/// Every NO-VALUE outcome rides
+/// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`], which has no member set
+/// at all: contained only by the consumers that splice the AUTHORED
+/// declaration for an external checker, and faulting for the ones that
+/// DERIVE an option object from the value.
+pub(crate) fn mark_request_result_partial_with_reasons(reasons: PartialReasonSet) {
+    mark_request_result_partial_with(reasons);
 }
 
 /// Mark the active result partial for the exact cancellation reason.
@@ -307,7 +362,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 #[inline]
 pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
     if read.result_is_partial {
-        mark_request_result_partial();
+        mark_request_result_partial_from_read_with(read.partial_reason_classes());
     }
 }
 
@@ -409,8 +464,11 @@ pub struct PerRequestCacheCounters {
     pub component_meta: HitMiss,
     /// `RouteDb` — host-backed resolver route cache.
     pub route_db: HitMiss,
-    /// `RefCycleResultDb` — transitive-cycle result cache for
-    /// parameterized generic helpers.
+    /// Always-zero counter for the retired `RefCycleResultDb` cache.
+    /// Retained under the legacy name to preserve audit-harness JSON
+    /// schema compatibility; the materialization cycle gate is a
+    /// semantic-query family now, so its warm hits ride
+    /// `semantic_graph` (and `type_resolution_ref_root_cycle_hits`).
     pub ref_cycle: HitMiss,
     /// `IntrinsicRegistry` — intrinsic dispatch lookup cache.
     pub intrinsic_registry: HitMiss,
@@ -699,8 +757,10 @@ pub struct RequestContext {
     /// Number of conditional-type branch decisions resolved (open
     /// distributions + closed branch reductions).
     pub type_resolution_conditional_decisions: AtomicU64,
-    /// Number of `ref_root_reaches_transitive_cycle_node` cache hits
-    /// observed during the request.
+    /// Number of materialization cycle gate
+    /// (`ClassifyMaterializationCycleGate`) warm family hits observed
+    /// during the request. Field name retained for audit-harness JSON
+    /// schema compatibility.
     pub type_resolution_ref_root_cycle_hits: AtomicU64,
     /// Total projection ops executed against the projection-op
     /// budget (`SemanticQueryKey::ProjectPath` invocations).
@@ -729,6 +789,18 @@ pub struct RequestContext {
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`] so a
     /// consumer can recover which query families a resolution actually touched.
     pub type_resolution_dispatched_query_tags: AtomicU32,
+    /// Number of cold whole-function flow-return evaluations this
+    /// request ran (root plus nested inline frames). Bumped at the
+    /// `FlowReturnStarted` emission site; a warm family hit bumps
+    /// nothing (the cold-vs-warm audit contract's counter witness).
+    pub flow_return_cold_computes: AtomicU32,
+    /// Number of flow-slice budget refusals observed. Bumped at the
+    /// `FlowSliceBudgetExceeded` emission site.
+    pub flow_return_budget_exceeded: AtomicU32,
+    /// Number of coinductive flow-cycle re-entry holds recorded on
+    /// the shared obligation runtime. Bumped at the
+    /// `FlowCycleSentinelHit` emission site.
+    pub flow_return_cycle_reentries: AtomicU32,
     /// Per-context accumulator for compile-phase wall-clock — parse
     /// phase. Stored as fixed-point microseconds (`f64` ms × 1_000`)
     /// so the atomic counter can `fetch_add` cheaply; finalisation
@@ -1236,6 +1308,9 @@ impl RequestContext {
             type_resolution_depth_high_water: AtomicU16::new(0),
             type_resolution_recursion_limit_reached: AtomicBool::new(false),
             type_resolution_dispatched_query_tags: AtomicU32::new(0),
+            flow_return_cold_computes: AtomicU32::new(0),
+            flow_return_budget_exceeded: AtomicU32::new(0),
+            flow_return_cycle_reentries: AtomicU32::new(0),
             compile_parse_us: AtomicU64::new(0),
             compile_transform_us: AtomicU64::new(0),
             compile_codegen_us: AtomicU64::new(0),
@@ -1390,8 +1465,8 @@ impl RequestContext {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the `ref_root_reaches_transitive_cycle_node` cache-hit
-    /// counter.
+    /// Bump the materialization cycle gate warm-hit counter
+    /// (`type_resolution_ref_root_cycle_hits`).
     pub fn bump_type_resolution_ref_root_cycle_hit(&self) {
         self.type_resolution_ref_root_cycle_hits
             .fetch_add(1, Ordering::Relaxed);

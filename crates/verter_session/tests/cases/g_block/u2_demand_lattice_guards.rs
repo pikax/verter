@@ -45,7 +45,7 @@ fn path(names: &[&str]) -> ProjectionPath {
 // ----------------------------------------------------------------------
 
 #[test]
-fn query_modes_are_presets_over_projection_demand_eval_policy() {
+pub(crate) fn query_modes_are_presets_over_projection_demand_eval_policy() {
     // INDEPENDENT ORACLE: every expected `Demand` below is a hand-written
     // struct literal — it NEVER calls `Demand::{identity,navigate,shallow,
     // expanded,skeleton}()`. `From<ProjectionMode>` is implemented via those
@@ -191,7 +191,7 @@ fn query_modes_are_presets_over_projection_demand_eval_policy() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode() {
+pub(crate) fn skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode() {
     // Skeleton is structurally a hand-built point — no special casing.
     let skeleton = Demand::skeleton();
     let hand_built = Demand {
@@ -235,7 +235,7 @@ fn skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn cache_key_axes_are_minimal_and_normalized() {
+pub(crate) fn cache_key_axes_are_minimal_and_normalized() {
     // A demand that exercises many non-⊥ axes, including display_needs.
     let rich = Demand {
         projection: ProjectionDemand {

@@ -192,11 +192,24 @@ mod projector {
         fn dispatch(&self) -> &ProjectSemanticDispatch<'_>;
 
         /// Plain SHELL raise (no operator reduction): materialize `node` into
-        /// a sealed [`OutputTypeExpr`] carrier. `None` is the miss signal (the
+        /// a sealed [`OutputTypeExpr`]. `None` is the miss signal (the
         /// node — or a node required while raising it — is unavailable from
-        /// the live graph store).
+        /// the live graph store); a `None` result is noted as an
+        /// `OutputMaterializationLoss` NON-CACHEABLE read BEFORE it is
+        /// returned (a torn read is never warm-admitted as a complete raise,
+        /// and never faults the enclosing compute's completeness).
         fn materialize_output_type_expr(&self, node: SemanticNodeId) -> Option<OutputTypeExpr> {
-            self.dispatch().output_shell_raise_sealed(node)
+            let raised = self.dispatch().output_shell_raise_sealed(node);
+            if raised.is_none() {
+                // DEBT (architect-accepted): the note is UNCONDITIONAL — it
+                // also fires for a genuinely-absent id (a real absence, not
+                // degradation), costing warm hits on that class for this
+                // block (fail-closed direction chosen deliberately).
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::OutputMaterializationLoss,
+                );
+            }
+            raised
         }
 
         /// REDUCE-then-raise: apply the supplied projection reduction context,
@@ -379,6 +392,7 @@ pub(crate) use projector::TestOutputCap;
 /// [`OutputProjector`] impl.
 mod carrier {
     use super::{DepSignature, OutputProjector, SemanticNodeId, TypeExpr};
+    use crate::project_semantic_dispatch::raise::{DegradedLeaf, MaterializedTypeExpr};
 
     /// The PAYLOAD VAULT: the inner [`TypeExpr`] lives here and is reachable
     /// by field access ONLY from within this module.
@@ -395,31 +409,63 @@ mod carrier {
     /// unwrap-locality proof; the capability instance is not otherwise
     /// consulted.
     mod payload {
-        use super::{OutputProjector, TypeExpr};
+        use super::{DegradedLeaf, MaterializedTypeExpr, OutputProjector, TypeExpr};
 
-        /// The sealed inner-`TypeExpr` payload. The single field is private
+        /// The sealed inner-`TypeExpr` payload. BOTH fields are private
         /// to this `payload` module — NOT `pub`, NOT `pub(super)`, NOT
-        /// `pub(crate)`.
-        pub(super) struct OutputPayload(TypeExpr);
+        /// `pub(crate)`. The `degraded_leaves` sidecar rides beside the
+        /// compat tree: it is folded into `result_is_partial` at the
+        /// `from_parts` choke point and is discarded ONLY at the
+        /// capability-gated terminal unwrap.
+        pub(super) struct OutputPayload {
+            type_expr: TypeExpr,
+            degraded_leaves: Vec<DegradedLeaf>,
+        }
 
         impl OutputPayload {
-            /// Seal a raw [`TypeExpr`] into the vault. `pub(super)` — only the
-            /// parent `carrier` module's carrier constructors reach it.
-            pub(super) fn new(type_expr: TypeExpr) -> Self {
-                Self(type_expr)
+            /// Seal a [`MaterializedTypeExpr`] (tree + sidecar) into the
+            /// vault. `pub(super)` — only the parent `carrier` module's
+            /// carrier constructors reach it.
+            pub(super) fn new(materialized: MaterializedTypeExpr) -> Self {
+                let (type_expr, degraded_leaves) = materialized.into_parts();
+                Self {
+                    type_expr,
+                    degraded_leaves,
+                }
             }
 
-            /// Structurally clone the payload (clones the inner [`TypeExpr`]).
-            /// NOT an unwrap — no [`TypeExpr`] escapes the vault, no capability
-            /// required; used by the carrier's [`Clone`] impl.
+            /// `true` when the payload carries any degradation leaf.
+            pub(super) fn has_degradation(&self) -> bool {
+                !self.degraded_leaves.is_empty()
+            }
+
+            /// Structurally clone the payload (clones BOTH the inner
+            /// [`TypeExpr`] and the degradation sidecar). NOT an unwrap — no
+            /// [`TypeExpr`] escapes the vault, no capability required; used
+            /// by the carrier's [`Clone`] impl.
             pub(super) fn clone_payload(&self) -> Self {
-                Self(self.0.clone())
+                Self {
+                    type_expr: self.type_expr.clone(),
+                    degraded_leaves: self.degraded_leaves.clone(),
+                }
             }
 
             /// Read the inner [`TypeExpr`] out, consuming the payload. Requires
             /// an [`OutputProjector`] capability — the unwrap-locality gate.
+            /// This is the ONLY place the degradation sidecar may be
+            /// discarded (the capability-gated TERMINAL unwrap) — and it is
+            /// discarded ONLY AFTER being observed into the NON-CACHEABLE
+            /// read channel (`OutputMaterializationLoss`): the result is
+            /// never warm-admitted as complete, and the observation never
+            /// faults the enclosing compute's completeness (a contained
+            /// member-level degradation stays entry-local).
             pub(super) fn into_type_expr<P: OutputProjector + ?Sized>(self, _cap: &P) -> TypeExpr {
-                self.0
+                if !self.degraded_leaves.is_empty() {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::OutputMaterializationLoss,
+                    );
+                }
+                self.type_expr
             }
 
             /// Test-only borrow of the inner [`TypeExpr`] (no capability). The
@@ -429,7 +475,7 @@ mod carrier {
             /// COMPILE-ABSENT from production builds.
             #[cfg(any(test, feature = "test-support"))]
             pub(super) fn type_expr_for_test(&self) -> &TypeExpr {
-                &self.0
+                &self.type_expr
             }
         }
     }
@@ -460,8 +506,10 @@ mod carrier {
         /// directly in `output_materialization`, where `pub(super)` resolved to
         /// `project_semantic_dispatch`); the vault moved the carrier one level
         /// deeper, so the same reach is now spelled explicitly.
-        pub(in crate::project_semantic_dispatch) fn from_raise(type_expr: TypeExpr) -> Self {
-            Self(payload::OutputPayload::new(type_expr))
+        pub(in crate::project_semantic_dispatch) fn from_raise(
+            materialized: MaterializedTypeExpr,
+        ) -> Self {
+            Self(payload::OutputPayload::new(materialized))
         }
 
         /// Read the inner [`TypeExpr`] out, consuming the carrier. Requires an
@@ -509,6 +557,10 @@ mod carrier {
             dep_signature: DepSignature,
             result_is_partial: bool,
         ) -> Self {
+            // CHOKE POINT: any degradation leaf riding the payload's sidecar
+            // marks the result partial — the typed degradation channel feeds
+            // the same partial bit the reducer supplies.
+            let result_is_partial = result_is_partial || type_expr.0.has_degradation();
             Self {
                 node_id,
                 type_expr,
@@ -521,9 +573,10 @@ mod carrier {
         /// always readable, NOT the laundering surface). Part of the carrier's
         /// documented readable-metadata contract, read in production by the
         /// publication pipeline off the reduced-output carrier: the no-poison
-        /// root-sentinel gate in `reduce_field_type_expr_with_mode` and the
+        /// root-sentinel gate in sink-private `reduce_field_value_node` and the
         /// node-domain shape comparison in `reduce_published_field_types` read
         /// node facts off this id instead of re-materialising a `TypeExpr`.
+        /// (The former TypeExpr helper `reduce_field_type_expr_with_mode` is deleted.)
         pub(crate) fn node_id(&self) -> Option<SemanticNodeId> {
             self.node_id
         }
@@ -597,7 +650,9 @@ mod carrier {
         ) -> Self {
             Self {
                 node_id,
-                type_expr: OutputTypeExpr(payload::OutputPayload::new(type_expr)),
+                type_expr: OutputTypeExpr(payload::OutputPayload::new(
+                    MaterializedTypeExpr::exact(type_expr),
+                )),
                 dep_signature,
                 result_is_partial,
             }
@@ -656,7 +711,26 @@ pub(crate) fn wrap_output_type_expr<P: OutputProjector + ?Sized>(
     _cap: &P,
     type_expr: TypeExpr,
 ) -> OutputTypeExpr {
-    OutputTypeExpr::from_raise(type_expr)
+    // A raw freshly-computed `TypeExpr` carries no degradation — seal it with
+    // an EXACT (empty) sidecar.
+    OutputTypeExpr::from_raise(
+        crate::project_semantic_dispatch::raise::MaterializedTypeExpr::exact(type_expr),
+    )
+}
+
+/// Seal a TYPED unmaterialized failure (`Miss`-family [`QueryError`]) into an
+/// [`OutputTypeExpr`], the terminal counterpart of [`wrap_output_type_expr`]
+/// for a present-but-unraisable node: the sidecar carries the degradation
+/// leaf, so the payload goes PARTIAL at the `from_parts` choke point (never
+/// laundered to a complete empty `Unknown`). Requires an [`OutputProjector`]
+/// capability — only a true output sink can mint it.
+pub(crate) fn wrap_degraded_output<P: OutputProjector + ?Sized>(
+    _cap: &P,
+    reason: crate::semantic_query::QueryError,
+) -> OutputTypeExpr {
+    OutputTypeExpr::from_raise(
+        crate::project_semantic_dispatch::raise::MaterializedTypeExpr::degraded(reason),
+    )
 }
 
 // =====================================================================

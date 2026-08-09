@@ -33,7 +33,10 @@ fn workspace_root() -> PathBuf {
 // `evaluate_deferred_semantic_node_with_context`). The shims live
 // inside the existing `for_tests` module gating pattern; further
 // extraction would split the test surface for marginal gain.
-const LIB_RS_LINE_CEILING: usize = 855;
+// +1 for the `pub mod binder_identity_facts;` module declaration (the
+// family-A `BinderIdentityFacts` substrate home — one irreducible
+// module-declaration line; all payload types live in the submodule).
+const LIB_RS_LINE_CEILING: usize = 856;
 
 #[test]
 fn lib_rs_stays_under_line_ceiling() {

@@ -70,10 +70,10 @@ fn round7_literal_union_slots_audit_stays_at_zero_outputschema_execute_edges() {
         if !matches!(edge.kind, OriginEdgeKind::ProjectMember) {
             continue;
         }
-        if let OriginEdgeMetaDto::ProjectMember { member_name, .. } = &edge.meta {
-            match member_name.as_ref() {
-                "outputSchema" => outputschema_count += 1,
-                "execute" => execute_count += 1,
+        if let OriginEdgeMetaDto::ProjectMember { member_key, .. } = &edge.meta {
+            match member_key.as_string() {
+                Some("outputSchema") => outputschema_count += 1,
+                Some("execute") => execute_count += 1,
                 _ => {}
             }
         }
@@ -82,8 +82,8 @@ fn round7_literal_union_slots_audit_stays_at_zero_outputschema_execute_edges() {
     let mut projection_path_count = 0usize;
     for projection in footprint.projections.iter() {
         for seg in projection.path.iter() {
-            if let verter_audit::origin_graph::ProjectPathSegment::Member { name } = seg {
-                if name.as_ref() == "outputSchema" || name.as_ref() == "execute" {
+            if let verter_audit::origin_graph::ProjectPathSegment::Member { key } = seg {
+                if key.as_string() == Some("outputSchema") || key.as_string() == Some("execute") {
                     projection_path_count += 1;
                 }
             }

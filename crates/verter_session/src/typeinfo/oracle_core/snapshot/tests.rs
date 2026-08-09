@@ -33,12 +33,14 @@ const SYMBOL: &str = "ComposedProps";
 /// codec so it is byte-for-byte what `to_json_value` emits (the on-disk form).
 fn oracle_value() -> Value {
     let obj = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "id".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "id".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     }));
     obj.to_json_value()
 }
@@ -392,8 +394,17 @@ fn identity_is_kind_specific_schema_bumped() {
     // An unknown oracle_value_kind is rejected (a future kind is a closed-tagged
     // addition that bumps the schema version, never silently accepted).
     assert!(matches!(
-        decode_identity("relation_verdict", identity),
+        decode_identity("bogus_value_kind", identity),
         Err(SnapshotDecodeError::UnknownValueKind(_))
+    ));
+
+    // CROSS-KIND rejection: `relation_verdict` is a KNOWN kind (v4), but a
+    // v3-shaped identity under it fails — the v4 identity is a DISTINCT closed
+    // shape whose required axes the v3 document does not carry (and vice
+    // versa: v4-only axes on a v3 kind are unknown fields).
+    assert!(matches!(
+        decode_identity("relation_verdict", identity),
+        Err(SnapshotDecodeError::Identity(_))
     ));
 
     // An identity with an unknown field FAILS (deny_unknown_fields).
@@ -415,13 +426,15 @@ fn identity_is_kind_specific_schema_bumped() {
     ));
 
     // The known-kinds set size stays tied to the schema version: a new kind
-    // MUST bump ORACLE_SCHEMA_VERSION. There is still exactly one kind; schema
-    // v2 was the capture-strategy field-set change (`identity.probe_rhs_kind` +
-    // `raw_capture.probe_scaffold`); schema v3 is the migration-fidelity field-set
-    // change (`migration_fingerprint_version` + `migration_fingerprint`), not a
-    // kind addition.
-    assert_eq!(KNOWN_VALUE_KINDS.len(), 1);
-    assert_eq!(ORACLE_SCHEMA_VERSION, 3);
+    // MUST bump ORACLE_SCHEMA_VERSION. Schema v2 was the capture-strategy
+    // field-set change (`identity.probe_rhs_kind` + `raw_capture.probe_scaffold`);
+    // schema v3 the migration-fidelity field-set change
+    // (`migration_fingerprint_version` + `migration_fingerprint`); schema v4 is
+    // the SECOND kind addition (`relation_verdict` — the migration mirror
+    // becomes kind-keyed: required for structured_type_expr, forbidden on
+    // relation_verdict).
+    assert_eq!(KNOWN_VALUE_KINDS.len(), 2);
+    assert_eq!(ORACLE_SCHEMA_VERSION, 4);
 }
 
 // -- probe_scaffold_recorded_and_rederivable --------------------------------
@@ -553,4 +566,544 @@ fn snapshot_env_pin_matches_workspace() {
     assert_eq!(decoded.oracle_schema_version, ORACLE_SCHEMA_VERSION);
     assert_eq!(decoded.normalizer_version, NORMALIZER_VERSION);
     assert_eq!(decoded.probe_synthesis_version, PROBE_SYNTHESIS_VERSION);
+}
+
+// -- relation_value_strict_rejects_a_graph_node_integer_bound ---------
+
+/// A fully-valid synthetic `relation_verdict` snapshot: `{ value: number }`
+/// against `{ value: infer V }`, capturing `assignable` with `V = number`.
+/// Built through the REAL synthesis + codec paths (the probe header via the
+/// versioned synthesis, the operands via the canonical derivation, the hover
+/// carrying the reduced tuple wire the strict rail re-decodes).
+fn valid_relation_snapshot() -> Value {
+    use super::super::identity::{
+        FreshnessTag, InferenceModeTag, RelationKindTag, RelationPolicyRecord,
+        RelationVerdictIdentity,
+    };
+    use super::super::query_specs::{HostSetupKindSpec, RelationBinderSpec, RelationQuerySpec};
+    use super::super::relation_probe::{self, RelationVerdict, RELATION_BINDING_PROJECTION};
+
+    let spec = RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function: "relation_synthetic_value",
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: HostSetupKindSpec::Standalone,
+        },
+        source_text: "{ value: number }",
+        target_text: "{ value: infer V }",
+        binder_layout: &[RelationBinderSpec {
+            ordinal: 0,
+            name: "V",
+            constraint: None,
+        }],
+        contract_rows: &["relation_synthetic_contract"],
+        engine_pin: None,
+    };
+    let identity: RelationVerdictIdentity =
+        relation_probe::relation_identity_from_spec(&spec).expect("synthetic spec derives");
+    assert_eq!(identity.relation, RelationKindTag::Assignable);
+    assert_eq!(identity.policy, RelationPolicyRecord::default_record());
+    assert_eq!(identity.freshness, FreshnessTag::Regular);
+    assert_eq!(identity.inference_mode, InferenceModeTag::TargetPattern);
+
+    // The bound: `number` lowered + normalized under the ONE relation-binding
+    // projection (the same the wire decoder applies).
+    let bound = super::super::normalize::normalize(
+        &super::super::admission::lower_hover_rhs("number").expect("bound lowers"),
+        RELATION_BINDING_PROJECTION,
+    )
+    .expect("bound normalizes")
+    .to_json_value();
+    let oracle_value = json!({
+        "verdict": RelationVerdict::Assignable.tag(),
+        "bindings": [{ "ordinal": 0, "name": "V", "bound": bound }],
+    });
+    let probe_header = relation_probe::relation_probe_header(
+        0,
+        spec.source_text,
+        spec.target_text,
+        &identity.binder_layout,
+    );
+    let hover_contents = "```typescript\ntype __oracle_probe__0 = readonly [true, readonly [readonly [0, \"V\", number]]];\n```".to_string();
+    let env = PinnedEnv {
+        tsgo_version: TSGO_VERSION.to_string(),
+        oracle_schema_version: ORACLE_SCHEMA_VERSION,
+        normalizer_version: NORMALIZER_VERSION,
+        probe_synthesis_version: PROBE_SYNTHESIS_VERSION,
+        compiler_options_hash: "sha256:deadbeef".to_string(),
+        env_corpus_id: "blake3:cafef00d".to_string(),
+    };
+    let probe = ProbeLocator {
+        probe_name: "__oracle_probe__0".to_string(),
+        offset: relation_probe::relation_probe_source(
+            spec.row_function,
+            0,
+            spec.source_text,
+            spec.target_text,
+            &identity.binder_layout,
+        )
+        .find("__oracle_probe__0")
+        .expect("probe name in synthesized source") as u64,
+    };
+    super::assemble_relation_snapshot_document(
+        "relation_verdict",
+        &identity,
+        &env,
+        &oracle_value,
+        &probe,
+        &json!({
+            "probe_name": "__oracle_probe__0",
+            "probe_header": probe_header,
+            "probe_scaffold": null,
+            "hover_contents": hover_contents,
+        }),
+        &json!({ "manifest": [], "files": [] }),
+        "blake3:placeholder",
+    )
+}
+
+#[test]
+fn relation_value_strict_accepts_valid_and_rejects_integer_bound() {
+    // The valid relation snapshot strictly decodes AND materializes.
+    let valid = valid_relation_snapshot();
+    let decoded = decode_strict(&valid).unwrap_or_else(|e| {
+        panic!("a valid relation_verdict snapshot must strictly decode: {e:?}")
+    });
+    let value = super::materialize_relation_value(&decoded).expect("materializes");
+    assert_eq!(
+        value.verdict,
+        super::super::relation_probe::RelationVerdict::Assignable
+    );
+    assert_eq!(value.bindings.len(), 1);
+    assert_eq!(value.bindings[0].ordinal, 0);
+    assert_eq!(value.bindings[0].name, "V");
+    assert!(matches!(
+        value.bindings[0].bound,
+        TypeExpr::Primitive(PrimitiveName::Number)
+    ));
+
+    // A bare graph-node INTEGER where the normalized TypeExpr JSON
+    // belongs FAILS the strict value rail — the persisted record never carries
+    // a SemanticNodeId. Asserted DIRECTLY against `decode_relation_value_strict`
+    // (the end-to-end `decode_strict` path would reject EARLIER, at the
+    // raw-capture re-derivation rail, and so could never prove THIS rail is the
+    // rejector): the strict value decode of the integer-bound value against
+    // the valid identity's binder layout must fail.
+    let valid = valid_relation_snapshot();
+    let identity_dto = match super::decode_identity("relation_verdict", &valid["identity"])
+        .expect("identity decodes")
+    {
+        super::DecodedIdentity::RelationVerdict(dto) => dto,
+        super::DecodedIdentity::StructuredTypeExpr(_) => panic!("wrong kind"),
+    };
+    let mut int_bound_value = valid["oracle_value"].clone();
+    int_bound_value["bindings"][0]["bound"] = json!(7);
+    assert!(
+        matches!(
+            super::decode_relation_value_strict(&int_bound_value, &identity_dto),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a graph-node integer `bound` must fail the strict VALUE rail itself \
+         (red if `type_expr_from_json` ever accepts a bare integer)"
+    );
+
+    // End-to-end, the same tamper ALSO fails `decode_strict` (here the
+    // raw-capture re-derivation rail is the first rejector — kept as coverage
+    // of that rail, not as the value-rail proof).
+    let mut bad = valid_relation_snapshot();
+    bad["oracle_value"]["bindings"][0]["bound"] = json!(7);
+    assert!(
+        matches!(
+            decode_strict(&bad),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a graph-node integer `bound` must fail strict decode"
+    );
+
+    // A binding whose ordinal/name does not match the identity binder layout
+    // fails (ordinal AND name must match in preorder).
+    let mut wrong_name = valid_relation_snapshot();
+    wrong_name["oracle_value"]["bindings"][0]["name"] = json!("Z");
+    assert!(matches!(
+        decode_strict(&wrong_name),
+        Err(SnapshotDecodeError::RelationValue(_))
+    ));
+
+    // A false verdict carrying bindings fails.
+    let mut false_with_bindings = valid_relation_snapshot();
+    false_with_bindings["oracle_value"]["verdict"] = json!("not_assignable");
+    assert!(matches!(
+        decode_strict(&false_with_bindings),
+        Err(SnapshotDecodeError::RelationValue(_))
+    ));
+
+    // A cross-kind field (the v3 migration mirror / source-admission digest on
+    // a relation snapshot) fails.
+    let mut cross = valid_relation_snapshot();
+    cross["migration_fingerprint"] = json!("blake3:00");
+    cross["migration_fingerprint_version"] = json!(1);
+    assert!(matches!(
+        decode_strict(&cross),
+        Err(SnapshotDecodeError::CrossKindField(_))
+    ));
+    let mut cross2 = valid_relation_snapshot();
+    cross2["source_admission_digest"] = json!({
+        "source_locator": { "reference_canonical": "/x.ts", "reference_name": "X", "symbol_space": "Type" },
+        "observed_source_files": [],
+        "contributors": [],
+        "final_verdict": "Admit"
+    });
+    assert!(matches!(
+        decode_strict(&cross2),
+        Err(SnapshotDecodeError::CrossKindField(_))
+    ));
+
+    // An unknown envelope field fails (the closed envelope).
+    let mut unknown = valid_relation_snapshot();
+    unknown["surprise"] = json!(true);
+    assert!(matches!(
+        decode_strict(&unknown),
+        Err(SnapshotDecodeError::Envelope(_))
+    ));
+
+    // A hand-edited oracle_value (recorded hover left intact) fails the v4
+    // raw-capture rail: the hover re-decodes to the ORIGINAL value.
+    let mut edited = valid_relation_snapshot();
+    edited["oracle_value"]["bindings"][0]["bound"] =
+        json!({ "kind": "primitive", "name": "string" });
+    assert!(
+        matches!(
+            decode_strict(&edited),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a hand-edited bound must fail the raw-capture re-derivation rail"
+    );
+}
+
+// -- failed-infer rows are representable (F3) ----------------------------------
+
+/// A synthetic FAILED-infer registry+snapshot case: `[string] extends
+/// [{value: infer V}]` — `not_assignable` with a NON-EMPTY binder layout
+/// (`[{0, "V"}]`) and ZERO matched bindings. The wire (`readonly [false,
+/// readonly []]`), the identity (inference_mode `target_pattern`, layout
+/// `[V]`), and the strict value rail all support this shape; pre-F3 the
+/// value rail's unconditional layout-length check rejected it.
+#[test]
+fn failed_infer_row_with_nonempty_layout_decodes_and_round_trips() {
+    use super::super::identity::RelationVerdictIdentity;
+    use super::super::query_specs::{HostSetupKindSpec, RelationBinderSpec, RelationQuerySpec};
+    use super::super::relation_probe::{self, RelationVerdict};
+
+    // The registry-shaped case derives its v4 identity (inference mode
+    // `target_pattern`, binder layout `[{0, "V"}]`).
+    let spec = RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function: "relation_failed_infer_synthetic",
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: HostSetupKindSpec::Standalone,
+        },
+        source_text: "[string]",
+        target_text: "{ value: infer V }",
+        binder_layout: &[RelationBinderSpec {
+            ordinal: 0,
+            name: "V",
+            constraint: None,
+        }],
+        contract_rows: &["relation_failed_infer_synthetic_contract"],
+        engine_pin: None,
+    };
+    let identity: RelationVerdictIdentity =
+        relation_probe::relation_identity_from_spec(&spec).expect("failed-infer spec derives");
+    assert_eq!(identity.binder_layout.len(), 1);
+
+    // The captured snapshot: not_assignable, ZERO bindings, non-empty layout.
+    let oracle_value = json!({
+        "verdict": RelationVerdict::NotAssignable.tag(),
+        "bindings": [],
+    });
+    let probe_header = relation_probe::relation_probe_header(
+        0,
+        spec.source_text,
+        spec.target_text,
+        &identity.binder_layout,
+    );
+    let env = PinnedEnv {
+        tsgo_version: TSGO_VERSION.to_string(),
+        oracle_schema_version: ORACLE_SCHEMA_VERSION,
+        normalizer_version: NORMALIZER_VERSION,
+        probe_synthesis_version: PROBE_SYNTHESIS_VERSION,
+        compiler_options_hash: "sha256:deadbeef".to_string(),
+        env_corpus_id: "blake3:cafef00d".to_string(),
+    };
+    let doc = super::assemble_relation_snapshot_document(
+        "relation_verdict",
+        &identity,
+        &env,
+        &oracle_value,
+        &ProbeLocator {
+            probe_name: "__oracle_probe__0".to_string(),
+            offset: relation_probe::relation_probe_source(
+                spec.row_function,
+                0,
+                spec.source_text,
+                spec.target_text,
+                &identity.binder_layout,
+            )
+            .find("__oracle_probe__0")
+            .expect("probe name in synthesized source") as u64,
+        },
+        &json!({
+            "probe_name": "__oracle_probe__0",
+            "probe_header": probe_header,
+            "probe_scaffold": null,
+            "hover_contents": "```typescript\ntype __oracle_probe__0 = readonly [false, readonly []];\n```",
+        }),
+        &json!({ "manifest": [], "files": [] }),
+        "blake3:placeholder",
+    );
+
+    // ACCEPTED: strict decode passes (the raw-capture rail re-decodes the
+    // recorded false wire to the stored value; the value rail no longer
+    // demands bindings == layout for a false verdict).
+    let decoded = decode_strict(&doc).unwrap_or_else(|e| {
+        panic!("a failed-infer row (non-empty layout, no bindings) must decode: {e:?}")
+    });
+    // ROUND-TRIPS through the materializer into the normalized boundary.
+    let value = super::materialize_relation_value(&decoded).expect("materializes");
+    assert_eq!(value.verdict, RelationVerdict::NotAssignable);
+    assert!(value.bindings.is_empty());
+
+    // The inverse rail is still live: a FALSE verdict CARRYING a binding
+    // rejects (the failed-infer relaxation never admits false-with-bindings).
+    let mut bad = doc.clone();
+    bad["oracle_value"]["bindings"] = json!([{
+        "ordinal": 0,
+        "name": "V",
+        "bound": { "kind": "primitive", "name": "string" },
+    }]);
+    assert!(matches!(
+        decode_strict(&bad),
+        Err(SnapshotDecodeError::RelationValue(_))
+    ));
+}
+
+// -- constrained-infer rows: no aliasing, schema validity ---------------
+
+/// The codex failing case: a constrained-infer row (`{ value: number }`
+/// against `{ value: infer V extends string }` — `not_assignable`, no
+/// bindings, non-empty layout) must NOT alias the unconstrained row, and its
+/// snapshot must strictly decode + round-trip.
+#[test]
+fn constrained_infer_row_does_not_alias_the_unconstrained_row() {
+    use super::super::identity::derive_relation_snapshot_id;
+    use super::super::query_specs::{HostSetupKindSpec, RelationBinderSpec, RelationQuerySpec};
+    use super::super::relation_probe::{self, RelationVerdict};
+
+    fn spec(
+        source: &'static str,
+        target: &'static str,
+        binder_layout: &'static [RelationBinderSpec],
+        row_function: &'static str,
+    ) -> RelationQuerySpec {
+        RelationQuerySpec {
+            row_file: "relation_verdict_oracle.rs",
+            row_function,
+            query_ordinal: 0,
+            oracle_family: "relation_verdict",
+            host_project: super::super::query_specs::HostProjectSpec {
+                project_root: "/",
+                workspace_root: "/",
+                tsconfig_path: "/oracle.tsconfig.json",
+                host_setup_kind: HostSetupKindSpec::Standalone,
+            },
+            source_text: source,
+            target_text: target,
+            binder_layout,
+            contract_rows: &["relation_constraint_alias_contract"],
+            engine_pin: None,
+        }
+    }
+    const CONSTRAINED_LAYOUT: &[RelationBinderSpec] = &[RelationBinderSpec {
+        ordinal: 0,
+        name: "V",
+        constraint: Some("string"),
+    }];
+    const BARE_LAYOUT: &[RelationBinderSpec] = &[RelationBinderSpec {
+        ordinal: 0,
+        name: "V",
+        constraint: None,
+    }];
+
+    let constrained = spec(
+        "{ value: number }",
+        "{ value: infer V extends string }",
+        CONSTRAINED_LAYOUT,
+        "relation_constrained_infer_synthetic",
+    );
+    let bare = spec(
+        "{ value: number }",
+        "{ value: infer V }",
+        BARE_LAYOUT,
+        "relation_constrained_infer_synthetic",
+    );
+    let constrained_identity =
+        relation_probe::relation_identity_from_spec(&constrained).expect("constrained derives");
+    let bare_identity =
+        relation_probe::relation_identity_from_spec(&bare).expect("unconstrained derives");
+
+    // NO ALIASING: distinct canonical identities AND distinct snapshot ids.
+    assert_ne!(constrained_identity, bare_identity);
+    let env = PinnedEnv {
+        tsgo_version: TSGO_VERSION.to_string(),
+        oracle_schema_version: ORACLE_SCHEMA_VERSION,
+        normalizer_version: NORMALIZER_VERSION,
+        probe_synthesis_version: PROBE_SYNTHESIS_VERSION,
+        compiler_options_hash: "sha256:deadbeef".to_string(),
+        env_corpus_id: "blake3:cafef00d".to_string(),
+    };
+    assert_ne!(
+        derive_relation_snapshot_id(&constrained_identity, &env),
+        derive_relation_snapshot_id(&bare_identity, &env),
+        "the constrained row must not alias the unconstrained row's identity"
+    );
+
+    // The constrained not_assignable snapshot strictly decodes + round-trips.
+    let probe_header = relation_probe::relation_probe_header(
+        0,
+        constrained.source_text,
+        constrained.target_text,
+        &constrained_identity.binder_layout,
+    );
+    let doc = super::assemble_relation_snapshot_document(
+        "relation_verdict",
+        &constrained_identity,
+        &env,
+        &json!({ "verdict": RelationVerdict::NotAssignable.tag(), "bindings": [] }),
+        &ProbeLocator {
+            probe_name: "__oracle_probe__0".to_string(),
+            offset: relation_probe::relation_probe_source(
+                constrained.row_function,
+                0,
+                constrained.source_text,
+                constrained.target_text,
+                &constrained_identity.binder_layout,
+            )
+            .find("__oracle_probe__0")
+            .expect("probe name in synthesized source") as u64,
+        },
+        &json!({
+            "probe_name": "__oracle_probe__0",
+            "probe_header": probe_header,
+            "probe_scaffold": null,
+            "hover_contents": "```typescript\ntype __oracle_probe__0 = readonly [false, readonly []];\n```",
+        }),
+        &json!({ "manifest": [], "files": [] }),
+        "blake3:placeholder",
+    );
+    let decoded = decode_strict(&doc)
+        .unwrap_or_else(|e| panic!("the constrained failed-infer snapshot must decode: {e:?}"));
+    let value = super::materialize_relation_value(&decoded).expect("materializes");
+    assert_eq!(value.verdict, RelationVerdict::NotAssignable);
+    assert!(value.bindings.is_empty());
+    // The stored layout carries the canonical constraint.
+    assert_eq!(
+        decoded.identity["binder_layout"][0]["constraint"],
+        json!({ "kind": "primitive", "name": "string" }),
+        "the stored binder layout entry carries the canonical constraint"
+    );
+
+    // A bogus (non-TypeExpr) constraint in the stored layout REJECTS.
+    let mut bad = doc.clone();
+    bad["identity"]["binder_layout"][0]["constraint"] = json!(7);
+    assert!(
+        matches!(decode_strict(&bad), Err(SnapshotDecodeError::Identity(_))),
+        "a graph-node integer constraint must fail strict decode"
+    );
+
+    // A constraint field with an unknown sibling key in a layout entry rejects
+    // (the layout DTO stays closed).
+    let mut bad2 = doc.clone();
+    bad2["identity"]["binder_layout"][0]["surprise"] = json!(true);
+    assert!(matches!(
+        decode_strict(&bad2),
+        Err(SnapshotDecodeError::Identity(_))
+    ));
+}
+
+// -- raw_capture probe identity is bound to the locator + content -------
+
+#[test]
+fn raw_capture_probe_identity_is_bound_to_locator_and_content() {
+    let valid = valid_relation_snapshot();
+    decode_strict(&valid).expect("the valid relation snapshot decodes");
+
+    // (i) Rename EVERY probe `__oracle_probe__0` → `__oracle_probe__9`
+    // consistently — raw_capture.probe_name, the header, the hover, AND
+    // identity.probe_locator.probe_name. Previously the raw_capture name was its
+    // own anchor and this passed.
+    let mut renamed = valid.clone();
+    let rename = |text: &str| text.replace("__oracle_probe__0", "__oracle_probe__9");
+    renamed["raw_capture"]["probe_name"] = json!("__oracle_probe__9");
+    renamed["raw_capture"]["probe_header"] = json!(rename(
+        valid["raw_capture"]["probe_header"].as_str().unwrap()
+    ));
+    renamed["raw_capture"]["hover_contents"] = json!(rename(
+        valid["raw_capture"]["hover_contents"].as_str().unwrap()
+    ));
+    renamed["identity"]["probe_locator"]["probe_name"] = json!("__oracle_probe__9");
+    assert!(
+        matches!(
+            decode_strict(&renamed),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a consistent all-probe rename must fail the bound probe-identity rails"
+    );
+
+    // (ii) Corrupt identity.probe_locator.offset (previously unvalidated).
+    let mut bad_offset = valid.clone();
+    bad_offset["identity"]["probe_locator"]["offset"] = json!(
+        valid["identity"]["probe_locator"]["offset"]
+            .as_u64()
+            .unwrap()
+            + 1
+    );
+    assert!(
+        matches!(
+            decode_strict(&bad_offset),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a corrupted probe_locator offset must fail the offset binding"
+    );
+
+    // (iii) Corrupt identity.workspace_files[0].content_hash (the probe-file
+    // content binding is recomputed from the versioned synthesis).
+    let mut bad_hash = valid.clone();
+    bad_hash["identity"]["workspace_files"][0]["content_hash"] =
+        json!("sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    assert!(
+        matches!(
+            decode_strict(&bad_hash),
+            Err(SnapshotDecodeError::RelationValue(_))
+        ),
+        "a corrupted probe-file content hash must fail the content binding"
+    );
+
+    // (iv) A renamed raw_capture.probe_name ALONE (locator untouched) rejects
+    // on the locator⇄capture binding even before the header leg.
+    let mut half_renamed = valid.clone();
+    half_renamed["raw_capture"]["probe_name"] = json!("__oracle_probe__9");
+    assert!(matches!(
+        decode_strict(&half_renamed),
+        Err(SnapshotDecodeError::RelationValue(_))
+    ));
 }

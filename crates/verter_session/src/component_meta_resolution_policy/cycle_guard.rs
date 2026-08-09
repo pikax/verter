@@ -21,7 +21,9 @@ use std::hash::{Hash, Hasher};
 use smallvec::SmallVec;
 use verter_type_expr::LiteralValue;
 
-use crate::semantic_query::{DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{
+    AuthoredPropertyKey, DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId,
+};
 
 use super::core::{DeclLookup, PolicyCtx};
 
@@ -195,7 +197,9 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
     }
     match ctx.node_data(node).as_deref() {
         Some(SemanticNodeData::Literal(value)) => NormalizedTypeArg::Literal(hash_literal(value)),
-        Some(SemanticNodeData::Infer { .. }) => NormalizedTypeArg::None,
+        Some(SemanticNodeData::Infer { .. }) | Some(SemanticNodeData::InferRef { .. }) => {
+            NormalizedTypeArg::None
+        }
         _ => NormalizedTypeArg::AnonymousShape(hash_node(node, ctx)),
     }
 }
@@ -324,12 +328,29 @@ fn hash_node_rec<H: std::hash::Hasher>(
         }
         SemanticNodeData::Object(surface) => {
             hasher.write_u8(7);
-            hasher.write_u64(surface.members.len() as u64);
-            for member in surface.members.iter() {
-                hasher.write(member.name.as_bytes());
+            hasher.write_u64(surface.positive_members().len() as u64);
+            for member in surface.positive_members().iter() {
+                match &member.key {
+                    AuthoredPropertyKey::String(value) => {
+                        hasher.write_u8(0);
+                        hasher.write(value.as_bytes());
+                    }
+                    AuthoredPropertyKey::Number(value) => {
+                        hasher.write_u8(1);
+                        value.hash(hasher);
+                    }
+                    AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        hasher.write_u8(2);
+                        identity.hash(hasher);
+                    }
+                    AuthoredPropertyKey::Computed(node) => {
+                        hasher.write_u8(3);
+                        hash_node_rec(ctx, *node, hasher, seen, depth + 1);
+                    }
+                }
                 hasher.write_u8(u8::from(member.optional));
                 hasher.write_u8(u8::from(member.readonly));
-                hasher.write_u8(u8::from(member.is_method));
+                member.method_kind.hash(hasher);
                 hash_node_rec(ctx, member.value, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.call_signatures.len() as u64);
@@ -344,6 +365,13 @@ fn hash_node_rec<H: std::hash::Hasher>(
             for signature in surface.index_signatures.iter() {
                 hash_node_rec(ctx, signature.key_type, hasher, seen, depth + 1);
                 hash_node_rec(ctx, signature.value_type, hasher, seen, depth + 1);
+            }
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            hasher.write_u8(30);
+            program.hash(hasher);
+            for child in program.child_nodes() {
+                hash_node_rec(ctx, child, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Union(arms) => {
@@ -411,8 +439,12 @@ fn hash_node_rec<H: std::hash::Hasher>(
                     hasher.write_u8(2);
                     number.hash(hasher);
                 }
-                IndexKey::TypeNode(index_node) => {
+                IndexKey::UniqueSymbol(identity) => {
                     hasher.write_u8(3);
+                    identity.hash(hasher);
+                }
+                IndexKey::Computed(index_node) => {
+                    hasher.write_u8(4);
                     hash_node_rec(ctx, *index_node, hasher, seen, depth + 1);
                 }
             }
@@ -442,9 +474,15 @@ fn hash_node_rec<H: std::hash::Hasher>(
             decl.hash(hasher);
             hasher.write_u16(*param_index);
         }
-        SemanticNodeData::Infer { name } => {
+        SemanticNodeData::Infer { name, binder } => {
             hasher.write_u8(18);
             hasher.write(name.as_bytes());
+            binder.write_stable_fingerprint(hasher);
+        }
+        SemanticNodeData::InferRef { name, binder } => {
+            hasher.write_u8(27);
+            hasher.write(name.as_bytes());
+            binder.write_stable_fingerprint(hasher);
         }
         SemanticNodeData::Conditional {
             check,
@@ -460,13 +498,20 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hash_node_rec(ctx, *true_branch_ref, hasher, seen, depth + 1);
             hash_node_rec(ctx, *false_branch_ref, hasher, seen, depth + 1);
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params,
             return_type,
             type_parameters,
             ..
         } => {
             hasher.write_u8(20);
+            // The kind is semantic identity: `() => R` and `new () => R`
+            // must never fingerprint-collide.
+            hasher.write_u8(match kind {
+                crate::semantic_query::SignatureKind::Call => 0,
+                crate::semantic_query::SignatureKind::Construct => 1,
+            });
             hasher.write_u64(params.len() as u64);
             for param in params.iter() {
                 if let Some(name) = param.name.as_deref() {
@@ -485,10 +530,6 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hasher.write(param.name.as_bytes());
             }
         }
-        SemanticNodeData::ConstructorType { signature } => {
-            hasher.write_u8(21);
-            hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
-        }
         SemanticNodeData::MergedDecl { contributors } => {
             hasher.write_u8(22);
             hasher.write_u64(contributors.len() as u64);
@@ -500,9 +541,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(23);
             error.hash(hasher);
         }
-        SemanticNodeData::RawFallback { raw } => {
+        SemanticNodeData::RawFallback { value } => {
             hasher.write_u8(24);
-            hasher.write(raw.as_bytes());
+            hasher.write(value.raw().as_bytes());
         }
         SemanticNodeData::ImportType(_) => {
             hasher.write_u8(25);
@@ -521,6 +562,11 @@ fn hash_node_rec<H: std::hash::Hasher>(
         SemanticNodeData::SyntheticBinding { id, .. } => {
             hasher.write_u8(26);
             id.hash(hasher);
+        }
+        // The sealed callable carrier's parts are readable only by its two
+        // consumers, so the cycle hash mixes the kind alone.
+        SemanticNodeData::DeferredCallable(_) => {
+            hasher.write_u8(31);
         }
         // `BareRef` is consumed by the `bare_ref_head` arm above the match;
         // every other reference / literal / primitive / alias variant has an
@@ -617,6 +663,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn node_structural_hash_discriminates_exact_infer_binder_identity() {
+        use crate::semantic_query::SemanticNodeData;
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let left_binder = graph.alloc_infer_binder_id();
+        let right_binder = graph.alloc_infer_binder_id();
+        let left = graph.intern_node_with_scope(
+            SemanticNodeData::InferRef {
+                name: Arc::from("T"),
+                binder: left_binder,
+            },
+            scope(),
+        );
+        let right = graph.intern_node_with_scope(
+            SemanticNodeData::InferRef {
+                name: Arc::from("T"),
+                binder: right_binder,
+            },
+            scope(),
+        );
+
+        assert_ne!(
+            digest(&host, left),
+            digest(&host, right),
+            "same-name infer references bound by distinct declarations must \
+             have distinct cycle-guard fingerprints"
+        );
+        assert_eq!(
+            digest(&host, left),
+            digest(&host, left),
+            "control: the same exact binder identity remains fingerprint-stable"
+        );
+    }
+
     /// Composite structural shape stays discriminating: two unions over the
     /// same arms in DIFFERENT order fingerprint differently (ordered), and
     /// a union is distinct from its own single arm (complete).
@@ -650,6 +732,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn node_structural_hash_discriminates_spread_operand_identity() {
+        use crate::semantic_query::{
+            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
+        };
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let value = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let member = SurfaceMember {
+            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+            value,
+            optional: true,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
+        };
+        let other_operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("U"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("U"),
+        });
+        let object = |operand| {
+            graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+                crate::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from([
+                        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                            crate::semantic_query::AuthoredPropertyEffect {
+                                key: member.key.clone(),
+                                value: member.value,
+                                optional: member.optional,
+                                readonly: member.readonly,
+                                visibility: member.visibility,
+                                spans: member.spans,
+                                declaration_origin: None,
+                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: MergeRoleStamp::NEUTRAL,
+                                excess_origin: member.excess_origin,
+                            },
+                        ),
+                        crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+                    ]),
+                },
+            ))
+        };
+        assert_ne!(
+            digest(&host, object(operand)),
+            digest(&host, object(other_operand)),
+            "spread operand identity is part of the cycle-guard structural fingerprint"
+        );
+    }
+
     /// A self-referential node graph terminates deterministically: the
     /// back-reference encoding closes the cycle instead of recursing, and
     /// the digest is stable across walks.
@@ -671,11 +822,13 @@ mod tests {
             scope(),
         );
         let member = |name: &str| SurfaceMember {
-            name: Arc::from(name),
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value: leaf,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,

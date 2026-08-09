@@ -25,14 +25,14 @@ impl ResolvedNativeProp {
     pub(crate) fn from_surface_member(
         member: &TypeInfoSurfaceMember,
         type_annotation: Option<String>,
-    ) -> Self {
-        Self {
-            name: member.name.as_ref().to_string(),
+    ) -> Option<Self> {
+        Some(Self {
+            name: member.published_name()?.to_string(),
             is_optional: member.optional,
             type_annotation,
             visibility: member.visibility,
             span: verter_span::Span::default(),
-        }
+        })
     }
 }
 
@@ -99,6 +99,7 @@ pub(crate) fn named_native_props_outcome(
             canonical_id: Arc::from(root_canonical),
             owner: root_owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(root_owner),
         },
         name: Arc::from(root_name),
     }));
@@ -131,7 +132,7 @@ pub(crate) fn named_native_props_outcome(
     let rows = surface
         .members
         .iter()
-        .map(|member| {
+        .filter_map(|member| {
             ResolvedNativeProp::from_surface_member(
                 member,
                 crate::typeinfo::raise::render_node_display_with_ctx(ctx, member.value),

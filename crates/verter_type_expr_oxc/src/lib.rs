@@ -14,14 +14,14 @@
 //! # Contract
 //!
 //! - Every well-formed OXC `TSType` node produces a valid `TypeExpr`.
-//! - Unsupported or unrecognized syntax produces `TypeExpr::Unknown { raw }`.
+//! - Unsupported or unrecognized syntax produces `TypeExpr::Unknown(UnknownValue::unsupported_syntax(...))`.
 //! - No partial parses — each node is fully consumed.
 //! - Source text is required for `Unknown` fallback and literal extraction.
 
 use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
-    TSSignature, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
+    TSSignature, TSThisParameter, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
     TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
@@ -29,9 +29,10 @@ use oxc_span::GetSpan;
 use std::sync::Arc;
 
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans,
-    MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-    PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
+    AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, FunctionSpans,
+    IndexSignature, IndexSignatureSpans, MappedModifier, MemberSpans, MethodSignature, ObjectExpr,
+    ObjectMember, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey, SpreadMember,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, UnknownValue, ValueRef,
 };
 
 mod dependency_facts;
@@ -132,7 +133,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // construct semantics walks the inner function exactly as before.
         TSType::TSConstructorType(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, source),
+                lower_formal_parameters(&ctor.params, None, source),
                 Some(Arc::new(lower_ts_type(
                     &ctor.return_type.type_annotation,
                     source,
@@ -231,9 +232,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // -- Catch-all --
         _ => {
             let span = ts_type.span();
-            TypeExpr::Unknown {
-                raw: span_text(source, span),
-            }
+            TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(source, span)))
         }
     }
 }
@@ -258,9 +257,10 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             Expression::NumericLiteral(n) => match unary.operator {
                 UnaryOperator::UnaryNegation => TypeExpr::number_literal(-n.value),
                 UnaryOperator::UnaryPlus => TypeExpr::number_literal(n.value),
-                _ => TypeExpr::Unknown {
-                    raw: span_text(source, unary.span()),
-                },
+                _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    unary.span(),
+                ))),
             },
             // `-1n` / `+1n` — a signed bigint literal type. `BigIntLiteral.value`
             // is the base-10 magnitude with NO sign (the sign lives on this
@@ -279,13 +279,15 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
                 UnaryOperator::UnaryPlus => {
                     TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
                 }
-                _ => TypeExpr::Unknown {
-                    raw: span_text(source, unary.span()),
-                },
+                _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    unary.span(),
+                ))),
             },
-            _ => TypeExpr::Unknown {
-                raw: span_text(source, unary.span()),
-            },
+            _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source,
+                unary.span(),
+            ))),
         },
         TSLiteral::TemplateLiteral(tpl) => {
             if tpl.expressions.is_empty() {
@@ -295,9 +297,10 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
                     TypeExpr::string_literal("")
                 }
             } else {
-                TypeExpr::Unknown {
-                    raw: span_text(source, tpl.span()),
-                }
+                TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    tpl.span(),
+                )))
             }
         } // TSLiteral is exhaustive with the variants above in OXC 0.117
     }
@@ -308,9 +311,10 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
         TSTypeName::IdentifierReference(id) => id.name.to_string(),
         TSTypeName::QualifiedName(qualified) => qualified_name_to_string(qualified),
         _ => {
-            return TypeExpr::Unknown {
-                raw: span_text(source, type_ref.span),
-            };
+            return TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source,
+                type_ref.span,
+            )));
         }
     };
 
@@ -408,9 +412,9 @@ fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
             return lower_import_type(import, source, true);
         }
         _ => {
-            return TypeExpr::Unknown {
-                raw: span_text(source, query.span),
-            };
+            return TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source, query.span,
+            )));
         }
     };
 
@@ -474,7 +478,7 @@ fn lower_mapped_type(mapped: &TSMappedType<'_>, source: &str) -> TypeExpr {
 fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {
     match sig {
         TSSignature::TSPropertySignature(prop) => {
-            let name = property_key_name(&prop.key)?;
+            let key = lower_property_key(&prop.key, source);
             let ty = prop
                 .type_annotation
                 .as_ref()
@@ -489,18 +493,14 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                     .as_ref()
                     .map(|ta| ta.type_annotation.span().into()),
             };
-            Some(ObjectMember::Property(ObjectProperty::with_spans_public(
-                name,
-                ty,
-                prop.optional,
-                prop.readonly,
-                spans,
-            )))
+            Some(ObjectMember::Property(
+                ObjectProperty::with_key_spans_public(key, ty, prop.optional, prop.readonly, spans),
+            ))
         }
         TSSignature::TSMethodSignature(method) => {
-            let name = property_key_name(&method.key)?;
+            let key = lower_property_key(&method.key, source);
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&method.params, source),
+                lower_formal_parameters(&method.params, method.this_param.as_deref(), source),
                 method
                     .return_type
                     .as_ref()
@@ -523,16 +523,13 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 name: Some(method.key.span().into()),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(MethodSignature::with_spans_public(
-                name,
-                func,
-                method.optional,
-                spans,
-            )))
+            Some(ObjectMember::Method(
+                MethodSignature::with_key_spans_public(key, func, method.optional, spans),
+            ))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&call.params, source),
+                lower_formal_parameters(&call.params, call.this_param.as_deref(), source),
                 call.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
@@ -579,7 +576,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, source),
+                lower_formal_parameters(&ctor.params, None, source),
                 ctor.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
@@ -651,7 +648,7 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
 
 fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
     normalize_function_type_params(FunctionExpr::with_spans(
-        lower_formal_parameters(&func.params, source),
+        lower_formal_parameters(&func.params, func.this_param.as_deref(), source),
         Some(Arc::new(lower_ts_type(
             &func.return_type.type_annotation,
             source,
@@ -667,11 +664,33 @@ fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr 
     ))
 }
 
-fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<FunctionParam> {
-    params
-        .items
-        .iter()
-        .map(|param| {
+/// Lower a function-like node's parameter list. An authored `this` receiver
+/// (`(this: T, ...)`) is preserved as the LEADING parameter named `this` — the
+/// representation applicability splits off before ordinary arity, and the one
+/// `ThisParameterType` / `OmitThisParameter` read. OXC carries it outside
+/// `FormalParameters`, so callers pass it explicitly; a node that cannot
+/// author one (a constructor type / construct signature) passes `None`.
+fn lower_formal_parameters(
+    params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
+    source: &str,
+) -> Vec<FunctionParam> {
+    this_param
+        .map(|this| {
+            FunctionParam::with_span(
+                Some("this".to_string()),
+                this.type_annotation
+                    .as_ref()
+                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
+                false,
+                false,
+                Some(this.span.into()),
+                this.type_annotation.is_some(),
+            )
+        })
+        .into_iter()
+        .chain(params.items.iter().map(|param| {
             let name = binding_pattern_name(&param.pattern);
             // OXC structural fact: did this parameter carry an explicit TS
             // annotation? (An explicit `: any` lowers to `Primitive(Any)` like a
@@ -690,7 +709,7 @@ fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<F
                 Some(param.span().into()),
                 has_ts_annotation,
             )
-        })
+        }))
         .chain(params.rest.as_ref().map(|rest| {
             let name = binding_pattern_name(&rest.rest.argument);
             let has_ts_annotation = rest.type_annotation.is_some();
@@ -725,6 +744,7 @@ fn lower_type_params(type_params: &TSTypeParameterDeclaration<'_>, source: &str)
                 .default
                 .as_ref()
                 .map(|d| Arc::new(lower_ts_type(d, source))),
+            is_const: p.r#const,
         })
         .collect()
 }
@@ -767,6 +787,7 @@ fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypePa
             name: param.name,
             constraint,
             default,
+            is_const: param.is_const,
         });
     }
 
@@ -927,7 +948,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         | TypeExpr::Literal(_)
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => expr.clone(),
+        | TypeExpr::Unknown(_) => expr.clone(),
     }
 }
 
@@ -938,14 +959,19 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         // via `with_visibility`. `with_spans` would default it to Public,
         // dropping a non-public class member's visibility when its generic
         // instance shape is normalized.
-        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty::with_visibility(
-            prop.name.clone(),
-            normalize_type_parameter_refs(&prop.ty, scope),
-            prop.optional,
-            prop.readonly,
-            prop.visibility,
-            prop.spans,
-        )),
+        ObjectMember::Property(prop) => ObjectMember::Property(
+            ObjectProperty::with_key_visibility(
+                normalize_property_key_type_params(&prop.key, scope),
+                normalize_type_parameter_refs(&prop.ty, scope),
+                prop.optional,
+                prop.readonly,
+                prop.visibility,
+                prop.spans,
+            )
+            // Verbatim thread-through of the existing member's recorded
+            // excess-property provenance (lossless reconstruction).
+            .with_excess_origin(prop.excess_origin),
+        ),
         ObjectMember::IndexSignature(sig) => {
             ObjectMember::IndexSignature(IndexSignature::with_spans(
                 sig.key_name.clone(),
@@ -961,13 +987,35 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         ObjectMember::ConstructSignature(func) => {
             ObjectMember::ConstructSignature(normalize_nested_function_type_params(func, scope))
         }
-        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature::with_visibility(
-            method.name.clone(),
-            normalize_nested_function_type_params(&method.function, scope),
-            method.optional,
-            method.visibility,
-            method.spans,
+        ObjectMember::Method(method) => ObjectMember::Method(
+            MethodSignature::with_key_visibility(
+                normalize_property_key_type_params(&method.key, scope),
+                normalize_nested_function_type_params(&method.function, scope),
+                method.optional,
+                method.visibility,
+                method.spans,
+            )
+            .with_excess_origin(method.excess_origin),
+        ),
+        ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(
+            normalize_type_parameter_refs(&spread.ty, scope),
         )),
+    }
+}
+
+fn normalize_property_key_type_params(
+    key: &TypeAuthoredPropertyKey,
+    scope: &[TypeParam],
+) -> TypeAuthoredPropertyKey {
+    match key {
+        AuthoredPropertyKey::String(value) => AuthoredPropertyKey::String(value.clone()),
+        AuthoredPropertyKey::Number(value) => AuthoredPropertyKey::Number(*value),
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            AuthoredPropertyKey::UniqueSymbol(identity.clone())
+        }
+        AuthoredPropertyKey::Computed(expression) => {
+            AuthoredPropertyKey::Computed(normalize_type_parameter_refs(expression, scope))
+        }
     }
 }
 
@@ -999,16 +1047,74 @@ fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam
 }
 
 // ---------------------------------------------------------------------------
-// Name extraction helpers
+// Property-key lowering
 // ---------------------------------------------------------------------------
 
-pub fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+/// Lower an authored OXC key without erasing computed syntax or canonical
+/// numeric identity.
+pub fn lower_property_key(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPropertyKey {
     match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-        PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
-        _ => None,
+        PropertyKey::StaticIdentifier(identifier) => {
+            AuthoredPropertyKey::from_known(TypedPropertyKey::identifier(identifier.name.as_str()))
+        }
+        PropertyKey::StringLiteral(literal) => AuthoredPropertyKey::from_known(
+            TypedPropertyKey::string_literal(literal.value.as_str()),
+        ),
+        PropertyKey::NumericLiteral(literal) => {
+            let key = CanonicalIndexInt::from_js_number(literal.value)
+                .map(TypedPropertyKey::Number)
+                .unwrap_or_else(|| {
+                    TypedPropertyKey::String(Arc::from(verter_ecma::js_number_to_string(
+                        literal.value,
+                    )))
+                });
+            AuthoredPropertyKey::from_known(key)
+        }
+        PropertyKey::Identifier(identifier) => {
+            AuthoredPropertyKey::Computed(TypeExpr::TypeOf(ValueRef {
+                path: vec![identifier.name.to_string()],
+                type_args: Vec::new(),
+            }))
+        }
+        PropertyKey::StaticMemberExpression(member) => {
+            let mut path = Vec::new();
+            if append_expression_property_path(&member.object, &mut path) {
+                path.push(member.property.name.to_string());
+                AuthoredPropertyKey::Computed(TypeExpr::TypeOf(ValueRef {
+                    path,
+                    type_args: Vec::new(),
+                }))
+            } else {
+                computed_property_key_fallback(key, source)
+            }
+        }
+        _ => computed_property_key_fallback(key, source),
     }
+}
+
+fn append_expression_property_path(
+    expression: &oxc_ast::ast::Expression<'_>,
+    path: &mut Vec<String>,
+) -> bool {
+    match expression {
+        oxc_ast::ast::Expression::Identifier(identifier) => {
+            path.push(identifier.name.to_string());
+            true
+        }
+        oxc_ast::ast::Expression::StaticMemberExpression(member) => {
+            append_expression_property_path(&member.object, path).then(|| {
+                path.push(member.property.name.to_string());
+            });
+            !path.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn computed_property_key_fallback(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPropertyKey {
+    AuthoredPropertyKey::Computed(TypeExpr::Unknown(UnknownValue::unsupported_syntax(
+        span_text(source, key.span()),
+    )))
 }
 
 fn binding_pattern_name(pattern: &BindingPattern<'_>) -> Option<String> {
@@ -1119,23 +1225,23 @@ mod synthetic_carrier_tests {
         };
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "prot".to_string(),
+                ObjectMember::Property(ObjectProperty::with_key_visibility(
+                    "prot".into(),
                     t_ref.clone(),
                     false,
                     false,
                     MemberVisibility::Protected,
                     MemberSpans::default(),
                 )),
-                ObjectMember::Method(MethodSignature::with_visibility(
-                    "priv".to_string(),
+                ObjectMember::Method(MethodSignature::with_key_visibility(
+                    "priv".into(),
                     FunctionExpr::synthetic(Vec::new(), Some(Arc::new(t_ref.clone())), Vec::new()),
                     false,
                     MemberVisibility::Private,
                     MemberSpans::default(),
                 )),
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "pub_field".to_string(),
+                ObjectMember::Property(ObjectProperty::with_key_visibility(
+                    "pub_field".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
@@ -1149,6 +1255,7 @@ mod synthetic_carrier_tests {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }];
         let normalized = normalize_type_parameter_refs(&object, &scope);
         let TypeExpr::Object(obj) = &normalized else {
@@ -1159,7 +1266,7 @@ mod synthetic_carrier_tests {
             .properties
             .iter()
             .find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "prot" => Some(p.visibility),
+                ObjectMember::Property(p) if p.string_name() == Some("prot") => Some(p.visibility),
                 _ => None,
             })
             .expect("`prot` property must survive normalization");
@@ -1173,7 +1280,7 @@ mod synthetic_carrier_tests {
             .properties
             .iter()
             .find_map(|m| match m {
-                ObjectMember::Method(m) if m.name == "priv" => Some(m.visibility),
+                ObjectMember::Method(m) if m.string_name() == Some("priv") => Some(m.visibility),
                 _ => None,
             })
             .expect("`priv` method must survive normalization");
@@ -1187,7 +1294,9 @@ mod synthetic_carrier_tests {
             .properties
             .iter()
             .find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "pub_field" => Some(p.visibility),
+                ObjectMember::Property(p) if p.string_name() == Some("pub_field") => {
+                    Some(p.visibility)
+                }
                 _ => None,
             })
             .expect("`pub_field` property must survive normalization");

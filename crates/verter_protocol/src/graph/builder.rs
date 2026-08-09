@@ -5,8 +5,9 @@ use std::sync::Arc;
 use hashbrown::HashTable;
 
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
-    ObjectMember, ObjectProperty, TupleElement, TypeExpr, TypeParam, ValueRef,
+    AuthoredPropertyKey, FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier,
+    MethodSignature, ObjectMember, ObjectProperty, TupleElement, TypeAuthoredPropertyKey, TypeExpr,
+    TypeParam, ValueRef,
 };
 
 use crate::graph::schema;
@@ -151,7 +152,7 @@ pub struct GraphTupleElement {
 #[serde(rename_all = "camelCase")]
 pub struct GraphObjectMember {
     pub kind: u32,
-    pub name: u32,
+    pub key: Option<GraphPropertyKey>,
     pub ty: u32,
     pub optional: bool,
     pub readonly: bool,
@@ -159,6 +160,30 @@ pub struct GraphObjectMember {
     pub key_type: u32,
     pub value_type: u32,
     pub function: u32,
+    pub method_kind: u32,
+    pub has_implementation_body: bool,
+}
+
+/// Lossless graph-wire property-key oneof.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GraphPropertyKey {
+    String {
+        value: u32,
+    },
+    Number {
+        value: i64,
+    },
+    UniqueSymbol {
+        canonical_id: u32,
+        owner_kind: u32,
+        owner_ordinal: u32,
+        symbol: u32,
+        member_path: Vec<u32>,
+    },
+    Computed {
+        node: u32,
+    },
 }
 
 /// Whether an object member is publicly visible for the graph wire. Property
@@ -172,7 +197,8 @@ fn object_member_is_public(member: &ObjectMember) -> bool {
         ObjectMember::Method(method) => method.visibility.is_public(),
         ObjectMember::IndexSignature(_)
         | ObjectMember::CallSignature(_)
-        | ObjectMember::ConstructSignature(_) => true,
+        | ObjectMember::ConstructSignature(_)
+        | ObjectMember::Spread(_) => true,
     }
 }
 
@@ -406,7 +432,9 @@ impl ExprMemoKey {
                 type_arguments_ptr: slice_ptr_id(type_arguments),
                 type_arguments_len: type_arguments.len(),
             },
-            TypeExpr::Unknown { raw } => Self::Unknown { raw: raw.clone() },
+            TypeExpr::Unknown(value) => Self::Unknown {
+                raw: value.raw().to_string(),
+            },
         }
     }
 }
@@ -946,8 +974,8 @@ impl GraphBuilder {
             TypeExpr::Parenthesized(inner) => GraphNode::Parenthesized {
                 inner: self.node_id(inner),
             },
-            TypeExpr::Unknown { raw } => GraphNode::Unknown {
-                raw: self.string_id(raw),
+            TypeExpr::Unknown(value) => GraphNode::Unknown {
+                raw: self.string_id(value.raw()),
             },
             // An import-type carrier resolves in the dispatch before reaching
             // the wire surface; the closed typeinfo schema has no dedicated
@@ -1064,13 +1092,31 @@ impl GraphBuilder {
                 self.signature_member(schema::MEMBER_CONSTRUCT_SIGNATURE, function)
             }
             ObjectMember::Method(method) => self.method_member(method),
+            ObjectMember::Spread(spread) => self.spread_member(spread),
+        }
+    }
+
+    fn spread_member(&mut self, spread: &verter_type_expr::SpreadMember) -> GraphObjectMember {
+        GraphObjectMember {
+            kind: schema::MEMBER_SPREAD,
+            key: None,
+            // The spread OPERAND rides the member's `ty` slot.
+            ty: self.node_id(&spread.ty),
+            optional: false,
+            readonly: false,
+            key_name: 0,
+            key_type: 0,
+            value_type: 0,
+            function: 0,
+            method_kind: 0,
+            has_implementation_body: false,
         }
     }
 
     fn property_member(&mut self, property: &ObjectProperty) -> GraphObjectMember {
         GraphObjectMember {
             kind: schema::MEMBER_PROPERTY,
-            name: self.string_id(&property.name),
+            key: Some(self.property_key(&property.key)),
             ty: self.node_id(&property.ty),
             optional: property.optional,
             readonly: property.readonly,
@@ -1078,13 +1124,15 @@ impl GraphBuilder {
             key_type: 0,
             value_type: 0,
             function: 0,
+            method_kind: 0,
+            has_implementation_body: false,
         }
     }
 
     fn index_signature_member(&mut self, signature: &IndexSignature) -> GraphObjectMember {
         GraphObjectMember {
             kind: schema::MEMBER_INDEX_SIGNATURE,
-            name: 0,
+            key: None,
             ty: 0,
             optional: false,
             readonly: signature.readonly,
@@ -1092,13 +1140,15 @@ impl GraphBuilder {
             key_type: self.node_id(&signature.key_type),
             value_type: self.node_id(&signature.value_type),
             function: 0,
+            method_kind: 0,
+            has_implementation_body: false,
         }
     }
 
     fn signature_member(&mut self, kind: u32, function: &FunctionExpr) -> GraphObjectMember {
         GraphObjectMember {
             kind,
-            name: 0,
+            key: None,
             ty: 0,
             optional: false,
             readonly: false,
@@ -1106,13 +1156,15 @@ impl GraphBuilder {
             key_type: 0,
             value_type: 0,
             function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(function.clone()))),
+            method_kind: 0,
+            has_implementation_body: false,
         }
     }
 
     fn method_member(&mut self, method: &MethodSignature) -> GraphObjectMember {
         GraphObjectMember {
             kind: schema::MEMBER_METHOD,
-            name: self.string_id(&method.name),
+            key: Some(self.property_key(&method.key)),
             ty: 0,
             optional: method.optional,
             readonly: false,
@@ -1122,6 +1174,39 @@ impl GraphBuilder {
             function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(
                 method.function.clone(),
             ))),
+            method_kind: match method.method_kind {
+                verter_type_expr::ObjectMethodKind::Method => 0,
+                verter_type_expr::ObjectMethodKind::Get => 1,
+                verter_type_expr::ObjectMethodKind::Set => 2,
+            },
+            has_implementation_body: method.has_implementation_body,
+        }
+    }
+
+    fn property_key(&mut self, key: &TypeAuthoredPropertyKey) -> GraphPropertyKey {
+        match key {
+            AuthoredPropertyKey::String(value) => GraphPropertyKey::String {
+                value: self.string_id(value),
+            },
+            AuthoredPropertyKey::Number(value) => GraphPropertyKey::Number { value: value.get() },
+            AuthoredPropertyKey::UniqueSymbol(identity) => GraphPropertyKey::UniqueSymbol {
+                canonical_id: self.string_id(&identity.canonical_id),
+                owner_kind: match identity.owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                },
+                owner_ordinal: identity.owner.ordinal(),
+                symbol: self.string_id(&identity.symbol),
+                member_path: identity
+                    .member_path
+                    .iter()
+                    .map(|segment| self.string_id(segment))
+                    .collect(),
+            },
+            AuthoredPropertyKey::Computed(expression) => GraphPropertyKey::Computed {
+                node: self.node_id(expression),
+            },
         }
     }
 
@@ -1248,7 +1333,30 @@ fn remap_snapshot_node(
                 .iter()
                 .map(|member| GraphObjectMember {
                     kind: member.kind,
-                    name: sid(member.name),
+                    key: member.key.as_ref().map(|key| match key {
+                        GraphPropertyKey::String { value } => {
+                            GraphPropertyKey::String { value: sid(*value) }
+                        }
+                        GraphPropertyKey::Number { value } => {
+                            GraphPropertyKey::Number { value: *value }
+                        }
+                        GraphPropertyKey::UniqueSymbol {
+                            canonical_id,
+                            owner_kind,
+                            owner_ordinal,
+                            symbol,
+                            member_path,
+                        } => GraphPropertyKey::UniqueSymbol {
+                            canonical_id: sid(*canonical_id),
+                            owner_kind: *owner_kind,
+                            owner_ordinal: *owner_ordinal,
+                            symbol: sid(*symbol),
+                            member_path: member_path.iter().map(|id| sid(*id)).collect(),
+                        },
+                        GraphPropertyKey::Computed { node } => {
+                            GraphPropertyKey::Computed { node: nid(*node) }
+                        }
+                    }),
                     ty: nid(member.ty),
                     optional: member.optional,
                     readonly: member.readonly,
@@ -1256,6 +1364,8 @@ fn remap_snapshot_node(
                     key_type: nid(member.key_type),
                     value_type: nid(member.value_type),
                     function: nid(member.function),
+                    method_kind: member.method_kind,
+                    has_implementation_body: member.has_implementation_body,
                 })
                 .collect(),
         },

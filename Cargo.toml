@@ -42,6 +42,7 @@ proc-macro2 = "1.0"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
 verter_css_syntax = { path = "crates/verter_css_syntax" }
 verter_macro_dto = { path = "crates/verter_macro_dto" }
+verter_ecma = { path = "crates/verter_ecma" }
 verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }
 verter_no_typeexpr_derive = { path = "crates/verter_no_typeexpr_derive" }
 verter_no_storedspan = { path = "crates/verter_no_storedspan" }
@@ -85,4 +86,35 @@ debug = "line-tables-only"
 # keep `line-tables-only` (above) for backtraces; third-party deps do not need
 # even line tables, which shrinks dependency rlibs and cuts link input size.
 [profile.dev.package."*"]
+debug = false
+
+# Test profile that reproduces the CONDITIONAL-COMPILATION and runtime-check
+# state of a shipped build — `debug_assertions` off, `overflow-checks` off —
+# while keeping dev codegen (opt-level 0, no LTO, many codegen units) so it
+# compiles at debug speed.
+#
+# Why it exists: `debug_assert!` does not evaluate its argument when
+# `debug_assertions` is off, and `#[cfg(debug_assertions)]` items disappear.
+# Every shipped artifact (LSP binary, napi, wasm) is built that way, so a side
+# effect written inside a `debug_assert!` argument, or a cross-crate item whose
+# availability depends on the profile, behaves differently there than in the
+# debug test run — and no debug-profile test can observe the difference.
+# `cargo check --workspace --release` does not observe it either: it compiles,
+# it does not run tests.
+#
+# `cfg(debug_assertions)` and `-C overflow-checks` are exactly what this
+# profile changes relative to `dev`, and they are the only inputs the class
+# depends on, so this profile is a faithful stand-in for `release` FOR THAT
+# CLASS. It is NOT a substitute for `release` in general: it shares none of
+# release's opt-level 3 / fat-LTO / single-codegen-unit code generation, so it
+# cannot surface optimisation- or LTO-dependent behaviour.
+#
+# `scripts/gate.mjs` builds and runs its shipped-cfg surface under this
+# profile.
+[profile.no-debug-assertions]
+inherits = "dev"
+debug-assertions = false
+overflow-checks = false
+
+[profile.no-debug-assertions.package."*"]
 debug = false

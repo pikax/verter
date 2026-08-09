@@ -5,41 +5,74 @@
 use super::*;
 use crate::semantic_query::SemanticGraphRead;
 
+/// Seed a decided SCC root candidate for `(source, target)` and return
+/// its publication witness — the shape the batched member publish is
+/// fenced on.
+#[cfg(test)]
+fn seed_relation_scc_root(
+    store: &SemanticGraphStore,
+    source: crate::semantic_query::SemanticNodeId,
+    target: crate::semantic_query::SemanticNodeId,
+    validated_at_generation: u64,
+) -> crate::semantic_query_memo::SccRootWitness {
+    let root_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation_payload_for_tests(
+        root_key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        validated_at_generation,
+    );
+    let admission_seq = store
+        .relation_published_carrier(&root_key)
+        .expect("the seeded root publishes a carrier")
+        .admission_seq;
+    crate::semantic_query_memo::SccRootWitness::relate(root_key, admission_seq)
+}
+
 #[test]
 fn production_relation_admission_is_semantic_store_owned() {
-    let store_source = include_str!("mod.rs");
+    let store_source = include_str!("scc_publish.rs");
     let producer_source = include_str!("../project_semantic_dispatch/relation.rs");
 
+    // Ownership: the family singleflight publishes the SCC ROOT's entry
+    // (its cold-build output IS the payload), and
+    // `SemanticGraphStore::publish_scc_members_fenced` is the ONE batched
+    // member-admission path both authorities' drains ride. The store owns
+    // the write, its root-witness fence, and its in-flight fence; the
+    // engine supplies only the computed payloads + the SCC-union carrier.
     let owner_start = store_source
-        .find("\n    pub(crate) fn compute_relation_and_admit")
-        .expect("SemanticGraphStore must own relation tracing and admission");
-    let owner_end = store_source[owner_start..]
-        .find("\n    /// Publish a relation judgement")
-        .map(|offset| owner_start + offset)
-        .expect("the owner-controlled relation funnel must precede the test seed seam");
-    let owner_body = &store_source[owner_start..owner_end];
+        .find("\n    pub(crate) fn publish_scc_members_fenced")
+        .expect("SemanticGraphStore must own the batched SCC member publish");
+    let owner_body = &store_source[owner_start..];
     assert!(
-        owner_body.contains(".with_fact_tracer("),
-        "the owner funnel must open the tracer scope itself — the spelling is the basis-source \
-         form, so a revert to a host-only tracer with no compaction basis also fails here"
+        owner_body.contains("reverse_index::register_reverse_index("),
+        "the member publish must land the (entries, memo_budget, reverse-index) consistency cluster"
     );
     assert!(
-        owner_body.contains("FactTracerBasisSource::from_ctx(ctx)"),
-        "and it must seed that scope from the REQUEST-BOUND context it was handed: an unbound \
-         source silently disarms movement detection for every relation compute"
+        owner_body.contains("SemanticQueryValue::Relation(member.payload)"),
+        "the member publish must store the PUBLIC Relation payload — never a compute-side verdict"
     );
-    assert!(owner_body.contains("self.insert_relation_owned("));
     assert!(
         !producer_source.contains("graph.insert_relation("),
-        "the relation engine must supply computation and roots, never reach the raw write"
+        "the relation engine must supply computation and roots, never reach a raw seed write"
     );
     assert!(
-        store_source
-            .lines()
-            .any(|line| line.trim_start().starts_with("fn insert_relation_owned(")),
-        "the production relation write must be private"
+        producer_source.contains(".publish_scc_members_fenced("),
+        "the authority's SCC drain must ride the store-owned batched member publish"
+    );
+    assert!(
+        store_source.lines().any(|line| line
+            .trim_start()
+            .starts_with("pub(crate) fn publish_scc_members_fenced(")),
+        "the production relation write must be crate-private"
     );
 }
+
 use crate::semantic_query::{
     DeclIdentity, DepVersion, PrimitiveKind, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId,
 };
@@ -67,6 +100,9 @@ fn scope(canonical: &str) -> ScopeId {
         canonical_id: Arc::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
+        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            TopLevelOwnerId::ordinary_file(),
+        ),
     }
 }
 
@@ -255,6 +291,7 @@ fn resolve_decl_memo_key_discriminates_top_level_owner() {
                 canonical_id: Arc::from("/w/Component.vue"),
                 owner,
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
             name: Arc::from("Shared"),
         })
@@ -332,9 +369,12 @@ fn intern_identity_invariant_holds_across_threads() {
 fn intern_span_participates_in_identity() {
     let store = SemanticGraphStore::new();
     let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let mk = |end: u32| SemanticNodeData::Function {
+    let mk = |end: u32| SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
@@ -489,6 +529,11 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
             );
             match inner.value {
                 QueryResult::Recursive(_) => {
+                    assert!(
+                        !inner.cache_suppress,
+                        "same-thread recursion keeps its established sentinel rail; \
+                         only a cross-thread wait cycle is forced ReturnOnly"
+                    );
                     let id =
                         store_ref.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
                     (QueryResult::Value(id), empty_signature())
@@ -498,6 +543,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
         },
     );
     assert!(matches!(result.value, QueryResult::Value(_)));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
 
 #[test]
@@ -622,6 +668,11 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
         "post-panic call must run a fresh cold build, not wait on the retired entry"
     );
     assert!(matches!(second.value, QueryResult::Value(_)));
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "panic cleanup must retire its execution owner and every wait edge"
+    );
 }
 
 /// `invalidate_canonical` sweeps every slot whose recorded
@@ -1311,8 +1362,8 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(Arc::from("a")),
-            PathSegment::Member(Arc::from("foo")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
         ]
         .into_boxed_slice(),
     );
@@ -1380,7 +1431,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
 /// the Expanded request would wrongly HIT — this guard catches exactly
 /// that silent-soundness collapse.
 #[test]
-fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
+pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     use crate::semantic_query::demand::{
         Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
     };
@@ -1388,9 +1439,15 @@ fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
 
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
@@ -1484,11 +1541,13 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
     };
 
     let deep = ProjectionPath::from_segments([
-        PathSegment::Member(Arc::from("c")),
-        PathSegment::Member(Arc::from("full")),
-        PathSegment::Member(Arc::from("bar")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("c")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
     ]);
-    let shallow_prefix = ProjectionPath::from_segments([PathSegment::Member(Arc::from("c"))]);
+    let shallow_prefix = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("c"),
+    )]);
 
     let expanded_at = |path: ProjectionPath| {
         let mut d = Demand::from(ProjectionMode::Expanded);
@@ -1555,9 +1614,15 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path,
@@ -1611,8 +1676,12 @@ fn cold_build_default_records_slot_mode_terminal_not_sub_slot() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path,
@@ -1666,8 +1735,12 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
@@ -1728,15 +1801,21 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
 /// recorded-point backfill (Navigate slot stays empty because
 /// `Shallow ⊅ Navigate`).
 #[test]
-fn backfill_writes_only_recorded_materialized_points() {
+pub(crate) fn backfill_writes_only_recorded_materialized_points() {
     use crate::semantic_query::demand::{Demand, MaterializedSet, ProjectionPath};
 
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
 
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
@@ -1805,8 +1884,12 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -1895,8 +1978,12 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     // Expanded build reads both /w/wide.ts and /w/narrow.ts —
     // its dep-sig spans both canonicals.
@@ -2035,8 +2122,12 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     use std::thread;
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -2190,7 +2281,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         crate::semantic_query::OriginMeta::None,
         dep_sig_for("/w/a.ts", 1),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         crate::semantic_query::RelateMemoKey::assignable(
             result,
             result,
@@ -2198,7 +2289,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         ),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         0,
     );
     // Sanity-check the pre-bump state is actually populated, else the
@@ -2235,6 +2326,671 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         0,
         "CLEAR BUG: invalidate_all must clear the DerivationStore edge \
          buckets on a project-generation bump",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relation-memo rehome — the relation judgements live in the family
+// memo's `Relate` family. These guards pin the family-rail behaviors the
+// retired dedicated `BudgetedRelationMemo` did NOT have (per-family
+// multi-candidate retention with invalid-first / LRU eviction, reverse-index
+// drains) AND the behaviors that must hold across the relation-engine
+// activation (full-identity dedup, strict self-root warm reads, decided-only
+// admission — `Unknown` is NEVER admitted anywhere). Each guard names the
+// discrimination it makes.
+// ---------------------------------------------------------------------------
+
+/// RELATION FAMILY DEDUP — a cold insert of a full relation identity is
+/// warm-served, and a same-discriminant re-publish dedups in place (no
+/// second candidate).
+///
+/// DISCRIMINATES against a rehome that lost the full-identity keying: a
+/// warm miss on the same key, or a same-key/same-generation/same-carrier
+/// re-publish that appended instead of replacing, fails the assertions.
+#[test]
+fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let gen0 = host.project_type_store().current_project_generation();
+
+    // Cold insert → warm hit on the SAME full identity (no recompute).
+    store.insert_relation_payload_for_tests(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "cold insert lands one entry"
+    );
+    assert!(
+        matches!(
+            store.get_relation_payload(ctx, &key).map(|p| p.outcome),
+            Some(crate::semantic_query::RelationOutcome::NotAssignable)
+        ),
+        "the same full identity must warm-hit after the cold insert",
+    );
+
+    // Same key + same generation + same carrier facts ⇒ same
+    // discriminant ⇒ in-place replace, never a second candidate.
+    store.insert_relation_payload_for_tests(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "DEDUP: a same-discriminant re-publish must replace in place",
+    );
+}
+
+/// RELATION FAMILY RSS RAILS — a content invalidation drains relation
+/// entries through the SAME reverse-index rail every family uses: the
+/// publish registers the carrier's canonicals in `canonical_to_entries`,
+/// and `invalidate_canonical` drains the matching entries.
+///
+/// DISCRIMINATES against the retired dedicated memo (which had NO reverse
+/// index — an `invalidate_canonical` never touched relation entries): the
+/// pre-rehome shape leaves the touched entry behind and fails the count
+/// assertions.
+#[test]
+fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let gen0 = host.project_type_store().current_project_generation();
+
+    let touched = "/w/relation_touched.ts";
+    let touched_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: touched.to_string(),
+            hash: [0xAB; 16],
+        },
+    ]));
+    let touched_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation_payload_for_tests(
+        touched_key,
+        touched_carrier,
+        Arc::from(vec![Arc::<str>::from(touched)]),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
+    );
+    // An unrelated relation entry (empty carrier — references no
+    // canonical) must survive the drain.
+    let untouched_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        source,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation_payload_for_tests(
+        untouched_key,
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        2,
+        "fixture: two relation entries"
+    );
+
+    let _ = store.invalidate_canonical(touched);
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "RSS RAILS: invalidate_canonical must drain the relation entry whose \
+         carrier references the touched canonical (the family reverse-index rail); \
+         the retired dedicated memo had no reverse index and would leave it behind",
+    );
+}
+
+#[test]
+fn binding_relate_cold_owners_do_not_join_but_share_store_admission_fences() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let relate = crate::semantic_query::RelateMemoKey {
+        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+        ..crate::semantic_query::RelateMemoKey::assignable(
+            source,
+            target,
+            crate::semantic_query::RelationContext::default(),
+        )
+    };
+    let query = relate.to_query_key();
+    let builds = Arc::new(AtomicUsize::new(0));
+    let start = Arc::new(std::sync::Barrier::new(3));
+
+    let mut owners = Vec::new();
+    for _ in 0..2 {
+        let store = Arc::clone(&store);
+        let query = query.clone();
+        let builds = Arc::clone(&builds);
+        let start = Arc::clone(&start);
+        owners.push(thread::spawn(move || {
+            let host = ctx_host();
+            start.wait();
+            store.execute_cooperative_value(
+                &host,
+                query,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while builds.load(Ordering::SeqCst) != 2 && std::time::Instant::now() < deadline
+                    {
+                        std::thread::yield_now();
+                    }
+                    assert_eq!(
+                        builds.load(Ordering::SeqCst),
+                        2,
+                        "both binding transactions must own independent cold builds"
+                    );
+                    (
+                        QueryResult::Value(SemanticQueryValue::Relation(
+                            store.relation_payload_for_tests(
+                                crate::semantic_query::RelationOutcome::Assignable,
+                            ),
+                        )),
+                        empty_signature(),
+                    )
+                },
+            )
+        }));
+    }
+    start.wait();
+    for (index, owner) in owners.into_iter().enumerate() {
+        let read = join_within(owner, &format!("binding owner {index}"));
+        assert!(matches!(
+            read.value,
+            QueryResult::Value(SemanticQueryValue::Relation(_))
+        ));
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "nonjoining changes only follower sharing, not store ownership"
+    );
+}
+
+#[test]
+fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let flight = store
+        .begin_inline_relation_flight(&key)
+        .expect("the inline member must claim the vacant relation family flight");
+    let query = key.to_query_key();
+    let joiner_store = Arc::clone(&store);
+    let joiner = thread::spawn(move || {
+        let host = ctx_host();
+        joiner_store.execute_cooperative_value(
+            &host,
+            query,
+            || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(SemanticQueryValue::Relation(
+                        joiner_store.relation_payload_for_tests(
+                            crate::semantic_query::RelationOutcome::NotAssignable,
+                        ),
+                    )),
+                    empty_signature(),
+                )
+            },
+        )
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.test_joiner_on_condvar_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        store.test_joiner_on_condvar_count() > 0,
+        "the concurrent top-level request must reach the family condvar"
+    );
+
+    let host = ctx_host();
+    let generation = host.project_type_store().current_project_generation();
+    let root_witness = seed_relation_scc_root(&store, target, source, generation);
+    assert!(
+        store.publish_scc_members_fenced(
+            Some(&host),
+            &root_witness,
+            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
+            generation,
+            vec![crate::semantic_query_memo::PendingRelationMember {
+                key,
+                payload: store.relation_payload_for_tests(
+                    crate::semantic_query::RelationOutcome::NotAssignable,
+                ),
+                flight,
+            }],
+            Vec::new(),
+            Vec::new(),
+        ),
+        "the inline member publish must retain its admission right"
+    );
+    let read = join_within(joiner, "inline relation joiner");
+    assert!(matches!(
+        read.value,
+        QueryResult::Value(SemanticQueryValue::Relation(payload))
+            if payload.outcome == crate::semantic_query::RelationOutcome::NotAssignable
+    ));
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "publishing the detached inline flight must retire its owner lease"
+    );
+}
+
+#[test]
+fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() {
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let canonical = Arc::<str>::from("/w/relation-scc-race.ts");
+    let whole_hash = [0x61; 16];
+    let scoped = |kind| {
+        store.intern_node_with_scope(
+            SemanticNodeData::Primitive(kind),
+            crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::clone(&canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash,
+                local_scope: None,
+            },
+        )
+    };
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let root_key = crate::semantic_query::RelateMemoKey::assignable(
+        scoped(PrimitiveKind::String),
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let member_key = crate::semantic_query::RelateMemoKey::assignable(
+        scoped(PrimitiveKind::Number),
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+        vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: whole_hash,
+        }]
+        .into_boxed_slice(),
+    ));
+    let roots = Arc::from(vec![Arc::clone(&canonical)].into_boxed_slice());
+    store.insert_relation_payload_for_tests(
+        root_key.clone(),
+        carrier.clone(),
+        Arc::clone(&roots),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        0,
+    );
+    let flight = store
+        .begin_inline_relation_flight(&member_key)
+        .expect("member flight");
+    let root_admission_seq = store
+        .relation_published_carrier(&root_key)
+        .expect("published root carrier")
+        .admission_seq;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_relation_member_pre_entries_gate(Arc::clone(&barrier));
+    let publisher_store = Arc::clone(&store);
+    let publisher = thread::spawn(move || {
+        publisher_store.publish_scc_members_fenced(
+            None,
+            &crate::semantic_query_memo::SccRootWitness::relate(root_key, root_admission_seq),
+            &carrier,
+            &roots,
+            0,
+            vec![crate::semantic_query_memo::PendingRelationMember {
+                key: member_key,
+                payload: publisher_store
+                    .relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+                flight,
+            }],
+            Vec::new(),
+            Vec::new(),
+        )
+    });
+
+    barrier.wait();
+    assert_eq!(
+        store.invalidate_canonical(canonical.as_ref()),
+        1,
+        "the root snapshot must be invalidated before member publication resumes"
+    );
+    barrier.wait();
+    assert!(
+        !join_within(publisher, "raced relation member publisher"),
+        "a member whose SCC root was invalidated must lose publication authority"
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        0,
+        "neither the invalidated root nor a stale member may survive"
+    );
+    assert_eq!(
+        store.canonical_to_entries_count(&canonical),
+        0,
+        "the stale member must not leave a reverse-index registration"
+    );
+}
+
+/// RELATION FAMILY BOUNDED RETENTION — the per-family candidate cap with
+/// invalid-first / LRU eviction applies to the `Relate` family: at cap
+/// pressure the INVALID candidate (a carrier whose self-root fails
+/// validation) is evicted ahead of any still-valid candidate, even when a
+/// valid candidate sits at the LRU front.
+///
+/// DISCRIMINATES against (a) plain LRU eviction (which would drop the
+/// gen-1 valid LRU front and keep the invalid gen-2 candidate) and (b)
+/// the retired relation-local FIFO (one slot per key — five publishes of
+/// the same key would collapse to a single entry, so the multi-candidate
+/// count assertions fail).
+#[test]
+fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let query_key = crate::semantic_query::SemanticQueryKey::Relate {
+        source: key.source,
+        target: key.target,
+        relation: key.relation,
+        policy: key.policy,
+        source_freshness: key.source_freshness,
+        inference_context: key.inference_context.clone(),
+        context: key.context,
+    };
+    assert_eq!(
+        store.family_candidate_cap_for_tests(&query_key),
+        4,
+        "fixture: the Relate family cap is the floor cap 4",
+    );
+
+    let valid_carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    let valid_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
+    // The invalid candidate: self-rooted on a canonical the live store
+    // view never tracked — strict self-root validation always fails.
+    let invalid_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/relation_never_tracked.ts".to_string(),
+            hash: [0xCD; 16],
+        },
+    ]));
+    let invalid_roots: Arc<[Arc<str>]> =
+        Arc::from(vec![Arc::<str>::from("/w/relation_never_tracked.ts")]);
+
+    // Distinct generations ⇒ distinct candidates in ONE family (the
+    // multi-candidate substrate the retired memo lacked).
+    let publish = |generation: u64, invalid: bool| {
+        store.insert_relation_payload_with_view_for_tests(
+            &host,
+            key.clone(),
+            if invalid {
+                invalid_carrier.clone()
+            } else {
+                valid_carrier.clone()
+            },
+            if invalid {
+                Arc::clone(&invalid_roots)
+            } else {
+                Arc::clone(&valid_roots)
+            },
+            store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+            generation,
+        );
+    };
+    publish(1, false); // valid — sits at the LRU front at cap pressure
+    publish(2, true); // INVALID
+    publish(3, false);
+    publish(4, false);
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query_key),
+        vec![1, 2, 3, 4],
+        "fixture: four distinct-discriminant candidates coexist in one Relate family",
+    );
+
+    // Cap pressure: a fifth distinct candidate must evict the INVALID
+    // gen-2 candidate — NOT the gen-1 valid LRU front.
+    publish(5, false);
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query_key),
+        vec![1, 3, 4, 5],
+        "INVALID-FIRST: cap pressure must evict the invalid gen-2 candidate ahead of \
+         the valid gen-1 LRU front (plain LRU would keep 2 and drop 1; the retired \
+         relation-local FIFO would hold a single entry)",
+    );
+    assert_eq!(store.relation_memo_count(), 4);
+}
+
+/// DECIDED-ONLY ADMISSION (the relation-engine activation contract) —
+/// both directions: a DECIDED payload publish admits AND warm-serves its
+/// binary outcome; an UNDECIDED payload (`BudgetExceeded`) NEVER enters
+/// the memo through any path (admission rows 3–4 of
+/// `docs/arch/u2-relation-infer-design.md`).
+///
+/// The refusal is RELEASE-ACTIVE: the publish gate returns `false` and
+/// releases the flight rather than relying on a `debug_assert!`, which is
+/// compiled out of exactly the builds that ship — so the test asserts the
+/// refusal itself, never a panic.
+///
+/// DISCRIMINATES against an admission-semantics regression: re-admitting
+/// `Unknown` fails the refuse assertions (the publish reports `true` and
+/// a warm entry appears); a store that stopped admitting decided payloads
+/// fails the admit assertions.
+///
+/// The refusal is release-active, so this test is compiled and run under
+/// EVERY cargo profile — including the `no-debug-assertions` profile,
+/// where `debug_assertions` is off. A refusal enforced only by
+/// `debug_assert!` would admit the undecided payload there and fail the
+/// REFUSE leg's `!published` / zero-entry assertions.
+#[test]
+fn relation_admission_is_decided_only_and_unknown_never_enters() {
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let gen0 = host.project_type_store().current_project_generation();
+
+    // ADMIT direction — a decided binary payload admits and warm-serves.
+    let admit_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation_payload_for_tests(
+        admit_key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "ADMIT: a decided binary payload stays admitted",
+    );
+    assert!(
+        matches!(
+            store
+                .get_relation_payload(ctx, &admit_key)
+                .map(|p| p.outcome),
+            Some(crate::semantic_query::RelationOutcome::NotAssignable)
+        ),
+        "ADMIT: the admitted payload warm-serves its decided outcome",
+    );
+
+    // REFUSE direction — the authority maps an undecided outcome onto
+    // ReturnOnly BEFORE any write, and the publication fence itself is
+    // the backstop. Prove the contract at the store surface: a
+    // `BudgetExceeded` payload is refused by the publish path's own
+    // gate, which reports "not published" instead of writing.
+    let refuse_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        source,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let budget_payload =
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::BudgetExceeded(
+            crate::semantic_query::BudgetExceededKind::RelationBudget,
+        ));
+    // The already-admitted key doubles as the batch's live SCC root, so
+    // the refusal is decided by the payload gate and nothing else.
+    let root_witness = crate::semantic_query_memo::SccRootWitness::relate(
+        admit_key.clone(),
+        store
+            .relation_published_carrier(&admit_key)
+            .expect("the admitted candidate publishes a carrier")
+            .admission_seq,
+    );
+    let refuse_flight = store
+        .begin_inline_relation_flight(&refuse_key)
+        .expect("the refused member claims its family flight");
+    let published = store.publish_scc_members_fenced(
+        None,
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: refuse_key.clone(),
+            payload: budget_payload.clone(),
+            flight: refuse_flight,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !published,
+        "REFUSE: a BudgetExceeded payload must be rejected by the publish gate (row 4) \
+         — as a returned refusal, not a debug-only assertion",
+    );
+    let refuse_flight = store
+        .begin_inline_relation_flight(&refuse_key)
+        .expect("the refused member re-claims its family flight");
+    let published = store.publish_scc_members_fenced(
+        None,
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: refuse_key.clone(),
+            payload: budget_payload,
+            flight: refuse_flight,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !published,
+        "REFUSE: a BudgetExceeded payload must be refused by the publish gate (row 4)",
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "REFUSE: no BudgetExceeded entry may enter the relation memo",
+    );
+    assert!(
+        store.get_relation_payload(ctx, &refuse_key).is_none(),
+        "REFUSE: the refused key has no warm entry to serve",
+    );
+    assert!(
+        store.retained_claimed_flight_keys_for_tests().is_empty()
+            && store.resident_flight_keys_for_tests().is_empty(),
+        "REFUSE: the refused member's flight must be released and retired, not stranded",
+    );
+
+    // REFUSE + FLIGHT — the same refusal on the fenced inline-member
+    // path must also RELEASE the claimed flight, exactly as the
+    // invalidation and cancellation refusals do. A refusal that returned
+    // early without aborting would strand every joiner on the flight's
+    // condvar; the reclaim below is what observes that.
+    let flight_key = crate::semantic_query::RelateMemoKey::assignable(
+        target,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let flight = store
+        .begin_inline_relation_flight(&flight_key)
+        .expect("fixture: the vacant relation family flight must be claimable");
+    let flight_published = store.publish_scc_members_fenced(
+        Some(&host),
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: flight_key.clone(),
+            payload: store.relation_payload_for_tests(
+                crate::semantic_query::RelationOutcome::BudgetExceeded(
+                    crate::semantic_query::BudgetExceededKind::RelationBudget,
+                ),
+            ),
+            flight,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !flight_published,
+        "REFUSE: an undecided payload on the fenced member path must not publish",
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "REFUSE: the fenced undecided member leaves the relation memo untouched",
+    );
+    assert!(
+        store.get_relation_payload(ctx, &flight_key).is_none(),
+        "REFUSE: the refused member key has no warm entry to serve",
+    );
+    assert!(
+        store.begin_inline_relation_flight(&flight_key).is_some(),
+        "REFUSE: the refusal must retire the claimed flight so the key is reclaimable \
+         (a refusal that skipped the abort would strand joiners on the condvar)",
     );
 }
 
@@ -2476,8 +3232,12 @@ fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
 
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -2785,6 +3545,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
             super::family::requested_point_for_key(&aborted_key),
         ),
         &aborted_parent,
+        false,
     );
     assert!(
         store.get_unvalidated(&aborted_key).is_none(),
@@ -2814,6 +3575,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
             super::family::requested_point_for_key(&healthy_key),
         ),
         &healthy_parent,
+        false,
     );
     assert!(
         store.get_unvalidated(&healthy_key).is_some(),
@@ -2892,6 +3654,7 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -3664,7 +4427,12 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 // ──────────────────────────────────────────────────────────────────
 
 fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice())
+    Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    )
 }
 
 fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryKey {
@@ -5595,8 +6363,8 @@ fn prefix_backfill_carries_traced_facts() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(Arc::from("outer")),
-            PathSegment::Member(Arc::from("inner")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("outer")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("inner")),
         ]
         .into_boxed_slice(),
     );
@@ -5611,8 +6379,12 @@ fn prefix_backfill_carries_traced_facts() {
     // The PREFIX key the backfill will publish — `path[..1]` =
     // [Member("outer")]. This is the entry whose carrier we'll
     // inspect for the discriminating signal.
-    let prefix_path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("outer"))].into_boxed_slice());
+    let prefix_path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("outer"),
+        )]
+        .into_boxed_slice(),
+    );
     let prefix_key = SemanticQueryKey::ProjectPath {
         base,
         path: prefix_path,
@@ -5660,6 +6432,7 @@ fn prefix_backfill_carries_traced_facts() {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: Some(Box::new(parent_carrier.clone())),
@@ -5971,6 +6744,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6181,6 +6955,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     // inner-memo non-cacheability is `cache_suppress` only;
                     // `result_is_partial` stays false.
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6425,6 +7200,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6635,6 +7411,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6826,6 +7603,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -7098,6 +7876,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -7384,6 +8163,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -7694,6 +8474,14 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
 /// DISCRIMINATION: reverting the FIX-2 admission `debug_assert!` + OR gate
 /// makes this build publish a warm `MemoEntry` (no panic), so the
 /// `#[should_panic]` expectation fails.
+///
+/// PREMISE: the admission invariant is a `debug_assert!`, so it fires only
+/// where `debug_assertions` is on. This test is compiled only under that
+/// same predicate — a build with debug assertions off has nothing to panic
+/// and would fail the expectation for a reason that says nothing about the
+/// code. It runs in every debug build, which is every profile the assert
+/// itself is active in.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "invariant violated at memo admission")]
 fn memo_admission_debug_asserts_against_partial_without_suppress() {
@@ -7957,10 +8745,11 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
 mod env_scoped_key_identity_guards {
     use super::super::family::{family_and_slot, FamilyKey};
     use crate::semantic_query::{
-        HashValue, InstantiateContext, MacroPayloadContext, MapperKey, MapperKind, MemberMergeRole,
-        OptionalityMod, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
-        ReadonlyMod, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-        SurfaceProvenanceContext,
+        ExactOptionalPropertyPolicy, HashValue, InstantiateContext, MacroPayloadContext, MapperKey,
+        MapperKind, MemberMergeRole, ObjectProjectionSelector, OptionalityMod, PrimitiveKind,
+        ProjectionMode, ProjectionReductionContext, QueryResult, ReadonlyMod,
+        ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+        SubstitutionCanonicalHash, SurfaceProvenanceContext,
     };
     use std::sync::Arc;
     use verter_type_expr::TopLevelOwnerId;
@@ -8487,6 +9276,19 @@ mod env_scoped_key_identity_guards {
         };
         let value_slot = value_root_slot(&canonical, &symbol, 0, [0; 16], [0; 16]);
         let type_of = |context| typeof_key(value_slot.clone(), [0; 16], context);
+        let project_object_spread = |projection_reduction| SemanticQueryKey::ProjectObjectSpread {
+            program: base,
+            selector: ObjectProjectionSelector::Surface,
+            context: crate::semantic_query::object_spread_projection::test_support::context(
+                projection_reduction,
+                [0; 16],
+                [0; 16],
+                [0; 16],
+                [0; 16],
+                SubstitutionCanonicalHash::distinct_for_test(0),
+                ExactOptionalPropertyPolicy::Enabled,
+            ),
+        };
         let project_path = |context| SemanticQueryKey::ProjectPath {
             base,
             path: super::family_test_path(),
@@ -8498,6 +9300,10 @@ mod env_scoped_key_identity_guards {
             (keyof(retained), keyof(suppressed)),
             (mapped(retained), mapped(suppressed)),
             (type_of(retained), type_of(suppressed)),
+            (
+                project_object_spread(retained),
+                project_object_spread(suppressed),
+            ),
             (project_path(retained), project_path(suppressed)),
         ];
         for (unfiltered, filtered) in &pairs {
@@ -9273,12 +10079,13 @@ mod prepared_identity_bijection {
     use crate::project_semantic_dispatch::BodySourceWitness;
     use crate::semantic_query::{
         ApparentTypeContext, BroadRuntimeContext, ClassSurfaceContext, ClassSurfaceSide,
-        ContextualTypingKey, EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey,
-        InstantiateContext, InstantiateKey, MacroPayloadContext, MapperKey, MapperKind,
-        OptionalityMod, OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId,
-        ProjectionMode, ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind,
-        RelationPolicy, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId,
-        SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+        ContextualTypingKey, EnumContext, ExactOptionalPropertyPolicy, FlowNarrowingKey,
+        FreshnessKey, HashValue, IndexKey, InstantiateContext, InstantiateKey, MacroPayloadContext,
+        MapperKey, MapperKind, ObjectProjectionSelector, OptionalityMod, OverloadSetContext,
+        PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
+        ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind, RelationPolicy,
+        ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId, SemanticQueryKey,
+        SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
         SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
@@ -9503,15 +10310,45 @@ mod prepared_identity_bijection {
                     members: nodes(&[1, 3]),
                 },
             ),
+            SemanticQueryKeyTag::ProjectObjectSpread => {
+                let context =
+                    crate::semantic_query::object_spread_projection::test_support::context(
+                        ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        h16(1),
+                        h16(2),
+                        h16(3),
+                        h16(4),
+                        SubstitutionCanonicalHash::distinct_for_test(1),
+                        ExactOptionalPropertyPolicy::Enabled,
+                    );
+                (
+                    SemanticQueryKey::ProjectObjectSpread {
+                        program: node(1),
+                        selector: ObjectProjectionSelector::Surface,
+                        context,
+                    },
+                    SemanticQueryKey::ProjectObjectSpread {
+                        program: node(1),
+                        selector: ObjectProjectionSelector::Key(
+                            crate::semantic_query::PropertyKey::identifier("x"),
+                        ),
+                        context,
+                    },
+                )
+            }
             SemanticQueryKeyTag::ProjectPath => (
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(Arc::from("p"))]),
+                    path: Arc::from([PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("p"),
+                    )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
                 },
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(Arc::from("q"))]),
+                    path: Arc::from([PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("q"),
+                    )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
                 },
             ),
@@ -9658,6 +10495,7 @@ mod prepared_identity_bijection {
                         type_env_hash: h16(0),
                         lib_env_hash: h16(0),
                         project_identity: 0,
+                        demand_scope: crate::semantic_query::ApparentDemandScope::Anchored,
                     },
                 },
                 SemanticQueryKey::ApparentType {
@@ -9666,6 +10504,7 @@ mod prepared_identity_bijection {
                         type_env_hash: h16(0),
                         lib_env_hash: h16(0),
                         project_identity: 0,
+                        demand_scope: crate::semantic_query::ApparentDemandScope::Anchored,
                     },
                 },
             ),
@@ -9719,7 +10558,76 @@ mod prepared_identity_bijection {
                 locator_key(&[]),
                 locator_key(&[TypeBodyPathStep::Member { ordinal: 0 }]),
             ),
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => (
+                SemanticQueryKey::ClassifyMaterializationCycleGate(
+                    crate::semantic_query::MaterializationCycleGateKey {
+                        root: type_slot("CycleA"),
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                    },
+                ),
+                SemanticQueryKey::ClassifyMaterializationCycleGate(
+                    crate::semantic_query::MaterializationCycleGateKey {
+                        root: type_slot("CycleB"),
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                    },
+                ),
+            ),
+            SemanticQueryKeyTag::FlowReturn => (
+                flow_return_test_key("FlowA", 0),
+                flow_return_test_key("FlowB", 0),
+            ),
+            SemanticQueryKeyTag::ResolveCall => (
+                resolve_call_test_key("a.ts", 0),
+                resolve_call_test_key("a.ts", 1),
+            ),
         }
+    }
+
+    fn resolve_call_test_key(canonical: &str, offset: u32) -> SemanticQueryKey {
+        SemanticQueryKey::ResolveCall(Box::new(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from(canonical),
+                offset,
+            },
+            callee: SemanticNodeId(1),
+            kind: crate::semantic_query::CallKind::Call,
+            receiver: None,
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            flow: FlowNarrowingKey::empty(),
+            context: crate::semantic_query::ResolveCallContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
+            },
+        }))
+    }
+
+    fn flow_return_test_key(name: &str, overload_ordinal: u32) -> SemanticQueryKey {
+        SemanticQueryKey::FlowReturn(Box::new(crate::semantic_query::FlowReturnKey {
+            function: crate::semantic_query::FlowFunctionSlotIdentity {
+                declaration_slot: type_slot(name),
+                function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                overload_ordinal,
+            },
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::FlowReturnContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
+                policy: crate::semantic_query::FlowReturnPolicy {},
+            },
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+        }))
     }
 
     fn std_hash(handle: &PreparedKeyHandle) -> u64 {

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use verter_type_expr::TypeExpr;
 
 use super::macro_type_arg_hot_ref as macro_type_arg_hot_product;
-use super::MacroHotMirror;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -58,21 +57,6 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             aliases: Vec::new(),
         })
         .unwrap();
-}
-
-impl MacroHotMirror {
-    /// Number of demanded (filled) macro cells — test observability only,
-    /// never a validity signal. A freshly published artifact reports `0`.
-    pub(crate) fn demanded_count(&self) -> usize {
-        self.cells
-            .get()
-            .map(|c| {
-                c.iter()
-                    .filter(|cell| cell.committed.get().is_some())
-                    .count()
-            })
-            .unwrap_or(0)
-    }
 }
 
 /// The 0-based index of the first macro in `canonical` (the SFCs below each
@@ -296,7 +280,11 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
     let root = node_data(&dispatch, handle.node());
     match root {
         Some(SemanticNodeData::Object(view)) => {
-            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            let names: Vec<&str> = view
+                .positive_members()
+                .iter()
+                .map(|m| m.string_name().expect("string-key fixture"))
+                .collect();
             assert!(
                 names.contains(&"a") && names.contains(&"b"),
                 "inline props object must carry both members, got {names:?}"
@@ -304,7 +292,7 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
             // Provenance survives the mirror path: DefineProps requests the
             // macro-T own-body provenance on its direct members.
             assert!(
-                view.members
+                view.positive_members()
                     .iter()
                     .all(|m| m.declared_in_macro_type_arg.get()),
                 "inline DefineProps members must carry `declared_in_macro_type_arg = true` \

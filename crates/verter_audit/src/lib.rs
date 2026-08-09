@@ -86,11 +86,11 @@ pub use memory::{current_process_rss, RequestMemoryAudit};
 pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};
 pub use observer::{clear_observer, current_observer, AuditEvent, AuditObserver};
 pub use origin_graph::{
-    ConditionalBranch, DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph,
-    DispatchKeyKind, EdgeId, MaterializationScopeAudit, MaterializationSubject,
-    MaterializeSkipReason, MemberEdgeProvenance, NamedIdentity, NodeId, NodeRecord, NormalizeKind,
-    OriginEdgeKind, OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind,
-    VfsLayer,
+    AuditPropertyKey, AuditTopLevelOwnerKind, AuditUniqueSymbolIdentity, ConditionalBranch,
+    DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph, DispatchKeyKind, EdgeId,
+    MaterializationScopeAudit, MaterializationSubject, MaterializeSkipReason, MemberEdgeProvenance,
+    NamedIdentity, NodeId, NodeRecord, NormalizeKind, OriginEdgeKind, OriginEdgeMetaDto,
+    ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind, VfsLayer,
 };
 pub use published_surface::{
     event_name_to_on_prop_name, names_for_policy, AnalyzedSurface, AnalyzedSurfaceItem,
@@ -100,12 +100,14 @@ pub use published_surface::{
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag,
-    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, LspMethodTag, ProjectionModeTag,
+    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, FlowSliceBudgetAxisTag, LspMethodTag,
+    ProjectionModeTag,
 };
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
-    ComponentMetaPayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,
-    SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
+    ComponentMetaPayload, FlowReturnInferencePayload, LspRequestPayload, McpToolPayload,
+    SemanticAnalysisPayload, SlowRecordSummary, TypeResolutionPayload, WorkspaceOp,
+    WorkspacePayload,
 };
 pub use record::{
     AuditCaptureState, Hash16, IncidentalFields, RequestAuditRecord, RequestKind,

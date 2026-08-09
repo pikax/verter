@@ -128,7 +128,7 @@ fn entries_by_kind(
 
 /// Resolve a payload entry's member NAMES (interned through the graph string
 /// table).
-fn member_names(
+fn member_keys(
     payload: &wire::FrameworkSurfacePayload,
     entry: &wire::FrameworkSurfaceKindEntry,
 ) -> Vec<String> {
@@ -143,6 +143,130 @@ fn member_names(
         .iter()
         .map(|m| strings.get(m.name_id as usize).cloned().unwrap_or_default())
         .collect()
+}
+
+/// A component whose props surface the substrate FAILED to compute must not
+/// encode as `SUPPORTED` + `GRAPH_EXACTNESS_EXACT_RESOLVED`.
+///
+/// Vue and Svelte are co-equal on this wire and were byte-indistinguishable
+/// from a clean answer: `encode_kind` maps `ResolvedOutcome::Resolved` (at
+/// ANY member count) and `::Missing` to SUPPORTED + EXACT_RESOLVED, and the
+/// flow substrate's degradation never reached `ResolvedOutcome`. So a
+/// consumer could not tell "this component declares these props" from "we
+/// could not work out its props".
+///
+/// Each row's props come from `ReturnType<typeof makeProps>` where
+/// `makeProps` returns an object with ONE member this substrate cannot type
+/// (tsgo `7.0.0-dev.20260526.1`: `{ label: string; made: Box }`).
+///
+/// The CLEAN controls are the discrimination: an ordinary component must
+/// still encode SUPPORTED + EXACT_RESOLVED, so a blanket downgrade fails
+/// them.
+///
+/// Mutation recipe: dropping the per-demand completeness read in
+/// `ExecutorResolveCtx::resolve_demand` returns both degraded rows to
+/// SUPPORTED / EXACT_RESOLVED while leaving the controls green.
+#[test]
+fn a_degraded_framework_surface_never_encodes_exact_resolved() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest};
+
+    const DEGRADED_BODY: &str = "class Box { readonly tag = \"box\" }\n\
+         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n";
+
+    let vue_degraded = format!(
+        "<script setup lang=\"ts\">\n{DEGRADED_BODY}\
+         defineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div></div></template>\n"
+    );
+    let vue_clean = "<script setup lang=\"ts\">\n\
+         function makeProps() { return { label: \"x\", n: 1 } }\n\
+         defineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div></div></template>\n";
+    let svelte_degraded = format!(
+        "<script lang=\"ts\">\n{DEGRADED_BODY}\
+         let {{ label, made }}: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{{label}}</p>\n"
+    );
+    let svelte_clean = "<script lang=\"ts\">\n\
+         function makeProps() { return { label: \"x\", n: 1 } }\n\
+         let { label, n }: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{label}</p>\n";
+
+    for (canonical, source, language, adapter, degraded) in [
+        (
+            "/D.vue",
+            vue_degraded.as_str(),
+            FileLanguage::vue(),
+            "vue",
+            true,
+        ),
+        ("/C.vue", vue_clean, FileLanguage::vue(), "vue", false),
+        (
+            "/D.svelte",
+            svelte_degraded.as_str(),
+            FileLanguage::svelte(),
+            "svelte",
+            true,
+        ),
+        (
+            "/C.svelte",
+            svelte_clean,
+            FileLanguage::svelte(),
+            "svelte",
+            false,
+        ),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
+
+        let result =
+            host.resolve_framework_surface_with_audit(framework_envelope(canonical, adapter));
+        let response = result.as_result().expect("structural response");
+        let payload = expect_payload(response);
+        let entries = entries_by_kind(payload);
+        let props = entries
+            .get(&(FrameworkSurfaceKind::Props as i32))
+            .unwrap_or_else(|| panic!("{canonical}: a PROPS entry"));
+        let status = props
+            .status
+            .as_ref()
+            .unwrap_or_else(|| panic!("{canonical}: PROPS carries a status"));
+        let members = member_keys(payload, props);
+
+        if degraded {
+            assert_ne!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: a surface the substrate failed to compute must not claim SUPPORTED \
+                 (members={members:?})"
+            );
+            assert_ne!(
+                status.exactness,
+                wire::Exactness::ExactResolved as i32,
+                "{canonical}: a degraded resolution must not claim EXACT_RESOLVED \
+                 (members={members:?})"
+            );
+        } else {
+            assert_eq!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the clean control stays SUPPORTED (members={members:?})"
+            );
+            assert_eq!(
+                status.exactness,
+                wire::Exactness::ExactResolved as i32,
+                "{canonical}: the clean control stays EXACT_RESOLVED (members={members:?})"
+            );
+            assert!(
+                members.iter().any(|m| m == "label"),
+                "{canonical}: the clean control publishes its props, got {members:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -288,7 +412,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let props_entry = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry");
-    let mut wire_prop_names = member_names(payload, props_entry);
+    let mut wire_prop_names = member_keys(payload, props_entry);
     wire_prop_names.sort();
     assert_eq!(
         wire_prop_names, live_prop_names,
@@ -322,7 +446,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let emits_entry = by_kind
         .get(&(FrameworkSurfaceKind::Emits as i32))
         .expect("emits entry");
-    let mut wire_emit_names = member_names(payload, emits_entry);
+    let mut wire_emit_names = member_keys(payload, emits_entry);
     wire_emit_names.sort();
     assert_eq!(
         wire_emit_names, live_emit_names,
@@ -355,7 +479,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let slots_entry = by_kind
         .get(&(FrameworkSurfaceKind::Slots as i32))
         .expect("slots entry");
-    let mut wire_slot_names = member_names(payload, slots_entry);
+    let mut wire_slot_names = member_keys(payload, slots_entry);
     wire_slot_names.sort();
     assert_eq!(
         wire_slot_names, live_slot_names,
@@ -437,10 +561,10 @@ fn define_model_surface_carries_the_model_binding() {
     assert!(
         !model.members.is_empty(),
         "a defineModel component must surface a non-empty MODEL binding, got {:?}",
-        member_names(payload, model)
+        member_keys(payload, model)
     );
     // The default model binding is named `modelValue`.
-    let names = member_names(payload, model);
+    let names = member_keys(payload, model);
     assert!(
         names.contains(&"modelValue".to_string()),
         "the default defineModel binding is `modelValue`, got {names:?}"
@@ -466,7 +590,7 @@ fn define_model_only_component_surfaces_modelvalue_in_props() {
     let props = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry present");
-    let names = member_names(payload, props);
+    let names = member_keys(payload, props);
     assert!(
         names.contains(&"modelValue".to_string()),
         "a defineModel-only component must surface `modelValue` in PROPS, got {names:?}"
@@ -498,7 +622,7 @@ fn multiple_define_model_calls_surface_every_binding() {
     let model = by_kind
         .get(&(FrameworkSurfaceKind::Model as i32))
         .expect("model entry present");
-    let names = member_names(payload, model);
+    let names = member_keys(payload, model);
     assert!(
         names.contains(&"title".to_string()) && names.contains(&"count".to_string()),
         "both defineModel bindings must surface in MODEL, got {names:?}"
@@ -507,7 +631,7 @@ fn multiple_define_model_calls_surface_every_binding() {
     let props = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry present");
-    let prop_names = member_names(payload, props);
+    let prop_names = member_keys(payload, props);
     assert!(
         prop_names.contains(&"title".to_string()) && prop_names.contains(&"count".to_string()),
         "both model bindings must surface in PROPS, got {prop_names:?}"
@@ -555,7 +679,7 @@ fn define_options_present_resolves_supported_with_members() {
         "a present defineOptions<T> resolves SUPPORTED with its declared members, \
          not UNSUPPORTED-because-present"
     );
-    let names = member_names(payload, options);
+    let names = member_keys(payload, options);
     assert!(
         names.contains(&"name".to_string()) && names.contains(&"inheritAttrs".to_string()),
         "both defineOptions members must surface, got {names:?}"
@@ -615,7 +739,7 @@ fn define_expose_present_resolves_supported_with_members() {
         FrameworkSurfaceKindSupport::Supported as i32,
         "a present defineExpose<T> resolves SUPPORTED with its declared members"
     );
-    let names = member_names(payload, expose);
+    let names = member_keys(payload, expose);
     assert!(
         names.contains(&"focus".to_string()) && names.contains(&"count".to_string()),
         "both defineExpose members must surface, got {names:?}"
@@ -691,4 +815,131 @@ fn nonexistent_named_export_is_a_malformed_payload() {
         "a nonexistent named export is a MalformedPayload, got {:?}",
         error.kind
     );
+}
+
+/// SECONDARY evidence, framework surface — an object return's ENTRY FORM
+/// no longer costs a CALL-sourced spread its reduction, and the corrected
+/// substrate answer reaches the Svelte props surface.
+///
+/// The thing under test is the substrate, asserted against tsgo in
+/// `typeinfo_tests::value_inference::
+/// object_return_entry_forms_lower_structurally_over_a_call_spread`. This
+/// row set proves the answer survives the framework-surface encoder, and
+/// that the encoder does not quietly turn a corrected surface into an
+/// empty SUPPORTED one.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`),
+/// `Eq<…>`-probed with a rejected negative control: the computed-key row is
+/// `{ label: string; z: number }`, the `as const` row `{ readonly label:
+/// string; readonly n: 1 }`, the `satisfies` row `{ label: string; n:
+/// number }`.
+///
+/// Discrimination: restoring the whole-literal bail returns every row to
+/// PARTIAL with zero members; the OPEN-key control fails under a change
+/// that starts trusting a key the substrate cannot name.
+#[test]
+fn an_entry_form_over_a_call_spread_reaches_the_framework_surface_intact() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest};
+
+    const PRELUDE: &str = "function base() { return { label: \"x\" } }\nconst k = \"z\"\n";
+
+    /// `(row, makeProps body, expected member names — empty means the
+    /// surface must fail closed)`.
+    const ROWS: &[(&str, &str, &[&str])] = &[
+        (
+            "computed",
+            "function makeProps() { return { ...base(), [k]: 1 } }\n",
+            &["label", "z"],
+        ),
+        (
+            "asconst",
+            "function makeProps() { return { ...base(), n: 1 } as const }\n",
+            &["label", "n"],
+        ),
+        (
+            "asconstonly",
+            "function makeProps() { return { ...base() } as const }\n",
+            &["label"],
+        ),
+        (
+            "satisfies",
+            "function makeProps() { return { ...base(), n: 1 } satisfies object }\n",
+            &["label", "n"],
+        ),
+        (
+            "clean",
+            "function makeProps() { return { ...base(), n: 1 } }\n",
+            &["label", "n"],
+        ),
+        // CONTROL — an OPEN key domain still fails CLOSED. A key whose
+        // value is not a literal provisions a property the surface cannot
+        // name, so publishing the modelled siblings alone would declare a
+        // member set missing a key the authored value has.
+        (
+            "openkey",
+            "function makeProps(key: string) { return { ...base(), [key]: 1 } }\n",
+            &[],
+        ),
+    ];
+
+    for (row, body, expected) in ROWS {
+        let canonical = format!("/EntryForm_{row}.svelte");
+        let source = format!(
+            "<script lang=\"ts\">\n{PRELUDE}{body}\
+             let props: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{{props}}</p>\n"
+        );
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.clone()),
+                input_id: canonical.clone(),
+                source: Arc::from(source.as_str()),
+                file_language: FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
+
+        let result =
+            host.resolve_framework_surface_with_audit(framework_envelope(&canonical, "svelte"));
+        let response = result.as_result().expect("structural response");
+        let payload = expect_payload(response);
+        let entries = entries_by_kind(payload);
+        let props = entries
+            .get(&(FrameworkSurfaceKind::Props as i32))
+            .unwrap_or_else(|| panic!("{canonical}: a PROPS entry"));
+        let status = props
+            .status
+            .as_ref()
+            .unwrap_or_else(|| panic!("{canonical}: PROPS carries a status"));
+        let mut members = member_keys(payload, props);
+        members.sort();
+        let mut want: Vec<String> = expected.iter().map(|m| (*m).to_owned()).collect();
+        want.sort();
+
+        if expected.is_empty() {
+            assert_ne!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the surface's key SET is unknown — claiming SUPPORTED would \
+                 publish a props surface missing a key the authored value has \
+                 (members={members:?})"
+            );
+            assert!(
+                members.is_empty(),
+                "{canonical}: fail-closed means NO members, not the modelled siblings alone; \
+                 got {members:?}"
+            );
+        } else {
+            assert_eq!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the literal lowers structurally and its spread reduces \
+                 (members={members:?})"
+            );
+            assert_eq!(
+                members, want,
+                "{canonical}: the complete member set must reach the framework surface"
+            );
+        }
+    }
 }

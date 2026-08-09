@@ -7,12 +7,21 @@
 //! tests assert each node-domain classifier EQUALS the legacy `TypeExpr`
 //! predicate applied to the raised oracle output:
 //!
-//! - `node_contains_semantic_miss_or_unraisable(node) == match raise(node)
-//!   { Some(e) => type_expr_contains_semantic_miss(&e), None => true }`
+//! PARITY IS SPLIT: degradation classification lives ONLY in the
+//! typed node domain (`QueryError` / the materialize sidecar); the raised
+//! compat tree is INERT (no raw sentinel classification reads it). So:
+//!
+//! - `node_contains_semantic_miss_or_unraisable(node)` is TYPED — asserted
+//!   per-fixture and cross-checked against BOTH node-domain algebras; the
+//!   legacy tree oracle (`type_expr_contains_semantic_miss`) is pinned INERT
+//!   (always false) on every raised tree.
 //! - `node_is_expanded_surface_legacy_equivalent(node) == match raise(node)
 //!   { Some(e) => type_expr_is_expanded_surface(&e), None => false }`
+//!   (the expanded oracle is STRUCTURAL, not sentinel-based — still exact).
 //! - `node_can_shell_raise(node) == raise(node).is_some()`
 //! - `raised_shape_eq_node_type_expr(node, &e) == Some(raise(node) == Some(e))`
+//!   (raw-only interner identity — a compatibility projection keys EQUAL to a
+//!   genuine `UnknownValue` with the same spelling).
 //! - `raised_shape_eq_nodes(a, b) == Some(raise(a) == raise(b))` (both `Some`).
 //!
 //! The corpus is built with DIRECT `graph.intern_node(SemanticNodeData::…)`
@@ -76,15 +85,24 @@ fn raise_oracle(host: &VerterHost, node: SemanticNodeId) -> Option<TypeExpr> {
 fn assert_classifier_parity(host: &VerterHost, node: SemanticNodeId, label: &str) {
     let oracle = raise_oracle(host, node);
 
-    let expect_miss = match &oracle {
-        Some(e) => type_expr_contains_semantic_miss(e),
-        None => true,
-    };
+    // SPLIT PARITY: the tree oracle is INERT (no raw sentinel
+    // classification reads the compat tree); the typed miss fact is
+    // cross-checked against the node-domain facts below. Pin the inertness
+    // here so the split is asserted on EVERY fixture.
+    if let Some(e) = &oracle {
+        assert!(
+            !type_expr_contains_semantic_miss(e),
+            "[{label}] the compat tree must be INERT — no raw sentinel classification (oracle = {oracle:?})"
+        );
+    }
+    // Self-consistency of the TYPED fact across the two node-domain
+    // projections: `node_contains_semantic_miss_or_unraisable` must equal
+    // `!facts.materialized` (or `true` when the whole raise is `None`).
+    let facts = node_raised_shape_facts(host, node);
     assert_eq!(
         node_contains_semantic_miss_or_unraisable(host, node),
-        expect_miss,
-        "[{label}] node_contains_semantic_miss must equal \
-         type_expr_contains_semantic_miss(raise(node)) (oracle = {oracle:?})"
+        facts.map(|f| !f.materialized()).unwrap_or(true),
+        "[{label}] the typed miss fact must agree across node-domain projections (oracle = {oracle:?})"
     );
 
     let expect_expanded = match &oracle {
@@ -248,7 +266,7 @@ fn parity_opaque_errors_and_raw_fallback() {
 
     // Raw-fallback carrier — a non-sentinel raw ⇒ MATERIALIZED.
     let raw = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: Arc::from("Weird<& Type>"),
+        value: verter_type_expr::UnknownValue::unsupported_syntax("Weird<& Type>"),
     });
     assert_classifier_parity(&host, raw, "raw-fallback-nonsentinel");
     assert!(
@@ -256,38 +274,31 @@ fn parity_opaque_errors_and_raw_fallback() {
         "RawFallback(non-sentinel text) ⇒ materialized"
     );
 
-    // Raw-fallback carrier whose text IS a sentinel string ⇒ NOT materialized
-    // (proves the classifier reads the raised raw, not the carrier kind).
+    // FLIPPED: a Raw-fallback carrier whose text IS a
+    // legacy sentinel spelling is a GENUINE `UnknownValue` — ALWAYS
+    // materialized, NEVER a sentinel. Degradation is typed-only.
     let raw_sentinel = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: Arc::from("semanticObjectSurface"),
+        value: verter_type_expr::UnknownValue::unsupported_syntax("semanticObjectSurface"),
     });
     assert_classifier_parity(&host, raw_sentinel, "raw-fallback-sentinel-text");
     assert!(
-        node_contains_semantic_miss_or_unraisable(&host, raw_sentinel),
-        "RawFallback whose raw IS a sentinel string ⇒ semantic miss"
+        !node_contains_semantic_miss_or_unraisable(&host, raw_sentinel),
+        "a genuine UnknownValue spelled like a sentinel is MATERIALIZED (typed-only degradation)"
     );
 }
 
 /// BEHAVIOUR-PRESERVATION across the typed-sentinel swap: the converted
 /// `fold_node` arms (here, the surface-member
-/// fallback) must raise to the BYTE-IDENTICAL legacy `Unknown { raw }` AND drive
+/// fallback) must raise to the BYTE-IDENTICAL legacy compat spelling AND drive
 /// the SAME downstream materialised/miss decision the old hardcoded literal did —
 /// end-to-end through the real graph fixtures, not just at the algebra entry
-/// point. This pins that the swap did not change observable output for these
-/// arms; it does NOT by itself prove every site was swapped. The SWAP
-/// DISCRIMINATION (no bare control-sentinel literal survives at the converted
-/// sites) lives in the tombstone `converted_sites_have_no_bare_control_sentinel_literal`
-/// (`carrier_materialize_tests.rs`), and the no-drift agreement between the typed
-/// authority and the raw recogniser lives in
-/// `query_error_sentinel_classification_agrees_with_raw_recogniser`
-/// (`raise_sentinel.rs`). Each assertion here is exact (a producer emitting a
-/// different/empty spelling, or losing the `type_expr_contains_semantic_miss`
-/// verdict, fails).
+/// point. The spelling is now the terminal compatibility projection
+/// (inert text); the miss decision is read off the TYPED node-domain fact.
+/// Each assertion here is exact (a producer emitting a different/empty
+/// spelling, or losing the typed miss verdict, fails).
 #[test]
 fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision() {
-    use crate::resolver_core::component_meta_query_engine::{
-        type_expr_contains_semantic_miss, SEMANTIC_SURFACE_MEMBER,
-    };
+    use crate::resolver_core::component_meta_query_engine::SEMANTIC_SURFACE_MEMBER;
 
     let host = host();
     let graph = graph_of(&host);
@@ -307,14 +318,16 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
                 .properties
                 .iter()
                 .find_map(|m| match m {
-                    verter_type_expr::ObjectMember::Property(p) if p.name == "broken" => {
+                    verter_type_expr::ObjectMember::Property(p)
+                        if p.string_name().expect("string-key fixture") == "broken" =>
+                    {
                         Some(&p.ty)
                     }
                     _ => None,
                 })
                 .expect("the `broken` member must survive into the projected surface");
             match property {
-                TypeExpr::Unknown { raw } => raw.clone(),
+                TypeExpr::Unknown(value) => value.raw().to_string(),
                 other => panic!("the unraisable member must fall back to Unknown, got {other:?}"),
             }
         }
@@ -322,45 +335,34 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
     };
     assert_eq!(
         member_raw, SEMANTIC_SURFACE_MEMBER,
-        "the converted surface-member fallback must use the byte-identical SEMANTIC_SURFACE_MEMBER spelling"
+        "the converted surface-member fallback must project the byte-identical SEMANTIC_SURFACE_MEMBER spelling"
     );
     assert!(
-        type_expr_contains_semantic_miss(&obj_raised),
-        "an object whose member fell back to the surface-member sentinel contains a semantic miss"
+        node_contains_semantic_miss_or_unraisable(&host, obj_with_unraisable_member),
+        "an object whose member degraded to UnrepresentableSurfaceMember is a TYPED semantic miss"
     );
 }
 
 /// The `fold_node` `Opaque(err)` arm routes the typed `QueryError` through the
-/// typed `opaque_sentinel` algebra entry (not a string round-trip). The MATERIALIZE
-/// path must still emit the byte-identical legacy `Unknown { raw: semantic_query_error_raw(err) }`,
-/// and the NODE-DOMAIN path (via `assert_classifier_parity`) must keep the SAME
-/// materialised / miss verdict the materialised oracle does — for the full
-/// `_ => opaque_sentinel`-reachable set the arm routes (every `Opaque` variant
-/// EXCEPT `RecursiveRef` / `DeclPlaceholder`, which hit the earlier
-/// `recursive_ref` / `reference` sub-arms and whose classification is covered by
-/// the agreement test in `raise_sentinel.rs`).
+/// typed `opaque_sentinel` algebra entry (not a string round-trip). The
+/// MATERIALIZE path must still emit the byte-identical legacy spelling (the
+/// terminal compatibility projection), and the NODE-DOMAIN path classifies on
+/// the TYPED variant ONLY — for the full `_ => opaque_sentinel`-reachable set
+/// the arm routes (every `Opaque` variant EXCEPT `RecursiveRef` /
+/// `DeclPlaceholder`, which hit the earlier `recursive_ref` / `reference`
+/// sub-arms).
 ///
-/// DISCRIMINATING on the text-bearing delegation on BOTH facts:
-/// - `materialized`: an `Opaque(Other("semanticMiss"))` raises (materialize) to
-///   `Unknown { raw: "semanticMiss" }`, which the oracle reads AS a semantic
-///   miss; the node-domain classifier reaches the same verdict ONLY because the
-///   typed authority delegates text-bearing payloads to the raw recogniser.
-///   Reverting that delegation (`Other(_) => false`) makes the node-domain
-///   summary report `materialized = true` (NOT a miss) while the oracle reports a
-///   miss — `assert_classifier_parity` then FAILS for this case.
-/// - `tag` (end-to-end): an `Opaque(Other("semanticObjectSurface"))` raises to
-///   `Unknown { raw == SEMANTIC_OBJECT_SURFACE }`, which the MATERIALISE algebra's
-///   `is_object_surface_sentinel` (raw-based) drops from an intersection. The
-///   node-domain algebra drops it only because its `tag` is
-///   `ObjectSurfaceSentinel`; reverting the tag-predicate delegation
-///   (`Other(_) => false` in `query_error_is_object_surface_sentinel`) tags it
-///   `Other`, so the node-domain `Intersection` KEEPS the arm while the oracle
-///   drops it — `assert_classifier_parity` + the `raised_shape_eq_nodes`
-///   collapse-equality assertion below then FAIL. This is the end-to-end tag
-///   drift the parity fixture previously omitted.
-///
-/// The prefix-text `Opaque(Other("budgetExceeded(x)"))` and the benign
-/// `Opaque(Other("free text"))` round out the adversarial set.
+/// SPLIT PARITY + the FLIPPED text-bearing equations:
+/// - `materialized`: an `Opaque(Other("semanticMiss"))` projects the
+///   byte-identical `semanticMiss` spelling, but the typed verdict is
+///   MATERIALIZED — `Other` payloads are INERT text, never sentinels (the
+///   legacy delegation equation is deleted).
+/// - `tag` (end-to-end): an `Opaque(Other("semanticObjectSurface"))` arm is
+///   RETAINED in an intersection (NEVER dropped — only a typed root
+///   `UnrepresentableSurface` degradation drops); the typed
+///   `UnrepresentableSurface` arm IS dropped (covered by
+///   `parity_intersection_arm_drop_and_collapse` and the dedicated
+///   discriminating test below).
 #[test]
 fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain_verdict() {
     use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
@@ -417,79 +419,73 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     for variant in variants {
         let node = graph.intern_node(SemanticNodeData::Opaque(variant.clone()));
 
-        // MATERIALIZE path: byte-identical to the legacy `unknown(semantic_query_error_raw(err))`.
+        // MATERIALIZE path: byte-identical terminal compatibility projection —
+        // the tree EQUALS a genuine `UnknownValue` with the legacy spelling
+        // (raw-only identity), and the interned key is EQUAL too
+        // (`assert_classifier_parity`'s eq_to_expr block).
         let raised = raise_oracle(&host, node).expect("an Opaque(err) node raises to Some");
         assert_eq!(
             raised,
-            TypeExpr::Unknown {
-                raw: semantic_query_error_raw(&variant),
-            },
-            "the Opaque({variant:?}) arm must materialise byte-identical to the legacy \
-             Unknown {{ raw: semantic_query_error_raw(err) }}"
+            TypeExpr::Unknown(verter_type_expr::UnknownValue::compatibility_projection(
+                semantic_query_error_raw(&variant)
+            )),
+            "the Opaque({variant:?}) arm must project byte-identical to the legacy \
+             Unknown {{ raw: semantic_query_error_raw(err) }} spelling"
         );
 
-        // NODE-DOMAIN path: every classifier equals the materialised oracle's
-        // verdict. For `Other(\"semanticMiss\")` this only holds because the
-        // typed authority delegates text-bearing payloads to the raw recogniser.
+        // NODE-DOMAIN path: typed classification only (split parity).
         assert_classifier_parity(&host, node, &format!("opaque-arm-{variant:?}"));
     }
 
-    // Concretely pin the discriminating `materialized` case so a reverted
-    // delegation surfaces here (not only via the loop): the materialised oracle
-    // reads `Opaque(Other("semanticMiss"))` as a semantic miss, and the
-    // node-domain classifier must agree.
+    // The FLIPPED `materialized` equation: an `Other("semanticMiss")` payload
+    // is INERT — MATERIALIZED, never a miss (only the typed `Miss` variant is
+    // the miss sentinel).
     let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
         "semanticMiss",
     ))));
     assert!(
-        node_contains_semantic_miss_or_unraisable(&host, adversarial),
-        "Opaque(Other(\"semanticMiss\")) must read as a semantic miss in the node domain \
-         (the text-bearing delegation); a reverted delegation would report NOT-a-miss here"
+        !node_contains_semantic_miss_or_unraisable(&host, adversarial),
+        "Opaque(Other(\"semanticMiss\")) is INERT — MATERIALIZED (typed-only classification)"
+    );
+    let typed_miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    assert!(
+        node_contains_semantic_miss_or_unraisable(&host, typed_miss),
+        "the typed Miss variant IS the miss sentinel"
     );
 
-    // END-TO-END `tag` discrimination for `Opaque(Other("semanticObjectSurface"))`:
-    // the materialise oracle drops the SEMANTIC_OBJECT_SURFACE arm from an
-    // intersection (raw-based `is_object_surface_sentinel`), so
-    // `Intersection(Other("semanticObjectSurface"), RealObject)` collapses to
-    // `RealObject`. The node-domain algebra drops the arm only via its
-    // `ObjectSurfaceSentinel` tag — which the text-bearing delegation now
-    // produces. `assert_classifier_parity` (oracle vs node-domain) + the
-    // collapse-equality below therefore HOLD with the delegation and FAIL if it is
-    // reverted (node-domain keeps the arm → a 2-arm Intersection that does NOT
-    // raise equal to the lone real object).
+    // The FLIPPED end-to-end `tag` equation: an
+    // `Opaque(Other("semanticObjectSurface"))` arm is RETAINED in an
+    // intersection — `Other` never acts as the surface sentinel.
     let real_member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let real_obj = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
         "kept",
         real_member,
     )])));
-    let object_surface_sentinel_arm = graph.intern_node(SemanticNodeData::Opaque(
-        QueryError::Other(Arc::from("semanticObjectSurface")),
-    ));
-    // Sanity: the lone arm raises to the object-surface sentinel ⇒ a semantic miss
-    // (it IS the arm we expect the intersection to drop).
+    let object_surface_other_arm = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        Arc::from("semanticObjectSurface"),
+    )));
+    // Sanity: the lone arm is MATERIALIZED (inert Other payload).
     assert!(
-        node_contains_semantic_miss_or_unraisable(&host, object_surface_sentinel_arm),
-        "Opaque(Other(\"semanticObjectSurface\")) raises to the SEMANTIC_OBJECT_SURFACE sentinel \
-         ⇒ a semantic miss"
+        !node_contains_semantic_miss_or_unraisable(&host, object_surface_other_arm),
+        "Opaque(Other(\"semanticObjectSurface\")) is INERT — MATERIALIZED"
     );
-    let inter_sentinel_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![object_surface_sentinel_arm, real_obj].into_boxed_slice(),
+    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![object_surface_other_arm, real_obj].into_boxed_slice(),
     )));
     assert_classifier_parity(
         &host,
-        inter_sentinel_real,
-        "intersection-object-surface-text-and-real",
+        inter_other_real,
+        "intersection-object-surface-other-text-and-real",
     );
     assert_eq!(
-        raised_shape_eq_nodes(&host, inter_sentinel_real, real_obj),
-        Some(true),
-        "(Other(\"semanticObjectSurface\") & RealObject) must drop the object-surface-sentinel arm \
-         (via the text-bearing tag delegation) and collapse EQUAL to the real object; a reverted \
-         tag delegation keeps the arm and breaks this collapse"
+        raised_shape_eq_nodes(&host, inter_other_real, real_obj),
+        Some(false),
+        "(Other(\"semanticObjectSurface\") & RealObject) RETAINS the arm — a 2-arm Intersection \
+         that is NOT equal to the lone real object"
     );
     assert!(
-        !node_contains_semantic_miss_or_unraisable(&host, inter_sentinel_real),
-        "the sentinel-arm-dropped intersection collapses to the real object ⇒ materialized"
+        !node_contains_semantic_miss_or_unraisable(&host, inter_other_real),
+        "the retained-Other intersection is materialized (Other payloads are inert)"
     );
 }
 
@@ -537,31 +533,42 @@ fn parity_alias_cycle_sentinel_string_classification() {
     // and `mutual_alias_cycle_x_y_x_returns_opaque...`), where the cycle is
     // produced by the resolver re-visiting a resolved declaration identity.
     //
-    // Here we pin the CLASSIFICATION of the alias-cycle sentinel STRING via a
-    // `RawFallback` mirror (the identical `type_expr_contains_semantic_miss`
-    // branch the raised cycle sentinel would take): the spelling
-    // `semanticAliasCycle` IS in the sentinel set ⇒ semantic miss.
-    let alias_cycle_sentinel = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: Arc::from("semanticAliasCycle"),
+    // FLIPPED: a `RawFallback` mirror carrying the
+    // alias-cycle / type-param-cycle SPELLING is a genuine `UnknownValue` —
+    // ALWAYS materialized, never a sentinel. The typed classifications live
+    // on the `Opaque(QueryError::RaiseAliasCycle)` /
+    // `Opaque(QueryError::TypeParamCycle)` carriers, pinned here directly.
+    let alias_cycle_spelling = graph.intern_node(SemanticNodeData::RawFallback {
+        value: verter_type_expr::UnknownValue::unsupported_syntax("semanticAliasCycle"),
     });
-    assert_classifier_parity(&host, alias_cycle_sentinel, "alias-cycle-sentinel-mirror");
+    assert_classifier_parity(&host, alias_cycle_spelling, "alias-cycle-spelling-genuine");
     assert!(
-        node_contains_semantic_miss_or_unraisable(&host, alias_cycle_sentinel),
-        "the alias-cycle sentinel string ⇒ semantic miss"
+        !node_contains_semantic_miss_or_unraisable(&host, alias_cycle_spelling),
+        "a genuine UnknownValue spelled `semanticAliasCycle` is MATERIALIZED"
+    );
+    let tp_cycle_spelling = graph.intern_node(SemanticNodeData::RawFallback {
+        value: verter_type_expr::UnknownValue::unsupported_syntax("semanticTypeParamCycle"),
+    });
+    assert_classifier_parity(&host, tp_cycle_spelling, "typeparam-cycle-spelling-genuine");
+    assert!(
+        !node_contains_semantic_miss_or_unraisable(&host, tp_cycle_spelling),
+        "a genuine UnknownValue spelled `semanticTypeParamCycle` is MATERIALIZED"
     );
 
-    // `semanticTypeParamCycle` is NOT in the sentinel set ⇒ MATERIALIZED
-    // (the raiser emits it for a TypeParam constraint/default cycle; it must read
-    // as materialized, unlike the alias-cycle sentinel). Same constructibility
-    // limitation as the alias self-cycle, so mirror the spelling via
-    // `RawFallback` to pin its NON-sentinel classification.
-    let tp_cycle = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: Arc::from("semanticTypeParamCycle"),
-    });
-    assert_classifier_parity(&host, tp_cycle, "typeparam-cycle-materialized-mirror");
+    // The TYPED carriers keep their classifications: `RaiseAliasCycle` is an
+    // unmaterialised sentinel; `TypeParamCycle` is deliberately materialized.
+    let alias_cycle_typed =
+        graph.intern_node(SemanticNodeData::Opaque(QueryError::RaiseAliasCycle));
+    assert_classifier_parity(&host, alias_cycle_typed, "alias-cycle-typed-carrier");
     assert!(
-        !node_contains_semantic_miss_or_unraisable(&host, tp_cycle),
-        "the type-param-cycle string is NOT a sentinel ⇒ materialized"
+        node_contains_semantic_miss_or_unraisable(&host, alias_cycle_typed),
+        "the TYPED RaiseAliasCycle carrier ⇒ semantic miss"
+    );
+    let tp_cycle_typed = graph.intern_node(SemanticNodeData::Opaque(QueryError::TypeParamCycle));
+    assert_classifier_parity(&host, tp_cycle_typed, "typeparam-cycle-typed-carrier");
+    assert!(
+        !node_contains_semantic_miss_or_unraisable(&host, tp_cycle_typed),
+        "the TYPED TypeParamCycle carrier is deliberately materialized"
     );
 }
 
@@ -631,12 +638,13 @@ fn parity_lazy_carriers() {
     });
     assert_classifier_parity(&host, instref, "instantiation-ref");
 
-    // A carrier whose type-arg points at an ABSENT node id ⇒ that arg raises to
-    // `None` and the carrier arm materialises it as `Unknown { raw: "<raise
-    // miss>" }` so the OUTER `Ref` still constructs (the carrier does NOT fail
-    // the whole raise). `<raise miss>` is NOT in the sentinel set ⇒ the carrier
-    // reads as MATERIALIZED — pinning the `.unwrap_or(Unknown { "<raise miss>" })`
-    // arm parity.
+    // A carrier whose type-arg points at an ABSENT node id ⇒ the mandatory
+    // arg position degrades to the TYPED `UnrepresentableSurfaceMember`
+    // (terminal projection `semanticSurfaceMember`) so the OUTER `Ref` still
+    // constructs (the carrier does NOT fail the whole raise). The node-domain
+    // `reference_leaf` fact stays MATERIALIZED (a `Ref` is materialized
+    // regardless of arg shapes); the payload-side degradation is carried by
+    // the materialize sidecar (partial), pinned separately.
     let instref_miss_arg = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/w/d.ts"),
@@ -649,12 +657,12 @@ fn parity_lazy_carriers() {
     assert_classifier_parity(&host, instref_miss_arg, "instantiation-ref-raise-miss-arg");
     assert!(
         node_can_shell_raise(&host, instref_miss_arg),
-        "a carrier with an absent type-arg still raises (the arg becomes the <raise miss> \
-         placeholder; the outer Ref constructs)"
+        "a carrier with an absent type-arg still raises (the arg degrades to the typed \
+         surface-member fallback; the outer Ref constructs)"
     );
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, instref_miss_arg),
-        "the `<raise miss>` placeholder is NOT in the sentinel set ⇒ the carrier reads materialized"
+        "the node-domain Ref-leaf fact is materialized regardless of the degraded arg"
     );
 
     let bare = graph.intern_node(SemanticNodeData::new_bare_ref(
@@ -678,6 +686,9 @@ fn parity_lazy_carriers() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -890,6 +901,83 @@ fn parity_intersection_arm_drop_and_collapse() {
     );
 }
 
+/// The intersection arm-drop is typed-root-only: a root-level
+/// `QueryError::UnrepresentableSurface` degradation is removed (vacuous arm),
+/// while an IDENTICALLY-SPELLED genuine `UnknownValue` arm AND a
+/// `QueryError::Other("semanticObjectSurface")` arm are both RETAINED (the
+/// flipped legacy equations — raw spelling never drops an arm).
+#[test]
+fn intersection_drops_only_typed_root_unrepresentable_surface() {
+    let host = host();
+    let graph = graph_of(&host);
+
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let real_obj = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
+        "a", string_id,
+    )])));
+
+    // (1) The TYPED root degradation drops: `UnrepresentableSurface & Real`
+    // collapses to `Real`.
+    let typed_surface =
+        graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface));
+    let inter_typed_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![typed_surface, real_obj].into_boxed_slice(),
+    )));
+    assert_eq!(
+        raised_shape_eq_nodes(&host, inter_typed_real, real_obj),
+        Some(true),
+        "a typed ROOT UnrepresentableSurface arm is REMOVED (collapses to the real arm)"
+    );
+    assert!(
+        !node_contains_semantic_miss_or_unraisable(&host, inter_typed_real),
+        "the collapsed intersection is materialized"
+    );
+
+    // (2) An IDENTICALLY-SPELLED genuine `UnknownValue` arm is RETAINED.
+    let genuine_surface_spelling = graph.intern_node(SemanticNodeData::RawFallback {
+        value: verter_type_expr::UnknownValue::unsupported_syntax("semanticObjectSurface"),
+    });
+    let inter_genuine_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![genuine_surface_spelling, real_obj].into_boxed_slice(),
+    )));
+    assert_eq!(
+        raised_shape_eq_nodes(&host, inter_genuine_real, real_obj),
+        Some(false),
+        "an identically-spelled GENUINE UnknownValue arm is NEVER removed"
+    );
+    // … and its terminal tree keeps the legacy two-arm shape with the exact
+    // spelling (the projection is inert text).
+    let raised = raise_oracle(&host, inter_genuine_real).expect("the intersection raises");
+    match &raised {
+        TypeExpr::Intersection(arms) => {
+            assert_eq!(arms.len(), 2, "both arms survive");
+            assert!(
+                matches!(&arms[0], TypeExpr::Unknown(value) if value.raw() == "semanticObjectSurface"),
+                "the genuine arm keeps its exact spelling, got {raised:?}"
+            );
+        }
+        other => panic!("expected a retained 2-arm Intersection, got {other:?}"),
+    }
+
+    // (3) A `QueryError::Other("semanticObjectSurface")` arm is RETAINED —
+    // `Other` never acts as the surface sentinel.
+    let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+        "semanticObjectSurface",
+    ))));
+    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![other_surface, real_obj].into_boxed_slice(),
+    )));
+    assert_eq!(
+        raised_shape_eq_nodes(&host, inter_other_real, real_obj),
+        Some(false),
+        "a QueryError::Other(\"semanticObjectSurface\") arm is NEVER removed"
+    );
+    assert!(
+        !node_contains_semantic_miss_or_unraisable(&host, inter_other_real),
+        "the retained-Other intersection is materialized (Other payloads are inert)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Class 6 — deferred operator shells (KeyOf / IndexedAccess / Mapped /
 // Conditional / TypeOf) — expanded_surface == false, plus `?`-None propagation.
@@ -928,7 +1016,7 @@ fn parity_deferred_operator_shells() {
     });
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tp,
-        index: IndexKey::TypeNode(k),
+        index: IndexKey::Computed(k),
     });
     assert_classifier_parity(&host, indexed, "indexed-access-T-K");
     assert!(
@@ -1290,7 +1378,8 @@ fn parity_function_and_constructor_type() {
     // `(a: string) => number` — Function with one materialized param + return.
     // `contains_semantic_miss` recurses the return + params; all materialized ⇒
     // NOT a miss, AND a Function is an expanded surface.
-    let func = graph.intern_node(SemanticNodeData::Function {
+    let func = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -1301,6 +1390,8 @@ fn parity_function_and_constructor_type() {
             .into_boxed_slice(),
         ),
         return_type: number_id,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(number_id),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -1320,7 +1411,8 @@ fn parity_function_and_constructor_type() {
     // the miss predicate) ⇒ semantic miss. The parity helper proves the raiser
     // and predicate agree on the recursion.
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let func_miss_param = graph.intern_node(SemanticNodeData::Function {
+    let func_miss_param = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("bad")),
@@ -1331,6 +1423,8 @@ fn parity_function_and_constructor_type() {
             .into_boxed_slice(),
         ),
         return_type: number_id,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(number_id),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -1346,7 +1440,7 @@ fn parity_function_and_constructor_type() {
     // The raiser raises the signature Function then rewraps as ConstructorType;
     // the miss predicate treats ConstructorType identically to Function (recurses
     // the same FunctionExpr payload).
-    let ctor = graph.intern_node(SemanticNodeData::ConstructorType { signature: func });
+    let ctor = graph.intern_construct_twin_for_tests(func);
     assert_classifier_parity(&host, ctor, "constructor-type-materialized");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, ctor),
@@ -1355,9 +1449,7 @@ fn parity_function_and_constructor_type() {
 
     // A ConstructorType whose signature param misses ⇒ semantic miss (recursion
     // through the construct signature, mirroring Function).
-    let ctor_miss = graph.intern_node(SemanticNodeData::ConstructorType {
-        signature: func_miss_param,
-    });
+    let ctor_miss = graph.intern_construct_twin_for_tests(func_miss_param);
     assert_classifier_parity(&host, ctor_miss, "constructor-type-miss-param");
     assert!(
         node_contains_semantic_miss_or_unraisable(&host, ctor_miss),
@@ -1559,12 +1651,11 @@ fn parity_carriers_with_type_args_and_raise_miss() {
         "a BareRef<number> raises to a Ref leaf ⇒ NOT a miss"
     );
 
-    // `Foo<absent>` — the absent type-arg raises to `None`, the BareRef arm
-    // materialises it as `Unknown { raw: "<raise miss>" }` so the OUTER Ref still
-    // constructs. `<raise miss>` is NOT in the sentinel set ⇒ the carrier reads
-    // MATERIALIZED. This proves the carrier-arg miss is MATERIALIZED (does NOT
-    // taint the parent) per LEGACY — the `.unwrap_or(Unknown { "<raise miss>" })`
-    // arm.
+    // `Foo<absent>` — the absent type-arg degrades to the TYPED
+    // `UnrepresentableSurfaceMember` (projection `semanticSurfaceMember`) so the
+    // OUTER Ref still constructs. The node-domain `reference_leaf` fact stays
+    // MATERIALIZED (does NOT taint the parent); the payload-side degradation is
+    // carried by the materialize sidecar.
     let bare_miss_arg = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
         NodeScopeId::Global,
@@ -1573,8 +1664,8 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     assert_classifier_parity(&host, bare_miss_arg, "bare-ref-raise-miss-arg");
     assert!(
         node_can_shell_raise(&host, bare_miss_arg),
-        "a BareRef with an absent type-arg still raises (the arg becomes <raise miss>; the outer \
-         Ref constructs)"
+        "a BareRef with an absent type-arg still raises (the arg degrades to the typed \
+         surface-member fallback; the outer Ref constructs)"
     );
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, bare_miss_arg),
@@ -1625,6 +1716,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -1650,6 +1744,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -1660,8 +1757,8 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     assert!(
         node_can_shell_raise(&host, typeof_miss_arg)
             && !node_contains_semantic_miss_or_unraisable(&host, typeof_miss_arg),
-        "a TypeOf with an absent instantiation arg materialises it as <raise miss>; the carrier \
-         reads materialized"
+        "a TypeOf with an absent instantiation arg degrades it to the typed surface-member \
+         fallback; the node-domain carrier fact reads materialized"
     );
 }
 
@@ -1793,7 +1890,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // `FunctionParam::synthetic` → `has_ts_annotation: false`, so they never
     // exercised the mismatch — that gap is why the bug shipped.
     //
-    // NOTE: `SemanticNodeData::Function` uses the GRAPH param
+    // NOTE: `SemanticNodeData::Signature` uses the GRAPH param
     // (`semantic_query::FunctionParam`, already imported at the top); the input
     // `TypeExpr::Function` uses the IR param (`verter_type_expr::FunctionParam`).
     // They are distinct types — alias the IR ones to keep both in scope.
@@ -1810,7 +1907,8 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // `(a: string) => number` — the node side. Its param raises with
     // `has_ts_annotation: false` (synthetic param → false; materializer/algebra
     // both hardcode false).
-    let func_node = graph.intern_node(SemanticNodeData::Function {
+    let func_node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -1821,6 +1919,8 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
             .into_boxed_slice(),
         ),
         return_type: number_id,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(number_id),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -1945,7 +2045,7 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
                  child, not drop it"
             );
             assert!(
-                matches!(&expressions[0], TypeExpr::Unknown { .. }),
+                matches!(&expressions[0], TypeExpr::Unknown(_)),
                 "the recursed miss child must raise to an Unknown sentinel inside the template's \
                  expressions; got {:?}",
                 expressions[0]
@@ -2020,12 +2120,14 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
     let members = props
         .iter()
         .map(|(name, value)| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(*name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
             value: *value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -2055,12 +2157,14 @@ fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
 
 // ---------------------------------------------------------------------------
 // Union NO-collapse edges — the easy-to-get-wrong subtlety BOTH codex legs
-// flagged: the raiser's `Union` arm `filter_map`s its members and NEVER
-// collapses, so `Union([A])` stays a union and an empty `Union([])` stays an
-// empty union. The bottom-up fold must preserve this EXACTLY (a collapse would
-// diverge from the materialize-then-predicate oracle). Each routes through
-// `assert_classifier_parity` so it discriminates against the oracle, plus a
-// DIRECT oracle shape assertion pinning the no-collapse.
+// flagged: the raiser's `Union` arm NEVER collapses (a single-member
+// `Union([A])` stays a union and an empty `Union([])` stays an empty union),
+// and a PRESENT-but-unraisable member fails the WHOLE composite
+// (presence-aware — never silently erased). The bottom-up fold must preserve
+// this EXACTLY (a collapse would diverge from the materialize-then-predicate
+// oracle). Each routes through `assert_classifier_parity` so it discriminates
+// against the oracle, plus a DIRECT oracle shape assertion pinning the
+// no-collapse.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2117,20 +2221,20 @@ fn parity_union_no_collapse_single_and_empty() {
         other => panic!("empty Union([]) must raise to an empty Union, got {other:?}"),
     }
 
-    // A `Union([A, miss])` DROPS the missing arm (filter_map) — `Union([A])`.
+    // FAIL-CLOSED (R2-F1): a `Union([A, <absent>])` FAILS THE WHOLE raise —
+    // a present-but-unraisable member is never silently erased.
     let absent = SemanticNodeId(u64::MAX);
-    let with_drop = graph.intern_node(SemanticNodeData::Union(Arc::from(
+    let with_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
         vec![str_id, absent].into_boxed_slice(),
     )));
-    assert_classifier_parity(&host, with_drop, "union-drop-missing-arm");
-    match raise_oracle(&host, with_drop) {
-        Some(TypeExpr::Union(ref members)) => assert_eq!(
-            members.len(),
-            1,
-            "Union([String, <absent>]) must DROP the absent arm (filter_map) → Union([String])"
-        ),
-        other => panic!("expected a Union, got {other:?}"),
-    }
+    assert!(
+        raise_oracle(&host, with_absent).is_none(),
+        "Union([String, <absent>]) must FAIL the whole raise (presence-aware)"
+    );
+    assert!(
+        !node_can_shell_raise(&host, with_absent),
+        "the node-domain fold fails identically (shared fold)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2352,7 +2456,8 @@ fn publication_score_corpus(
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
 
-    let function = graph.intern_node(SemanticNodeData::Function {
+    let function = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -2363,6 +2468,8 @@ fn publication_score_corpus(
             .into_boxed_slice(),
         ),
         return_type: number,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(number),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -2460,6 +2567,9 @@ fn publication_score_corpus(
                         canonical_id: Arc::from("/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
                     },
                     name: Arc::from("factory"),
                 },
@@ -2473,6 +2583,7 @@ fn publication_score_corpus(
             "infer",
             graph.intern_node(SemanticNodeData::Infer {
                 name: Arc::from("U"),
+                binder: graph.alloc_infer_binder_id(),
             }),
         ),
         (
@@ -2491,9 +2602,7 @@ fn publication_score_corpus(
         ),
         ("function", function),
         ("constructor_type", {
-            graph.intern_node(SemanticNodeData::ConstructorType {
-                signature: function,
-            })
+            graph.intern_construct_twin_for_tests(function)
         }),
         ("decl_ref", foo),
         (
@@ -2540,13 +2649,13 @@ fn publication_score_corpus(
         (
             "raw_fallback",
             graph.intern_node(SemanticNodeData::RawFallback {
-                raw: Arc::from("SomeRawText"),
+                value: verter_type_expr::UnknownValue::unsupported_syntax("SomeRawText"),
             }),
         ),
         (
-            "raw_fallback_sentinel",
+            "raw_fallback_sentinel_spelling",
             graph.intern_node(SemanticNodeData::RawFallback {
-                raw: Arc::from("semanticAliasCycle"),
+                value: verter_type_expr::UnknownValue::unsupported_syntax("semanticAliasCycle"),
             }),
         ),
         (
@@ -2615,6 +2724,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::Array { .. } => "array",
             SemanticNodeData::Tuple { .. } => "tuple",
             SemanticNodeData::Object(_) => "object",
+            SemanticNodeData::ObjectSpreadProgram(_) => "object_spread_program",
             SemanticNodeData::MergedDecl { .. } => "merged_decl",
             SemanticNodeData::Conditional { .. } => "conditional",
             SemanticNodeData::TemplateLiteral { .. } => "template_literal",
@@ -2624,15 +2734,20 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::TypeOf(_) => "typeof",
             SemanticNodeData::TypeParam { .. } => "type_param",
             SemanticNodeData::Infer { .. } => "infer",
+            SemanticNodeData::InferRef { .. } => "infer-ref",
             SemanticNodeData::Opaque(_) => "opaque",
-            SemanticNodeData::Function { .. } => "function",
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            } => "constructor_type",
+            SemanticNodeData::Signature { .. } => "function",
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
             SemanticNodeData::BareRef(_) => "bare_ref",
             SemanticNodeData::ImportType(_) => "import_type",
             SemanticNodeData::RawFallback { .. } => "raw_fallback",
-            SemanticNodeData::ConstructorType { .. } => "constructor_type",
             SemanticNodeData::SyntheticBinding { .. } => "synthetic_binding",
+            SemanticNodeData::DeferredCallable(_) => "deferred_callable",
         }
     }
 
@@ -2693,5 +2808,355 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
          here. Missing: {:?}; Extra: {:?}",
         expected.difference(&covered).collect::<Vec<_>>(),
         covered.difference(&expected).collect::<Vec<_>>(),
+    );
+}
+
+/// F3-1 regression: the intersection normalization drops a typed
+/// `UnrepresentableSurface` arm — but the arm's TYPED degradation must
+/// survive into the folded payload (fail-closed: a normalized-away
+/// degradation must never read as a complete result).
+#[test]
+fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
+    let host = host();
+    let graph = graph_of(&host);
+
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let real_obj = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
+        "a", string_id,
+    )])));
+    let typed_surface =
+        graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface));
+    let inter = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![typed_surface, real_obj].into_boxed_slice(),
+    )));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let mut active = rustc_hash::FxHashSet::default();
+    let folded = super::raise::fold_to_type_expr(&dispatch, inter, &mut active)
+        .expect("the intersection raises");
+    assert!(
+        folded.has_degradation(),
+        "the dropped sentinel arm's typed degradation must survive the normalization"
+    );
+    // The compat tree still collapses to the real object (bytes preserved).
+    assert!(
+        matches!(folded.expr(), TypeExpr::Object(_)),
+        "the collapsed tree is the real object, got {:?}",
+        folded.expr()
+    );
+    // … and the surviving degradation is NOT root-anchored (a nested path —
+    // the collapsed result must never read as a fresh root sentinel, so an
+    // OUTER intersection does not re-drop it).
+    assert!(
+        folded.root_degradation().is_none(),
+        "the absorbed degradation must not re-anchor at the root"
+    );
+}
+
+/// F3-2 regression: an invalid call signature (raises to a degraded
+/// non-function, so it cannot become a `CallSignature` member) is dropped
+/// from the object — its TYPED degradation must survive into the folded
+/// payload (fail-closed, never silently complete).
+#[test]
+fn invalid_call_signature_drop_keeps_typed_degradation_in_sidecar() {
+    let host = host();
+    let graph = graph_of(&host);
+
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let mut surface = object_surface(&[("a", string_id)]);
+    surface.call_signatures = Arc::from(vec![miss].into_boxed_slice());
+    let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let mut active = rustc_hash::FxHashSet::default();
+    let folded =
+        super::raise::fold_to_type_expr(&dispatch, obj, &mut active).expect("the object raises");
+    assert!(
+        folded.has_degradation(),
+        "the dropped call signature's typed degradation must survive"
+    );
+    let TypeExpr::Object(object) = folded.expr() else {
+        panic!("expected an object, got {:?}", folded.expr());
+    };
+    assert_eq!(
+        object.properties.len(),
+        1,
+        "only the real property survives (the invalid signature is dropped)"
+    );
+}
+
+fn fold_raises(host: &VerterHost, node: SemanticNodeId) -> bool {
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let mut active = rustc_hash::FxHashSet::default();
+    super::raise::fold_to_type_expr(&dispatch, node, &mut active).is_some()
+}
+
+#[test]
+fn union_with_unraisable_member_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let node = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+    )));
+    assert!(
+        !fold_raises(&host, node),
+        "Union([String, <absent>]) must fail whole"
+    );
+}
+
+#[test]
+fn intersection_with_unraisable_arm_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let node = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+    )));
+    assert!(
+        !fold_raises(&host, node),
+        "Intersection([String, <absent>]) must fail whole"
+    );
+}
+
+#[test]
+fn tuple_with_unraisable_element_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let node = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                crate::semantic_query::TupleElement {
+                    label: None,
+                    value: str_id,
+                    optional: false,
+                    rest: false,
+                },
+                crate::semantic_query::TupleElement {
+                    label: None,
+                    value: SemanticNodeId(u64::MAX),
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    assert!(
+        !fold_raises(&host, node),
+        "Tuple([String, <absent>]) must fail whole"
+    );
+}
+
+#[test]
+fn template_literal_with_unraisable_expression_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let node = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis: Arc::from(vec![Arc::from("x")].into_boxed_slice()),
+        expressions: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+    });
+    assert!(
+        !fold_raises(&host, node),
+        "TemplateLiteral with an unraisable expression must fail whole"
+    );
+}
+
+#[test]
+fn function_with_unraisable_return_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: SemanticNodeId(u64::MAX),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(SemanticNodeId(
+            u64::MAX,
+        )),
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    assert!(
+        !fold_raises(&host, node),
+        "a function whose REQUIRED return is unraisable must fail whole"
+    );
+}
+
+#[test]
+fn function_with_unraisable_parameter_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("a")),
+                SemanticNodeId(u64::MAX),
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: str_id,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(str_id),
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    assert!(
+        !fold_raises(&host, node),
+        "a function with an unraisable parameter must fail whole"
+    );
+}
+
+#[test]
+fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
+    let host = host();
+    let graph = graph_of(&host);
+    let decl = decl_identity_unscoped("/w/tp.ts", "T");
+    let with_constraint = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl.clone(),
+        param_index: 0,
+        constraint: Some(SemanticNodeId(u64::MAX)),
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    assert!(
+        !fold_raises(&host, with_constraint),
+        "a PRESENT-but-unraisable constraint must fail whole (None ≠ absent)"
+    );
+    let with_default = graph.intern_node(SemanticNodeData::TypeParam {
+        decl,
+        param_index: 0,
+        constraint: None,
+        default: Some(SemanticNodeId(u64::MAX)),
+        display_name: Arc::from("T"),
+    });
+    assert!(
+        !fold_raises(&host, with_default),
+        "a PRESENT-but-unraisable default must fail whole (None ≠ absent)"
+    );
+    // … and a genuinely-absent slot still raises (None is preserved).
+    let plain = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/tp.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    assert!(fold_raises(&host, plain), "absent slots stay absent");
+}
+
+#[test]
+fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
+    use crate::project_semantic_dispatch::raise::{MaterializedOutputTypeExpr, OutputTypeExpr};
+    use crate::semantic_query::DepSignature;
+
+    let host = host();
+    let graph = graph_of(&host);
+    let node = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity_unscoped("/w/r.ts", "Box"),
+        args: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+    });
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let mut active = rustc_hash::FxHashSet::default();
+    let folded = super::raise::fold_to_type_expr(&dispatch, node, &mut active)
+        .expect("the carrier still raises (degraded arg)");
+    assert!(
+        folded.has_degradation(),
+        "an unraisable carrier arg must degrade (typed UnrepresentableSurfaceMember)"
+    );
+    let TypeExpr::Ref { type_arguments, .. } = folded.expr() else {
+        panic!("expected Ref, got {:?}", folded.expr());
+    };
+    assert!(
+        matches!(
+            type_arguments.first(),
+            Some(TypeExpr::Unknown(v)) if v.raw() == "semanticSurfaceMember"
+        ),
+        "the fallback arg is the typed surface-member projection, got {:?}",
+        folded.expr()
+    );
+    // … and the payload goes PARTIAL at the choke point (no warm admission).
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        Some(node),
+        OutputTypeExpr::from_raise(folded),
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        carrier.result_is_partial(),
+        "a degraded carrier arg must mark the payload partial"
+    );
+}
+
+/// R3-F1 — terminal laundering: a PRESENT-BUT-UNRAISABLE composite reaches
+/// the reduce-then-raise terminal as a TYPED unmaterialized failure (partial,
+/// never admitted complete); a GENUINE absence stays exact + non-partial.
+#[test]
+fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
+    use crate::project_semantic_dispatch::output_materialization::{
+        wrap_output_type_expr, TestOutputCap,
+    };
+    use crate::project_semantic_dispatch::raise::{MaterializedTypeExpr, OutputTypeExpr};
+    use crate::semantic_query::{DepSignature, ProjectionMode, ProjectionReductionContext};
+
+    let host = host();
+    let graph = graph_of(&host);
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // (1) A present-but-unraisable composite: reduce succeeds (the union node
+    // exists), the raise FAILS on the absent child — the terminal payload must
+    // be PARTIAL (typed unmaterialized failure), never admitted complete.
+    let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+    )));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let reduced = dispatch.raise_and_reduce_with_context(
+        union_absent,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    assert!(
+        reduced.result_is_partial(),
+        "a present-but-unraisable composite must reach the terminal as PARTIAL"
+    );
+    // (2) A GENUINE absence (a lane source with no typed payload) stays the
+    // exact `missing_output` — NON-partial.
+    let cap2 = TestOutputCap::new(&dispatch);
+    let sealed = wrap_output_type_expr(
+        &cap2,
+        TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
+    );
+    let genuine = crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr::from_parts(
+        None,
+        sealed,
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        !genuine.result_is_partial(),
+        "a genuine absence stays exact + non-partial"
+    );
+
+    // (3) The sealed-carrier None fallback degrades TYPED (partial), not an
+    // exact empty Unknown.
+    let degraded = MaterializedTypeExpr::degraded(QueryError::Miss);
+    assert!(degraded.has_degradation());
+    let carrier = crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(degraded),
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        carrier.result_is_partial(),
+        "the terminal None fallback is a typed unmaterialized failure"
     );
 }

@@ -3967,6 +3967,7 @@ dependencies = [
  "tempfile",
  "verter_audit",
  "verter_css_syntax",
+ "verter_ecma",
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
@@ -4021,6 +4022,10 @@ dependencies = [
  "verter_type_runtime",
  "verter_workspace",
 ]
+
+[[package]]
+name = "verter_ecma"
+version = "0.0.1-beta.3"
 
 [[package]]
 name = "verter_ffi"
@@ -4311,6 +4316,7 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+ "oxc_syntax",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -4341,6 +4347,7 @@ dependencies = [
  "indexmap",
  "oxc_allocator",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
  "parking_lot",
@@ -4478,6 +4485,7 @@ dependencies = [
  "serde",
  "serde_json",
  "static_assertions",
+ "verter_ecma",
  "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_span",
@@ -4492,6 +4500,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "serde",
+ "verter_ecma",
  "verter_span",
  "verter_type_expr",
 ]

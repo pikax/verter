@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, LiteralValue, MappedModifier, ObjectExpr, ObjectMember,
     ObjectProperty, PrimitiveName, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
-    ValueRef,
+    UnknownProvenance, UnknownValue, ValueRef,
 };
 
 use super::{
@@ -220,12 +220,17 @@ fn lowers_unknown_to_raw_fallback_verbatim() {
     // Unsupported raw syntax → `RawFallback { raw }` with the exact text
     // preserved. RawFallback is display/compat only, never a miss signal.
     let host = VerterHost::new_standalone(Default::default());
-    let expr = TypeExpr::Unknown {
-        raw: "Weird<& Type>".to_string(),
-    };
+    let expr = TypeExpr::Unknown(UnknownValue::unsupported_syntax("Weird<& Type>"));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::RawFallback { raw } => assert_eq!(raw.as_ref(), "Weird<& Type>"),
+        SemanticNodeData::RawFallback { value } => {
+            assert_eq!(value.raw(), "Weird<& Type>");
+            assert_eq!(
+                value.provenance(),
+                UnknownProvenance::UnsupportedSyntax,
+                "the lowered RawFallback keeps the typed provenance"
+            );
+        }
         other => panic!("expected RawFallback, got {other:?}"),
     }
 }
@@ -421,9 +426,9 @@ fn lowers_tuple_preserving_rest_element() {
 
 #[test]
 fn lowers_constructor_type_wrapping_a_function_signature() {
-    // `new (x: number) => Foo` → `ConstructorType(Function(...))`, keeping
-    // constructor-ness distinct from a plain function (the eager path
-    // flattens both to `Function`).
+    // `new (x: number) => Foo` → a root `Signature(Construct)`, keeping
+    // constructor-ness distinct from a plain function (every producer,
+    // eager included, preserves the kind).
     let host = VerterHost::new_standalone(Default::default());
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
@@ -440,16 +445,21 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
     );
     let expr = TypeExpr::ConstructorType(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
-    let signature = match &*node(&graph, root) {
-        SemanticNodeData::ConstructorType { signature } => *signature,
-        other => panic!("expected ConstructorType, got {other:?}"),
-    };
     assert!(
-        !matches!(&*node(&graph, root), SemanticNodeData::Function { .. }),
-        "constructor-ness must NOT collapse to a plain Function"
+        matches!(
+            &*node(&graph, root),
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
+        ),
+        "a bare `new (…) => R` lowers to a root construct Signature, got {:?}",
+        *node(&graph, root)
     );
+    let signature = root;
     match &*node(&graph, signature) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             return_type,
             ..
@@ -474,10 +484,11 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
 #[test]
 fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     // `{ new(): T }` is an Object carrying a construct signature — NOT a
-    // `ConstructorType` (that is the bare `new () => T` form). The two must stay
-    // distinct (Vue treats a ctor-type as Function, a type-literal with a
-    // construct signature as Object). Discriminates against a lowerer that
-    // flattens the type literal to ConstructorType.
+    // root `Signature(Construct)` (that is the bare `new () => T` form). The
+    // two spellings must stay distinct (a root construct signature vs an
+    // Object whose `construct_signatures` hold `Signature(Construct)`
+    // nodes). Discriminates against a lowerer that collapses the type
+    // literal to a root construct signature.
     let host = VerterHost::new_standalone(Default::default());
     let func = FunctionExpr::synthetic(
         vec![],
@@ -493,7 +504,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
         SemanticNodeData::Object(view) => {
-            assert!(view.members.is_empty(), "no plain members");
+            assert!(view.positive_members().is_empty(), "no plain members");
             assert_eq!(
                 view.construct_signatures.len(),
                 1,
@@ -502,7 +513,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
             assert!(
                 matches!(
                     &*node(&graph, view.construct_signatures[0]),
-                    SemanticNodeData::Function { .. }
+                    SemanticNodeData::Signature { .. }
                 ),
                 "the construct signature lowers to a Function node"
             );
@@ -512,9 +523,12 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     assert!(
         !matches!(
             &*node(&graph, root),
-            SemanticNodeData::ConstructorType { .. }
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
         ),
-        "a type-literal `{{ new(): T }}` must NOT flatten to ConstructorType"
+        "a type-literal `{{ new(): T }}` must NOT collapse to a root construct Signature"
     );
 }
 
@@ -542,12 +556,14 @@ fn generic_function_binds_own_type_param_in_params_and_return() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     );
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             return_type,
             type_parameters,
@@ -593,6 +609,7 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             },
             verter_type_expr::TypeParam {
                 name: "U".to_string(),
@@ -601,13 +618,15 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
                     type_arguments: verter_type_expr::empty_type_args(),
                 })),
                 default: None,
+                is_const: false,
             },
         ],
     );
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..
@@ -662,6 +681,7 @@ fn generic_function_default_sees_prior_type_param_binder() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             },
             verter_type_expr::TypeParam {
                 name: "U".to_string(),
@@ -670,13 +690,15 @@ fn generic_function_default_sees_prior_type_param_binder() {
                     name: Arc::from("T"),
                     type_arguments: verter_type_expr::empty_type_args(),
                 })),
+                is_const: false,
             },
         ],
     );
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..
@@ -840,12 +862,15 @@ fn conditional_binds_bare_infer_in_true_branch() {
             ..
         } => {
             assert!(
-                matches!(&*node(&graph, *extends), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, *extends), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "extends lowers `infer P` to an Infer carrier"
             );
-            assert_eq!(
-                *true_branch_ref, *extends,
-                "the true-branch `P` binds to the `infer P` carrier introduced by `extends`"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the `infer P` \
+                 declaration introduced by `extends` (reference-vs-declaration survives \
+                 interning), got {:?}",
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -898,12 +923,14 @@ fn conditional_binds_nested_infer_in_true_branch() {
                 other => panic!("expected Array extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, nested_infer), SemanticNodeData::Infer { name } if name.as_ref() == "E"),
+                matches!(&*node(&graph, nested_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "E"),
                 "the Array element is the `infer E` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, nested_infer,
-                "the true-branch `E` binds to the nested `infer E` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "E"),
+                "the true-branch `E` binds as an `InferRef` REFERENCE to the nested \
+                 `infer E` declaration, got {:?}",
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -936,14 +963,16 @@ fn conditional_binds_object_member_infer_in_true_branch() {
             type_arguments: verter_type_expr::empty_type_args(),
         }),
         extends: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
-                TypeExpr::Infer {
-                    name: "P".to_string(),
-                },
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "a".to_string().into(),
+                    TypeExpr::Infer {
+                        name: "P".to_string(),
+                    },
+                    false,
+                    false,
+                ),
+            )],
         }))),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("P"),
@@ -961,18 +990,20 @@ fn conditional_binds_object_member_infer_in_true_branch() {
         } => {
             let member_infer = match &*node(&graph, *extends) {
                 SemanticNodeData::Object(view) => {
-                    assert_eq!(view.members.len(), 1);
-                    view.members[0].value
+                    assert_eq!(view.positive_members().len(), 1);
+                    view.positive_members()[0].value
                 }
                 other => panic!("expected Object extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, member_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, member_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "the object member `a` is the `infer P` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, member_infer,
-                "the true-branch `P` binds to the object-member `infer P` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the \
+                 object-member `infer P` declaration, got {:?}",
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1031,19 +1062,23 @@ fn conditional_binds_function_param_infer_in_true_branch() {
             ..
         } => {
             let param_infer = match &*node(&graph, *extends) {
-                SemanticNodeData::Function { params, .. } => {
+                SemanticNodeData::Signature {
+                    kind: _, params, ..
+                } => {
                     assert_eq!(params.len(), 1);
                     params[0].ty
                 }
                 other => panic!("expected Function extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, param_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, param_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "the function parameter `x` is the `infer P` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, param_infer,
-                "the true-branch `P` binds to the function-param `infer P` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the \
+                 function-param `infer P` declaration, got {:?}",
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1104,8 +1139,9 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             true_branch_ref, ..
         } => {
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::Infer { name } if name.as_ref() == "R"),
-                "the true-branch `R` binds to the mapped `as infer R` carrier, got {:?}",
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "R"),
+                "the true-branch `R` binds as an `InferRef` REFERENCE to the mapped \
+                 `as infer R` declaration, got {:?}",
                 *node(&graph, *true_branch_ref)
             );
             assert!(
@@ -1135,12 +1171,14 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         ),
     };
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "own".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "own".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     }));
     let expr = TypeExpr::Intersection(Arc::from(vec![base_ref, own_body].into_boxed_slice()));
     let binders: [BinderScope; 0] = [];
@@ -1173,9 +1211,9 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     }
     match &*node(&graph, arms[1]) {
         SemanticNodeData::Object(view) => {
-            assert_eq!(view.members.len(), 1);
-            let m = &view.members[0];
-            assert_eq!(m.name.as_ref(), "own");
+            assert_eq!(view.positive_members().len(), 1);
+            let m = &view.positive_members()[0];
+            assert_eq!(m.string_name().expect("string-key fixture"), "own");
             assert_eq!(
                 m.merge_role,
                 MemberMergeRole::OwnBody,
@@ -1356,6 +1394,183 @@ fn assert_paths_agree(
     (graph, structural)
 }
 
+fn conditional_with_infer(name: &str, check: PrimitiveName) -> TypeExpr {
+    TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(check)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: name.to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    }
+}
+
+fn conditional_infer_binder(
+    graph: &SemanticGraphStore,
+    conditional: SemanticNodeId,
+) -> crate::semantic_query::InferBinderId {
+    let extends = match graph.node_data(conditional).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        other => panic!("expected conditional root, got {other:?}"),
+    };
+    match graph.node_data(extends).as_deref() {
+        Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+        other => panic!("expected infer declaration in extends, got {other:?}"),
+    }
+}
+
+#[test]
+fn authored_infer_identity_is_shared_by_structural_and_eager_routes() {
+    let host = VerterHost::new_standalone(Default::default());
+    let expr = conditional_with_infer("RouteT", PrimitiveName::String);
+    let (graph, structural_root) = lower_root(&host, &expr);
+    let structural_binder = conditional_infer_binder(&graph, structural_root);
+    let _eager_result = lower_eager(&host, &expr);
+    let route_binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
+        .filter_map(
+            |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
+                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "RouteT" => {
+                    Some(binder.clone())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        route_binders.len(),
+        1,
+        "eager and structural routes must mint one byte-identical authored binder identity"
+    );
+    assert!(route_binders.contains(&structural_binder));
+}
+
+#[test]
+fn authored_infer_identity_survives_relowering_and_unrelated_demand_order() {
+    let target = conditional_with_infer("StableT", PrimitiveName::String);
+    let noise = conditional_with_infer("NoiseT", PrimitiveName::Number);
+
+    let host_a = VerterHost::new_standalone(Default::default());
+    let (graph_a, first) = lower_root(&host_a, &target);
+    let (_, second) = lower_root(&host_a, &target);
+    assert_eq!(
+        conditional_infer_binder(&graph_a, first),
+        conditional_infer_binder(&graph_a, second),
+        "re-lowering the same authored conditional must reuse its binder identity"
+    );
+
+    let host_b = VerterHost::new_standalone(Default::default());
+    let _ = lower_root(&host_b, &noise);
+    let (graph_b, reordered) = lower_root(&host_b, &target);
+    assert_eq!(
+        conditional_infer_binder(&graph_a, first),
+        conditional_infer_binder(&graph_b, reordered),
+        "an unrelated earlier demand must not change authored binder identity"
+    );
+}
+
+#[test]
+fn authored_infer_identity_is_independent_of_concurrent_demand_order() {
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let run = |target_first: bool, barrier: Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let host = VerterHost::new_standalone(Default::default());
+            let target = conditional_with_infer("ConcurrentT", PrimitiveName::String);
+            let noise = conditional_with_infer("ConcurrentNoise", PrimitiveName::Number);
+            barrier.wait();
+            let (graph, root) = if target_first {
+                let target = lower_root(&host, &target);
+                let _ = lower_root(&host, &noise);
+                target
+            } else {
+                let _ = lower_root(&host, &noise);
+                lower_root(&host, &target)
+            };
+            conditional_infer_binder(&graph, root)
+        })
+    };
+
+    let first = run(true, Arc::clone(&barrier));
+    let second = run(false, barrier);
+    assert_eq!(
+        first.join().expect("first concurrent lowering succeeds"),
+        second.join().expect("second concurrent lowering succeeds"),
+        "concurrent stores with opposite demand order must mint the same authored identity"
+    );
+}
+
+#[test]
+fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let outer_u = graph.intern_node_with_scope(
+        SemanticNodeData::TypeParam {
+            decl: DeclIdentity::from_scope(&fixture_scope(), Arc::from("OuterU")),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("U"),
+        },
+        fixture_scope(),
+    );
+    let mut outer = BinderScope::default();
+    outer.bind(Arc::from("U"), outer_u);
+    let frames = [outer];
+    let ctx = StructuralLowerContext::new(&frames);
+    let pattern = TypeExpr::Tuple {
+        elements: Arc::from(
+            vec![
+                verter_type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Infer {
+                        name: "U".to_string(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+                verter_type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Ref {
+                        name: Arc::from("U"),
+                        type_arguments: verter_type_expr::empty_type_args(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(pattern),
+        true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let root = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+        .expect("structural lowering succeeds")
+        .node();
+    let extends = match graph.node_data(root).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        other => panic!("expected conditional, got {other:?}"),
+    };
+    let elements = match graph.node_data(extends).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        other => panic!("expected tuple pattern, got {other:?}"),
+    };
+    assert!(matches!(
+        graph.node_data(elements[0].value).as_deref(),
+        Some(SemanticNodeData::Infer { .. })
+    ));
+    assert_eq!(
+        elements[1].value, outer_u,
+        "ordinary sibling `U` must resolve through the ordinary outer frame, not the hidden infer declaration"
+    );
+}
+
 #[test]
 fn structural_equivalence_for_primitive() {
     let host = VerterHost::new_standalone(Default::default());
@@ -1403,12 +1618,14 @@ fn structural_equivalence_for_intersection_of_objects() {
     let host = VerterHost::new_standalone(Default::default());
     let obj = |name: &str, prim: PrimitiveName| {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                name.to_string(),
-                TypeExpr::Primitive(prim),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    name.to_string().into(),
+                    TypeExpr::Primitive(prim),
+                    false,
+                    false,
+                ),
+            )],
         }))
     };
     let expr = TypeExpr::Intersection(Arc::from(
@@ -1492,7 +1709,7 @@ fn structural_equivalence_for_function() {
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(matches!(
         &*node(&graph, root),
-        SemanticNodeData::Function { params, .. } if params.len() == 1
+        SemanticNodeData::Signature { kind: _, params, .. } if params.len() == 1
     ));
 }
 
@@ -1504,14 +1721,14 @@ fn structural_equivalence_for_object_with_members() {
     let host = VerterHost::new_standalone(Default::default());
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "a".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "b".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "b".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
@@ -1520,7 +1737,7 @@ fn structural_equivalence_for_object_with_members() {
     }));
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(
-        matches!(&*node(&graph, root), SemanticNodeData::Object(view) if view.members.len() == 2),
+        matches!(&*node(&graph, root), SemanticNodeData::Object(view) if view.positive_members().len() == 2),
         "the agreed root is the structural object with both members"
     );
 }
@@ -1570,12 +1787,14 @@ fn structural_equivalence_for_nested_composite() {
     let host = VerterHost::new_standalone(Default::default());
     let object_array = TypeExpr::Array {
         element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "a".to_string().into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                ),
+            )],
         }))),
         readonly: false,
     };
@@ -1638,5 +1857,145 @@ fn structural_equivalence_assertion_is_discriminating() {
     assert_eq!(
         eager, structural_same,
         "the SAME shape still agrees across paths"
+    );
+}
+
+#[test]
+fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
+    // The macro-argument producer's reference binding must be
+    // declaration-distinct: in
+    // `string extends infer U ? (number extends U ? U : "no") : never`
+    // the inner `extends U` / true-branch `U` are REFERENCES to the outer
+    // binder (`InferRef`), so the outer substitution reaches them and the
+    // whole payload evaluates to `"no"`. A producer that binds references
+    // to the `Infer` declaration node makes the inner conditional
+    // indistinguishable from a rebind — the shadow stop fires and the
+    // surviving `U` is reinterpreted as a fresh bare infer, yielding the
+    // wrong `number`.
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let binders: [BinderScope; 0] = [];
+    let ctx = StructuralLowerContext::new(&binders);
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: "U".to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            extends: Arc::new(TypeExpr::Ref {
+                name: Arc::from("U"),
+                type_arguments: verter_type_expr::empty_type_args(),
+            }),
+            true_type: Arc::new(TypeExpr::Ref {
+                name: Arc::from("U"),
+                type_arguments: verter_type_expr::empty_type_args(),
+            }),
+            false_type: Arc::new(TypeExpr::Literal(LiteralValue::String("no".to_string()))),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+        .expect("structural lowering should succeed");
+
+    // Producer-level contract: the inner conditional's extends/true are
+    // `InferRef` REFERENCES, never the `Infer` declaration node.
+    let (inner_extends, inner_true) = match &*node(&graph, handle.node()) {
+        SemanticNodeData::Conditional {
+            true_branch_ref, ..
+        } => match &*node(&graph, *true_branch_ref) {
+            SemanticNodeData::Conditional {
+                extends,
+                true_branch_ref: inner_true,
+                ..
+            } => (*extends, *inner_true),
+            other => panic!("inner conditional expected, got {other:?}"),
+        },
+        other => panic!("outer conditional expected, got {other:?}"),
+    };
+    assert!(
+        matches!(&*node(&graph, inner_extends), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
+        "the inner `extends U` is a REFERENCE to the outer binder, got {:?}",
+        *node(&graph, inner_extends)
+    );
+    assert!(
+        matches!(&*node(&graph, inner_true), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
+        "the inner true-branch `U` is a REFERENCE to the outer binder, got {:?}",
+        *node(&graph, inner_true)
+    );
+
+    // Behavioral contract: the payload evaluates to `"no"`.
+    let (check, extends, true_branch, false_branch, distributive) =
+        match &*node(&graph, handle.node()) {
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+            } => (
+                *check,
+                *extends,
+                *true_branch_ref,
+                *false_branch_ref,
+                *distributive,
+            ),
+            other => panic!("outer conditional expected, got {other:?}"),
+        };
+    use crate::semantic_query::SemanticQueryApi as _;
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let result =
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+        }) {
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryOutput { value: id, .. },
+            ) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+    assert!(
+        matches!(
+            &*node(&graph, result),
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) if s == "no"
+        ),
+        "`string extends infer U ? (number extends U ? U : \"no\") : never` must \
+         resolve \"no\" on the macro producer path, got {:?}",
+        *node(&graph, result)
+    );
+}
+
+#[test]
+fn structural_equivalence_for_constructor_signature() {
+    // Producer parity: the eager path and the structural producer
+    // intern the SAME root `Signature(Construct)` node for the same
+    // `new (x: number) => number` (the eager path no longer flattens the
+    // construct kind away).
+    let host = VerterHost::new_standalone(Default::default());
+    let func = FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("x".to_string()),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+        )],
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        vec![],
+    );
+    let expr = TypeExpr::ConstructorType(Arc::new(func));
+    let (graph, root) = assert_paths_agree(&host, &expr);
+    assert!(
+        matches!(
+            &*node(&graph, root),
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
+        ),
+        "both producers mint a root Signature(Construct), got {:?}",
+        *node(&graph, root)
     );
 }

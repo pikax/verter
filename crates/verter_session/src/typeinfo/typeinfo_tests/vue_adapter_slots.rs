@@ -847,7 +847,7 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
         .surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "default")
+        .find(|m| m.string_name().expect("string-key fixture") == "default")
         .expect("the `default` member is on the macro surface");
     // Single `Function` root — the normalizer's non-`Union` arm combiner.
     let parts = CallableNodeView::new(&dispatch, member.value)
@@ -885,7 +885,11 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
             object.properties[0]
         );
     };
-    assert_eq!(label.name, "label", "the surviving arm's member is `label`");
+    assert_eq!(
+        label.string_name().expect("string-key fixture"),
+        "label",
+        "the surviving arm's member is `label`"
+    );
     assert!(
         matches!(label.ty, TypeExpr::Primitive(PrimitiveName::String)),
         "`label` keeps its `string` primitive type, got {:?}",

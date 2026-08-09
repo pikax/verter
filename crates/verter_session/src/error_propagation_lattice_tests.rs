@@ -306,7 +306,7 @@ fn error_any_never_propagation_lattice() {
         PathSegment::Index(IndexKey::String(Arc::from("k")))
     ]));
     assert!(!ProjectSemanticDispatch::project_path_is_indexed_access(&[
-        PathSegment::Member(Arc::from("foo"))
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo"))
     ]));
 
     // mapped over never = {} (empty object); a DIRECT mapping over unknown is
@@ -318,7 +318,10 @@ fn error_any_never_propagation_lattice() {
     );
     match kind(m) {
         Some(SemanticNodeData::Object(view)) => {
-            assert!(view.members.is_empty(), "mapped over never = {{}}");
+            assert!(
+                view.positive_members().is_empty(),
+                "mapped over never = {{}}"
+            );
         }
         other => panic!("mapped over never must be an empty Object, got {other:?}"),
     }
@@ -414,6 +417,7 @@ fn conditional_any_check_unions_both_branches() {
     // falls through so the infer-binding path in `build_conditional` binds U.
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     assert!(
@@ -442,6 +446,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let y_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
 
@@ -464,12 +469,14 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let obj_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                name: Arc::from("x"),
+                key: crate::semantic_query::AuthoredPropertyKey::string("x"),
                 value: infer_u,
                 optional: false,
                 readonly: false,
-                is_method: false,
+                method_kind: None,
+                has_implementation_body: false,
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
@@ -622,7 +629,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
 
     let is_assignable = |a: SemanticNodeId, b: SemanticNodeId| {
         matches!(
-            dispatch.relate_nodes(a, b).0,
+            dispatch.execute_relate_pair_as_result_for_tests(a, b),
             RelationResult::Assignable { .. }
         )
     };
@@ -668,7 +675,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     assert!(
         matches!(
-            dispatch.relate_nodes(string, number).0,
+            dispatch.execute_relate_pair_as_result_for_tests(string, number),
             RelationResult::NotAssignable
         ),
         "string <: number must stay NotAssignable — the bidirectional flip is error-specific"

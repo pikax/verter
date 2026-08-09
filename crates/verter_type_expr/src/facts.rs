@@ -18,13 +18,22 @@ use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
 use crate::locators::{
-    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, MacroPayloadLocator,
-    SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
+    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, FunctionReturnLocator,
+    MacroPayloadLocator, SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use crate::span_origins::{
     FunctionParamSpanOrigin, FunctionSpansOrigin, IndexSignatureSpansOrigin, MemberSpansOrigin,
 };
-use crate::{MemberVisibility, PrimitiveName, TypeExprScope};
+use crate::{
+    AuthoredPropertyKey, MemberVisibility, ObjectMethodKind, PrimitiveName, PropertyKey,
+    TypeExprScope,
+};
+
+/// Known property-key identity stored by shallow header facts.
+pub type FactPropertyKey = PropertyKey<ValueDeclIdentityPart>;
+
+/// Authored fact key. Computed syntax owns its body-slot locator.
+pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclIdentityPart>;
 
 // ===========================================================================
 // Supporting typed replacements introduced with the fact substrate
@@ -383,6 +392,8 @@ impl TypeDependencyPathFact {
     Clone,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     serde::Serialize,
     serde::Deserialize,
@@ -405,6 +416,8 @@ pub enum DeclarationOrigin {
     Clone,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     serde::Serialize,
     serde::Deserialize,
@@ -777,9 +790,9 @@ pub enum KeySourceFact {
     /// unresolved alias-ref arms (either may be empty; non-conforming union
     /// arms contribute nothing, exactly like the legacy enumeration).
     LiteralAliasUnion {
-        /// Flattened string-literal arms, in source order (unsorted — the
+        /// Flattened literal-key arms, in source order (unsorted — the
         /// engine sorts/dedups only a COMPLETED enumeration).
-        literals: Arc<[String]>,
+        literals: Arc<[FactPropertyKey]>,
         /// Unresolved zero-argument alias-ref arms, in source order.
         aliases: Arc<[KeySourceRefFact]>,
     },
@@ -832,7 +845,7 @@ pub enum NarrowFrontierBody {
 )]
 pub enum MemberNamesRoute {
     /// A closed enumeration of object member names.
-    Closed(Arc<[String]>),
+    Closed(Arc<[FactPropertyKey]>),
     /// Open / undecidable key domain — the L1 carrier-stop class.
     OpenKeyDomain,
 }
@@ -845,28 +858,28 @@ pub enum MemberNamesRoute {
 /// sort-before-hash `Hash` — two values could hash equal while comparing
 /// unequal). Membership semantics only — Pick/Omit key ORDER is not semantic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
-pub struct RouteKeySet(Arc<[String]>);
+pub struct RouteKeySet(Arc<[FactPropertyKey]>);
 
 impl RouteKeySet {
     /// Build a normalized key set (sorted + deduped).
-    pub fn new<I, S>(keys: I) -> Self
+    pub fn new<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
-        let mut keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        let mut keys: Vec<FactPropertyKey> = keys.into_iter().map(Into::into).collect();
         keys.sort();
         keys.dedup();
         Self(keys.into())
     }
 
     /// The normalized (sorted, deduped) keys.
-    pub fn as_slice(&self) -> &[String] {
+    pub fn as_slice(&self) -> &[FactPropertyKey] {
         &self.0
     }
 
     /// Iterate the normalized keys.
-    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+    pub fn iter(&self) -> std::slice::Iter<'_, FactPropertyKey> {
         self.0.iter()
     }
 
@@ -881,16 +894,14 @@ impl RouteKeySet {
     }
 
     /// Membership test (binary search over the normalized inner).
-    pub fn contains(&self, key: &str) -> bool {
-        self.0
-            .binary_search_by(|probe| probe.as_str().cmp(key))
-            .is_ok()
+    pub fn contains(&self, key: &FactPropertyKey) -> bool {
+        self.0.binary_search(key).is_ok()
     }
 }
 
 impl<'a> IntoIterator for &'a RouteKeySet {
-    type Item = &'a String;
-    type IntoIter = std::slice::Iter<'a, String>;
+    type Item = &'a FactPropertyKey;
+    type IntoIter = std::slice::Iter<'a, FactPropertyKey>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
@@ -903,7 +914,7 @@ impl<'de> serde::Deserialize<'de> for RouteKeySet {
     where
         D: serde::Deserializer<'de>,
     {
-        let keys = Vec::<String>::deserialize(deserializer)?;
+        let keys = Vec::<FactPropertyKey>::deserialize(deserializer)?;
         Ok(Self::new(keys))
     }
 }
@@ -933,7 +944,7 @@ pub enum RouteDemand {
     Whole,
     /// Indexed member path: `Type['a']['b']` (each element is one segment; never
     /// collapsed to a shorter prefix).
-    MemberPath(Arc<[String]>),
+    MemberPath(Arc<[FactPropertyKey]>),
     /// `Pick<Type, 'a' | 'b'>` subset (normalized key set).
     Pick(RouteKeySet),
     /// `Omit<Type, 'a' | 'b'>` subset (normalized key set).
@@ -942,34 +953,34 @@ pub enum RouteDemand {
 
 impl RouteDemand {
     /// Build a `Pick` demand from any key iterator (normalized).
-    pub fn pick<I, S>(keys: I) -> Self
+    pub fn pick<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::Pick(RouteKeySet::new(keys))
     }
 
     /// Build an `Omit` demand from any key iterator (normalized).
-    pub fn omit<I, S>(keys: I) -> Self
+    pub fn omit<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::Omit(RouteKeySet::new(keys))
     }
 
     /// Build a `MemberPath` demand from ordered segments (order preserved).
-    pub fn member_path<I, S>(segments: I) -> Self
+    pub fn member_path<I, K>(segments: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::MemberPath(
             segments
                 .into_iter()
                 .map(Into::into)
-                .collect::<Vec<String>>()
+                .collect::<Vec<FactPropertyKey>>()
                 .into(),
         )
     }
@@ -983,7 +994,7 @@ impl RouteDemand {
     }
 
     /// The ordered segments of a `MemberPath` demand.
-    pub fn segments(&self) -> Option<&[String]> {
+    pub fn segments(&self) -> Option<&[FactPropertyKey]> {
         match self {
             Self::MemberPath(segments) => Some(segments),
             Self::Whole | Self::Pick(_) | Self::Omit(_) => None,
@@ -1027,7 +1038,7 @@ pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
         }
         (RouteDemand::MemberPath(p), RouteDemand::Pick(ps))
         | (RouteDemand::Pick(ps), RouteDemand::MemberPath(p)) => {
-            let mut merged: Vec<String> = ps.as_slice().to_vec();
+            let mut merged: Vec<FactPropertyKey> = ps.as_slice().to_vec();
             if let Some(first) = p.first() {
                 merged.push(first.clone());
             }
@@ -1038,7 +1049,7 @@ pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
             }
         }
         (RouteDemand::Pick(a), RouteDemand::Pick(b)) => {
-            let mut merged: Vec<String> = a.as_slice().to_vec();
+            let mut merged: Vec<FactPropertyKey> = a.as_slice().to_vec();
             merged.extend(b.iter().cloned());
             RouteDemand::pick(merged)
         }
@@ -1137,7 +1148,7 @@ pub enum RouteDependencyRefFact {
 )]
 pub struct MemberDependencyEdge {
     /// The member whose dependencies these are.
-    pub member: String,
+    pub member: FactPropertyKey,
     /// The typed route refs this member depends on — each a local name or an
     /// external route ref carrying its route demand (never a bare name string,
     /// which would drop Pick / Omit / canonical / route transitivity).
@@ -1235,7 +1246,7 @@ pub struct DeferredKeyUtilityEdge {
     pub base: Option<RouteDependencyRefFact>,
     /// The literal inner index path for [`DeferredKeyUtilityKind::IndexedAccess`]
     /// (`Imported['a'][K]` carries `["a"]`); empty for `Pick`/`Omit`.
-    pub base_path: Arc<[String]>,
+    pub base_path: Arc<[FactPropertyKey]>,
     /// The deferred key-source recipe (the bare local alias, as a
     /// [`KeyDomainFact::FollowSlot`] symbol locator).
     pub key_source: KeyDomainFact,
@@ -1347,7 +1358,7 @@ pub enum MemberPathSeedTarget {
 pub struct MemberPathSeedEdge {
     /// The property path within the owning decl (empty = the decl's own body
     /// root, for the whole-body-is-a-bare-ref forward case).
-    pub path: Arc<[String]>,
+    pub path: Arc<[FactPropertyKey]>,
     /// What the path resolves to.
     pub depends_on: MemberPathSeedTarget,
 }
@@ -1418,18 +1429,27 @@ impl ShallowRouteFacts {
     NoStoredSpan,
 )]
 pub struct MemberHeaderFact {
-    /// The member name.
-    pub name: String,
-    /// Whether the member is a method (`true`) vs a property (`false`) — the
-    /// lower-neutral analogue of the shallow `MemberHeaderKind::{Method,
-    /// Property}`.
-    pub is_method: bool,
+    /// The statically known member key. Computed keys remain on the full object
+    /// member fact where their body locator is representable.
+    pub key: FactPropertyKey,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Whether the member is optional (`?`).
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
     /// Member visibility (publication-filtered at the boundary; part of identity).
     pub visibility: MemberVisibility,
+}
+
+impl MemberHeaderFact {
+    /// Borrow the ordinary string spelling when this header has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// The narrowed enum-member-NAME inventory fact — the full statically-named
@@ -1513,6 +1533,13 @@ pub enum InferenceUnavailableReason {
     NoStoredSpan,
 )]
 pub struct ValueTypeAnnotationFact {
+    /// Whether the declaration carries the nominal `unique symbol` type.
+    ///
+    /// The lowered [`TypeExpr`](crate::TypeExpr) representation deliberately
+    /// models both `symbol` and `unique symbol` as the same primitive type, so
+    /// this declaration fact preserves the authored nominal distinction for
+    /// computed-property identity resolution.
+    pub is_unique_symbol: bool,
     /// The precomputed graph-free `typeof x[.y]` target, when the annotation is a
     /// value peel.
     pub typeof_alias_target: Option<ValueDeclIdentityPart>,
@@ -1529,6 +1556,12 @@ pub struct ValueTypeAnnotationFact {
     pub annotation: Option<SemanticTypeSource>,
     /// Producer-owned authored reference head for exact route provenance.
     pub reference_head: AuthoredReferenceHeadFact,
+    /// Indexed semantic expression source for an inferred declaration value.
+    /// Mutually exclusive with `annotation`: calls and callback returns are
+    /// evaluated from their parsed program record, never reconstructed as a
+    /// fabricated type expression.
+    #[serde(default)]
+    pub expression_source: Option<SemanticExpressionSource>,
 }
 
 /// Locator for one authored reference argument. Macro payloads need the macro
@@ -1600,6 +1633,44 @@ pub enum AuthoredReferenceHeadFact {
     Unavailable,
 }
 
+/// Content-free identity of one indexed program expression.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct ProgramExpressionIdentity {
+    /// Canonical file containing the parsed expression record.
+    pub canonical_id: Arc<str>,
+    /// SFC/script-absolute byte offset of the expression root.
+    pub offset: u32,
+}
+
+/// Semantic source of an inferred value expression.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum SemanticExpressionSource {
+    /// A parsed expression record in the retained program index.
+    ProgramExpression(ProgramExpressionIdentity),
+    /// The exact declared/body-derived return carrier of a function value.
+    FunctionReturn(FunctionReturnSource),
+}
+
 /// One narrowed type parameter: its name, ordinal, and constraint/default
 /// locators (never embedded `TypeExpr`).
 #[derive(
@@ -1622,6 +1693,10 @@ pub struct NarrowTypeParam {
     pub constraint: Option<TypeBodySlot>,
     /// Default body locator (`T = D`), if any.
     pub default: Option<TypeBodySlot>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>` is
+    /// valid) — never a session-wide flag.
+    #[serde(default)]
+    pub is_const: bool,
 }
 
 /// A whole type-parameter declaration list.
@@ -1727,15 +1802,57 @@ pub struct FunctionParamFact {
     pub span_origin: FunctionParamSpanOrigin,
 }
 
-/// Why an implementation body's return type is absent instead of inferred.
-///
-/// These statement families require a richer control-flow model than the
-/// semantic producer currently supports. They are persisted explicitly so a
-/// consumer cannot mistake an incomplete scan for a safely narrowed return.
+/// Which authored position of a declaration one callable body occupies.
+/// Combined with a declaration slot identity and an overload ordinal this
+/// addresses every served function position in a file: the declaration's own
+/// callable, a function-valued member surface, the initializer arrow /
+/// function expression, or another authored function position.
 #[derive(
     Debug,
     Clone,
-    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum FunctionPartIdentity {
+    /// The declaration's own callable body (`function f` declarations and
+    /// value signature groups). The overload ordinal selects the signature
+    /// inside the group in source order (the trailing implementation is the
+    /// last ordinal).
+    DeclarationBody,
+    /// A function-valued member of a class or object surface (methods,
+    /// accessors, object-literal methods), addressed by member ordinals from
+    /// the declaration surface.
+    Member {
+        /// Member ordinal path from the declaration to the callable member.
+        member_path: Arc<[u32]>,
+    },
+    /// The arrow / function expression that IS the declaration's
+    /// initializer (`const f = () => { .. }`, `const f = function () { .. }`).
+    Initializer,
+    /// Another authored function position (a nested function expression in
+    /// an initializer surface), addressed by source-order ordinal.
+    Other {
+        /// Source-order ordinal among same-kind positions.
+        ordinal: u32,
+    },
+}
+
+/// The env-free program identity of one served function position whose
+/// return is BODY-DERIVED. This is the fact-side seed of the session's
+/// `FlowFunctionSlotIdentity`: content-free and env-free (the env-bearing
+/// slot derives at demand through the session's single slot-finalization
+/// choke point), carrying exactly the declaration anchor, the part
+/// identity, and the overload ordinal.
+#[derive(
+    Debug,
+    Clone,
     PartialEq,
     Eq,
     Hash,
@@ -1744,26 +1861,26 @@ pub struct FunctionParamFact {
     NoTypeExpr,
     NoStoredSpan,
 )]
-pub enum ReturnInferenceUnsupported {
-    Loop,
-    Switch,
-    Try,
-    Jump,
-    Labeled,
-    With,
-    ModuleDeclaration,
+pub struct FlowFunctionReturnIdentity {
+    /// The owning declaration's content-free anchor.
+    pub anchor: AuthoredAnchor,
+    /// Which authored position of the declaration this callable occupies.
+    pub function_part: FunctionPartIdentity,
+    /// Source-order signature ordinal inside an overload group (the
+    /// trailing implementation is the last ordinal). Zero outside overload
+    /// groups.
+    pub overload_ordinal: u32,
 }
 
-/// Producer verdict for body-derived function return inference.
-///
-/// `NotInferred` covers authored/JSDoc returns, bodiless declarations, and
-/// synthesized signatures. `Complete` means every reachable statement was
-/// modeled and records whether execution can reach the end of the body.
-/// `Unsupported` is a fail-closed verdict and never carries a narrowed return.
+/// Where one served function position's return type comes from. A DECLARED
+/// return replays the retained declaration lowering through its locator; a
+/// body-derived return is served by the whole-function `FlowReturn`
+/// producer through the session's sealed consumer helper; `Absent` means
+/// the signature has no recoverable return carrier (a bodiless overload or
+/// a synthesized signature) — never "inferred".
 #[derive(
     Debug,
     Clone,
-    Copy,
     Default,
     PartialEq,
     Eq,
@@ -1773,35 +1890,14 @@ pub enum ReturnInferenceUnsupported {
     NoTypeExpr,
     NoStoredSpan,
 )]
-pub enum ReturnInferenceCompleteness {
+pub enum FunctionReturnSource {
+    /// A declared return (an authored TS annotation or a JSDoc recovery).
+    Declared(FunctionReturnLocator),
+    /// A body-derived return, served by the `FlowReturn` producer.
+    Flow(FlowFunctionReturnIdentity),
+    /// No recoverable return carrier.
     #[default]
-    NotInferred,
-    Complete {
-        can_fall_through: bool,
-    },
-    Unsupported(ReturnInferenceUnsupported),
-    Unavailable(InferenceUnavailableReason),
-}
-
-/// Exact declaration-member address and return-inference verdict for one
-/// authored method. This inventory remains separate from open `FunctionExpr`
-/// typed IR so facts have one authority and consumers never rematch by shape.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    NoTypeExpr,
-    NoStoredSpan,
-)]
-pub struct MemberReturnInferenceFact {
-    /// Exact member origin: declaration contributor plus produced-shape path.
-    pub origin: FunctionSpansOrigin,
-    /// Producer verdict for this member's return inference.
-    pub return_inference: ReturnInferenceCompleteness,
+    Absent,
 }
 
 /// A narrowed function signature (an overload-group member). `FunctionExpr`
@@ -1822,30 +1918,23 @@ pub struct FunctionSignatureFact {
     pub type_parameters: Arc<[NarrowTypeParam]>,
     /// Ordered parameter facts.
     pub parameters: Arc<[FunctionParamFact]>,
-    /// The return type body locator. Authored and inferred return types both
-    /// use this content-free path: the locator replays the retained declaration
-    /// lowering, while [`Self::spans_origin`] independently determines whether
-    /// an authored return-type source span exists. `None` therefore means the
-    /// signature has no recoverable return carrier, not merely "inferred".
-    pub return_ty: Option<TypeBodySlot>,
-    /// Whether body-derived return inference was complete and, when it was,
-    /// whether an implicit fallthrough return remains reachable.
+    /// Where the return type comes from. A DECLARED return (authored TS
+    /// annotation or JSDoc recovery) replays its content-free locator; a
+    /// body-derived return names the served function position the session's
+    /// whole-function producer answers; `Absent` means the signature has no
+    /// recoverable return carrier.
     #[serde(default)]
-    pub return_inference: ReturnInferenceCompleteness,
+    pub return_source: FunctionReturnSource,
     /// Producer-owned authored reference head of the AUTHORED return
     /// annotation, for exact demand-time route provenance — the return-position
     /// peer of [`ValueTypeAnnotationFact::reference_head`].
     ///
     /// Minted ONLY when the signature carried an explicit authored TS return
-    /// annotation. An INFERRED return still mints [`Self::return_ty`] (that
-    /// locator replays the retained lowering regardless of authorship), so
-    /// minting a head from that carrier would fabricate authored evidence for a
-    /// return the author never wrote: every non-authored return position —
-    /// inferred returns, object-shape member signatures, synthesized
-    /// constructors — publishes
-    /// [`AuthoredReferenceHeadFact::Unavailable`] instead. An authored
-    /// annotation that is not a type reference at all publishes
-    /// [`AuthoredReferenceHeadFact::NotReference`].
+    /// annotation. A body-derived return publishes
+    /// [`AuthoredReferenceHeadFact::Unavailable`] instead: minting a head from
+    /// that carrier would fabricate authored evidence for a return the author
+    /// never wrote. An authored annotation that is not a type reference at all
+    /// publishes [`AuthoredReferenceHeadFact::NotReference`].
     #[serde(default = "authored_reference_head_unavailable")]
     pub return_reference_head: AuthoredReferenceHeadFact,
     /// Overload-visibility fact: hide the trailing implementation signature.
@@ -1876,8 +1965,8 @@ fn authored_reference_head_unavailable() -> AuthoredReferenceHeadFact {
     NoStoredSpan,
 )]
 pub struct ObjectPropertyFact {
-    /// The member name.
-    pub name: String,
+    /// The authored property key.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the member is optional.
     pub optional: bool,
     /// Whether the member is readonly.
@@ -1888,6 +1977,14 @@ pub struct ObjectPropertyFact {
     pub ty: TypeBodySlot,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+}
+
+impl ObjectPropertyFact {
+    /// Borrow the ordinary string spelling when this property has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// A narrowed object method member.
@@ -1903,16 +2000,27 @@ pub struct ObjectPropertyFact {
     NoStoredSpan,
 )]
 pub struct ObjectMethodFact {
-    /// The member name.
-    pub name: String,
+    /// The authored method or accessor key.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the method is optional.
     pub optional: bool,
+    /// Authored method, getter, or setter kind.
+    #[serde(default)]
+    pub method_kind: ObjectMethodKind,
     /// Member visibility (identity-participating, publication-filtered).
     pub visibility: MemberVisibility,
     /// The method's function signature.
     pub function: FunctionSignatureFact,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+}
+
+impl ObjectMethodFact {
+    /// Borrow the ordinary string spelling when this method has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// The declared SHAPE of an index-signature key (so `[k: string] ≠ [k: number]`).
@@ -1964,7 +2072,27 @@ pub struct IndexSignatureFact {
     pub span_origin: IndexSignatureSpansOrigin,
 }
 
-/// One narrowed object member over all five `ObjectMember` variants.
+/// A narrowed object-literal spread entry (`{ ...operand }`), kept in source
+/// order among the other member facts — the fold's semantics depend on where
+/// the spread sits between the direct members.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct SpreadMemberFact {
+    /// The spread OPERAND's type body locator (content-free; the operand type
+    /// is recovered by re-lowering the declaration on demand).
+    pub ty: TypeBodySlot,
+}
+
+/// One narrowed object member over all six `ObjectMember` variants.
 #[derive(
     Debug,
     Clone,
@@ -1987,6 +2115,8 @@ pub enum ObjectMemberFact {
     ConstructSignature(FunctionSignatureFact),
     /// An index signature.
     IndexSignature(IndexSignatureFact),
+    /// An object-literal spread entry (source-order-significant).
+    Spread(SpreadMemberFact),
 }
 
 /// The `PreparedValueDecl.object_shape: Option<ObjectExpr>` narrowing — closed
@@ -2127,8 +2257,10 @@ pub struct PreparedMemberFact {
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
-    /// Whether the member is a method.
-    pub is_method: bool,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Member visibility.
     pub visibility: MemberVisibility,
     /// Typed declaration origin (defining file / synthetic).
@@ -2872,14 +3004,16 @@ pub struct ResolvedLocalTypeFact {
     NoStoredSpan,
 )]
 pub struct ProjectedMemberFact {
-    /// The member name.
-    pub name: String,
+    /// Exact authored key, including a retained computed-key locator.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the member is optional.
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
-    /// Whether the member is a method.
-    pub is_method: bool,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Member visibility.
     pub visibility: MemberVisibility,
     /// Whether the member was author-declared in the macro type argument.
@@ -3151,7 +3285,7 @@ pub enum ProjectedTypeFact {
         /// The authored base body the projection starts from.
         base: AuthoredBodyLocator,
         /// The ordered member-name path off the base.
-        path: Arc<[String]>,
+        path: Arc<[FactPropertyKey]>,
     },
     /// A projected callable occurrence route. `occurrence` is minted by the
     /// resolver from the exact instantiated semantic subject, so replay never
@@ -3734,6 +3868,7 @@ impl NarrowTypeParam {
             ordinal: self.ordinal,
             constraint: constraint.unwrap_or_else(|| self.constraint.clone()),
             default: default.unwrap_or_else(|| self.default.clone()),
+            is_const: self.is_const,
         })
     }
 }
@@ -3874,11 +4009,11 @@ impl FunctionSignatureFact {
         let type_parameters =
             absolutize_fact_slice(&self.type_parameters, |p| p.absolutize(canonical_id));
         let parameters = absolutize_fact_slice(&self.parameters, |p| p.absolutize(canonical_id));
-        let return_ty = absolutize_slot_opt(&self.return_ty, canonical_id);
+        let return_source = self.return_source.absolutize(canonical_id);
         let return_reference_head = self.return_reference_head.absolutize(canonical_id);
         if type_parameters.is_none()
             && parameters.is_none()
-            && return_ty.is_none()
+            && return_source.is_none()
             && return_reference_head.is_none()
         {
             return None;
@@ -3886,13 +4021,36 @@ impl FunctionSignatureFact {
         Some(Self {
             type_parameters: type_parameters.unwrap_or_else(|| Arc::clone(&self.type_parameters)),
             parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
-            return_ty: return_ty.unwrap_or_else(|| self.return_ty.clone()),
-            return_inference: self.return_inference,
+            return_source: return_source.unwrap_or_else(|| self.return_source.clone()),
             return_reference_head: return_reference_head
                 .unwrap_or_else(|| self.return_reference_head.clone()),
             has_implementation_body: self.has_implementation_body,
             spans_origin: self.spans_origin.clone(),
         })
+    }
+}
+
+impl FunctionReturnSource {
+    /// `Some(rewritten)` when a producer-local (empty-canonical) anchor is
+    /// rewritten to the owning canonical; `None` when already absolute.
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        match self {
+            Self::Declared(locator) => {
+                let slot = locator.slot().absolutize(canonical_id)?;
+                Some(Self::Declared(match locator {
+                    FunctionReturnLocator::Authored(_) => FunctionReturnLocator::Authored(slot),
+                    FunctionReturnLocator::Jsdoc(_) => FunctionReturnLocator::Jsdoc(slot),
+                }))
+            }
+            Self::Flow(identity) => identity.anchor.absolutize(canonical_id).map(|anchor| {
+                Self::Flow(FlowFunctionReturnIdentity {
+                    anchor,
+                    function_part: identity.function_part.clone(),
+                    overload_ordinal: identity.overload_ordinal,
+                })
+            }),
+            Self::Absent => None,
+        }
     }
 }
 
@@ -3930,6 +4088,10 @@ impl ObjectMemberFact {
             ObjectMemberFact::ConstructSignature(signature) => signature
                 .absolutize(canonical_id)
                 .map(ObjectMemberFact::ConstructSignature),
+            ObjectMemberFact::Spread(spread) => spread
+                .ty
+                .absolutize(canonical_id)
+                .map(|ty| ObjectMemberFact::Spread(SpreadMemberFact { ty })),
             ObjectMemberFact::IndexSignature(signature) => {
                 let key_type = signature.key_type.absolutize(canonical_id);
                 let value_type = signature.value_type.absolutize(canonical_id);
@@ -4313,7 +4475,11 @@ fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
         .parameters
         .iter()
         .any(|param| slot_opt_scope_relative(&param.ty))
-        || slot_opt_scope_relative(&signature.return_ty)
+        || match &signature.return_source {
+            FunctionReturnSource::Declared(locator) => slot_scope_relative(locator.slot()),
+            FunctionReturnSource::Flow(identity) => anchor_scope_relative(&identity.anchor),
+            FunctionReturnSource::Absent => false,
+        }
         || authored_reference_head_scope_relative(&signature.return_reference_head)
 }
 
@@ -4329,6 +4495,7 @@ fn object_member_scope_relative(member: &ObjectMemberFact) -> bool {
             key_shape_scope_relative(&signature.key_type)
                 || slot_scope_relative(&signature.value_type)
         }
+        ObjectMemberFact::Spread(spread) => slot_scope_relative(&spread.ty),
     }
 }
 

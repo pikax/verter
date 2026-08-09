@@ -77,7 +77,7 @@ fn comment_only_edit_keeps_semantic_key_rekeys_display_to_equal_value() {
         parse_stable_hash: psh(1),
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
     let original_sem_hash = dummy_sem(0x42);
@@ -91,7 +91,7 @@ fn comment_only_edit_keeps_semantic_key_rekeys_display_to_equal_value() {
         content_hash: content(1),
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
     let original_disp_hash = dummy_disp(0x77);
@@ -110,7 +110,7 @@ fn comment_only_edit_keeps_semantic_key_rekeys_display_to_equal_value() {
         content_hash: content(2), // different content_hash
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
 
@@ -171,7 +171,7 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
         parse_stable_hash: psh(5),
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
     let sem_hash = dummy_sem(0x11);
@@ -185,7 +185,7 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
         content_hash: content(5),
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
     let old_disp_hash = dummy_disp(0xA0);
@@ -204,7 +204,7 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
         content_hash: content(6),
         parse_env_hash: psh(7),
         exporter: InternedName::from("Foo"),
-        member_name: InternedName::from("a"),
+        member_name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         symbol_space: SymbolSpace::Type,
     };
     let new_disp_hash = dummy_disp(0xB0);

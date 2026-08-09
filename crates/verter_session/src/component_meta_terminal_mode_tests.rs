@@ -39,36 +39,42 @@ fn build_test_host() -> Arc<VerterHost> {
 /// `ProjectPath` projections.
 fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
-    let mut current = leaf;
-    for name in ["bar", "full", "b", "a"] {
-        let member = SurfaceMember {
-            visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
-            value: current,
-            optional: false,
-            readonly: false,
-            is_method: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            spans: Default::default(),
-            declaration_origin: None,
-        };
-        current = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(vec![member].into_boxed_slice()),
+    let leaf = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        }));
+        },
+    ));
+    let mut current = leaf;
+    for name in ["bar", "full", "b", "a"] {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value: current,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        current = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(vec![member].into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ));
     }
     current
 }
@@ -85,10 +91,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -137,10 +143,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -196,10 +202,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -257,10 +263,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -319,10 +325,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -381,10 +387,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -440,10 +446,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),

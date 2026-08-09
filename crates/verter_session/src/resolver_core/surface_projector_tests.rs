@@ -43,13 +43,14 @@ fn member(
     name_span: Option<Span>,
 ) -> TypeInfoSurfaceMember {
     TypeInfoSurfaceMember {
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         name_span: name_span.map(|span| CanonicalSpan::new(Arc::from("/types.ts"), span)),
         value: SemanticNodeId(1),
         type_annotation_span: None,
         optional,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility,
         declared_in_macro_type_arg: false,
         jsdoc_description_span: None,
@@ -101,8 +102,14 @@ fn native_prop_rows_keep_all_visibilities_with_wire_default_spans() {
 
     let native: Vec<ResolvedNativeProp> = members
         .iter()
-        .map(|member| {
-            ResolvedNativeProp::from_surface_member(member, Some(format!("T_{}", member.name)))
+        .filter_map(|member| {
+            ResolvedNativeProp::from_surface_member(
+                member,
+                Some(format!(
+                    "T_{}",
+                    member.string_name().expect("string-key fixture")
+                )),
+            )
         })
         .collect();
 
@@ -152,7 +159,8 @@ fn native_prop_rows_keep_all_visibilities_with_wire_default_spans() {
 fn native_prop_row_unrendered_annotation_stays_none() {
     let synthesized = member("synthesized", false, MemberVisibility::Public, None);
 
-    let row = ResolvedNativeProp::from_surface_member(&synthesized, None);
+    let row = ResolvedNativeProp::from_surface_member(&synthesized, None)
+        .expect("string-key surface member produces a native row");
 
     assert_eq!(row.name, "synthesized");
     assert_eq!(row.span, Span::default());

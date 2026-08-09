@@ -32,7 +32,9 @@ pub struct TypeResolutionPayload {
     pub expansions: u32,
     /// Number of conditional branch decisions resolved.
     pub conditional_decisions: u32,
-    /// Number of `ref_root_reaches_transitive_cycle_node` cache hits.
+    /// Number of materialization cycle gate
+    /// (`ClassifyMaterializationCycleGate`) warm family hits. Field
+    /// name retained for JSON schema compatibility.
     pub ref_root_cycle_hits: u32,
     /// Total projection ops executed against the projection-op budget.
     pub projection_ops_executed: u32,

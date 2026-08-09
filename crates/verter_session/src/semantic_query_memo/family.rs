@@ -8,13 +8,16 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
+
 use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
 use crate::semantic_query::demand::{
     cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
+    PropertyKey, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, VueHeritagePolicy,
 };
 
@@ -254,6 +257,13 @@ pub(super) enum FamilyKey {
     NormalizeIntersection {
         members: Arc<[SemanticNodeId]>,
     },
+    /// Selector-aware object-spread projection family. The payload is boxed to
+    /// keep the hot `FamilyKey` enum below its size rail. Only the established
+    /// projection mode/demand dimensions are erased into `ModeSlot`; every
+    /// other context dimension remains exact family identity.
+    ProjectObjectSpread {
+        identity: Box<ObjectSpreadProjectionFamilyIdentity>,
+    },
     ProjectPath {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
@@ -367,32 +377,25 @@ pub(super) enum FamilyKey {
     /// target / relation kind / policy / source freshness / inference context /
     /// env+substitution+projection-reduction context).
     ///
-    /// No production code constructs a [`SemanticQueryKey::Relate`] value, so
-    /// this variant is never published into or read from the family memo at
-    /// runtime — the production relation authority is `relate_nodes`, which keys
-    /// the dedicated `relation_memo` on the same `RelateMemoKey` and never
-    /// enters `execute_cooperative` / the family memo. The variant exists SOLELY
-    /// so `family_and_slot` stays total and honest over every
-    /// [`SemanticQueryKey`] variant (a real distinct identity, never a
-    /// placeholder reusing another family's shape).
+    /// This is the LIVE relation-memo family. The production relation
+    /// authority is `SemanticQueryApi::execute(SemanticQueryKey::Relate)`;
+    /// root execution uses the shared cooperative value path to read and
+    /// publish this family, and every sub-relation re-enters that authority.
     ///
-    /// It carries the FULL relation identity (NOT just source/target): even
-    /// though nothing is admitted under it, a `Relate` key can NEVER collide
-    /// with a live [`Self::IndexedAccess`] slot over the same `(source, target)`
-    /// nodes — the prior arm aliased `IndexedAccess` and was a latent
-    /// wrong-domain warm-hit hazard. Carrying the whole `RelateMemoKey` also
-    /// keeps the family identity faithful to the relation memo's own key, so two
-    /// `Relate` keys differing in any relation-identity axis map to distinct
-    /// family identities.
+    /// It carries the FULL relation identity (NOT just source/target): a
+    /// `Relate` key can NEVER collide with a live [`Self::IndexedAccess`]
+    /// slot over the same `(source, target)` nodes, and two `Relate` keys
+    /// differing in any relation-identity axis map to distinct family
+    /// identities.
     ///
     /// The `RelateMemoKey` payload is BOXED: a Rust
     /// enum is sized to its largest variant, and `RelateMemoKey` is 144B, so
     /// embedding it BY VALUE would inflate EVERY entry key of the hot
-    /// single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
-    /// NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes and
-    /// delegates `Hash`/`Eq`/`Clone` to the inner key, so the family IDENTITY
-    /// (and `variant_label`) is UNCHANGED — two `Relate` keys differing in any
-    /// relation-identity axis still map to distinct family identities.
+    /// single-node `FamilyKey → FamilySlots` keyspace. `Box<RelateMemoKey>`
+    /// is 8 bytes and delegates `Hash`/`Eq`/`Clone` to the inner key, so the
+    /// family IDENTITY (and `variant_label`) is UNCHANGED — two `Relate`
+    /// keys differing in any relation-identity axis still map to distinct
+    /// family identities.
     Relate {
         key: Box<crate::semantic_query::RelateMemoKey>,
     },
@@ -400,16 +403,22 @@ pub(super) enum FamilyKey {
     /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
     /// `project_identity` = `J`) ride here ON the family key — these are
     /// ENV hashes, NOT content/version hashes (R6-clean). Two queries
-    /// differing only in any env dim do NOT collide. Non-producing (the
-    /// lib-member index is unimplemented): the execute path returns
-    /// `Opaque(Miss)` and nothing is ever admitted under this family; like
-    /// `Relate`, the variant exists so `family_and_slot` stays total and
-    /// honest.
+    /// differing only in any env dim do NOT collide. `demand_scope` is the
+    /// rootless-callable scope witness (content-free canonical identity,
+    /// R6-clean): an `Anchored` demand and a `Rootless` demand over the
+    /// SAME base node are DISTINCT family identities, as are two `Rootless`
+    /// demands from different canonicals — the same interned rootless node
+    /// can never cross-serve between projects. LIVE producer for the
+    /// CALLABLE arm only; a rootless value is built `cache_suppress` so
+    /// nothing rootless is ever admitted under this family. The
+    /// primitive-to-wrapper arm (the lib-member index) is unimplemented and
+    /// returns `Opaque(Miss)`.
     ApparentType {
         base: SemanticNodeId,
         type_env_hash: crate::semantic_query::HashValue,
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
+        demand_scope: crate::semantic_query::ApparentDemandScope,
     },
     /// Mode-erased `TemplateLiteralReduce` identity. `pattern` (quasis) and
     /// the ORDER-SIGNIFICANT `args` (NEVER reordered — concatenation order
@@ -490,6 +499,103 @@ pub(super) enum FamilyKey {
     LowerLocator {
         key: Box<crate::locator_identity::LocatorLoweringKey>,
     },
+    /// Mode-erased `ClassifyMaterializationCycleGate` identity. The family
+    /// fields are EXACTLY the sealed
+    /// [`crate::semantic_query::MaterializationCycleGateKey`] — the
+    /// env-bearing root slot (`T` / `L` / `J`) + `parse_env_hash` (`P`) +
+    /// `resolve_env_hash` (`R`) — and NOTHING else: the remaining axes
+    /// (empty args, `StructuralTransit`, `Skeleton`, neutral
+    /// policy/provenance) are FIXED inside the producer, so the family is
+    /// mode-free and lives in the `Single` slot. No content hash,
+    /// generation, `DeclIdentity`, or algorithm version enters the family
+    /// identity (R6); version-rooting lives on the cached value's read-set
+    /// facts + observed self-roots.
+    ///
+    /// The payload is BOXED (mirroring [`Self::Relate`]'s
+    /// `Box<RelateMemoKey>`): the root slot composite would inflate EVERY
+    /// entry of the hot single-node `FamilyKey → FamilySlots` keyspace.
+    ClassifyMaterializationCycleGate {
+        key: Box<crate::semantic_query::MaterializationCycleGateKey>,
+    },
+    /// Mode-erased `FlowReturn` identity. The family fields are EXACTLY
+    /// the full [`crate::semantic_query::FlowReturnKey`] — function slot
+    /// identity (declaration slot + part + overload ordinal), normalized
+    /// type args, and the env/substitution/policy context — and NOTHING
+    /// else: no demand path, projection mode, content hash, generation,
+    /// or budget (R6); version-rooting lives on the cached value's
+    /// `ProgramAnalysisFactRef::FlowBody` fact + consumed subquery facts
+    /// + self roots.
+    ///
+    /// BOXED (mirroring [`Self::Relate`]): the key composite would
+    /// inflate EVERY entry of the hot keyspace.
+    FlowReturn {
+        key: Box<crate::semantic_query::FlowReturnKey>,
+    },
+    /// Mode-erased `ResolveCall` identity. The family fields are EXACTLY
+    /// the full [`crate::semantic_query::ResolveCallKey`] — call-site
+    /// program point, callee / receiver / argument nodes, call-vs-construct
+    /// kind, explicit type args, the sealed-empty flow axis, and the env +
+    /// substitution context — and NOTHING else: no freshness field, no
+    /// contextual / candidate-target axis, no budget, no content hash (R6);
+    /// version-rooting lives on the cached value's read-set facts + self
+    /// roots. The applicability executor is live, but its winner remains
+    /// staged/ReturnOnly until the return-equation boundary commits it; the
+    /// family identity is already final so `family_and_slot` stays total.
+    ///
+    /// BOXED (mirroring [`Self::Relate`]): the key composite would
+    /// inflate EVERY entry of the hot keyspace.
+    ResolveCall {
+        key: Box<crate::semantic_query::ResolveCallKey>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct ObjectSpreadProjectionFamilyIdentity {
+    program: SemanticNodeId,
+    selector: crate::semantic_query::ObjectProjectionSelector,
+    resolve_env_hash: crate::semantic_query::HashValue,
+    type_env_hash: crate::semantic_query::HashValue,
+    lib_env_hash: crate::semantic_query::HashValue,
+    project_identity: crate::semantic_query::HashValue,
+    substitution: crate::semantic_query::SubstitutionCanonicalHash,
+    optional_property_policy: crate::semantic_query::ExactOptionalPropertyPolicy,
+    provenance: crate::semantic_query::SurfaceProvenanceContext,
+    merge_role: crate::semantic_query::MemberMergeRole,
+    vue_heritage_policy: VueHeritagePolicy,
+}
+
+// Family-side R6 witness. `program`/`selector` are already-lowered semantic
+// identities; the four raw hashes are named env dimensions. No content/version
+// hash or parse-env dimension can be added without updating this exhaustive
+// no-`..` destructure.
+const _: fn(&ObjectSpreadProjectionFamilyIdentity) = w_object_spread_projection_family_identity;
+
+#[allow(dead_code)]
+fn w_object_spread_projection_family_identity(identity: &ObjectSpreadProjectionFamilyIdentity) {
+    let ObjectSpreadProjectionFamilyIdentity {
+        program,
+        selector,
+        resolve_env_hash,
+        type_env_hash,
+        lib_env_hash,
+        project_identity,
+        substitution,
+        optional_property_policy,
+        provenance,
+        merge_role,
+        vue_heritage_policy,
+    } = identity;
+    let _: &SemanticNodeId = program;
+    let _: &crate::semantic_query::ObjectProjectionSelector = selector;
+    let _: &crate::semantic_query::HashValue = resolve_env_hash;
+    let _: &crate::semantic_query::HashValue = type_env_hash;
+    let _: &crate::semantic_query::HashValue = lib_env_hash;
+    let _: &crate::semantic_query::HashValue = project_identity;
+    let _: &crate::semantic_query::SubstitutionCanonicalHash = substitution;
+    let _: &crate::semantic_query::ExactOptionalPropertyPolicy = optional_property_policy;
+    let _: &crate::semantic_query::SurfaceProvenanceContext = provenance;
+    let _: &crate::semantic_query::MemberMergeRole = merge_role;
+    let _: &VueHeritagePolicy = vue_heritage_policy;
 }
 
 impl FamilyKey {
@@ -511,6 +617,7 @@ impl FamilyKey {
             FamilyKey::TypeOf { .. } => "TypeOf",
             FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
             FamilyKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+            FamilyKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
             FamilyKey::ProjectPath { .. } => "ProjectPath",
             FamilyKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
             FamilyKey::ResolveClassSurface { .. } => "ResolveClassSurface",
@@ -524,6 +631,66 @@ impl FamilyKey {
             FamilyKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
             FamilyKey::ContextualTypeAt { .. } => "ContextualTypeAt",
             FamilyKey::LowerLocator { .. } => "LowerLocator",
+            FamilyKey::ClassifyMaterializationCycleGate { .. } => {
+                "ClassifyMaterializationCycleGate"
+            }
+            FamilyKey::FlowReturn { .. } => "FlowReturn",
+            FamilyKey::ResolveCall { .. } => "ResolveCall",
+        }
+    }
+
+    /// Per-family bounded-retention candidate cap
+    /// (`U3.ADAPTIVE_FAMILY_RETENTION`). Exhaustive and wildcard-free by
+    /// contract: every family declares its own cap.
+    ///
+    /// The FLOOR is 4 — every family retains at least four concurrent
+    /// view variants of one content-free identity. The LIVE
+    /// inference/substitution-heavy families — `Instantiate`, `TypeOf`,
+    /// `Conditional`, `MappedType` — receive a HIGHER cap (8): one
+    /// content-free identity of those families legitimately coexists
+    /// across many live substitution / inference-context / overlay
+    /// variants, so the floor would thrash a hot inference loop.
+    /// Content-light projection and modeless families — including the
+    /// live `Relate` family (one content-free relation identity coexists
+    /// across few view variants) — and every
+    /// non-producing variant (nothing is ever admitted under
+    /// `ApparentType` / `FlowNarrowingAt` / `ContextualTypeAt` /
+    /// `ResolveAmbientNamespace` / `ResolveEnum`), keep the floor.
+    ///
+    /// This is the FAMILY-LOCAL bound only. The process-wide candidate
+    /// memory ceiling and the typed non-admission (`ReturnOnly`) path are
+    /// full-`U3.CACHE_FACT_MODEL` work, deliberately NOT modelled here:
+    /// cacheability never depends on memory pressure, and a new cacheable
+    /// candidate is ALWAYS admitted after local eviction.
+    pub(super) fn candidate_cap(&self) -> usize {
+        match self {
+            FamilyKey::Instantiate { .. }
+            | FamilyKey::TypeOf { .. }
+            | FamilyKey::Conditional { .. }
+            | FamilyKey::MappedType { .. }
+            | FamilyKey::ProjectObjectSpread { .. }
+            | FamilyKey::FlowReturn { .. } => 8,
+            FamilyKey::ResolveDecl(_) => 4,
+            FamilyKey::ProjectMember { .. } => 4,
+            FamilyKey::IndexedAccess { .. } => 4,
+            FamilyKey::KeyOf { .. } => 4,
+            FamilyKey::NormalizeUnion { .. } => 4,
+            FamilyKey::NormalizeIntersection { .. } => 4,
+            FamilyKey::ProjectPath { .. } => 4,
+            FamilyKey::ResolveMacroPayload { .. } => 4,
+            FamilyKey::ResolveClassSurface { .. } => 4,
+            FamilyKey::ResolveAmbientNamespace { .. } => 4,
+            FamilyKey::ResolveEnum { .. } => 4,
+            FamilyKey::ResolveOverloadSet { .. } => 4,
+            FamilyKey::ClassifyBroadRuntime { .. } => 4,
+            FamilyKey::Relate { .. } => 4,
+            FamilyKey::ApparentType { .. } => 4,
+            FamilyKey::TemplateLiteralReduce { .. } => 4,
+            FamilyKey::FlowNarrowingAt { .. } => 4,
+            FamilyKey::ContextualTypeAt { .. } => 4,
+            FamilyKey::LowerLocator { .. } => 4,
+            FamilyKey::ClassifyMaterializationCycleGate { .. } => 4,
+            FamilyKey::ResolveCall { .. } => 4,
         }
     }
 }
@@ -585,31 +752,112 @@ pub(super) enum ModeSlot {
     VueRuntimeSurfaceShallow,
 }
 
-/// Per-slot candidate cap.
-///
-/// Two candidates in one (family, slot) belong to different views (a
-/// base view and an overlay view, or two overlays of the SAME
-/// content-free key under different file-content versions). Same-view
-/// re-publish (matching signature) replaces in place; a different
-/// view appends; an unrelated fifth candidate FIFO-evicts the
-/// oldest. The cap prevents unbounded growth for keys queried under
-/// many distinct overlays without losing R20 overlay isolation.
-pub(super) const FAMILY_SLOT_CANDIDATE_CAP: usize = 4;
+/// SmallVec inline capacity for the per-slot candidate list — a
+/// STORAGE optimization only, NOT the retention policy. The semantic
+/// candidate cap is per-family ([`FamilyKey::candidate_cap`]); a slot
+/// whose family cap exceeds the inline capacity spills to the heap.
+pub(super) const CANDIDATE_LIST_INLINE_CAP: usize = 4;
 
-/// Per-slot candidate list (cap [`FAMILY_SLOT_CANDIDATE_CAP`]).
+/// Per-slot candidate list (semantic cap: [`FamilyKey::candidate_cap`]).
 ///
-/// Insertion order is FIFO from front to back; the eldest candidate
-/// sits at index 0. Eviction policy when an unmatched signature
-/// appends a new candidate at cap: evict the oldest candidate at
-/// index 0.
-pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; FAMILY_SLOT_CANDIDATE_CAP]>;
+/// Slot order IS the LRU order: the least-recently admitted /
+/// validated-hit candidate sits at the front (index 0). A publish
+/// appends at the back; a validated warm hit promotes its candidate to
+/// the back ([`FamilySlots::mark_validated_freshest`]). Eviction at the
+/// family cap is invalid-first, then the front of this order — see
+/// [`FamilySlots::publish_one`] and [`select_eviction_victim`].
+pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
+
+/// The eviction victim a publish site selected for a slot at its
+/// family cap. Computed by [`select_eviction_victim`] OUTSIDE the
+/// `entries` mutex (never validate fact rails while holding `entries`)
+/// and applied by [`FamilySlots::publish_one`] under it.
+pub(super) enum EvictionVictim {
+    /// Evict the candidate carrying this `admission_seq` — the FIRST
+    /// candidate (front-to-back LRU order) whose fact rail failed
+    /// validation against the publishing caller's stable store view.
+    /// [`FamilySlots::publish_one`] rechecks the candidate's identity
+    /// under the lock and falls back to the LRU front when the seq no
+    /// longer resolves (a concurrent invalidation drained it first).
+    Invalid(u64),
+    /// Every candidate validated against the caller's view (or no view
+    /// was threaded — the legacy test publishes): evict the front of
+    /// the LRU order, the least-recently validated-hit candidate.
+    LruFront,
+}
+
+/// Invalid-first victim selection over a slot SNAPSHOT. The publish
+/// site calls this AFTER releasing the `entries` mutex
+/// (snapshot/validate/reacquire): returns the first candidate whose
+/// `ReadSetSignature` fact rail fails validation against the publishing
+/// caller's stable store view, else [`EvictionVictim::LruFront`]. An
+/// invalid candidate can never warm-hit, so evicting it ahead of any
+/// still-valid candidate is pure win.
+pub(super) fn select_eviction_victim(
+    candidates: &CandidateList,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+) -> EvictionVictim {
+    candidates
+        .iter()
+        .find(|candidate| !candidate.validate(ctx))
+        .map_or(EvictionVictim::LruFront, |candidate| {
+            EvictionVictim::Invalid(candidate.admission_seq)
+        })
+}
+
+/// Eviction planning for a family-slot publish
+/// (`U3.ADAPTIVE_FAMILY_RETENTION` per-family bounded retention).
+///
+/// Probes the PRIMARY slot under a SHORT `entries` hold: when the
+/// incoming `entry` is a new discriminant and the slot already sits at
+/// the family cap `cap`, the publish will evict — so snapshot the
+/// candidate list, RELEASE the lock, and validate each candidate
+/// against the publishing caller's stable store view
+/// ([`select_eviction_victim`]), picking the first INVALID candidate
+/// (front-to-back LRU order). Validation NEVER runs while holding
+/// `entries` — the fact-rail walk against the resolver store view is
+/// reentrant work that must not serialise unrelated warm reads and cold
+/// publishes on the single global memo mutex (mirrors the warm-read
+/// snapshot/validate/reacquire discipline). The publish sites re-check
+/// their abort fences under the publish lock AFTER this plan, so an
+/// invalidation racing the plan is still caught. The returned victim is
+/// applied under the publish lock with an `admission_seq` identity
+/// recheck, falling back to the LRU front; with no victim needed
+/// (in-place replacement or below cap) this is a pure read. Lives in
+/// `family.rs` (not on `SemanticGraphStore`) so the post-split
+/// `mod.rs` stays under its line budget; takes the raw mutex and holds
+/// it only for the probe — same brief-hold discipline as the warm-hit
+/// fast path.
+pub(super) fn plan_family_slot_eviction(
+    entries: &Mutex<FxHashMap<FamilyKey, FamilySlots>>,
+    family: &FamilyKey,
+    slot: ModeSlot,
+    entry: &MemoEntry,
+    cap: usize,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+) -> EvictionVictim {
+    let snapshot: Option<CandidateList> = {
+        let entries = entries.lock();
+        entries.get(family).and_then(|slots| {
+            if slots.primary_slot_needs_victim(slot, entry, cap) {
+                Some(slots.snapshot_slot(slot))
+            } else {
+                None
+            }
+        })
+    };
+    match snapshot {
+        Some(candidates) => select_eviction_victim(&candidates, ctx),
+        None => EvictionVictim::LruFront,
+    }
+}
 
 /// Outcome of [`FamilySlots::publish`]: the list of slots this publish
 /// populated PLUS the candidates that were displaced during the
-/// publish (same-discriminant replacements + per-slot FIFO cap-evictions).
-/// The caller drains each displaced candidate's reverse-index
-/// registrations by its `admission_seq` so a surviving sibling
-/// candidate in the same slot keeps its own seq registrations.
+/// publish (same-discriminant replacements + per-family bounded-retention
+/// cap-evictions). The caller drains each displaced candidate's
+/// reverse-index registrations by its `admission_seq` so a surviving
+/// sibling candidate in the same slot keeps its own seq registrations.
 pub(super) struct FamilyPublishOutcome {
     pub(super) populated: smallvec::SmallVec<[ModeSlot; 6]>,
     pub(super) displaced: smallvec::SmallVec<[(ModeSlot, MemoEntry); 4]>,
@@ -618,8 +866,8 @@ pub(super) struct FamilyPublishOutcome {
 /// Per-family per-slot warm storage.
 ///
 /// Each slot independently holds an ORDERED LIST of [`MemoEntry`]
-/// candidates (cap [`FAMILY_SLOT_CANDIDATE_CAP`]) — see
-/// [`CandidateList`]. Each candidate carries its own
+/// candidates (bounded at the family's [`FamilyKey::candidate_cap`]) —
+/// see [`CandidateList`]. Each candidate carries its own
 /// `read_set_signature` + `self_root_canonicals`, so two file-content
 /// versions of the SAME content-free `SemanticQueryKey` (e.g.
 /// `Instantiate { base: ResolvedDeclSlotIdentity { .. }, .. }` under a
@@ -735,14 +983,14 @@ impl FamilySlots {
     /// the path-precise fact rail against the resolver store view,
     /// which is itself reentrant work; holding `entries` across that
     /// walk serialises every unrelated warm read and cold publish
-    /// during validation, which the multi-candidate cap-4 substrate
-    /// makes worse.
+    /// during validation, which the multi-candidate substrate makes
+    /// worse.
     pub(super) fn snapshot_slot(&self, slot: ModeSlot) -> CandidateList {
         self.slot_list(slot).clone()
     }
 
     /// Move the candidate matching `(validated_at_generation, facts)`
-    /// to the back of `slot`'s FIFO order — the LRU bookkeeping the
+    /// to the back of `slot`'s LRU order — the bookkeeping the
     /// snapshot/validate-outside-lock path's caller invokes after a
     /// successful match.
     ///
@@ -753,8 +1001,8 @@ impl FamilySlots {
     /// snapshot and this update — this is a no-op; the caller has
     /// already returned the cloned `MemoEntry` from the snapshot.
     ///
-    /// Moves the matching candidate to the back of the FIFO insertion
-    /// order so the LRU eviction policy treats it as freshest.
+    /// Moves the matching candidate to the back of the LRU order so
+    /// the bounded-retention eviction policy treats it as freshest.
     /// `validated_at_generation` is left unchanged (admission-time
     /// stamp, not access-time).
     pub(super) fn mark_validated_freshest(&mut self, slot: ModeSlot, entry: &MemoEntry) {
@@ -780,14 +1028,37 @@ impl FamilySlots {
         self.slot_list(slot).first()
     }
 
+    /// Would publishing `entry` into `slot` require evicting a resident
+    /// candidate? True iff `entry` is a NEW discriminant (not an
+    /// in-place same-view replacement) and the slot already sits at the
+    /// family cap `cap`. The publish site evaluates this UNDER the
+    /// `entries` lock to decide whether eviction planning must snapshot
+    /// the candidate list and validate it outside the lock
+    /// ([`select_eviction_victim`]).
+    pub(super) fn primary_slot_needs_victim(
+        &self,
+        slot: ModeSlot,
+        entry: &MemoEntry,
+        cap: usize,
+    ) -> bool {
+        let list = self.slot_list(slot);
+        list.len() >= cap && !list.iter().any(|c| candidate_same_discriminant(c, entry))
+    }
+
     /// Publish `entry` into `slot` and backfill every narrower slot
     /// whose candidate list is currently empty.
     ///
-    /// Admission policy in the PRIMARY slot:
+    /// Admission policy in the PRIMARY slot (`U3.ADAPTIVE_FAMILY_RETENTION`
+    /// per-family bounded retention):
     /// - Same exact `(validated_at_generation, facts)` discriminant ⇒
-    ///   replace in place (move to back; same-view re-publish).
-    /// - Different discriminant ⇒ append at the back.
-    /// - At cap ⇒ FIFO-evict the front (oldest by insertion).
+    ///   replace in place (move to back; same-view re-publish) and
+    ///   become freshest.
+    /// - Different discriminant ⇒ ALWAYS admitted after local eviction:
+    ///   at the family cap `cap`, evict `victim` FIRST (an
+    ///   invalid-against-the-publishing-view candidate selected by
+    ///   [`select_eviction_victim`] outside the `entries` lock), else
+    ///   the front of the LRU order (the least-recently validated-hit
+    ///   candidate), then append at the back.
     ///
     /// §3.4 **recorded-point backfill** into a projection-depth-narrower
     /// target slot: the broader compute's entry is cloned UNCHANGED into
@@ -798,25 +1069,27 @@ impl FamilySlots {
     /// owning family (empty for non-path families); the target slot's
     /// requested point is `point_for_slot(target, requested_path)`. A
     /// narrower compute that wrote first survives (backfill writes only
-    /// into an empty slot).
+    /// into an empty slot, so backfill never reaches the cap path).
     ///
     /// Returns the list of slots this publish populated AND the
     /// candidates that the publish displaced (same-discriminant
-    /// replacements + per-slot FIFO cap-eviction victims). The caller
-    /// drains each displaced candidate's reverse-index registrations
-    /// under its own admission_seq so a sibling candidate in the same
-    /// slot keeps its registrations.
+    /// replacements + per-family bounded-retention cap-eviction
+    /// victims). The caller drains each displaced candidate's
+    /// reverse-index registrations under its own admission_seq so a
+    /// sibling candidate in the same slot keeps its registrations.
     pub(super) fn publish(
         &mut self,
         slot: ModeSlot,
         entry: MemoEntry,
         requested_path: &ProjectionPath,
+        cap: usize,
+        victim: EvictionVictim,
     ) -> FamilyPublishOutcome {
         let mut populated = smallvec::SmallVec::<[ModeSlot; 6]>::new();
         let mut displaced: smallvec::SmallVec<[(ModeSlot, MemoEntry); 4]> =
             smallvec::SmallVec::new();
-        for victim in self.publish_one(slot, entry.clone()) {
-            displaced.push((slot, victim));
+        for evicted in self.publish_one(slot, entry.clone(), cap, victim) {
+            displaced.push((slot, evicted));
         }
         populated.push(slot);
         for target in slot_domain_siblings(slot) {
@@ -833,8 +1106,8 @@ impl FamilySlots {
             if !cached_satisfies(&entry.satisfied_projection, &target_point) {
                 continue;
             }
-            for victim in self.publish_one(*target, entry.clone()) {
-                displaced.push((*target, victim));
+            for evicted in self.publish_one(*target, entry.clone(), cap, EvictionVictim::LruFront) {
+                displaced.push((*target, evicted));
             }
             populated.push(*target);
         }
@@ -845,8 +1118,8 @@ impl FamilySlots {
     }
 
     /// Internal: admit `entry` into a single slot's candidate list,
-    /// applying the same-discriminant-replace / FIFO-evict rules.
-    /// Returns the candidates that were displaced (replaced or
+    /// applying the same-discriminant-replace / bounded-retention-evict
+    /// rules. Returns the candidates that were displaced (replaced or
     /// evicted) — the caller drains their reverse-index registrations
     /// by per-candidate `admission_seq` so a surviving sibling
     /// candidate in the same slot keeps its own seq registrations.
@@ -854,6 +1127,8 @@ impl FamilySlots {
         &mut self,
         slot: ModeSlot,
         entry: MemoEntry,
+        cap: usize,
+        victim: EvictionVictim,
     ) -> smallvec::SmallVec<[MemoEntry; 2]> {
         let mut displaced: smallvec::SmallVec<[MemoEntry; 2]> = smallvec::SmallVec::new();
         let list = self.slot_list_mut(slot);
@@ -862,22 +1137,39 @@ impl FamilySlots {
             .position(|c| candidate_same_discriminant(c, &entry))
         {
             // Same view re-publish: remove the previous candidate and
-            // append the new one so it becomes the freshest by
-            // insertion order. A FIFO eviction now drops the oldest
-            // unrelated candidate, not the just-replaced one. The
-            // displaced candidate's reverse-index registrations
+            // append the new one so it becomes the freshest in the LRU
+            // order. A cap eviction then drops the least-recently
+            // validated unrelated candidate, not the just-replaced one.
+            // The displaced candidate's reverse-index registrations
             // (keyed under its own admission_seq) are orphan stamps
             // until the caller drains them.
             displaced.push(list.remove(pos));
             list.push(entry);
         } else {
-            // Different view: append. If we overshoot the cap, drop
-            // the oldest candidate at the front — and surface it so
-            // the caller can drain its reverse-index registrations.
-            list.push(entry);
-            while list.len() > FAMILY_SLOT_CANDIDATE_CAP {
-                displaced.push(list.remove(0));
+            // Different view: make room BEFORE appending so the new
+            // candidate is ALWAYS admitted after local eviction (never
+            // dropped by the cap, never admission-gated). The FIRST
+            // eviction honours the publish site's pre-selected `victim`
+            // — an invalid-against-the-publishing-view candidate chosen
+            // outside the `entries` lock — rechecked HERE by
+            // `admission_seq` identity: if the seq no longer resolves
+            // (a concurrent invalidation drained it between the
+            // snapshot and this lock hold), fall back to the LRU front.
+            // Any further iteration evicts the front of the LRU order
+            // (the least-recently validated-hit candidate).
+            let mut victim = victim;
+            while list.len() >= cap {
+                let index = match victim {
+                    EvictionVictim::Invalid(seq) => list
+                        .iter()
+                        .position(|c| c.admission_seq == seq)
+                        .unwrap_or(0),
+                    EvictionVictim::LruFront => 0,
+                };
+                displaced.push(list.remove(index));
+                victim = EvictionVictim::LruFront;
             }
+            list.push(entry);
         }
         displaced
     }
@@ -911,17 +1203,18 @@ impl FamilySlots {
     /// [`super::SemanticGraphStore::audit_eager_key_dump`] to flatten
     /// family state into per-slot rows for the corpus snapshot.
     ///
-    /// **By design — single-representative shape.** With the cap-4
-    /// multi-candidate substrate a slot may hold up to 4 candidates,
-    /// but this audit row format yields ONE row per populated slot
-    /// to preserve the legacy corpus-snapshot shape so existing audit
-    /// fixtures stay stable. Tooling that needs the full per-candidate
+    /// **By design — single-representative shape.** With the
+    /// multi-candidate substrate a slot may hold several candidates
+    /// (bounded at the family's [`FamilyKey::candidate_cap`]), but this
+    /// audit row format yields ONE row per populated slot to preserve
+    /// the legacy corpus-snapshot shape so existing audit fixtures stay
+    /// stable. Tooling that needs the full per-candidate
     /// enumeration uses [`Self::iter_populated_slots_all`] (drain /
     /// reverse-index sweep paths), not this audit dump. The chosen
-    /// representative is the FIRST candidate in the list — the eldest
-    /// by insertion order under the FIFO discipline (the slot's LRU
-    /// move-to-back operation reorders subsequent reads, so a recently
-    /// validated candidate is at the back of the list, not the front).
+    /// representative is the FIRST candidate in the list — the front of
+    /// the LRU order (the slot's validated-hit move-to-back operation
+    /// reorders subsequent reads, so a recently validated candidate is
+    /// at the back of the list, not the front).
     pub(super) fn iter_populated_slots(&self) -> Vec<(&'static str, &MemoEntry)> {
         let mut out: Vec<(&'static str, &MemoEntry)> = Vec::new();
         if let Some(e) = self.single.first() {
@@ -969,9 +1262,22 @@ impl FamilySlots {
     /// Candidate count in a specific slot. Exposed for test probes
     /// (`SemanticGraphStore::slot_candidate_count_for_tests`); the
     /// integration tests use it to verify multi-candidate
-    /// coexistence and cap-4 FIFO eviction. Cheap O(1) read.
+    /// coexistence and per-family bounded retention. Cheap O(1) read.
     pub(super) fn slot_candidate_count_for_test(&self, slot: ModeSlot) -> usize {
         self.slot_list(slot).len()
+    }
+
+    /// The slot's candidate `validated_at_generation` stamps in slot
+    /// order (front = least-recently admitted / validated-hit). Exposed
+    /// for test probes
+    /// (`SemanticGraphStore::slot_candidate_generations_for_tests`); the
+    /// per-family bounded-retention guards use it to assert
+    /// survivor/victim identity and LRU order.
+    pub(super) fn slot_candidate_generations_for_test(&self, slot: ModeSlot) -> Vec<u64> {
+        self.slot_list(slot)
+            .iter()
+            .map(|candidate| candidate.validated_at_generation)
+            .collect()
     }
 
     /// Walk `slot`'s candidate list and retain only those entries for
@@ -1297,6 +1603,31 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
+        SemanticQueryKey::ProjectObjectSpread {
+            program,
+            selector,
+            context,
+        } => {
+            let projection = context.projection_reduction();
+            (
+                FamilyKey::ProjectObjectSpread {
+                    identity: Box::new(ObjectSpreadProjectionFamilyIdentity {
+                        program: *program,
+                        selector: selector.clone(),
+                        resolve_env_hash: context.resolve_env_hash(),
+                        type_env_hash: context.type_env_hash(),
+                        lib_env_hash: context.lib_env_hash(),
+                        project_identity: context.project_identity(),
+                        substitution: context.substitution(),
+                        optional_property_policy: context.optional_property_policy(),
+                        provenance: projection.provenance,
+                        merge_role: projection.merge_role,
+                        vue_heritage_policy: projection.vue_heritage_policy,
+                    }),
+                },
+                context_to_slot(projection),
+            )
+        }
         SemanticQueryKey::ProjectPath {
             base,
             path,
@@ -1312,11 +1643,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             context_to_slot(*context),
         ),
         // `Relate` maps to a DEDICATED, non-aliasing `FamilyKey::Relate`
-        // carrying the FULL relation identity. No production code constructs a
-        // `SemanticQueryKey::Relate`, so this arm is exercised only by identity
-        // guards; the production relation authority is `relate_nodes`, which
-        // keys the dedicated `relation_memo` on the same `RelateMemoKey` and
-        // never enters `execute_cooperative` / `family_and_slot`.
+        // carrying the FULL relation identity. Production relation roots enter
+        // this arm through `SemanticQueryApi::execute(Relate)` and the shared
+        // cooperative value path; sub-relations re-enter the same authority.
         //
         // `family_and_slot` is consulted UNCONDITIONALLY by
         // `try_warm_hit_fast_path` BEFORE any admission short-circuit, so this
@@ -1442,8 +1771,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        // ApparentType — non-producing. No projection mode → the `Single`
-        // slot. The `{T, L, J}` env dims ride on the family key (the key
+        // ApparentType — LIVE producer for the callable arm. No projection
+        // mode → the `Single` slot. The `{T, L, J}` env dims AND the
+        // rootless demand-scope witness ride on the family key (the key
         // has no slot to carry them).
         SemanticQueryKey::ApparentType { base, context } => (
             FamilyKey::ApparentType {
@@ -1451,6 +1781,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 type_env_hash: context.type_env_hash,
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
+                demand_scope: context.demand_scope.clone(),
             },
             ModeSlot::Single,
         ),
@@ -1527,6 +1858,33 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
+        // ClassifyMaterializationCycleGate — LIVE producer with a
+        // mode-erased key: the sealed `MaterializationCycleGateKey` IS the
+        // family identity (root slot + P + R, nothing else; T/L/J
+        // slot-carried; args/demand/mode/policy fixed inside the
+        // producer), so the family uses the `Single` slot.
+        SemanticQueryKey::ClassifyMaterializationCycleGate(key) => (
+            FamilyKey::ClassifyMaterializationCycleGate {
+                key: Box::new(key.clone()),
+            },
+            ModeSlot::Single,
+        ),
+        // FlowReturn — LIVE whole-function producer with a mode-erased
+        // key: the full `FlowReturnKey` IS the family identity (function
+        // slot + type args + env/substitution/policy), so the family
+        // uses the `Single` slot.
+        SemanticQueryKey::FlowReturn(key) => {
+            (FamilyKey::FlowReturn { key: key.clone() }, ModeSlot::Single)
+        }
+        // ResolveCall — complete mixed-equation results only. Mode-erased:
+        // the full `ResolveCallKey` IS the family
+        // identity (call-site point + callee/receiver/args + kind +
+        // explicit type args + sealed-empty flow axis + env/substitution
+        // context), so the family uses the `Single` slot.
+        SemanticQueryKey::ResolveCall(key) => (
+            FamilyKey::ResolveCall { key: key.clone() },
+            ModeSlot::Single,
+        ),
     }
 }
 
@@ -1541,12 +1899,34 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
         SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
         SemanticQueryKey::ProjectMember { member, .. } => {
-            ProjectionPath::from_segments([PathSegment::Member(Arc::clone(member))])
+            ProjectionPath::from_segments([PathSegment::Member(PropertyKey::identifier(
+                Arc::clone(member),
+            ))])
         }
         SemanticQueryKey::IndexedAccess { index, .. } => {
             ProjectionPath::from_segments([PathSegment::Index(index.clone())])
         }
+        // FlowReturn: the path is the key's OWN demand-axis projection
+        // path (whole-return = empty). Kept in lockstep with
+        // `requested_demand_override` so the requested point's path and
+        // the requested path are the same datum.
+        SemanticQueryKey::FlowReturn(key) => key.demand.point.projection.path.clone(),
         _ => ProjectionPath::empty(),
+    }
+}
+
+/// The requested-DEMAND override for key variants that embed their own
+/// demand point instead of denoting it through their `ModeSlot` preset.
+/// `FlowReturn` carries the flow-typed `(ProjectionDemand, EvalPolicy)`
+/// point as a KEY FIELD (`ReturnProjectionDemand`); a warm hit on such a
+/// key must be gated against THAT point — the shared demand-lattice
+/// dominance machinery over the key's own demand — never the modeless
+/// `Single` preset (which would collapse every demand point to a trivial
+/// pass). `None` keeps the `point_for_slot` formula.
+pub(super) fn requested_demand_override(key: &SemanticQueryKey) -> Option<Demand> {
+    match key {
+        SemanticQueryKey::FlowReturn(key) => Some(key.demand.point.clone()),
+        _ => None,
     }
 }
 
@@ -1559,6 +1939,9 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
 /// (`cached_satisfies(entry.satisfied_projection, requested_point_for_key(key))`).
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
+    if let Some(point) = requested_demand_override(key) {
+        return MaterializedPoint::new(point);
+    }
     let (_, slot) = family_and_slot(key);
     let path = requested_path_for_key(key);
     MaterializedPoint::new(point_for_slot(slot, &path))
@@ -1591,6 +1974,11 @@ pub(super) fn carrier_facts_reference_canonical(
         crate::resolver_core::FactVersionRef::FileSourceEnv {
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
+        crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => match fact {
+            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
+                function.canonical_id.as_ref() == canonical_id
+            }
+        },
         // Not file-scoped — whole-project scalars reference no canonical.
         crate::resolver_core::FactVersionRef::ProjectGeneration { .. }
         | crate::resolver_core::FactVersionRef::DomainGeneration(_)

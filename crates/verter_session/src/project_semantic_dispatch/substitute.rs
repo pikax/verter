@@ -180,56 +180,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = self.graph().node_data(node) else {
             return (self.opaque(QueryError::Miss), true);
         };
-        // Cross-variant name bridge — Infer-BINDER-only, in BOTH
-        // directions. `parameter_node` may be a `TypeParam` (the
-        // primary path) OR an `Infer` (the Conditional reducer's
-        // infer-bind consumer that interns an Infer node and calls
-        // substitute). Only an `Infer` binder activates name-based
-        // matching: it rewrites same-name `Infer` references AND
-        // same-name `TypeParam` references (true_branch references
-        // may lower as TypeParam shells via the
-        // unresolved-TypeParameter path). A `TypeParam` binder never
-        // matches by name — its sole authority is the node-id branch
-        // above, and in particular it must NOT rewrite a same-name
-        // `Infer { name }` node: TS `infer X` DECLARES a fresh
-        // conditional-scoped binder that shadows the outer parameter,
-        // so a collection-driven (TypeParam-binder) substitution
-        // leaves it intact.
-        let (parameter_name, parameter_is_infer): (Option<Arc<str>>, bool) =
-            match self.graph().node_data(parameter_node).as_deref() {
-                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                    (Some(Arc::clone(display_name)), false)
-                }
-                Some(SemanticNodeData::Infer { name }) => (Some(Arc::clone(name)), true),
-                _ => (None, false),
-            };
-        // Cross-variant TypeParam-by-name fallback: when the caller
-        // passed an Infer parameter_node, true_branch references
-        // may be TypeParam nodes with the matching display_name
-        // (the unresolved-TypeParameter lowering path). Match them
-        // by name. This branch fires only when parameter_node is
-        // an Infer (not a TypeParam) — for TypeParam parameter_node
-        // the node-id branch above is the sole authority.
-        if parameter_is_infer {
-            if let SemanticNodeData::TypeParam { display_name, .. } = data.as_ref() {
-                if let Some(name) = parameter_name.as_ref() {
-                    if display_name.as_ref() == name.as_ref() {
-                        return (arg, true);
-                    }
-                }
-            }
-        }
+        // Infer substitution is exact-binder-only. A legitimate reference is
+        // an `InferRef` carrying the same opaque binder identity; a same-name
+        // `TypeParam` is an unrelated declaration and is never rewritten.
+        let parameter_infer_binder = match self.graph().node_data(parameter_node).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+            _ => None,
+        };
+        let parameter_is_infer = parameter_infer_binder.is_some();
         match data.as_ref() {
-            // Same-name `Infer` occurrence: rewritten ONLY for an
-            // `Infer` binder. Under a `TypeParam` binder the node is
-            // a fresh conditional-scoped declaration shadowing the
-            // parameter — never an occurrence of it.
-            SemanticNodeData::Infer { name }
-                if parameter_is_infer
-                    && parameter_name
-                        .as_ref()
-                        .map(|n| n.as_ref() == name.as_ref())
-                        .unwrap_or(false) =>
+            // Exact infer declaration/reference occurrence.
+            SemanticNodeData::Infer { binder, .. } | SemanticNodeData::InferRef { binder, .. }
+                if parameter_infer_binder == Some(binder.clone()) =>
             {
                 (arg, true)
             }
@@ -371,21 +333,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Object(surface) => {
                 let mut any_changed = false;
-                let mut new_members = Vec::with_capacity(surface.members.len());
-                for member in surface.members.iter() {
+                let mut new_members = Vec::with_capacity(surface.positive_members().len());
+                for member in surface.positive_members().iter() {
+                    let key = member.key.clone().map(
+                        |computed| {
+                            let (sub_key, changed) =
+                                self.substitute_with_change_tracking(computed, parameter_node, arg);
+                            any_changed |= changed;
+                            sub_key
+                        },
+                        |identity| identity,
+                    );
                     let (sub_value, c) =
                         self.substitute_with_change_tracking(member.value, parameter_node, arg);
                     any_changed |= c;
                     new_members.push(SurfaceMember {
-                        name: Arc::clone(&member.name),
+                        key,
                         value: sub_value,
                         optional: member.optional,
                         readonly: member.readonly,
-                        is_method: member.is_method,
+                        method_kind: member.method_kind,
+                        has_implementation_body: member.has_implementation_body,
                         // Type-parameter substitution preserves the source
-                        // member's declared accessibility (substitution changes
-                        // only the value's type-param occurrences).
+                        // member's declared accessibility and excess-property
+                        // provenance (substitution changes only the value's
+                        // type-param occurrences).
                         visibility: member.visibility,
+                        excess_origin: member.excess_origin,
                         // Type-parameter substitution preserves the
                         // source member's structural shape — only the
                         // value's type-param occurrences change.
@@ -486,8 +460,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         SemanticNodeData::Object(SurfaceView::from_entries(
                             entries,
                             new_keyspace,
-                            surface.has_index_signature,
+                            surface.has_known_index_signature(),
                         )),
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let mut any_changed = false;
+                let rebuilt = program.map_child_nodes(|child| {
+                    let (substituted, changed) =
+                        self.substitute_with_change_tracking(child, parameter_node, arg);
+                    any_changed |= changed;
+                    substituted
+                });
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(rebuilt),
                     ),
                     true,
                 )
@@ -553,13 +546,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
                 }
-                // Shadowing check by node-id equality. Both
-                // `mapper.parameter` and `parameter` are
-                // `SemanticNodeId`s, so the comparison is direct
-                // and distinguishes a mapper that binds the same
-                // node-id as the caller's `parameter_node` from one
-                // that binds a structurally-equivalent but distinct
-                // binder identity.
+                // Exact node identity is the sole shadowing axis. A mapped
+                // TypeParam that merely shares an infer display name is a
+                // distinct declaration and cannot match an exact InferRef.
                 let shadowed = mapper.parameter_node == parameter_node;
                 let (sub_source, source_changed) =
                     self.substitute_with_change_tracking(*source, parameter_node, arg);
@@ -662,12 +651,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
                 }
+                // Capture-avoidance for an `Infer` binder — the same
+                // shadow rule the Mapped arm applies, here on the
+                // conditional-scope axis: a
+                // nested conditional whose OWN `extends` pattern DECLARES
+                // the same infer name RE-BINDS it — `Infer { name }` is
+                // name-identity, so the inner declaration IS the binder
+                // node. The re-binding scopes the extends pattern and the
+                // TRUE branch; the check and the FALSE branch stay in the
+                // OUTER binder's scope and still substitute. The
+                // detection is DECLARATION-scoped
+                // ([`Self::extends_pattern_declares_infer`]): a bare
+                // REFERENCE to the outer binder (a same-name `TypeParam`
+                // shell) does not shadow, and an `Infer` declared under a
+                // deeper `Conditional`/`Mapped` scope inside `extends`
+                // binds at THAT level, not here.
+                let shadowed_by_inner_infer = parameter_is_infer
+                    && self.extends_pattern_declares_infer(*extends, parameter_node);
                 let (sub_check, cc) =
                     self.substitute_with_change_tracking(*check, parameter_node, arg);
-                let (sub_extends, ec) =
-                    self.substitute_with_change_tracking(*extends, parameter_node, arg);
-                let (sub_true, tc) =
-                    self.substitute_with_change_tracking(*true_branch_ref, parameter_node, arg);
+                let (sub_extends, ec) = if shadowed_by_inner_infer {
+                    (*extends, false)
+                } else {
+                    self.substitute_with_change_tracking(*extends, parameter_node, arg)
+                };
+                let (sub_true, tc) = if shadowed_by_inner_infer {
+                    (*true_branch_ref, false)
+                } else {
+                    self.substitute_with_change_tracking(*true_branch_ref, parameter_node, arg)
+                };
                 let (sub_false, fc) =
                     self.substitute_with_change_tracking(*false_branch_ref, parameter_node, arg);
                 if !(cc || ec || tc || fc) {
@@ -735,13 +747,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // when the outer binder fires. This is the primary
             // materialisation path for nested-infer in TS conditional
             // `extends` clauses.
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
+                // Signature-local TypeParams need no spelling-based stop:
+                // legitimate outer references carry an exact InferRef;
+                // locally shadowed occurrences carry the local TypeParam.
                 let mut any_changed = false;
                 let mut new_params = Vec::with_capacity(params.len());
                 for param in params.iter() {
@@ -780,10 +798,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         None => None,
                     };
+                    // The parameter's own binder node embeds its declaration-
+                    // local bounds: keep the binder verbatim when they are
+                    // untouched; re-intern it with the substituted bounds
+                    // (same decl identity + index + name) when they move, so
+                    // `param` stays the decl's own `TypeParam` node.
+                    let param = if new_constraint == tp.constraint && new_default == tp.default {
+                        tp.param
+                    } else {
+                        match self.graph().node_data(tp.param).as_deref() {
+                            Some(SemanticNodeData::TypeParam {
+                                decl, param_index, ..
+                            }) => self.graph().intern_preserving_scope(
+                                tp.param,
+                                SemanticNodeData::TypeParam {
+                                    decl: decl.clone(),
+                                    param_index: *param_index,
+                                    constraint: new_constraint,
+                                    default: new_default,
+                                    display_name: Arc::clone(&tp.name),
+                                },
+                            ),
+                            _ => tp.param,
+                        }
+                    };
                     new_type_parameters.push(TypeParamDecl {
                         name: Arc::clone(&tp.name),
+                        param,
                         constraint: new_constraint,
                         default: new_default,
+                        is_const: tp.is_const,
                     });
                 }
                 if !any_changed {
@@ -792,10 +836,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::Function {
+                        SemanticNodeData::Signature {
+                            kind: *kind,
                             params: Arc::from(new_params.into_boxed_slice()),
                             return_type: sub_return,
                             type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
+                            // Instantiation PRESERVES the occurrence — an
+                            // instantiated candidate is the same occurrence.
+                            occurrence: occurrence.clone(),
+                            // A declared carrier retargets the substituted
+                            // return node; a body-derived carrier is
+                            // untouched.
+                            return_carrier: match return_carrier {
+                                crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Declared(
+                                        sub_return,
+                                    )
+                                }
+                                crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Function(
+                                        source.clone(),
+                                    )
+                                }
+                            },
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
@@ -853,8 +916,209 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .expect("ImportType is a carrier");
                 (self.graph().intern_preserving_scope(node, rebuilt), true)
             }
+            // The sealed index-composed carrier substitutes its OWN
+            // parameters and binder constraints/defaults; the occurrence
+            // and the deferred return carrier are preserved.
+            SemanticNodeData::DeferredCallable(callable) => {
+                let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
+                let mut any_changed = false;
+                let mut new_params = Vec::with_capacity(parts.params.len());
+                for param in parts.params.iter() {
+                    let (sub_ty, changed) =
+                        self.substitute_with_change_tracking(param.ty, parameter_node, arg);
+                    any_changed |= changed;
+                    new_params.push(FunctionParam {
+                        name: param.name.clone(),
+                        ty: sub_ty,
+                        optional: param.optional,
+                        rest: param.rest,
+                        span: param.span,
+                    });
+                }
+                let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());
+                for tp in parts.type_parameters.iter() {
+                    let new_constraint = match tp.constraint {
+                        Some(constraint) => {
+                            let (sub, changed) = self.substitute_with_change_tracking(
+                                constraint,
+                                parameter_node,
+                                arg,
+                            );
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    let new_default = match tp.default {
+                        Some(default) => {
+                            let (sub, changed) =
+                                self.substitute_with_change_tracking(default, parameter_node, arg);
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    new_type_parameters.push(TypeParamDecl {
+                        name: Arc::clone(&tp.name),
+                        param: tp.param,
+                        constraint: new_constraint,
+                        default: new_default,
+                        is_const: tp.is_const,
+                    });
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                let rebuilt = SemanticNodeData::DeferredCallable(callable.with_substituted(
+                    Arc::from(new_params.into_boxed_slice()),
+                    Arc::from(new_type_parameters.into_boxed_slice()),
+                ));
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
             _ => (node, false),
         }
+    }
+
+    /// Declaration-scoped shadow predicate for the Conditional
+    /// substitution arm: `true` iff `pattern` — a conditional's own
+    /// `extends` pattern — DECLARES the infer binder `binder` at THIS
+    /// pattern's level. Only a reachable `Infer` node with the binder's
+    /// name counts (name-identity interning makes the inner declaration
+    /// the binder node itself); explicitly NOT counted:
+    ///
+    /// - a bare REFERENCE to the name (a same-name `TypeParam` shell —
+    ///   references never re-bind);
+    /// - an `Infer` beneath a nested `Conditional` or `Mapped` inside the
+    ///   pattern — TS scopes `infer` to the NEAREST enclosing conditional
+    ///   (and a mapped type introduces its own binder scope), so such a
+    ///   declaration binds at that inner level, never at this one.
+    ///
+    /// This is deliberately a separate predicate from
+    /// [`Self::subtree_references_node`], whose unrestricted
+    /// reference-reachability semantics its other callers depend on.
+    pub(super) fn extends_pattern_declares_infer(
+        &self,
+        pattern: SemanticNodeId,
+        binder: SemanticNodeId,
+    ) -> bool {
+        let Some(SemanticNodeData::Infer {
+            binder: target_binder,
+            ..
+        }) = self.graph().node_data(binder).as_deref().cloned()
+        else {
+            return false;
+        };
+        let graph = self.graph();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = vec![pattern];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Infer { binder, .. } => {
+                    if *binder == target_binder {
+                        return true;
+                    }
+                }
+                // A nested CONDITIONAL is the only infer-binding
+                // boundary: an `infer` beneath it declares at THAT
+                // conditional's level — do not descend. A `Mapped` is NOT
+                // a boundary — an `infer` in its source / value /
+                // `as`-remap declares for the ENCLOSING conditional (the
+                // `conditional_binds_mapped_as_remap_infer_in_true_branch`
+                // producer contract).
+                SemanticNodeData::Conditional { .. } => {}
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    stack.push(mapper.value_expr);
+                    if let Some(remap) = mapper.name_remap {
+                        stack.push(remap);
+                    }
+                }
+                // A construction program is not an infer-binding boundary:
+                // an `infer` inside a program effect declares for the
+                // ENCLOSING conditional (same rule as an `infer` inside an
+                // `Object` member value above). Mirrors the substitute
+                // engine's `map_child_nodes` descent and `absorb`'s
+                // `child_nodes` stack push.
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
+                }
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    for member in members.iter() {
+                        stack.push(*member);
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        stack.push(element.value);
+                    }
+                }
+                SemanticNodeData::Object(surface) => {
+                    for member in surface.positive_members().iter() {
+                        stack.push(member.value);
+                    }
+                    for signature in surface.call_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.construct_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(k) = surface.keyspace {
+                        stack.push(k);
+                    }
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } => {
+                    for param in params.iter() {
+                        stack.push(param.ty);
+                    }
+                    stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(c);
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(d);
+                        }
+                    }
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    for arg in args.iter() {
+                        stack.push(*arg);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for expr in expressions.iter() {
+                        stack.push(*expr);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Read-only walker that returns `true` iff `target` is structurally
@@ -895,28 +1159,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `value_expr` / `name_remap` arms, matching substitute's
     /// `shadowed` short-circuit.
     ///
-    /// **Cross-variant `Infer { name }` fallback** mirrors substitute's
-    /// Infer-BINDER-only name bridge: when the `target` binder is itself
-    /// an `Infer` node, a descendant `Infer { name }` (or `TypeParam`)
-    /// whose name equals the target's is treated as a reference. Under a
-    /// `TypeParam` target a same-name `Infer { name }` descendant is NOT
-    /// a reference — TS `infer X` declares a fresh conditional-scoped
-    /// binder that shadows the outer parameter, and substitute leaves it
-    /// intact — so the walker reports `false` for it, keeping the two
-    /// engines in agreement.
+    /// Infer reachability mirrors substitution exactly: only `Infer` /
+    /// `InferRef` nodes carrying the target declaration's opaque binder count.
+    /// Display names never participate.
     pub(super) fn subtree_references_node(
         &self,
         root: SemanticNodeId,
         target: SemanticNodeId,
     ) -> bool {
-        let (target_name, target_is_infer): (Option<Arc<str>>, bool) =
-            match self.graph().node_data(target).as_deref() {
-                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                    (Some(Arc::clone(display_name)), false)
-                }
-                Some(SemanticNodeData::Infer { name }) => (Some(Arc::clone(name)), true),
-                _ => (None, false),
-            };
+        let target_infer_binder = match self.graph().node_data(target).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+            _ => None,
+        };
 
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<SemanticNodeId> = Vec::new();
@@ -932,41 +1186,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             };
             match data.as_ref() {
-                // Cross-variant name fallback: an `Infer { name }`
-                // whose `name` matches an Infer BINDER's name is a
-                // structural reference, per
-                // `substitute_with_change_tracking`'s `Infer` arm.
-                // Under a `TypeParam` binder the same-name `Infer` is
-                // a fresh conditional-scoped declaration shadowing the
-                // parameter — substitute leaves it intact, so the
-                // walker must not count it as a reference.
-                SemanticNodeData::Infer { name } => {
-                    if target_is_infer {
-                        if let Some(t) = target_name.as_ref() {
-                            if t.as_ref() == name.as_ref() {
-                                return true;
-                            }
-                        }
+                // Exact declaration/reference binder match.
+                SemanticNodeData::Infer { binder, .. }
+                | SemanticNodeData::InferRef { binder, .. } => {
+                    if target_infer_binder == Some(binder.clone()) {
+                        return true;
                     }
                 }
-                // A `TypeParam` reference whose `display_name` matches
-                // the binder's name is ALSO a structural reference when
-                // the binder itself is `Infer` (substitute's
-                // TypeParam-by-name cross-variant bridge). Under the
-                // `build_mapped_type` hoist contract the binder is
-                // always a `TypeParam`, so this branch is a no-op for
-                // the hoist caller; including it keeps the walker
-                // symmetric with substitute and robust against future
-                // callers passing an `Infer` target.
-                SemanticNodeData::TypeParam { display_name, .. } => {
-                    if target_is_infer {
-                        if let Some(t) = target_name.as_ref() {
-                            if t.as_ref() == display_name.as_ref() {
-                                return true;
-                            }
-                        }
-                    }
-                }
+                SemanticNodeData::TypeParam { .. } => {}
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
@@ -984,7 +1211,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Object(surface) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         stack.push(member.value);
                     }
                     for signature in surface.call_signatures.iter() {
@@ -1011,7 +1238,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let IndexKey::TypeNode(idx_node) = index {
+                    if let IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);
                     }
                 }
@@ -1043,12 +1270,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.push(*arg);
                     }
                 }
+                // Substitute descends program effects via `map_child_nodes`;
+                // the scanner must descend the same children or it reports a
+                // program value holding the binder as K-independent (the
+                // `build_mapped_type` hoist) / binder-free (the
+                // `record_target_shape` generic-key gate).
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
+                }
                 SemanticNodeData::MergedDecl { contributors } => {
                     for contributor in contributors.iter() {
                         stack.push(*contributor);
                     }
                 }
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,
@@ -1106,11 +1341,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match index {
             IndexKey::String(text) => (IndexKey::String(Arc::clone(text)), false),
             IndexKey::Number(number) => (IndexKey::Number(*number), false),
-            IndexKey::TypeNode(node) => {
+            IndexKey::UniqueSymbol(identity) => (IndexKey::UniqueSymbol(identity.clone()), false),
+            IndexKey::Computed(node) => {
                 let (sub, changed) =
                     self.substitute_with_change_tracking(*node, parameter_node, arg);
                 if !changed {
-                    return (IndexKey::TypeNode(*node), false);
+                    return (IndexKey::Computed(*node), false);
                 }
                 let normalised = self.normalized_index_key_node(sub);
                 (normalised, true)

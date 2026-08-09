@@ -402,9 +402,9 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
                 carrier.binding_name.hash(hasher);
                 carrier.value_node.hash(hasher);
             }
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 21u8.hash(hasher);
-                raw.hash(hasher);
+                value.hash(hasher);
             }
             // Mirrors the `Ref` arm: a distinct discriminant (`23`, the next
             // free tag after `ConstructorType`'s `22`) then the leaf
@@ -440,7 +440,7 @@ fn hash_object_member<'a, H: Hasher>(
     match member {
         ObjectMember::Property(p) => {
             0u8.hash(hasher);
-            p.name.hash(hasher);
+            p.key.hash(hasher);
             (p.optional as u8).hash(hasher);
             (p.readonly as u8).hash(hasher);
             hash_member_visibility(p.visibility, hasher);
@@ -463,10 +463,14 @@ fn hash_object_member<'a, H: Hasher>(
         }
         ObjectMember::Method(m) => {
             4u8.hash(hasher);
-            m.name.hash(hasher);
+            m.key.hash(hasher);
             (m.optional as u8).hash(hasher);
             hash_member_visibility(m.visibility, hasher);
             hash_function_expr(&m.function, hasher, worklist);
+        }
+        ObjectMember::Spread(s) => {
+            5u8.hash(hasher);
+            worklist.push(&s.ty);
         }
     }
 }
@@ -888,8 +892,8 @@ mod tests {
 
         let source_with = |vis: MemberVisibility| {
             Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-                    "x".to_string(),
+                properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
+                    "x".to_string().into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     false,
                     false,
@@ -931,12 +935,14 @@ mod tests {
         // fingerprint identically to one built via `synthetic` (both Public) —
         // the marker is only-for-non-public.
         let via_synthetic = Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "x".to_string(),
-                TypeExpr::Primitive(PrimitiveName::Number),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "x".to_string().into(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                ),
+            )],
         })));
         let synthetic_fp = MapperFingerprint::from_components(
             &via_synthetic,

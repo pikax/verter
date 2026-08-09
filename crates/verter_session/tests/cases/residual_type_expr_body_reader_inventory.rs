@@ -15,9 +15,10 @@
 //! `mapper_binder_registry` structural fingerprint, etc.). Parser inventories
 //! contain syntax, routing, and dependency facts only; no parser DTO persists
 //! a typed-IR sidecar. The COMPLETE semantic-`TypeExpr`
-//! terminal-completeness census (≈96 semantic surfaces) lives in
-//! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
-//! `type_expand` three-surface handle-native sub-design is §5.7. That
+//! terminal-completeness census (≈96 semantic surfaces) lives in the
+//! program's terminal-`TypeExpr`-removal design lineage (not carried on this
+//! branch), together with the `type_expand` three-surface handle-native
+//! sub-design. That
 //! resolved/generated class is enforced STRUCTURALLY at its owning surfaces
 //! (semantic `TypeExpr` field DELETION + `#[derive(NoTypeExpr)]` +
 //! sealed-output privacy), NOT by this body-reader scanner — adding
@@ -33,9 +34,26 @@
 //! vocabulary; and the persisted jsdoc `resolved_type` is the sealed
 //! `verter_protocol` `ResolvedJsdocTypeOutput` graph snapshot — none of these
 //! is (or ever was) a declaration-BODY reader, so no row exists here for them.
-//! This whole inventory file DELETES when the residual reader classes are
-//! empty and the typed-IR body bridge is fully removed — at that point the
-//! guard has nothing left to confine.
+//! This file does NOT delete at a terminal zero: it is a PERMANENT curated
+//! ratchet/census, NOT terminal confinement. The `ProducerLowering` class is
+//! the permanent authored-syntax→graph producer bridge (lease-only ingress at
+//! the graph-lowering boundary — the sanctioned typed-IR consumption, not
+//! residual debt, NOT on a path to zero), and the `GraphFreeDto` class is the
+//! remaining below-graph residual. The terminal invariant is zero stored/hot
+//! `TypeExpr` and zero post-lowering semantic decisions over `TypeExpr` — not
+//! zero body readers. The two former stored type-parameter pockets are CLOSED
+//! (the type-parameter-bound confinement block): the memoized
+//! `LoweredTypeDecl.type_parameters: Vec<TypeParam>` storage is deleted
+//! (`LoweredTypeDecl` is wholly `NoTypeExpr`; the `narrow_type_parameters`
+//! mirror is the sole stored authority, the locator/binder deref re-borrows
+//! bound content + the full sibling frame lease-only via
+//! `transient_type_parts`, and the external frontier derives its narrow
+//! output from the mirror with a content-free re-anchor of the bound slots to
+//! the frontier symbol), and `TypeParamBinding` is shrunk to the content-free
+//! `(name, ordinal)` fact pair (`NoTypeExpr`), its script-setup bounds
+//! re-borrowed at query time through ONE artifact-local transient producer
+//! over the pinned `IndexedReady` and lowered by ONE dispatch helper shared
+//! by both content readers.
 //!
 //! ## scanner records (durable guard-local record — Structural-Confinement-First)
 //!
@@ -106,13 +124,19 @@
 //! live below the session graph, because their semantic body data has no
 //! graph-native arm for its shape, because they are the producer mint itself, or
 //! because they are output/compat reads. This inventory enumerates and partitions
-//! exactly that residual set. The classes shrink to empty when the structural arms
-//! that retire each one exist (private owner-layer body storage plus
-//! graph-native `HotTypeRef` handle access, an explicit `AuthoredDeclBody` /
-//! authored-shape surface, a graph-native closedness/key-domain classifier, a
-//! below-graph layering seam, and the imported-registry-carrier / locator-split
-//! refactors); at that point the `AuthoredShape` / `GraphFreeDto` /
-//! `GraphBackedPending` classes are empty and this guard is deleted.
+//! exactly that residual set. At the terminal state the `AuthoredShape` and
+//! `GraphBackedPending` classes are EMPTY (every named structural arm landed —
+//! the heritage/closedness facts, the narrowed value-annotation fact, the
+//! imported-registry facts carrier, and the locator-native `named_decl_body`);
+//! the `ProducerLowering` class is PERMANENT (the producer bridge above, not on
+//! a path to zero); and the `GraphFreeDto` class is the remaining residual —
+//! below-graph readers whose carriers are content-free facts/locators, the
+//! two external-frontier rows included (their former read of the stored
+//! type-parameter pocket is CLOSED — the frontier derives its narrow output
+//! from the memo's `narrow_type_parameters` mirror with a content-free
+//! re-anchor of the bound slots to the frontier symbol; a `HotTypeRef` there
+//! would invert the below-graph layering). This guard stays as the curated
+//! ratchet over that final partition; it is not deleted.
 //!
 //! This guard pins, structurally:
 //!   1. PRESENCE — every enumerated reader is defined at its `(file, impl/mod,
@@ -1140,24 +1164,31 @@ enum ReaderClass {
     /// [`graph_backed_migrated_anchors_perform_no_typeexpr_body_read`]).
     GraphBackedMigrated,
 
-    /// Authored-shape reader — the decision is intrinsically about the AUTHORED
-    /// syntactic form (literal `Pick` / `Omit` head, `IndexedAccess` object
-    /// chain, `Ref { type_arguments }`, heritage `extends` / `implements` refs,
-    /// closedness / key-domain over the authored `TypeExpr`). Stays `TypeExpr`.
+    /// Authored-shape reader — the decision was intrinsically about the
+    /// AUTHORED syntactic form (literal `Pick` / `Omit` head, `IndexedAccess`
+    /// object chain, `Ref { type_arguments }`, heritage `extends` /
+    /// `implements` refs, closedness / key-domain over the authored
+    /// `TypeExpr`). The class is EMPTY — DONE: the heritage candidates and the
+    /// closedness/key-domain cluster went fact-native (`HeritageBaseFact` /
+    /// `KeyDomainClosednessFact` minted at lazy decl-body lowering, evaluated
+    /// dispatch-side over recipes + nodes), the registry ref-collection
+    /// surface went node-domain, and the shallow fast-path walkers were
+    /// deleted with their functions. No query-time authored-shape `TypeExpr`
+    /// walk remains; a new row here would be growth the curated enumeration
+    /// reddens.
     ///
     /// ```text
-    /// scanner_invariant: reads of a declaration body as TypeExpr for authored-shape
-    ///   decisions are CONFINED BY POLICY to the enumerated production anchors in this
-    ///   class (the curated inventory row), NOT a structurally-enforced embargo. These
-    ///   reads may inspect preserved syntax but must not feed graph-backed semantic
-    ///   reduction. A new bare-field reader outside the enumeration is caught by the
-    ///   curated enumeration + the behavioural parity rail, not by this guard.
-    /// scanner_justification: Whether a reader requires authored syntax is an
-    ///   architectural judgment not expressible by Rust while raw TypeExpr bodies
-    ///   remain available.
-    /// mechanism_ruling: curated inventory row, not a structural confinement proof.
-    ///   The structural replacement is private body storage plus an AuthoredDeclBody
-    ///   wrapper/tokened accessor.
+    /// scanner_invariant: the class is at its empty target — every named
+    ///   authored-shape arm landed fact-native or was deleted with its
+    ///   function; any new row is growth.
+    /// scanner_justification: whether a reader requires authored syntax is an
+    ///   architectural judgment not expressible by Rust while raw TypeExpr
+    ///   bodies remain available; the landed fact-native arms removed every
+    ///   enumerated reader.
+    /// mechanism_ruling: empty class — DONE. Authored syntax reaches semantic
+    ///   consumers only as producer-minted facts/locators; authored TypeExpr
+    ///   consumption is confined to the permanent ProducerLowering ingress
+    ///   (lease-only, decision-free transit).
     /// hardening_rounds: 0
     /// ```
     AuthoredShape,
@@ -1165,7 +1196,20 @@ enum ReaderClass {
     /// Graph-free DTO reader — lives BELOW the session `SemanticGraphStore`
     /// (shallow-file route closures, external-type-frontier resolve paths,
     /// eval-env value-decl peel) and cannot carry a `HotTypeRef` without making a
-    /// below-graph DTO depend on the session graph. Stays `TypeExpr`.
+    /// below-graph DTO depend on the session graph. DECISION inputs are
+    /// content-free facts/locators on every row; `TypeExpr` contact is limited
+    /// to ONE named shape: `route_closure`'s key-source mint — TRANSIENT
+    /// producer ingress (`mint_key_source_fact`, `shallow_file_state.rs:2609`,
+    /// hands lease-reborrowed contributor bodies as `&[TypeExpr]` to
+    /// `produce_key_source_fact`,
+    /// `verter_semantic/src/facts/route_facts.rs:220`; authored bodies, never
+    /// stored — the memo stores only the content-free `KeySourceFact`
+    /// outcome). The two external-frontier rows' former read of the STORED
+    /// `LoweredTypeDecl.type_parameters` pocket is CLOSED (the
+    /// type-parameter-bound confinement block): the frontier now derives its
+    /// narrow type-parameter output from the memo's `narrow_type_parameters`
+    /// mirror with a content-free re-anchor of the bound slots to the
+    /// frontier symbol.
     ///
     /// ```text
     /// scanner_invariant: carriage of a declaration body as TypeExpr on a below-graph
@@ -1184,44 +1228,43 @@ enum ReaderClass {
     /// ```
     GraphFreeDto,
 
-    /// Graph-backed-PENDING reader — a genuinely graph-backed reader that reads
-    /// the body as `TypeExpr` because its shape has no graph-native arm. Each row
-    /// stays `TypeExpr` because the structural arm that would let it route through
-    /// `decl_body_hot_ref` / graph-native dispatch is absent (the imported-registry
-    /// body carrier carries `TypeExpr` rather than identity / `HotTypeRef`; the
-    /// member-surface-route key enumerator has no graph-native `SemanticNodeData`
-    /// key enumerator; the locator is a single `TypeExpr`-returning locator, not
-    /// split into identity/hot vs authored-body locators). Unlike the
-    /// `AuthoredShape` / `GraphFreeDto` /
-    /// `ProducerLowering` / `OutputCompat` classes (which record WHY a reader reads
-    /// `TypeExpr` as a settled architectural fact), this class is a NON-GROWTH
-    /// BOUNDED SET: it is bounded at the readers structurally requiring such an arm,
-    /// may only shrink (a row leaves the moment its structural arm lands), never
-    /// grow, and the cap guard [`graph_backed_pending_is_a_non_growth_bounded_class`]
-    /// REDDENS on any growth. Each row's `reason` names the structural arm that
-    /// would retire it.
+    /// Graph-backed-PENDING reader — a genuinely graph-backed reader that read
+    /// the body as `TypeExpr` because its shape had no graph-native arm. The
+    /// class is EMPTY — DONE: every named structural arm landed (the narrowed
+    /// value-annotation fact, the imported-registry facts carrier, the
+    /// locator-native `named_decl_body`), so no reader still needs such an arm.
+    /// The class stays on the ledger as a NON-GROWTH BOUNDED SET at zero: the
+    /// cap guard [`graph_backed_pending_is_a_non_growth_bounded_class`] REDDENS
+    /// on any growth (a new row would be a genuinely graph-backed reader
+    /// reading `TypeExpr` for want of a graph-native arm — never acceptable
+    /// silently).
     ///
     /// ```text
-    /// scanner_invariant: a non-growth bounded set — every GraphBackedPending row is
-    ///   a graph-backed reader whose shape has no graph-native arm; the set is
-    ///   bounded at the readers structurally requiring such an arm, shrinks to empty
-    ///   as those arms land, and never grows.
-    /// scanner_justification: which graph-backed reader needs a larger structural arm
-    ///   (a carrier identity flip, a graph-native key enumerator, a locator split)
-    ///   before it can route through decl_body_hot_ref is an architectural
-    ///   judgement; the named arm in each row records the boundary, a present
-    ///   architectural fact. The former value-decl annotation arm landed as the
-    ///   narrowed annotation fact and its rows left the class.
-    /// mechanism_ruling: non-growth bounded set — the cap REDs on growth and is
-    ///   LOWERED as each structural arm lands; the set empties as the arms land and
-    ///   this inventory is deleted.
+    /// scanner_invariant: a non-growth bounded set at its empty target — every
+    ///   named structural arm landed (the value-annotation fact, the
+    ///   imported-registry facts carrier, the locator-native named_decl_body);
+    ///   the set shrank to empty as those arms landed and never grows.
+    /// scanner_justification: which graph-backed reader needed a larger
+    ///   structural arm (a carrier identity flip, a graph-native key
+    ///   enumerator, a locator split) before it could route through
+    ///   decl_body_hot_ref was an architectural judgement; each named arm was
+    ///   recorded as a present architectural fact and has now landed.
+    /// mechanism_ruling: non-growth bounded set — the cap REDs on growth; the
+    ///   set emptied as the arms landed. This inventory is a PERMANENT curated
+    ///   ratchet over the terminal partition (ProducerLowering permanent
+    ///   ingress + the GraphFreeDto residual); it is NOT deleted at the empty
+    ///   target.
     /// hardening_rounds: 0
     /// ```
     GraphBackedPending,
 
-    /// Producer lowering — the body mint itself (lowers the authored body into
-    /// the semantic graph) and the eager clone path it backs. Exempt: it is the
-    /// required bridge from authored IR into graph IR.
+    /// Producer lowering — the PERMANENT authored-syntax→graph ingress: the
+    /// body mint itself (lowers the authored body into the semantic graph),
+    /// the content-free assembly tails, and the locator-deref / recipe-escape
+    /// supply lines. NOT on a path to zero — the eager-clone-path debt is
+    /// CLOSED (no `lookup_object`/`into_owned` remains on the prepare
+    /// surface). Exempt: it is the required bridge from authored IR into graph
+    /// IR.
     ///
     /// ```text
     /// scanner_invariant: reads of the authored body to lower it into the semantic
@@ -1297,8 +1340,9 @@ struct ReaderRow {
 /// The residual `TypeExpr` body-reader surface, partitioned by [`ReaderClass`].
 /// `GraphBackedMigrated` rows route through the shared `decl_body_hot_ref` hot
 /// accessor / a graph-native arm and must NOT read a declaration body as
-/// `TypeExpr`; the `AuthoredShape` / `GraphFreeDto` / `GraphBackedPending` /
-/// `ProducerLowering` rows are the justified stay-allowlist. `fact_emission.rs`
+/// `TypeExpr`; the `ProducerLowering` / `GraphFreeDto` rows are the justified
+/// stay-allowlist (`AuthoredShape` / `GraphBackedPending` are EMPTY — DONE:
+/// their named arms landed fact-native or were deleted with their functions). `fact_emission.rs`
 /// and the oracle `source_walk.rs` are EXCLUDED (they are `OutputCompat` in
 /// `COMPAT_BODY_READERS`).
 const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
@@ -1318,7 +1362,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
                  decl_body_hot_ref hot accessor (the Instantiate memo, published Navigate) and \
                  returns its node; reads no prepared.body, no reverse bridge",
     },
-    // ── ProducerLowering — the mint + the eager clone path it backs ─────
+    // ── ProducerLowering — the permanent producer ingress (mint + assembly tails + supply lines)
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
         impl_path: "impl ProjectSemanticDispatch",
@@ -1451,12 +1495,13 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         method_chain: false,
         required_hot_route: &[],
         reason: "thin driver over the shared verter_semantic fact-closure core \
-                 (route_closure_over_facts + SfsRouteFactProvider); the below-graph TypeExpr \
-                 traffic is the provider's deferred key-source fact MINT (key_source_lookup → \
-                 produce_key_source_fact over the lease-only re-borrowed alias contributor \
-                 bodies) — the shared core receives only the content-free KeySourceLookup \
-                 outcome, never a body. No .body field read remains; anchored by the \
-                 enumeration, not the tripwire",
+                 (route_closure_over_facts + SfsRouteFactProvider); TypeExpr contact is the \
+                 LANDED key-source fact mint — TRANSIENT lease-reborrowed ingress \
+                 (key_source_lookup → mint_key_source_fact / produce_key_source_fact over \
+                 lease-only re-borrowed alias contributor bodies as &[TypeExpr]; decision \
+                 inputs stay content-free KeySourceFact / KeySourceLookup outcomes, never a \
+                 stored body). No .body field read remains; anchored by the enumeration, not \
+                 the tripwire",
     },
     // The seven former route-walker GraphFreeDto rows
     // (`member_path_route_closure`, `member_route_closure`,
@@ -1475,10 +1520,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         method_chain: false,
         required_hot_route: &[],
         reason: "mints the graph-free NarrowFrontierBody::Resolvable locator + narrowed \
-                 type-param facts from the local decl (resolve_local_frontier_body) — the \
-                 external-type frontier lives below the session graph. No .body field read (and \
-                 no .body.<method> chain read) remains; anchored by the enumeration, not the \
-                 tripwire",
+                 type-param facts from the local decl (resolve_local_frontier_body) — reads the \
+                 memo's content-free narrow_type_parameters mirror, re-anchoring each bound \
+                 slot to the frontier symbol (the former STORED LoweredTypeDecl.type_parameters \
+                 pocket read is CLOSED); decision inputs stay content-free \
+                 locators/facts. No .body field read remains; anchored by the enumeration, not \
+                 the tripwire",
     },
     ReaderRow {
         file: "src/resolver_core/external_type_frontier.rs",
@@ -1487,11 +1534,13 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
         required_hot_route: &[],
-        reason: "re-clones a frontier-produced ResolvedSymbol.frontier_body \
-                 (existing.frontier_body.clone(), a graph-free NarrowFrontierBody locator, not a \
-                 TypeExpr body) when rebuilding from an already-resolved chain entry — the \
-                 frontier lives below the session graph. No .body field read remains; anchored by \
-                 the enumeration, not the tripwire",
+        reason: "re-clones a frontier-produced ResolvedSymbol.frontier_body / type_parameters \
+                 (existing.frontier_body.clone() + existing.type_parameters.clone() — graph-free \
+                 NarrowFrontierBody locator + NarrowTypeParam facts derived earlier from the \
+                 memo's narrow_type_parameters mirror at resolve_local_frontier_body) \
+                 when rebuilding from an already-resolved chain entry; decision inputs stay \
+                 content-free. No .body field read remains; anchored by the enumeration, not the \
+                 tripwire",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
@@ -1584,7 +1633,7 @@ const COMPAT_BODY_READERS: &[CompatRow] = &[
         fn_name: "compat_type_contributors_for_typeinfo",
         method_chain: false,
         reason: "typeinfo-oracle contributor read — re-borrows the per-contributor TypeExpr view \
-                 lease-only from the retained snapshot (transient_type_bodies); the record stores \
+                 lease-only from the retained snapshot (transient_type_parts); the record stores \
                  content-free contributor locators, so no .body.<method> chain read remains",
     },
     // ── The consumer call-site fns that route through the helpers ───────
@@ -2917,8 +2966,8 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test (count pin): COMPAT_BODY_READERS must have exactly 5 rows"
     );
 
-    // Per-class partition pins. 1 GraphBackedMigrated + 4 ProducerLowering + 3
-    // AuthoredShape + 5 GraphFreeDto + 0 GraphBackedPending = 13. (The
+    // Per-class partition pins. 1 GraphBackedMigrated + 6 ProducerLowering + 0
+    // AuthoredShape + 5 GraphFreeDto + 0 GraphBackedPending = 12. (The
     // class-heritage row left the AuthoredShape class when the heritage
     // candidates went fact-native — producer-minted `HeritageBaseFact`s +
     // dispatch head-resolution over content-free arg locators. The
@@ -3046,9 +3095,10 @@ fn real_tree_inventory_is_non_vacuous() {
 /// [`GRAPH_BACKED_PENDING_TARGET`] and holds the class empty.
 const GRAPH_BACKED_PENDING_CAP: usize = 0;
 
-/// The bound of the empty `GraphBackedPending` set: ZERO. Each row leaves the
-/// class the moment its structural arm lands; when the count reaches 0 the class
-/// (and this guard) is deleted.
+/// The bound of the empty `GraphBackedPending` set: ZERO. Each row left the
+/// class the moment its structural arm landed; the count IS zero and the class
+/// (and this guard) stays as a permanent ratchet over the terminal partition —
+/// neither is deleted.
 const GRAPH_BACKED_PENDING_TARGET: usize = 0;
 
 /// Count the [`ReaderClass::GraphBackedPending`] rows in an arbitrary row slice —
@@ -3066,8 +3116,9 @@ fn count_pending_in(rows: &[ReaderRow]) -> usize {
 /// GROW past its current cap. A NEW pending row (a graph-backed reader added
 /// instead of routed through a structural arm) pushes the count over
 /// [`GRAPH_BACKED_PENDING_CAP`] and REDDENS this guard; when a pending row's named
-/// structural arm lands and it leaves the class, the cap is LOWERED toward 0. This
-/// is the non-growth rail; the exact `== 3` pin in
+/// structural arm lands and it leaves the class, the cap is LOWERED — it reached 0 with the
+/// last arm. This
+/// is the non-growth rail; the exact `== 0` pin in
 /// `real_tree_inventory_is_non_vacuous` coexists with it.
 #[test]
 fn graph_backed_pending_is_a_non_growth_bounded_class() {

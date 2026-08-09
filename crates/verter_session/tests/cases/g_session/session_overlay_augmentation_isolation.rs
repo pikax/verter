@@ -59,7 +59,7 @@ fn prop_names(
 }
 
 #[test]
-fn session_overlay_augmentation_isolated_from_base_meta() {
+pub(crate) fn session_overlay_augmentation_isolated_from_base_meta() {
     let project = workspace_project(&[
         (
             "/workspace/src/types.ts",

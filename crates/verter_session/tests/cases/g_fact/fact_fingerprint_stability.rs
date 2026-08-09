@@ -106,7 +106,7 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
 
     let presence_a_key = FactKey::MemberPresence {
         exporter: InternedName::from("Foo"),
-        name: InternedName::from("a"),
+        name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         space: SymbolSpace::Type,
     };
     let presence_a_before = reg_a
@@ -122,7 +122,7 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
 
     let presence_b_key = FactKey::MemberPresence {
         exporter: InternedName::from("Foo"),
-        name: InternedName::from("b"),
+        name: verter_type_expr::facts::FactPropertyKey::identifier("b"),
         space: SymbolSpace::Type,
     };
     assert!(
@@ -222,7 +222,16 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     // R10 + R27 canonical visit order. The fact emitter sorts
     // type symbols and value symbols by name before emission, so
     // the same file rewritten with decls in reverse declaration
-    // order produces a byte-identical fact set.
+    // order produces a byte-identical fact set — EXCEPT the
+    // deliberately ORDER-SENSITIVE binder rails
+    // (`DeclContributionOrder` / `AugmentationContributionOrder`),
+    // whose entire function is to move when the AUTHORED
+    // declaration order changes (the family-A binder-identity
+    // overload / declaration-order provenance rail: a swap must
+    // invalidate consumers of the authored order — see
+    // `g_binder/binder_identity_facts.rs::contributor_order_swap_warm_misses_cosmetic_between_overloads_stays_warm`).
+    // Every OTHER fact stays reorder-cosmetic; this loop narrows the
+    // byte-identity assertion to that reorder-cosmetic set.
     let in_order = indexed_from_source(
         "export interface Alpha { a: string }\n\
          export interface Bravo { b: number }\n\
@@ -236,8 +245,15 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     let reg_a = registry_of(&in_order);
     let reg_b = registry_of(&reversed);
     // Every fact key in `reg_a` MUST exist in `reg_b` with the
-    // same semantic_hash.
+    // same semantic_hash (the two order-sensitive binder rails
+    // excepted BY DESIGN).
     for (key, fact_a) in reg_a.iter() {
+        if matches!(
+            key,
+            FactKey::DeclContributionOrder { .. } | FactKey::AugmentationContributionOrder { .. }
+        ) {
+            continue;
+        }
         let fact_b = reg_b
             .get(key)
             .unwrap_or_else(|| panic!("declaration reorder dropped key: {key:?}"));

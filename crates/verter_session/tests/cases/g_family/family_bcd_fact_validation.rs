@@ -5,7 +5,7 @@
 //!
 //! Family B:
 //!   - `MaterializeStructureEntry` (component_meta_materialize)
-//!   - `RefCycleEntry` (transitive cycle BFS results)
+//!   - the retired `RefCycleEntry` (transitive cycle BFS results)
 //!   - `MemoEntry` (semantic_query_memo)
 //!
 //! Family C/D:
@@ -77,14 +77,13 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     );
 }
 
-/// Family B: MaterializeStructureEntry + RefCycleEntry + MemoEntry
+/// Family B: MaterializeStructureEntry + MemoEntry
 /// each carry the `read_set_signature` fact carrier as their sole
 /// cache-validity rail. Source-grep arch guard.
 #[test]
 fn family_b_entries_carry_fact_carrier() {
     let cache = read_session_source("component_meta_caches.rs");
     assert_struct_carries_fact_carrier(&cache, "MaterializeStructureEntry");
-    assert_struct_carries_fact_carrier(&cache, "RefCycleEntry");
 
     let memo = read_session_source("semantic_query_memo/family.rs");
     assert_struct_carries_fact_carrier(&memo, "MemoEntry");

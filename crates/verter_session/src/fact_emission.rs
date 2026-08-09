@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::decl_headers::{MemberHeader, MemberHeaderKind};
+use verter_semantic::analysis::decl_headers::MemberHeader;
 use verter_semantic::analysis::types::hash_16;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::{
@@ -53,6 +53,12 @@ use crate::file_artifact_store::{
 };
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
+
+/// The contribution-set / order-sensitive fact family: augmentation
+/// contribution set+order, declaration contribution order, and the
+/// whole-file scope-inventory set facts (split out of this file to keep
+/// each emission module under the file-size ceiling).
+mod contribution_facts;
 
 /// parse-time emission result: a populated [`FileFacts`] plus the
 /// per-file augmentation list.
@@ -345,6 +351,15 @@ pub(crate) fn emit_parse_facts_counting_inventory(
             display_hash: body_hash,
         });
     }
+
+    // ── Order-sensitive contributor-sequence facts + augmentation
+    //    contribution set/order facts (all HEADER-level) ──
+    contribution_facts::emit_decl_contribution_order_facts(&mut registry, shallow, indexed);
+    contribution_facts::emit_augmentation_contribution_facts(&mut registry, shallow);
+
+    // ── Whole-file scope-inventory set facts (augmentation targets +
+    //    namespace blocks, EMPTY blocks included) ──
+    contribution_facts::emit_scope_inventory_facts(&mut registry, shallow);
 
     let lazy = LazyBodyFactSource {
         memo: Arc::clone(shallow.decl_bodies()),
@@ -711,12 +726,15 @@ impl verter_semantic::facts::RouteFactLens for OwnedRouteLens<'_> {
 // ──────────────────────────────────────────────────────────────────
 
 fn member_kind_for_header(header: &MemberHeader) -> MemberKind {
-    match header.kind {
-        MemberHeaderKind::Property => MemberKind::Property {
+    match header.method_kind {
+        None => MemberKind::Property {
             readonly: header.readonly,
             optional: header.optional,
         },
-        MemberHeaderKind::Method => MemberKind::Method,
+        Some(verter_type_expr::ObjectMethodKind::Method) => MemberKind::Method,
+        Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set) => {
+            MemberKind::Accessor
+        }
     }
 }
 
@@ -730,13 +748,13 @@ fn emit_member_shape_facts(
     if headers.is_empty() {
         return;
     }
-    let members_for_shape: Vec<(Arc<str>, MemberKind)> = headers
+    let members_for_shape: Vec<(verter_type_expr::facts::FactPropertyKey, MemberKind)> = headers
         .iter()
-        .map(|header| {
-            (
-                Arc::<str>::from(header.name.as_str()),
-                member_kind_for_header(header),
-            )
+        .filter_map(|header| {
+            header
+                .key
+                .cloned_known()
+                .map(|key| (key, member_kind_for_header(header)))
         })
         .collect();
     emit_member_facts_from_kinds(registry, name, exporter, space, members_for_shape);
@@ -751,12 +769,12 @@ fn emit_member_facts_from_kinds(
     name: &str,
     exporter: &InternedName,
     space: SymbolSpace,
-    mut members_for_shape: Vec<(Arc<str>, MemberKind)>,
+    mut members_for_shape: Vec<(verter_type_expr::facts::FactPropertyKey, MemberKind)>,
 ) {
     if members_for_shape.is_empty() {
         return;
     }
-    members_for_shape.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+    members_for_shape.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Exact incoming batch: one `MemberShape` fact plus one `MemberPresence`
     // fact per member — reserve up front instead of doubling mid-batch.
@@ -772,11 +790,11 @@ fn emit_member_facts_from_kinds(
         display_hash: shape_hash,
     });
     for (member_name, kind) in &members_for_shape {
-        let presence_hash = compute_member_presence_hash(name, member_name.as_ref(), *kind, space);
+        let presence_hash = compute_member_presence_hash(name, member_name, *kind, space);
         registry.insert(Fact {
             key: FactKey::MemberPresence {
                 exporter: exporter.clone(),
-                name: InternedName(Arc::clone(member_name)),
+                name: member_name.clone(),
                 space,
             },
             semantic_hash: presence_hash,
@@ -834,10 +852,16 @@ fn emit_enum_symbol_headers(registry: &mut FactRegistry, view: &FactEmissionView
             continue;
         };
         let exporter = InternedName::from(name);
-        let members_for_shape: Vec<(Arc<str>, MemberKind)> = members
-            .iter()
-            .map(|variant| (Arc::<str>::from(variant.as_str()), MemberKind::EnumMember))
-            .collect();
+        let members_for_shape: Vec<(verter_type_expr::facts::FactPropertyKey, MemberKind)> =
+            members
+                .iter()
+                .map(|variant| {
+                    (
+                        verter_type_expr::PropertyKey::identifier(variant.as_str()),
+                        MemberKind::EnumMember,
+                    )
+                })
+                .collect();
         emit_member_facts_from_kinds(
             registry,
             name,
@@ -1026,22 +1050,13 @@ fn compute_display_hash(semantic: &Hash16) -> Hash16 {
 /// augmentation-index producer populates it lazily on first
 /// augmentation-sensitive query.
 fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationFact> {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
-
-    let specifier_for = |scope: &AugmentationScopeKind| -> InternedSpecifier {
-        match scope {
-            AugmentationScopeKind::Global => InternedSpecifier::from(GLOBAL_AUGMENTATION_TAG),
-            AugmentationScopeKind::Module(spec) => InternedSpecifier::from(spec.as_str()),
-        }
-    };
-
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
 
     // Type-space augmentations (interfaces, type aliases).
     for (scope, key, header) in view.augmentation_type_headers() {
         let name = key.name.as_ref();
         out.push(ModuleAugmentationFact {
-            specifier: specifier_for(scope),
+            specifier: contribution_facts::specifier_for(scope),
             owner: key.owner,
             augmented_name: InternedName::from(name),
             space: SymbolSpace::Type,
@@ -1060,7 +1075,7 @@ fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationF
     for (scope, key, header) in view.augmentation_value_headers() {
         let name = key.name.as_ref();
         out.push(ModuleAugmentationFact {
-            specifier: specifier_for(scope),
+            specifier: contribution_facts::specifier_for(scope),
             owner: key.owner,
             augmented_name: InternedName::from(name),
             space: SymbolSpace::Value,
@@ -1102,7 +1117,7 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
 /// names/kinds/flags, contributor count. Moves on any skeleton edit
 /// (member add/remove/rename, kind change, contributor add/remove);
 /// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
-fn augmentation_header_fingerprint(
+pub(super) fn augmentation_header_fingerprint(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -1111,8 +1126,6 @@ fn augmentation_header_fingerprint(
     contributor_count: usize,
 ) -> Hash16 {
     use std::hash::{Hash, Hasher};
-    let mut sorted: Vec<&MemberHeader> = members.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let digest = |salt: u64| -> u64 {
         let mut h = rustc_hash::FxHasher::default();
         salt.hash(&mut h);
@@ -1121,9 +1134,9 @@ fn augmentation_header_fingerprint(
         name.hash(&mut h);
         kind.hash(&mut h);
         contributor_count.hash(&mut h);
-        for member in &sorted {
-            member.name.hash(&mut h);
-            matches!(member.kind, MemberHeaderKind::Method).hash(&mut h);
+        for member in members {
+            member.key.hash(&mut h);
+            member.method_kind.hash(&mut h);
             member.optional.hash(&mut h);
             member.readonly.hash(&mut h);
         }

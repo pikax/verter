@@ -23,6 +23,7 @@
 pub(crate) mod admission;
 pub(crate) mod candidate_store;
 pub(crate) mod compile_output_node;
+pub(crate) mod flow_slice_node;
 pub(crate) mod lookup_publish;
 pub(crate) mod node;
 pub(crate) mod singleflight;

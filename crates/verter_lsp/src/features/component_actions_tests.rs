@@ -48,6 +48,7 @@ fn make_prop(name: &str) -> TemplatePropUsage {
         name: name.to_string(),
         is_bound: true,
         expression: None,
+        expression_locator: None,
         constness: PropValueConstness::Dynamic,
         referenced_bindings: vec![],
         from_spread: false,

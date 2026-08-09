@@ -14,7 +14,6 @@ use std::sync::Arc;
 use crate::instant::Instant;
 
 use crate::resolver_core::{
-    collect_dynamic_root_candidates_from_type,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry, fallthrough_cache_key,
     materialize_imported_runtime_values_into_env, push_partial_reason,
@@ -61,6 +60,15 @@ pub(super) struct FallthroughEvalInputs {
     pub(super) env: std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     pub(super) materialized_runtime_values:
         std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>,
+}
+
+/// Whether a STATIC `is="…"` value names a NATIVE element rather than a
+/// component. This is the same authority the IDE template rewrite consults
+/// (`verter_compiler`'s `static_component_is_target`): a name outside the
+/// HTML tag set is a component target — a local binding, an import, or a
+/// `GlobalComponents`-registered name — never an intrinsic element.
+fn static_is_names_native_tag(name: &str) -> bool {
+    verter_parser::utils::vue::tag::is_html_tag(name.as_bytes())
 }
 
 impl std::ops::Deref for FallthroughEvalInputs {
@@ -911,6 +919,8 @@ impl VerterHost {
                 canonical_id,
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 prop,
+                prop.expression_locator
+                    .and_then(|locator| template.expression(locator)),
                 env_ref,
                 overrides_in,
             ) else {
@@ -1001,7 +1011,10 @@ impl VerterHost {
             let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             let env_ref = eval_env.as_deref();
             for directive in spread_directives {
-                let Some(expression) = directive.expression.as_deref() else {
+                let Some(expression) = directive
+                    .expression_span
+                    .and_then(|span| template.expression_at_span(span))
+                else {
                     push_partial_reason(
                         &mut resolved.partial_reasons,
                         PartialBranchReason::UnknownSpread,
@@ -1063,32 +1076,59 @@ impl VerterHost {
         };
 
         let expression = is_prop
-            .expression
-            .clone()
-            .or_else(|| is_prop.is_shorthand.then(|| is_prop.name.clone()));
-        let Some(expression) = expression else {
+            .expression_locator
+            .and_then(|locator| template.expression(locator));
+        let shorthand;
+        let expression = if let Some(expression) = expression {
+            expression
+        } else if !is_prop.is_bound {
+            // A STATIC `is="…"` classifies structurally, through the SAME
+            // native-tag authority the IDE template rewrite uses: an HTML
+            // tag name is an intrinsic element, and every other name is a
+            // component reference that resolves through the `typeof` arm —
+            // a local binding, an import, or a `GlobalComponents`-registered
+            // name. A component name this project cannot resolve produces NO
+            // candidate, so the branch is unresolved rather than a
+            // fabricated intrinsic attribute surface.
+            shorthand = verter_type_expr::IndexedValueExpression::Value(
+                is_prop.expression.as_ref().map_or_else(
+                    || verter_type_expr::TypeExpr::boolean_literal(true),
+                    |value| {
+                        let name = value.trim();
+                        if name.is_empty() || static_is_names_native_tag(name) {
+                            verter_type_expr::TypeExpr::string_literal(value.clone())
+                        } else {
+                            verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                                path: vec![name.to_string()],
+                                type_args: Vec::new(),
+                            })
+                        }
+                    },
+                ),
+            );
+            &shorthand
+        } else if is_prop.is_shorthand {
+            shorthand = verter_type_expr::IndexedValueExpression::Value(
+                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec![is_prop.name.clone()],
+                    type_args: Vec::new(),
+                }),
+            );
+            &shorthand
+        } else {
             return Vec::new();
         };
 
         let mut candidates = Vec::new();
-        if let Some(lowered) =
-            verter_semantic::analysis::type_eval_build::parse_value_expression_type(&expression)
-        {
-            candidates.extend(collect_dynamic_root_candidates_from_type(
-                &lowered,
-                snapshot.imports.as_slice(),
-            ));
-        }
         // Bind the engine to the supplied request-bound `ctx` so
         // cache validators inside the engine inherit the overlay-aware
         // view. The evaluated `is=` value resolves to a NODE and its
-        // dynamic-root candidates are read in node domain (the raw-parse
-        // step above stays syntactic).
+        // dynamic-root candidates are read in node domain.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
         candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
             verter_type_expr::TopLevelOwnerId::instance(0),
-            &expression,
+            expression,
             eval_env.as_deref(),
             overrides,
             snapshot.imports.as_slice(),

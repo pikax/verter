@@ -230,6 +230,9 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
             canonical_id: Arc::from("/test/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("MemoTarget"),
     });

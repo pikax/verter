@@ -7,7 +7,8 @@ use verter_type_expr::{
     render_type_expr_display, FunctionExpr, FunctionParam, IndexSignature, LiteralValue,
     MappedModifier, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam, ValueRef,
+    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam,
+    UnknownValue, ValueRef,
 };
 
 fn reference(name: &str) -> TypeExpr {
@@ -38,6 +39,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
         name: "T".into(),
         constraint: Some(Arc::new(reference("Base"))),
         default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+        is_const: false,
     };
     let callable = function(
         vec![FunctionParam::synthetic(
@@ -72,6 +74,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
                 name: "U".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }),
             true,
             false,
@@ -82,18 +85,20 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
                 name: "U".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             })],
         ),
         vec![TypeParam {
             name: "U".into(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     );
 
     let expression = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "dash-key".into(),
                 TypeExpr::Array {
                     element: Arc::new(reference("Foo")),
@@ -110,7 +115,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
             )),
             ObjectMember::CallSignature(callable),
             ObjectMember::ConstructSignature(constructor),
-            ObjectMember::Method(MethodSignature::synthetic_public(
+            ObjectMember::Method(MethodSignature::synthetic_public_key(
                 "run".into(),
                 method,
                 true,
@@ -145,6 +150,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                     name: "K".into(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 })),
             }),
             extends: Arc::new(reference("Expected")),
@@ -159,6 +165,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                 name: "K".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             })]),
         })),
     };
@@ -204,9 +211,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                 },
             ]),
         },
-        TypeExpr::Unknown {
-            raw: "Custom & Raw".into(),
-        },
+        TypeExpr::Unknown(UnknownValue::unsupported_syntax("Custom & Raw")),
     ]));
 
     let rendered = render_type_expr_display(&expression).expect("the complete union must render");
@@ -298,7 +303,7 @@ fn rejects_internal_or_malformed_carriers_instead_of_rendering_unknown() {
     );
 
     assert_eq!(
-        render_type_expr_display(&TypeExpr::Unknown { raw: String::new() }),
+        render_type_expr_display(&TypeExpr::Unknown(UnknownValue::missing_output())),
         Err(TypeExprDisplayError::EmptyUnknownSource)
     );
     assert_eq!(

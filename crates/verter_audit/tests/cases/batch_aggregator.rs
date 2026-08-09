@@ -64,6 +64,9 @@ fn build_record(
         }
         RequestKind::Custom { .. } => RequestKindPayload::None,
         RequestKind::TypeInfoGraph => RequestKindPayload::TypeInfoGraph(Default::default()),
+        RequestKind::FlowReturnInference => {
+            RequestKindPayload::FlowReturnInference(Default::default())
+        }
     };
     let mut record = RequestAuditRecord {
         request_id,

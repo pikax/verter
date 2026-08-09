@@ -4,6 +4,8 @@
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
 mod compound_lowering_shapes;
+mod const_type_param_lowering;
 mod constructor_type_lowering;
 mod recursion_depth;
+mod this_receiver_lowering;
 mod typeof_instantiation_lowering;

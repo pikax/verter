@@ -1,8 +1,8 @@
 {
   "block_content_artifact_schema_version": 1,
   "qualified_source_map_schema_version": 1,
-  "cache_cluster_schema_version": 8,
-  "component_meta_schema_version": 8,
+  "cache_cluster_schema_version": 10,
+  "component_meta_schema_version": 10,
   "structure_protocol_version": 1,
   "provider_protocol_version": 12,
   "napi_schema_version": 1,

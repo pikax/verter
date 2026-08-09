@@ -211,7 +211,7 @@ impl DeferredEvaluationFrame {
     fn merge_read<T>(&mut self, read: &CacheRead<T>) {
         self.completeness = self
             .completeness
-            .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+            .or_partial_if(read.result_is_partial, read.partial_reason_classes());
         self.cache_suppress |= read.cache_suppress;
     }
 
@@ -239,7 +239,8 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
     match index {
         IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
         IndexKey::Number(number) => IndexKey::Number(*number),
-        IndexKey::TypeNode(node) => IndexKey::TypeNode(*node),
+        IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+        IndexKey::Computed(node) => IndexKey::Computed(*node),
     }
 }
 
@@ -356,10 +357,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // canonical-needle recovery.
                 match super::build::integer_convention_index_key(*number) {
                     Some(integer) => IndexKey::Number(integer),
-                    None => IndexKey::TypeNode(resolved),
+                    None => IndexKey::Computed(resolved),
                 }
             }
-            _ => IndexKey::TypeNode(resolved),
+            _ => IndexKey::Computed(resolved),
         }
     }
 
@@ -637,6 +638,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             canonical_id: Arc::clone(&identity.canonical_id),
                             owner: identity.owner,
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                identity.owner,
+                            ),
                         },
                         name: Arc::clone(&identity.decl_name),
                     }));
@@ -646,7 +650,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &read.dep_signature,
                     );
                     completeness = completeness
-                        .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+                        .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) => {
@@ -697,7 +701,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &read.dep_signature,
                     );
                     completeness = completeness
-                        .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+                        .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) => {
@@ -861,7 +865,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.deferred_read_action(frame, read, fallback)
                     }
                     DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
-                        IndexKey::TypeNode(index_node) => {
+                        IndexKey::Computed(index_node) => {
                             frame.stage =
                                 DeferredEvaluationStage::AwaitIndexedIndex { object: child.node };
                             DeferredEvaluationAction::Push {
@@ -971,7 +975,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             let projection_path: Arc<[PathSegment]> = Arc::from(
                                                 path.iter()
                                                     .map(|segment| {
-                                                        PathSegment::Member(Arc::clone(segment))
+                                                        PathSegment::Member(
+                                                            crate::semantic_query::PropertyKey::identifier(
+                                                                Arc::clone(segment),
+                                                            ),
+                                                        )
                                                     })
                                                     .collect::<Vec<_>>()
                                                     .into_boxed_slice(),
@@ -1087,12 +1095,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     );
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 frame.completeness = frame.completeness.merge(carrier_completeness);
-                                if observed.result_is_partial && !carrier_completeness.is_partial()
-                                {
-                                    frame.completeness = frame.completeness.merge(
-                                        ResultCompleteness::partial(PartialReasonSet::PROPAGATED),
-                                    );
-                                }
+                                frame.completeness = frame.completeness.or_partial_if(
+                                    observed.result_is_partial
+                                        && !carrier_completeness.is_partial(),
+                                    observed.partial_reasons,
+                                );
                                 frame.cache_suppress |= observed.cache_suppress;
                                 frame.advance_or_finish(resolved)
                             }
@@ -1145,6 +1152,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the matching funnel for evaluator-local ones.
     pub(super) fn fold_local_partial_completeness(&self, reasons: PartialReasonSet) {
         crate::request_context::fold_result_completeness(ResultCompleteness::partial(reasons));
-        self.fold_into_top_build_local_taint(true, true);
+        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 }

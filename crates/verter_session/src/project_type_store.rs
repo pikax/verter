@@ -99,7 +99,12 @@ pub struct AnalysisArtifactKey {
 ///
 /// The OXC parse arena is transient — `IndexedReady` stores only owned
 /// `Send + Sync` data so long-lived host-owned caches do not carry borrowed
-/// AST pointers.
+/// AST pointers. Its declaration-body memo (`shallow_state.decl_bodies()`)
+/// also serves the arena-free `FunctionProgramIndex` demand product:
+/// function identities + body locators, binding/reference inventory,
+/// return sites, writes/effects, the control-region skeleton, exact direct
+/// local call targets, and whole-function stable hashes — structural only,
+/// never a lowered type tree.
 ///
 /// `IndexedReady` is the single canonical post-parse artifact: every
 /// consumer reads it from [`FileArtifactStore`] through
@@ -926,11 +931,6 @@ pub struct ProjectTypeStore {
     /// The canonical removed-symbol list lives in
     /// `tests/cases/g_misc0/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
-    /// C — host-owned cache for
-    /// `meta_resolve::ref_root_reaches_transitive_cycle_node`. BFS
-    /// results stored as `(DeclIdentity → bool)` with reverse-index
-    /// invalidation matching `MaterializeStructureDb`.
-    ref_cycle_db: crate::component_meta_caches::RefCycleResultDb,
     /// Issue #6 — host-owned proof cache for the ComponentConfig
     /// theme variant fast path. Keyed by
     /// `(app_config_decl_canonical_id, component_key_literal)`. An
@@ -954,6 +954,16 @@ pub struct ProjectTypeStore {
     /// the per-profile [`compile_cache_db`](Self::compile_cache_db)
     /// instead, so the two cache families are disjoint by construction.
     compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
+    /// The demand-sliced flow substrate's home: the
+    /// once-per-content-version `FunctionFlowGraphStore` plus the
+    /// content-addressed `FlowSliceHashNode` / `FlowSliceLoweredBodyNode`
+    /// artifact nodes and the shared armed `FlowSliceBudget` cell.
+    /// Content-addressed (key identity IS validity — no fact rail, no
+    /// generation participation, like `compile_output_pure_content`);
+    /// per-canonical eviction rides the `evict_canonical` cascade.
+    /// Memory-side only; persistent registration of the two nodes is
+    /// separately owed and nothing here builds a persistence tier.
+    flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
     /// Holds [`crate::types::DerivedRawState`] entries (the
     /// caller-supplied route table plus source-derived analyses); the
@@ -988,6 +998,12 @@ pub struct ProjectTypeStore {
     /// Keyed on `content_hash` so cosmetic edits recompute display facts only.
     /// See [`crate::member_display_fact_store::MemberDisplayFactStore`].
     member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore,
+    /// Family-A `BinderIdentityFacts` artifact store — the pre-reducer
+    /// binder-identity substrate (scope tree / declaration-slot seeds /
+    /// provenance). Keyed `(canonical, parse_stable_hash, parse_env_hash)`
+    /// so cosmetic edits preserve the entry. See
+    /// [`crate::binder_identity_facts::BinderIdentityFactsStore`].
+    binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore,
     /// Host-owned mapped-binder ordinal registry. The
     /// registry hands out STABLE `param_index` ordinals for each
     /// `(canonical, display_name, fingerprint)` triple so two
@@ -1080,9 +1096,6 @@ impl ProjectTypeStore {
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
             ));
-        let ref_cycle_db = crate::component_meta_caches::RefCycleResultDb::with_counter(
-            Arc::clone(&counters.component_meta_cache_live),
-        );
         let app_config_no_override_proof =
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1103,10 +1116,10 @@ impl ProjectTypeStore {
             owner_collection_db,
             shape_cache_db,
             materialize_structure_db,
-            ref_cycle_db,
             app_config_no_override_proof,
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
+            flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores::new(),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
@@ -1116,6 +1129,7 @@ impl ProjectTypeStore {
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
+            binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore::new(),
             mapper_binder_registry: Arc::new(
                 crate::mapper_binder_registry::MapperBinderRegistry::new(),
             ),
@@ -1222,6 +1236,12 @@ impl ProjectTypeStore {
         &self.compile_output_pure_content
     }
 
+    /// The demand-sliced flow substrate's project-global home (graph
+    /// store + slice nodes + shared budget cell).
+    pub(crate) fn flow_slice(&self) -> &crate::cache_runtime::flow_slice_node::FlowSliceStores {
+        &self.flow_slice
+    }
+
     /// Source-content-domain DB for the per-canonical compile cache
     /// (D48). Stores [`crate::types::DerivedRawState`] entries;
     /// source-content changes invalidate, profile-flag changes preserve.
@@ -1309,13 +1329,6 @@ impl ProjectTypeStore {
         &self.materialize_structure_db
     }
 
-    /// C — accessor for the host-owned
-    /// transitive-cycle BFS cache consulted by
-    /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
-    pub fn ref_cycle_db(&self) -> &crate::component_meta_caches::RefCycleResultDb {
-        &self.ref_cycle_db
-    }
-
     /// Resolve-domain authoritative store for resolved import /
     /// re-export bindings + per-specifier resolutions. Keyed by
     /// `(canonical, content_hash, parse_env_hash, resolve_env_hash,
@@ -1357,6 +1370,17 @@ impl ProjectTypeStore {
         &self,
     ) -> &crate::member_display_fact_store::MemberDisplayFactStore {
         &self.member_display_facts
+    }
+
+    /// Family-A `BinderIdentityFacts` artifact store (the pre-reducer
+    /// binder-identity substrate). See
+    /// [`crate::binder_identity_facts::BinderIdentityFactsStore`] for the
+    /// producer contract.
+    #[must_use]
+    pub fn binder_identity_facts_store(
+        &self,
+    ) -> &crate::binder_identity_facts::BinderIdentityFactsStore {
+        &self.binder_identity_facts
     }
 
     /// Host-owned mapped-binder ordinal registry. Hands
@@ -1410,6 +1434,15 @@ impl ProjectTypeStore {
     ///   references the canonical.
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
+        // Flow-slice substrate: content-addressed, so a stale version
+        // misses by key — which holds because the key carries the EXACT
+        // per-function byte hash AND the artifacts store no absolute
+        // source position (see `flow_slice_node`). Eviction here is for
+        // memory hygiene exactly like the `FileArtifactStore` removal
+        // above, NOT the correctness rail: it fires on upsert only for
+        // artifact-only canonicals, so it never runs for an ordinary
+        // edited file and the key must be the oracle on its own.
+        self.flow_slice.remove_canonical(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
         self.owner_import_surfaces.remove(canonical_id);
         self.component_meta_results.invalidate_owner(canonical_id);
@@ -1430,9 +1463,6 @@ impl ProjectTypeStore {
         // structural-materialiser cache (sole materialiser cache).
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
-        // R — same per-canonical reverse-index drain
-        // for the BFS cycle-result cache.
-        self.ref_cycle_db.invalidate_for_canonical(canonical_id);
         // Issue #6 / drop any AppConfigNoOverrideProof entry
         // whose dep_signature references this canonical or whose
         // app_config_decl_canonical_id IS this canonical.
@@ -1452,6 +1482,11 @@ impl ProjectTypeStore {
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
+        // Family-A binder-identity artifacts key on the canonical's
+        // parse-stable skeleton: a content edit drops them so the next
+        // demand re-projects from fresh shallow state.
+        self.binder_identity_facts
+            .invalidate_canonical(canonical_id);
         // Drop the per-canonical mapper-binder
         // registry slot. The next lowering of any mapper in this
         // file starts with a fresh `Arc::as_ptr` keyspace so a
@@ -1494,13 +1529,14 @@ impl ProjectTypeStore {
         self.shape_cache_db.invalidate_canonical(canonical_id);
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
-        self.ref_cycle_db.invalidate_for_canonical(canonical_id);
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
         self.semantic_db.lock().invalidate(canonical_id);
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
+        self.binder_identity_facts
+            .invalidate_canonical(canonical_id);
         self.mapper_binder_registry
             .clear_for_canonical(canonical_id);
     }
@@ -1665,10 +1701,6 @@ impl ProjectTypeStore {
         // `member_shape_cache_db`.
         self.shape_cache_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
-        // R — project-shape change invalidates the
-        // BFS cycle-result cache (entries depend on the same routes /
-        // intrinsics that change at the project-generation boundary).
-        self.ref_cycle_db.invalidate_all();
         // Issue #6 / project-shape change invalidates every
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
@@ -1733,7 +1765,6 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "owner_collection_db",
     "shape_cache_db",
     "materialize_structure_db",
-    "ref_cycle_db",
     "app_config_no_override_proof",
     "compile_cache_db",
     // D48 split: source-content-domain and dep-closure-domain siblings
@@ -1769,7 +1800,6 @@ impl ProjectTypeStore {
             &self.owner_collection_db,
             &self.shape_cache_db,
             &self.materialize_structure_db,
-            &self.ref_cycle_db,
             &self.app_config_no_override_proof,
             &self.compile_cache_db,
             // Source-content-domain and dep-closure-domain siblings of
@@ -1843,7 +1873,6 @@ impl ProjectTypeStore {
             self.materialize_structure_db
                 .invalidate_canonical_for(canonical_id),
         );
-        total = total.saturating_add(self.ref_cycle_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
             self.app_config_no_override_proof
                 .invalidate_canonical_for(canonical_id),

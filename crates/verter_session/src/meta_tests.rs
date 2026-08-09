@@ -5,7 +5,7 @@ use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
-use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr, UnknownValue};
 
 fn published_type(
     row: &crate::meta_resolve::MaterializedTypePublication,
@@ -2135,6 +2135,938 @@ import { obj } from './obj'
 /// replay warm-hits — RED. Post-fix the carrier merges the fallthrough
 /// completeness into the gate, refusing admission — GREEN. The runtime node
 /// cache and the legacy mirror also stay empty for the partial.
+/// PUBLIC BOUNDARY — a props type derived from a helper whose return has
+/// ONE unmodelled member publishes the MODELLED members, marks the
+/// unmodelled one, reports partial, and warms NOTHING.
+///
+/// `defineProps<ReturnType<typeof makeProps>>()` over
+/// `{ label: "x", made: new Box() }`. The substrate cannot type
+/// `new Box()` — that is `U6.CALL_RESOLVE` — but `label` is fully known,
+/// and a props surface is a COMPOSITE: routing one unmodelled member to a
+/// whole-frame failure published `[]`, complete and warm, where the
+/// checker publishes `{ label: string; made: Box }`. A wrong value at a
+/// public boundary, entering `ComponentMetaResultDb`.
+///
+/// Four independent assertions, because three of them pass on the wrong
+/// implementation:
+///
+///  1. `label` IS published (fails on the collapse);
+///  2. `made` IS published and is NOT a usable type — it is the typed
+///     unresolved marker, never a fabricated `any` (a fabricated `any` is
+///     indistinguishable from an authored one at every downstream gate,
+///     so this is what discriminates "marked" from "silently guessed");
+///  3. the result is reported PARTIAL;
+///  4. nothing warms `ComponentMetaResultDb` — a replay is cold.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `ReturnType<typeof makeProps>` is
+/// `{ label: string; made: Box }`.
+///
+/// Mutation recipe: restoring the whole-frame `Err` for a positional
+/// non-modelling drops BOTH props and assertion 1 fails (verbatim: "the
+/// modelled sibling `label` MUST be published … got []" — which is B-F1
+/// reproduced at the boundary); publishing a fabricated `any` for `made`
+/// leaves 1/3/4 green and fails 2.
+///
+/// Assertions 3 and 4 are NOT gated by the consumer-entry cache-read fold
+/// on this fixture — the unresolved marker suppresses admission through
+/// the `FlowReturn` query's own `cache_suppress` regardless. The fold's
+/// discriminator is
+/// [`a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result`],
+/// where the degraded value carries no marker at all.
+/// PUBLIC BOUNDARY — a DEGRADED SUCCESS whose value is fully usable still
+/// gates the ENCLOSING result: partial, and nothing warms.
+///
+/// This is the arm the marker cannot cover. `makeProps` compound-assigns
+/// to its own parameter before returning — a plain `=` write at
+/// statement position is APPLIED by the evaluator and stays clean, so
+/// the degradation fixture rides the operator form nobody applies —
+/// so the evaluation carries the typed `UnappliedWriteEffect` degradation
+/// — but its VALUE is a perfectly ordinary `{ label: string }` with no
+/// miss carrier anywhere in it. So every downstream "is this value
+/// known" test passes, the props surface publishes `label: string`, and
+/// the ONLY thing that says the answer is not complete is the
+/// degradation channel itself.
+///
+/// The sealed consumer entry
+/// (`ProjectSemanticDispatch::execute_function_return_source`) is what
+/// carries that fact outward, by folding the cache-read rails. Without
+/// the fold the enclosing composition reports COMPLETE and WARMS around a
+/// degraded interior — which is the defect the fold was landed for, and
+/// which nothing in the suite discriminated until this row.
+///
+/// Mutation recipe: emptying the `consumer_fold` match arms at the sealed
+/// entry leaves the whole rest of the suite green and fails exactly this
+/// test — first on `synthesis_should_suppress`, and on the warm replay if
+/// that assertion is removed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/C2.vue",
+            r#"<script setup lang="ts">
+function makeProps(seed: string) {
+  seed += "y"
+  return { label: seed }
+}
+defineProps<ReturnType<typeof makeProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let canonical = "/src/C2.vue";
+    let meta = get_meta(&project, canonical);
+
+    // The value is USABLE and fully known: `label` publishes normally and
+    // carries NO marker. That is what makes this row discriminating — the
+    // degradation is the only signal there is.
+    let label = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("the `label` prop");
+    let label_type = demand_published_type(
+        host,
+        canonical,
+        label.publication.result().selected_source(),
+        "label",
+    );
+    assert!(
+        matches!(&label_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "the degraded evaluation's VALUE is ordinary and fully known; got {label_type:?}"
+    );
+
+    // The enclosing result is nevertheless PARTIAL, and warms nothing.
+    let (_, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a degraded flow-return interior makes the ENCLOSING result partial — the sealed \
+         consumer entry's cache-read fold is the only thing that carries that fact outward"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, canonical);
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a result composed around a degraded interior MUST NOT warm \
+         `ComponentMetaResultDb` (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// A body-derived return the substrate could NOT infer never publishes as a
+/// COMPLETE and WARM component-meta surface.
+///
+/// SIX measured programs published `props: []` with
+/// `synthesis_should_suppress: false` and a WARM cache hit on replay, for
+/// shapes the checker types without difficulty. The whole no-value class
+/// reached `get_component_meta` announcing a complete answer, because the
+/// sealed consumer entry suppressed only the build-local taint and left the
+/// REQUEST unmarked — and `mark_request_result_partial` is the sole gate on
+/// `ComponentMetaResultDb`.
+///
+/// Each row states the checker's answer (tsgo `7.0.0-dev.20260526.1`,
+/// `--noEmit --strict --ignoreConfig`). The boundary triple is asserted for
+/// every one: the published `props`, `synthesis_should_suppress`, and the
+/// `component_meta_result_cache_hits` DELTA across a replay.
+///
+/// `cleanControl` is the discrimination control: an ordinary body must
+/// still publish its props, report complete, and warm — a fold that
+/// suppressed everything would pass every other row and fail this one.
+///
+/// Mutation recipe: returning the no-value arm to `(false, true)` —
+/// build-local taint only — flips every `NO_ANSWER` row's suppress to
+/// `false` and its replay delta to 1.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    /// The checker HAS an answer for every one of these; this substrate does
+    /// not. The publication contract is the same either way: not complete,
+    /// not warm.
+    const NO_ANSWER: &[(&str, &str, &str)] = &[
+        (
+            "/src/U1Loop.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            "{ label: string }",
+        ),
+        (
+            "/src/U1LoopArrow.vue",
+            "function makeProps() { return { label: \"x\", go: (n: number) => { while (n > 0) { return n } return 0 } } }",
+            "{ label: string; go: (n: number) => number }",
+        ),
+        (
+            "/src/U1HelperBare.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "{ label: string; made: Box }",
+        ),
+        (
+            "/src/U1HelperArray.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
+            "{ label: string; made: (string | Box)[] }",
+        ),
+    ];
+
+    for (canonical, script, checker) in NO_ANSWER {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            resolved.synthesis_should_suppress,
+            "{canonical}: the checker publishes `{checker}` and this substrate publishes \
+             {names:?} — whatever it publishes, it must NOT report a COMPLETE surface"
+        );
+
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after, hits_before,
+            "{canonical}: an uninferred body return MUST NOT warm `ComponentMetaResultDb` \
+             (hits_before={hits_before}, hits_after={hits_after})"
+        );
+    }
+
+    // THE DISCRIMINATION CONTROL: an ordinary body publishes, reports
+    // complete, and warms. A blanket suppression passes every row above.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/U1Clean.vue",
+            "<script setup lang=\"ts\">\nfunction makeProps() { return { label: \"x\", n: 1 } }\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/U1Clean.vue");
+    let mut names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["label", "n"],
+        "the clean control publishes its whole props surface"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/U1Clean.vue")
+        .expect("the clean resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the clean control reports a COMPLETE surface"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/U1Clean.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the clean control WARMS on replay (hits_before={hits_before}, hits_after={hits_after})"
+    );
+
+    // The switch / try statement-position return shapes the no-answer set
+    // lost: both now publish the checker's surface, COMPLETE and warm.
+    for (canonical, script) in [
+        (
+            "/src/U1Switch.vue",
+            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+        ),
+        (
+            "/src/U1Try.vue",
+            "function makeProps() { try { return { label: \"x\" } } catch { return { label: \"y\" } } }",
+        ),
+    ] {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["label"],
+            "{canonical}: the statement-position return join publishes the checker's member set"
+        );
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            !resolved.synthesis_should_suppress,
+            "{canonical}: the switch / try return now HAS an answer — the surface is complete"
+        );
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after,
+            hits_before + 1,
+            "{canonical}: a clean statement-position return WARMS on replay"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/C1.vue",
+            r#"<script setup lang="ts">
+class Box { readonly tag = "box" }
+function makeProps() {
+  return { label: "x", made: new Box() }
+}
+defineProps<ReturnType<typeof makeProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let canonical = "/src/C1.vue";
+    let meta = get_meta(&project, canonical);
+
+    let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    // 1. The MODELLED member survives.
+    assert!(
+        names.contains(&"label"),
+        "the modelled sibling `label` MUST be published — one unmodelled member \
+         never discards the composite; got {names:?}"
+    );
+    // 2. The unmodelled member is present and MARKED, never a fabricated
+    //    `any` and never a silently dropped key.
+    assert!(
+        names.contains(&"made"),
+        "the unmodelled member `made` MUST be published as a marked slot, \
+         never silently dropped; got {names:?}"
+    );
+    let made = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "made")
+        .expect("the `made` prop");
+    // The published slot is a TYPED FAILURE, not a value: the boundary
+    // says "this member's type is not known" rather than handing over a
+    // fabricated `any`, which is indistinguishable from an authored one at
+    // every downstream gate. The positional marker spelling
+    // (`UNMODELED_POSITION`) is derived from the failure at display time;
+    // the prop itself carries the failed publication.
+    assert!(
+        matches!(
+            made.publication.result(),
+            verter_type_expr::PublicationResult::Failed { .. }
+        ),
+        "`made` must NOT publish a usable type source — it carries the typed \
+         unresolved marker; got {:?}",
+        made.publication.result()
+    );
+
+    // 3. The result is reported PARTIAL: the resolve suppresses synthesis,
+    //    which is the boundary's "this surface is not a complete answer"
+    //    channel.
+    let (_, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a props surface carrying an unmodelled member is reported PARTIAL"
+    );
+
+    // 4. Nothing warms: a replay is COLD.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, canonical);
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a props surface carrying an unmodelled member MUST NOT warm \
+         `ComponentMetaResultDb` (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// The emitted runtime option value (`props: { … }` / `emits: [ … ]`),
+/// bracket-matched out of a rendered module.
+///
+/// The assertion target has to be this object and nothing else. A rendered
+/// `<script setup>` module splices the AUTHORED script verbatim into
+/// `setup(__props)`, so `code.contains("label")` is satisfied by the helper
+/// source whatever the props block says — a props check written that way
+/// passes against `props: {}`.
+#[cfg(not(target_arch = "wasm32"))]
+fn emitted_runtime_option(code: &str, option_key: &str) -> String {
+    let Some(key) = code.find(option_key) else {
+        panic!("the rendered module declares no `{option_key}` option:\n{code}");
+    };
+    let open = key + option_key.len();
+    // The option key is the LAST thing in the module only if the render
+    // truncated: index rather than slice-index so a truncated render is a
+    // named failure instead of a bounds panic pointing at this helper.
+    let (opener, closer) = match code.as_bytes().get(open) {
+        Some(b'{') => (b'{', b'}'),
+        Some(b'[') => (b'[', b']'),
+        Some(other) => {
+            panic!("`{option_key}` is neither an object nor an array (got {other:?}):\n{code}")
+        }
+        None => panic!("the rendered module ends at its `{option_key}` option:\n{code}"),
+    };
+    let mut depth = 0usize;
+    for (offset, byte) in code.as_bytes()[open..].iter().enumerate() {
+        if *byte == opener {
+            depth += 1;
+        } else if *byte == closer {
+            depth -= 1;
+            if depth == 0 {
+                return code[open..=open + offset].to_owned();
+            }
+        }
+    }
+    panic!("unbalanced `{option_key}` option:\n{code}");
+}
+
+/// What the RUNTIME lane produced for one `<script setup>` body.
+#[cfg(not(target_arch = "wasm32"))]
+enum RenderedRuntime {
+    /// The module compiled; the payload is its `props` option object.
+    Props(String),
+    /// The lane refused with `XUnavailableMacroSemanticResult`.
+    Refused,
+}
+
+/// Render `script` as a `<script setup lang="ts">` body whose props type is
+/// `ReturnType<typeof makeProps>`, on the RUNTIME (bundler) lane.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_runtime_props(canonical: &str, script: &str) -> RenderedRuntime {
+    render_runtime_macro(
+        canonical,
+        script,
+        "defineProps<ReturnType<typeof makeProps>>()",
+        "props: ",
+    )
+}
+
+/// [`render_runtime_props`] for `defineEmits<ReturnType<typeof makeEmits>>()`.
+/// The payload is the emitted `emits: [...]` option array.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_runtime_emits(canonical: &str, script: &str) -> RenderedRuntime {
+    render_runtime_macro(
+        canonical,
+        script,
+        "defineEmits<ReturnType<typeof makeEmits>>()",
+        "emits: ",
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn render_runtime_macro(
+    canonical: &str,
+    script: &str,
+    macro_call: &str,
+    option_key: &str,
+) -> RenderedRuntime {
+    use verter_compiler::compile::CompileTarget;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            canonical,
+            &format!(
+                "<script setup lang=\"ts\">\n{script}\n{macro_call}\n</script>\n<template><div /></template>"
+            ),
+        )
+        .unwrap();
+    let response = project.host().get_virtual_file(crate::types::VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(canonical.to_owned()),
+        node_kind: Some(crate::types::VirtualNodeKind::Main),
+        compile_profile: crate::types::CompileProfile {
+            target: CompileTarget::BUNDLER,
+            ..crate::types::CompileProfile::default()
+        },
+    });
+    match response {
+        Ok(response) => {
+            let macro_errors: Vec<_> = response
+                .diagnostics
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "XUnavailableMacroSemanticResult")
+                .collect();
+            assert!(
+                macro_errors.is_empty(),
+                "{canonical}: a module that emits bytes must not ALSO carry the \
+                 macro-semantic refusal; got {macro_errors:?}"
+            );
+            RenderedRuntime::Props(emitted_runtime_option(&response.code, option_key))
+        }
+        Err(crate::types::HostError::CompileError(failure)) => {
+            assert!(
+                failure
+                    .diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "XUnavailableMacroSemanticResult"),
+                "{canonical}: the refusal must be the macro-semantic diagnostic, not an \
+                 unrelated compile failure; got {:?}",
+                failure.diagnostics.diagnostics
+            );
+            RenderedRuntime::Refused
+        }
+        Err(other) => panic!("{canonical}: unexpected host failure {other:?}"),
+    }
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — the runtime lane derives EACH member's
+/// constructor set from THAT member's own evidence.
+///
+/// The flow substrate publishes a degraded success as a surface in which the
+/// one position it could not type carries the typed unresolved marker and
+/// every modelled sibling is exact. The runtime lane must read that surface
+/// the same way: the marker-carrying member emits `type: null` (Vue's
+/// "validation and casting off"), and a sibling the substrate typed exactly
+/// keeps its real constructor.
+///
+/// The regression this pins: the per-member broad-runtime classification
+/// short-circuited on the frame-level partial before it ever projected the
+/// member, so BOTH members collapsed to `type: null` — `get_component_meta`
+/// published `label` as `string` on the same tree while the module Vue
+/// actually runs declared it untyped. Vue drives Boolean casting, `default`
+/// factory handling, and dev validation off `type`, so an erased constructor
+/// is a runtime behaviour change, not a cosmetic one.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// `ReturnType<typeof makeProps>` is `{ label: string; made: Box }`.
+///
+/// Discrimination: restoring the short-circuit fails the `label: { type:
+/// String` assertion; publishing a fabricated constructor for the unmodelled
+/// member fails the `made: { type: null` assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn runtime_props_derive_each_member_from_that_members_own_evidence() {
+    let RenderedRuntime::Props(props) = render_runtime_props(
+        "/src/R1Helper.vue",
+        "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+    ) else {
+        panic!(
+            "a FAITHFUL degraded surface (marker at one position, every sibling exact) has a \
+             member set — the runtime lane must publish it, not refuse"
+        );
+    };
+    assert!(
+        props.contains("label: { type: String"),
+        "the substrate typed `label` exactly, so its runtime constructor must survive the \
+         sibling's degradation:\n{props}"
+    );
+    assert!(
+        !props.contains("label: { type: null"),
+        "`label` must NOT be erased to `type: null` — that is the sibling-collapse \
+         regression:\n{props}"
+    );
+    assert!(
+        props.contains("made: { type: null"),
+        "`made` carries the typed unresolved marker, so the runtime lane must emit it with \
+         validation off rather than fabricate a constructor:\n{props}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — a flow-return degradation at the ROOT
+/// refuses; it never publishes an empty `props` object.
+///
+/// A marker at an interior POSITION leaves a member set the runtime lane can
+/// publish. A marker at the ROOT does not: there are no members at all, so
+/// the derived surface is empty and emitting it declares a props-less
+/// component for a component that declares props. Every listener and bound
+/// attribute then falls through to `$attrs` — silently wrong at runtime, and
+/// strictly worse than refusing, because refusing is loud and the TSX lane
+/// still type-checks the file.
+///
+/// Two families reach the root: a NO-VALUE outcome (`R2Loop`: a
+/// return-bearing loop the substrate does not model) and an object literal
+/// whose SPREAD SOURCE the substrate cannot type — directly
+/// (`S5NewSpread`) or one call away (`S6MarkerSpread`, whose callee's own
+/// frame is what cannot type its return). An unknown source makes the
+/// literal's KEY SET unknown, and an object surface has no way to say
+/// "and an unknown number of further keys". tsgo types both as
+/// `{ label: …; n: number }`, so publishing `{ n }` alone would be a
+/// surface missing a declared prop — not a conservative answer.
+///
+/// `S5NewSpread` is the row that discriminates the evaluator's spread
+/// fail-closed rail: dropping an unevaluable spread source instead of
+/// failing the literal closed publishes `props: { n: { type: Number } }`
+/// for it. `S6MarkerSpread` reaches the same verdict one rail earlier
+/// (the callee's frame failure propagates) and is coverage for that
+/// authored shape rather than a second discriminator for the same arm.
+///
+/// A spread whose source IS modelled is not in that family: the literal
+/// lowers structurally, the source rides the same call sink every other
+/// call position rides, and the surface publishes with its real
+/// constructors. That is the `SPREADS` block below.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// every spread row's `ReturnType<typeof makeProps>` is an ordinary object
+/// type — `{ label: string; n: number }` for S1/S3/S4/C1, `{ label: string }`
+/// for S2 — which is exactly why publishing `props: {}` for them is wrong
+/// rather than merely conservative.
+///
+/// The controls are the discrimination: a blanket "never publish an empty
+/// surface" regression passes every refusal row and fails every publish row,
+/// whose props must carry their real constructors.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() {
+    /// `(canonical, script)` — the runtime lane must REFUSE.
+    const REFUSES: &[(&str, &str)] = &[
+        (
+            "/src/R2Loop.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+        ),
+        (
+            "/src/S5NewSpread.vue",
+            "class Box { readonly label = \"x\" }\nfunction makeProps() { return { ...new Box(), n: 1 } }",
+        ),
+        // The same fact one CALL away — the spread source is a modelled
+        // direct call whose own frame is the one that cannot type its
+        // return. It exercises a different rail from S5 (which the
+        // content half refuses at the classifier) and reaches the same
+        // verdict: publishing `{ n }` here would declare a props surface
+        // missing `label`.
+        (
+            "/src/S6MarkerSpread.vue",
+            "class Box { readonly label = \"x\" }\nfunction base() { return new Box() }\nfunction makeProps() { return { ...base(), n: 1 } }",
+        ),
+    ];
+
+    for (canonical, script) in REFUSES {
+        match render_runtime_props(canonical, script) {
+            RenderedRuntime::Refused => {}
+            RenderedRuntime::Props(props) => panic!(
+                "{canonical}: the substrate could not type the ROOT, so there is no member set \
+                 — the runtime lane must refuse rather than declare this component's props to \
+                 be `{props}`"
+            ),
+        }
+    }
+
+    /// `(canonical, script)` — the runtime lane must PUBLISH exactly this.
+    const PUBLISHES: &[(&str, &str, &[&str])] = &[
+        (
+            "/src/S1Spread.vue",
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/S2SpreadOnly.vue",
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base() } }",
+            &["label: { type: String"],
+        ),
+        (
+            "/src/S3TwoSpreads.vue",
+            "function a() { return { label: \"x\" } }\nfunction b() { return { n: 1 } }\nfunction makeProps() { return { ...a(), ...b() } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/S4ArrowSpread.vue",
+            "const arrowConst = () => ({ label: \"x\" })\nfunction makeProps() { return { ...arrowConst(), n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/C1ModuleConst.vue",
+            "const mc = { label: \"x\" }\nfunction makeProps() { return { ...mc, n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/C2Plain.vue",
+            "function makeProps() { return { label: \"x\", n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+    ];
+
+    for (canonical, script, expected) in PUBLISHES {
+        let RenderedRuntime::Props(props) = render_runtime_props(canonical, script) else {
+            panic!("{canonical}: a fully modelled surface must still compile and publish");
+        };
+        for needle in *expected {
+            assert!(
+                props.contains(needle),
+                "{canonical}: expected `{needle}` in the emitted props object:\n{props}"
+            );
+        }
+        assert!(
+            !props.contains("type: null"),
+            "{canonical}: every member of a fully modelled spread surface has a real \
+             constructor — `type: null` is the erasure this row exists to forbid:\n{props}"
+        );
+    }
+
+    // `defineEmits` is the same rule on the same evidence, and the failure is
+    // not a milder one: `emits: []` for a component that declares emits sends
+    // every `@evA` listener silently through to `$attrs` instead of the
+    // declared emit.
+    let RenderedRuntime::Props(emits) = render_runtime_emits(
+        "/src/E1Spread.vue",
+        "function base() { return { evA: (p: string) => true } }\nfunction makeEmits() { return { ...base(), evB: (n: number) => true } }",
+    ) else {
+        panic!("/src/E1Spread.vue: a modelled spread source leaves a complete event set");
+    };
+    assert!(
+        emits.contains("\"evA\"") && emits.contains("\"evB\""),
+        "/src/E1Spread.vue: the spread-contributed event and the direct one must BOTH \
+         survive:\n{emits}"
+    );
+
+    let RenderedRuntime::Props(emits) = render_runtime_emits(
+        "/src/E2Plain.vue",
+        "function makeEmits() { return { evA: (p: string) => true, evB: (n: number) => true } }",
+    ) else {
+        panic!("/src/E2Plain.vue: a fully modelled emits surface must still compile and publish");
+    };
+    assert!(
+        emits.contains("\"evA\"") && emits.contains("\"evB\""),
+        "/src/E2Plain.vue: both declared events must survive:\n{emits}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — an UNVERIFIED flow return publishes its
+/// complete member set with validation OFF, rather than deleting the module.
+///
+/// `FLOW_RETURN_UNVERIFIED` states exactly one thing: every member is present
+/// and one member's TYPE may be wrong. The member set is therefore
+/// publishable and the member TYPES are not, so the honest emit is the full
+/// name set with `type: null` — the same encoding the lane already uses for a
+/// member it could not resolve. Refusing instead deleted every byte of the
+/// module for parameter reassignment and a conditional `var`, both of which
+/// are ordinary TypeScript that the previous implementation compiled
+/// correctly.
+///
+/// The fixtures ride COMPOUND assignments (`+=`): a plain `=` write at
+/// statement position is applied by the evaluator and verified, so the
+/// unverified class is exercised through the operator form nobody applies
+/// (the destructured-parameter row included — its plain element binding
+/// is modelled, so it too needs the compound form to stay unverified).
+///
+/// The degradation is a property of the FRAME (it is seeded from the lowered
+/// slice's effect list before any member is evaluated), so it applies to
+/// every member. Attributing it per member by intersecting each member
+/// value's slot reads with the write's targets is FAIL-OPEN and must not be
+/// done — see `degradation_reason_class` for the counter-example and for the
+/// sound complement.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// row 1 is `{ label: string }`, rows 2 and 3 are `{ label: string; n: number
+/// }` — every row is an ordinary object type, so deleting the module is not a
+/// defensible answer for any of them.
+///
+/// Discrimination: refusing again fails the `Props` destructure; emitting a
+/// constructor derived from the unverified value fails the `type: null`
+/// assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
+    /// `(canonical, script, member names)`
+    const ROWS: &[(&str, &str, &[&str])] = &[
+        (
+            "/src/W1Param.vue",
+            "function makeProps(seed: string) { seed += \"y\"; return { label: seed } }",
+            &["label"],
+        ),
+        (
+            "/src/W2CondVar.vue",
+            "function makeProps(k: boolean) { var v = 1; if (k) { v += 2 } return { label: \"x\", n: v } }",
+            &["label", "n"],
+        ),
+        (
+            "/src/W3Destructure.vue",
+            "function makeProps({ seed }: {seed: string}) { seed += \"y\"; return { label: seed, n: 1 } }",
+            &["label", "n"],
+        ),
+    ];
+
+    for (canonical, script, members) in ROWS {
+        let RenderedRuntime::Props(props) = render_runtime_props(canonical, script) else {
+            panic!(
+                "{canonical}: an unverified value has a COMPLETE member set — deleting the \
+                 whole module is not the honest answer"
+            );
+        };
+        for member in *members {
+            assert!(
+                props.contains(&format!("{member}: {{ type: null")),
+                "{canonical}: `{member}` must be published with validation off — its name is \
+                 known and its type is not:\n{props}"
+            );
+        }
+        assert!(
+            !props.contains("type: String") && !props.contains("type: Number"),
+            "{canonical}: no member may carry a constructor derived from a value the \
+             substrate could not verify:\n{props}"
+        );
+    }
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — the TSX lane emits for EVERY flow-return
+/// degradation class, including the two the runtime lane refuses.
+///
+/// The TSC projection splices the AUTHORED declaration and the authored type
+/// argument into the generated TSX and lets the external checker compute the
+/// member types. A body-derived return THIS substrate could not infer, could
+/// not verify, or could not produce at all therefore says nothing about
+/// whether the TSX is the full surface — faulting on any of them deleted the
+/// whole file's type-check surface for programs tsgo types without
+/// difficulty.
+///
+/// The lane is driven through `ensure_ide_compiled` + `get_ide`, which is the
+/// only way to reach the `CachedTsx` projection: `get_virtual_file` with
+/// `VirtualNodeKind::Main` and `CompileTarget::IDE` returns the RUNTIME module
+/// under a names-only demand, so a test written that way measures the runtime
+/// lane twice and reports the TSX lane healthy no matter what it does.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// every row's `ReturnType<typeof makeProps>` is an ordinary object type, so
+/// the emitted TSX type-checks in all five cases.
+///
+/// Discrimination: making the TSX lane fault on any flow-return class fails
+/// the row for that class — `R1Helper` for the uninferred class, `R4Write` for
+/// the unverified class, `R2Loop` for the no-value class, `S1Spread` for a
+/// root-position marker. `R3Clean` fails nothing on its own and is the
+/// control that a blanket "always emit" change is not what passed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
+    /// `(canonical, script, the binding the projected TSX must name)`
+    const ROWS: &[(&str, &str)] = &[
+        // A FAITHFUL degraded surface — a marker at one interior position.
+        (
+            "/src/R1Helper.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+        ),
+        // A NO-VALUE outcome.
+        (
+            "/src/R2Loop.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+        ),
+        // The clean control.
+        (
+            "/src/R3Clean.vue",
+            "function makeProps() { return { label: \"x\", n: 1 } }",
+        ),
+        // An UNVERIFIED value.
+        (
+            "/src/R4Write.vue",
+            "function makeProps(seed: string) { seed = \"y\"; return { label: seed } }",
+        ),
+        // A ROOT-position marker.
+        (
+            "/src/S1Spread.vue",
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }",
+        ),
+    ];
+
+    for (canonical, script) in ROWS {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+        // The LSP's own IDE profile (`Documents::tsx_profile`). A default
+        // (BUNDLER) profile normalized with the TSX bit still demands runtime
+        // PROP CONSTRUCTORS, so a test written that way measures the runtime
+        // lane's constructor demand and calls it the TSX lane.
+        let profile = crate::types::CompileProfile {
+            source_map: true,
+            target: verter_compiler::compile::CompileTarget::IDE
+                | verter_compiler::compile::CompileTarget::TEMPLATE_DATA,
+            ..crate::types::CompileProfile::default()
+        };
+        let compiled = host
+            .ensure_ide_compiled(canonical, &profile)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{canonical}: the TSX lane splices the authored declaration and is \
+                     unaffected by a body-derived degradation — it must never delete the \
+                     file's type-check surface; got {err:?}"
+                )
+            });
+        assert!(
+            compiled,
+            "{canonical}: a Vue carrier always has an IDE projection surface"
+        );
+        let ide = host
+            .get_ide(canonical, &profile)
+            .unwrap_or_else(|| panic!("{canonical}: no TSX projection was cached"));
+        assert!(
+            ide.code.contains("makeProps"),
+            "{canonical}: the projected TSX must splice the authored script:\n{}",
+            ide.code
+        );
+        assert!(
+            ide.code.contains("defineProps"),
+            "{canonical}: the projected TSX must carry the authored macro call:\n{}",
+            ide.code
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {
@@ -3191,6 +4123,57 @@ defineSlots<Slots>()
     );
 }
 
+/// A construct-signature slot value (`new (p) => object`) is NOT a
+/// callable slot shape: TS cannot invoke it as a render callback, so
+/// slot-binding synthesis must refuse it (no bindings), exactly as a
+/// non-callable value. The sibling call-signature slot is the positive
+/// control proving the binding pipeline is live in the same fixture.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn construct_signature_slot_value_publishes_no_callable_bindings() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  default: new (p: { x: string }) => object
+  named: (p: { y: string }) => any
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/Comp.vue");
+
+    // Positive control: the CALL-signature slot binds its first-param
+    // member.
+    let named = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "named")
+        .expect("the call-signature slot `named` must publish");
+    let named_bindings: Vec<&str> = named.bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        named_bindings,
+        vec!["y"],
+        "the call-signature slot must bind `y`, got {named_bindings:?}"
+    );
+
+    // The construct-signature slot is NOT callable: no bindings may be
+    // synthesized from its first parameter.
+    let default_slot = meta.slots.iter().find(|slot| slot.name == "default");
+    if let Some(slot) = default_slot {
+        let bindings: Vec<&str> = slot.bindings.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            bindings.is_empty(),
+            "a construct-signature slot value is not a callable slot shape — \
+             no bindings may be synthesized from `new (p: {{ x: string }}) => object`, \
+             got {bindings:?}"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
@@ -3439,7 +4422,9 @@ defineProps<Props>()
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3500,7 +4485,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3565,7 +4552,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3649,7 +4638,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3705,7 +4696,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -4619,7 +5612,7 @@ defineProps<Props>()
         shape
             .properties
             .iter()
-            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "id")),
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "id")),
         "expected instantiated Item shape to expose id, got {:?}",
         shape.properties
     );
@@ -4697,7 +5690,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -4772,7 +5767,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -5105,7 +6102,7 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();
@@ -6013,8 +7010,6 @@ defineProps<ColorModeSelectProps>()
 /// assertions FAIL pre-change and PASS post-change.
 #[test]
 fn get_component_meta_table_shaped_open_omit_heritage_carrier_stops_complete() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6088,19 +7083,17 @@ defineProps<TableProps<T>>()
         other => panic!("`options` must be an `Omit` carrier Ref, got {other:?}"),
     }
 
-    // No published field may carry a budget-tripped partial sentinel — the
-    // result must be COMPLETE, not a degraded budget partial.
-    for p in &meta.props {
-        let Some(source) = p.publication.result().selected_source() else {
-            continue;
-        };
-        let published = shallow_published_type(project.host(), "/Table.vue", Some(source), &p.name);
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
+    // Typed no-leak guard (replaces the raw-spelling scan): the resolved meta
+    // was ADMITTED to the resolved-meta cache — admission is complete-only, so
+    // a budget-tripped partial surface would have been refused (the negative
+    // class is pinned by the partial-fixture / budget-exhaustion admission
+    // tests).
+    assert!(
+        cached_resolved_state(&project, "/Table.vue", crate::types::ProjectionMode::Expanded)
+            .is_some(),
+        "the Table.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/Table.vue", &meta);
 }
 
 /// Route/mode-INDEPENDENT L1: a ChatMessages.vue-shaped HERMETIC SFC. A
@@ -6137,8 +7130,6 @@ defineProps<TableProps<T>>()
 /// carrier (`chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier`).
 #[test]
 fn get_component_meta_chat_messages_shaped_open_pick_heritage_enumerates_picked_keys_only() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6199,19 +7190,14 @@ defineProps<ChatProps<T>>()
          source must never whole-materialise, got: {prop_names:?}"
     );
 
-    // No published field may carry a budget-tripped partial sentinel.
-    for p in &meta.props {
-        let Some(source) = p.publication.result().selected_source() else {
-            continue;
-        };
-        let published =
-            shallow_published_type(project.host(), "/ChatMessages.vue", Some(source), &p.name);
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
+    // Typed no-leak guard (replaces the raw-spelling scan): the resolved meta
+    // was ADMITTED to the resolved-meta cache — admission is complete-only.
+    assert!(
+        cached_resolved_state(&project, "/ChatMessages.vue", crate::types::ProjectionMode::Expanded)
+            .is_some(),
+        "the ChatMessages.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/ChatMessages.vue", &meta);
 }
 
 /// Route/mode-INDEPENDENT L1 for the MAPPED family: a hermetic SFC with
@@ -6242,8 +7228,6 @@ defineProps<ChatProps<T>>()
 /// assertions.
 #[test]
 fn get_component_meta_open_mapped_slots_surface_carrier_stops_no_sentinel() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6279,45 +7263,20 @@ defineSlots<OpenMappedSlots<T>>()
     // The resolution must TERMINATE and publish a COMPLETE result.
     let meta = get_meta(&project, "/OpenMappedSlots.vue");
 
-    // No published prop / slot binding may carry a budget-tripped partial
-    // sentinel — the open mapped slots surface carrier-stopped to a
-    // shallow shell instead of materialising the per-key value loop.
-    for p in &meta.props {
-        let Some(source) = p.publication.result().selected_source() else {
-            continue;
-        };
-        let published = shallow_published_type(
-            project.host(),
+    // Typed no-leak guard (replaces the raw-spelling scans over props and
+    // slot bindings): the resolved meta was ADMITTED to the resolved-meta
+    // cache — admission is complete-only, so a budget-tripped partial would
+    // have been refused.
+    assert!(
+        cached_resolved_state(
+            &project,
             "/OpenMappedSlots.vue",
-            Some(source),
-            &p.name,
-        );
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
-    for slot in &meta.slots {
-        for binding in &slot.bindings {
-            let Some(source) = binding.publication.result().selected_source() else {
-                continue;
-            };
-            let published = shallow_published_type(
-                project.host(),
-                "/OpenMappedSlots.vue",
-                Some(source),
-                &binding.name,
-            );
-            assert!(
-                !type_expr_is_budget_exceeded_sentinel(&published),
-                "no slot binding may carry a BudgetExceeded sentinel; slot `{}` binding `{}` \
-                 did: {published:?} — the open mapped slots value body was materialised (the storm)",
-                slot.name,
-                binding.name,
-            );
-        }
-    }
+            crate::types::ProjectionMode::Expanded
+        )
+        .is_some(),
+        "the OpenMappedSlots.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/OpenMappedSlots.vue", &meta);
 
     // CLOSED key domain ⇒ the keys ENUMERATE: `header` / `footer` publish
     // as named slots (key enumeration is path-precise even when the value
@@ -10426,7 +11385,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "current" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "current" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ImportedHelper should keep a current member");
@@ -10745,7 +11708,7 @@ defineProps<LinkProps>()
                 || matches!(
                     variant,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path")),
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path")),
                 )
         }),
         "owner-local route helper should preserve its object branch, got {route_ty:?}"
@@ -10778,7 +11741,9 @@ defineProps<LinkProps>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -10844,7 +11809,9 @@ defineProps<ModuleProps>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -10931,7 +11898,9 @@ defineProps<Props>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11290,7 +12259,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -11304,7 +12277,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -11318,7 +12295,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -11423,7 +12404,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -11486,7 +12471,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -11499,7 +12488,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "gap" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "gap" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button.ui should keep a gap member");
@@ -11557,7 +12550,9 @@ defineProps<{
     // `variants → color → {primary, secondary}`.
     let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
         members.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == prop_name => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == prop_name =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -11585,7 +12580,9 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11637,7 +12634,9 @@ defineProps<{
 fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
     let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
         members.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == prop_name => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == prop_name =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -11662,7 +12661,9 @@ fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11758,7 +12759,9 @@ defineProps<{
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == name => {
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == name =>
+                {
                     Some(property.ty.clone())
                 }
                 _ => None,
@@ -11881,7 +12884,9 @@ defineProps<{
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == name => {
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == name =>
+                {
                     Some(property.ty.clone())
                 }
                 _ => None,
@@ -12099,7 +13104,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -12113,7 +13122,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "color" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button.variants should keep a color member");
@@ -12140,7 +13153,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -12152,14 +13169,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -12237,7 +13254,9 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -12250,7 +13269,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -12262,14 +13285,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -12342,7 +13365,9 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -12357,7 +13382,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -12369,14 +13398,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -12982,7 +14011,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -12994,7 +14027,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "color"),
         ),
         "Button.variants should expose color, got {:?}",
         variants_member
@@ -13004,7 +14037,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -13016,14 +14053,14 @@ defineProps<ButtonProps>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -13232,7 +14269,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         local_config_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "slot"),
         ),
         "LocalConfig should keep its slot member, got {local_config_ty:?}"
     );
@@ -13437,7 +14474,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ComponentConfig should keep a ui member");
@@ -13452,7 +14493,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "node" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ComponentConfig.ui should keep a node member");
@@ -13467,7 +14512,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "node" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Level2 should have a node member");
@@ -13479,7 +14528,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         level3_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "leaf"),
         ),
         "Level3 should expose leaf, got {:?}",
         inner_node
@@ -14213,13 +15262,13 @@ defineEmits<Emits>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "list"),
         ),
         "ui helper should keep list, got {ui_ty:?}"
     );
@@ -14469,13 +15518,13 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "list"),
         ),
         "ui helper should keep list, got {ui_ty:?}"
     );
@@ -14911,7 +15960,7 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
@@ -19746,6 +20795,29 @@ use verter_semantic::analysis::component_meta::{
 };
 
 /// Helper: get the component meta for a file (through session).
+/// The typed masking probe over a published prop surface: every present
+/// prop source reads NOT-degraded on the raise-time sidecar (fold +
+/// `from_parts` choke point — independent of `synthesis_should_suppress`).
+fn assert_no_degraded_props(
+    host: &VerterHost,
+    canonical: &str,
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    for p in &meta.props {
+        let Some(source) = p.publication.result().selected_source() else {
+            continue;
+        };
+        assert_eq!(
+            crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_is_degraded(
+                host, canonical, source
+            ),
+            Some(false),
+            "prop `{}` must carry NO typed degradation on its raise-time sidecar (masking case)",
+            p.name,
+        );
+    }
+}
+
 fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
@@ -19990,13 +21062,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "ui helper should expose label, got {ui_ty:?}"
     );
@@ -20033,13 +21105,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
@@ -20235,13 +21307,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "ui helper should expose label, got {ui_ty:?}"
     );
@@ -20278,13 +21350,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
@@ -20606,6 +21678,145 @@ const showNative = true
         );
     } else {
         panic!("expected FallthroughSurface::Branches");
+    }
+}
+
+/// A STATIC `is="…"` classifies structurally, exactly as the IDE template
+/// rewrite does: an HTML tag name is a native root, and every other value
+/// is a component reference — here, an in-scope non-type-only import
+/// binding. Both directions are asserted, because the two surfaces must not
+/// disagree about one construct.
+/// Mutation recipe: mint a bare string literal for every static `is=` and
+/// the component direction collapses to a native tag; mint a `typeof` value
+/// reference for every static `is=` and the native direction stops
+/// resolving `div`.
+#[test]
+fn static_is_resolves_imported_component_and_native_tag() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><component is="Child" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/Native.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="div" /></template>"#,
+        )
+        .unwrap();
+
+    let component_meta = get_meta(&project, "/App.vue");
+    assert!(
+        root_chain_steps(&component_meta)
+            .iter()
+            .any(|step| matches!(
+                step,
+                ResolvedRootStep::Component { component_name, .. } if component_name == "Child"
+            )),
+        "a static is=\"Child\" naming an imported binding is a COMPONENT root: {:?}",
+        component_meta.fallthrough_surface
+    );
+    assert!(
+        !root_chain_steps(&component_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "Child")),
+        "a static is=\"Child\" naming an imported binding is never a native tag: {:?}",
+        component_meta.fallthrough_surface
+    );
+
+    let native_meta = get_meta(&project, "/Native.vue");
+    assert!(
+        root_chain_steps(&native_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "div")),
+        "a static is=\"div\" naming no in-scope binding is a NATIVE tag: {:?}",
+        native_meta.fallthrough_surface
+    );
+}
+
+/// The GLOBAL-registration direction of the same authority: a static
+/// `is="GlobalWidget"` names no import and no HTML tag, so it is a COMPONENT
+/// target — exactly what the IDE template rewrite decides through the same
+/// `is_html_tag` authority when it mints a `GlobalComponents` fallback const
+/// for that name. Verter's project side owns no `GlobalComponents`
+/// resolution, so the branch is UNRESOLVED (fail-closed) rather than an
+/// intrinsic attribute surface fabricated for a component; the genuine
+/// native tag in the same fixture still resolves as native.
+///
+/// Mutation recipe: classify a non-import static `is=` as a string literal
+/// again and `GlobalWidget` reappears as `NativeTag`; classify every static
+/// `is=` as a `typeof` reference and `div` stops resolving as native.
+#[test]
+fn static_is_global_component_name_is_a_component_target_not_a_native_tag() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Global.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="GlobalWidget" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/NativeToo.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="div" /></template>"#,
+        )
+        .unwrap();
+
+    let global_meta = get_meta(&project, "/Global.vue");
+    let global_steps = root_chain_steps(&global_meta);
+    assert!(
+        !global_steps
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { .. })),
+        "a globally-registered is=\"GlobalWidget\" is never a native tag: {:?}",
+        global_meta.fallthrough_surface
+    );
+    assert!(
+        global_steps.iter().any(|step| matches!(
+            step,
+            ResolvedRootStep::Unresolved {
+                reason: UnresolvedBranchReason::DynamicComponentIs,
+                ..
+            }
+        )),
+        "a component target this project cannot resolve fails closed as an \
+         unresolved branch: {:?}",
+        global_meta.fallthrough_surface
+    );
+
+    let native_meta = get_meta(&project, "/NativeToo.vue");
+    assert!(
+        root_chain_steps(&native_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "div")),
+        "a genuine native tag still resolves as native: {:?}",
+        native_meta.fallthrough_surface
+    );
+}
+
+/// Every root-chain step reachable from a resolved fallthrough surface.
+fn root_chain_steps(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) -> Vec<ResolvedRootStep> {
+    match &meta.fallthrough_surface {
+        FallthroughSurface::Branches { branches } => branches
+            .iter()
+            .flat_map(|branch| branch.root_chain.iter().cloned())
+            .collect(),
+        FallthroughSurface::None { .. } => Vec::new(),
     }
 }
 
@@ -21000,7 +22211,7 @@ fn payload_ty_references(ty: &TypeExpr, event_name: &str) -> bool {
             matches!(
                 member,
                 ObjectMember::Property(property)
-                    if property.name == "source"
+                    if property.string_name().expect("string-key fixture") == "source"
                         && matches!(
                             &property.ty,
                             TypeExpr::Literal(verter_type_expr::LiteralValue::String(value))
@@ -23947,7 +25158,7 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -24021,7 +25232,7 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -24219,7 +25430,9 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some((p.name.as_str(), &p.ty)),
+            ObjectMember::Property(p) => {
+                Some((p.string_name().expect("string-key fixture"), &p.ty))
+            }
             _ => None,
         })
         .collect();
@@ -25956,7 +27169,11 @@ defineExpose<PanelApi>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["open".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("open")],
+                "one member hop"
+            );
         }
         other => panic!("the open member publishes the MemberPath replay source, got {other:?}"),
     }
@@ -26039,7 +27256,11 @@ defineExpose<LocalApi>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["focus".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("focus")],
+                "one member hop"
+            );
         }
         other => panic!("the focus member publishes the MemberPath replay source, got {other:?}"),
     }
@@ -26212,7 +27433,11 @@ defineExpose<LocalApi>({
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("selectAll")],
+                "one member hop"
+            );
         }
         other => {
             panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
@@ -26353,7 +27578,11 @@ defineExpose<ImportedApi>({
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("selectAll")],
+                "one member hop"
+            );
         }
         other => {
             panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
@@ -26789,7 +28018,7 @@ defineEmits(['ping'])
     );
     assert_eq!(
         payloads[0],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "a None payload source must materialize to the canonical typed Unknown \
          via the central missing-source policy, got {:?}",
         payloads[0]
@@ -27403,7 +28632,7 @@ const cond = true
             assert_eq!(object.properties.len(), 1, "Named = {{ x: number }}");
             match &object.properties[0] {
                 verter_type_expr::ObjectMember::Property(prop) => {
-                    assert_eq!(prop.name, "x");
+                    assert_eq!(prop.string_name().expect("string-key fixture"), "x");
                     assert_eq!(
                         prop.ty,
                         TypeExpr::Primitive(PrimitiveName::Number),
@@ -27944,7 +29173,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     let (analysis, _resolution, types) = output.into_parts();
     let lanes = types.into_lanes();
 
-    let unknown = TypeExpr::Unknown { raw: String::new() };
+    let unknown = TypeExpr::Unknown(UnknownValue::missing_output());
     assert_eq!(
         published_type(&lanes.props[0]),
         &unknown,
@@ -28216,7 +29445,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
             members: Arc::from(
                 vec![tf::ObjectMemberFact::Property(tf::ObjectPropertyFact {
-                    name: "member".to_string(),
+                    key: "member".into(),
                     optional: false,
                     readonly: false,
                     visibility: verter_type_expr::MemberVisibility::Public,
@@ -28235,9 +29464,9 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                    "member"
-                ))],
+                &[crate::meta_resolve::InteriorSourceStep::Member(
+                    "member".into(),
+                )],
                 "the typed failure names the exact nested member position"
             );
         }
@@ -28267,8 +29496,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: None,
-            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
+            return_source: tf::FunctionReturnSource::Absent,
             return_reference_head: tf::AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
@@ -28382,8 +29610,7 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: None, // deliberately absent synthetic return slot
-            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
+            return_source: tf::FunctionReturnSource::Absent, // deliberately absent synthetic return
             return_reference_head: tf::AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
@@ -28787,7 +30014,9 @@ fn warm_output_materializes_under_the_validated_capture_not_a_fresh_view() {
                 .properties
                 .iter()
                 .find_map(|member| match member {
-                    verter_type_expr::ObjectMember::Property(prop) if prop.name == "x" => {
+                    verter_type_expr::ObjectMember::Property(prop)
+                        if prop.string_name().expect("string-key fixture") == "x" =>
+                    {
                         Some(prop.ty.clone())
                     }
                     _ => None,
@@ -29082,7 +30311,11 @@ defineProps<{ own: SharedAlias }>()
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "tag" => Some(&property.ty),
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == "tag" =>
+                {
+                    Some(&property.ty)
+                }
                 _ => None,
             })
             .expect("the nested member survives materialization");
@@ -29628,7 +30861,7 @@ defineEmits<Events>()
         TypeExpr::Object(shape) => assert!(
             shape.properties.iter().any(|member| matches!(
                 member,
-                ObjectMember::Property(property) if property.name == "id"
+                ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "id"
             )),
             "the demanded Row payload expands to its declared members, got {demanded:?}"
         ),
@@ -29943,7 +31176,11 @@ defineEmits<Events>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("the object carrier keeps its nested member");
@@ -29977,7 +31214,11 @@ defineEmits<Events>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("the demanded object keeps its nested member");
@@ -29985,7 +31226,7 @@ defineEmits<Events>()
         TypeExpr::Object(row_shape) => assert!(
             row_shape.properties.iter().any(|member| matches!(
                 member,
-                ObjectMember::Property(property) if property.name == "id"
+                ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "id"
             )),
             "the walked nested Row reaches its id leaf, got {demanded:?}"
         ),
@@ -30263,7 +31504,7 @@ defineEmits(['save'])
         .expect("the save event publishes");
     assert_eq!(
         materialized_event_types(&lanes)[save],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "the unannotated position renders the centralized typed unknown"
     );
 
@@ -30370,7 +31611,7 @@ defineEmits<{ save: [id: number] }>()
     let (_analysis, _resolution, types) = output.into_parts();
     assert_eq!(
         materialized_event_types(&types.into_lanes())[0],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "the absent position renders the centralized typed Unknown"
     );
 
@@ -30471,7 +31712,11 @@ defineProps<Props>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("onClick")],
+                "one member hop"
+            );
         }
         other => panic!(
             "the imported function member publishes the MemberPath replay \
@@ -31163,7 +32408,11 @@ defineProps<Props>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("onClick")],
+                "one member hop"
+            );
             lane_prop.ty.clone()
         }
         other => panic!(
@@ -31417,7 +32666,9 @@ defineProps<{ [key: string]: { nested: number } }>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -31753,7 +33004,7 @@ defineSlots<SeparatorSlots>()
             matches!(
                 property,
                 verter_type_expr::ObjectMember::Property(property)
-                    if property.name == "root"
+                    if property.string_name().expect("string-key fixture") == "root"
                         && matches!(property.ty, TypeExpr::Primitive(PrimitiveName::String))
             )
         }),
@@ -31900,7 +33151,7 @@ defineProps<Props>()
             TypeExpr::Object(object)
                 if object.properties.iter().any(|property| matches!(
                     property,
-                    ObjectMember::Property(property) if property.name == "path"
+                    ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path"
                 ))
         )),
         "the union keeps its `{{ path: string }}` arm; got {arms:?}"
@@ -32132,5 +33383,457 @@ fn template_slots_carry_declared_in_macro_type_arg() {
     assert!(
         anchor.declared_in_macro_type_arg,
         "an authored template `<slot>` element declares the name"
+    );
+}
+
+/// Public macro regression: the signature utilities are KIND-aware
+/// over a retained direct constructor type in a `defineProps` payload —
+/// `ConstructorParameters<new (x: string) => object>` materialises the
+/// `[x: string]` tuple and `InstanceType<new () => { made: string }>` the
+/// instance type (never `Opaque(Miss)`).
+#[test]
+fn define_props_constructor_parameters_and_instance_type_over_direct_constructor() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{
+  args: ConstructorParameters<new (x: string) => object>,
+  inst: InstanceType<new () => { made: string }>,
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    // `args` = [x: string].
+    match &evaluated_define_props_type(&project, "/App.vue", &evaluated, "args") {
+        TypeExpr::Tuple { elements, .. } => {
+            assert_eq!(elements.len(), 1, "ConstructorParameters tuple arity");
+            assert_eq!(
+                elements[0].ty,
+                TypeExpr::Primitive(PrimitiveName::String),
+                "the constructor's parameter type flows into the tuple"
+            );
+        }
+        other => panic!(
+            "ConstructorParameters<new (x: string) => object> must evaluate to \
+             a tuple, got {other:?}"
+        ),
+    }
+
+    // `inst` = { made: string }.
+    match &evaluated_define_props_type(&project, "/App.vue", &evaluated, "inst") {
+        TypeExpr::Object(obj) => {
+            assert_eq!(obj.properties.len(), 1, "InstanceType instance surface");
+        }
+        other => panic!(
+            "InstanceType<new () => {{ made: string }}> must evaluate to the \
+             instance object, got {other:?}"
+        ),
+    }
+}
+
+/// Render `script` as a `<script setup lang="ts">` body under an ARBITRARY
+/// macro call, on the RUNTIME (bundler) lane.
+///
+/// [`render_runtime_props`] pins the single-argument
+/// `defineProps<ReturnType<typeof makeProps>>()` shape. A surface assembled
+/// from SEVERAL producers — an intersection arm, a heritage clause, a
+/// `withDefaults` wrapper — needs the macro call spelled per row, because
+/// the defect those rows exist to catch is invisible when the degraded
+/// producer is the only one.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_runtime_composed(
+    canonical: &str,
+    script: &str,
+    macro_call: &str,
+    option_key: &str,
+) -> RenderedRuntime {
+    render_runtime_macro(canonical, script, macro_call, option_key)
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — a producer that yielded NO SURFACE
+/// refuses the module even when a SIBLING producer contributed members.
+///
+/// The refusal that protects the runtime lane has to be asked
+/// per-CONTRIBUTION, not per-SURFACE. A no-value flow return
+/// (`for (…) { return … }` — a return-bearing loop the substrate does not
+/// model) produces no member set at all; when it is the macro's ONLY
+/// producer the assembled surface is empty and a structural "is the surface
+/// empty" check catches it. Compose it with ONE authored arm and that check
+/// is defeated: the surface is non-empty, so the module publishes the
+/// sibling's members alone and the no-value producer's members vanish.
+///
+/// That failure is quieter than the `props: {}` case it replaced, and
+/// strictly worse. The IDE/TSX lane splices the AUTHORED macro call, so the
+/// external checker types `props.label` as `string` and reports nothing,
+/// while the runtime module Vue actually executes declares no `label` prop
+/// at all — every `:label` binding falls through to `$attrs`. Types and
+/// runtime disagree, silently, on two mainstream Vue idioms (an
+/// intersection type argument and an `interface … extends` heritage
+/// clause).
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// for every row here the composed type is an ordinary object type whose
+/// keys are `"label" | "extra"` (`"evA" | "evB"` for the emits row) —
+/// verified with an `Eq<keyof T, …>` probe plus a negative control asserting
+/// `Eq<keyof T, "extra">` which the checker REJECTS. So publishing the
+/// sibling arm alone is a surface missing a declared member, not a
+/// conservative answer.
+///
+/// Discrimination: restoring the per-surface `props.is_empty()` predicate
+/// republishes every row here (the sibling arm makes the surface non-empty),
+/// and the `PUBLISHES` control block below fails under a blanket "any
+/// observed flow degradation refuses" regression — a FAITHFUL degraded
+/// surface composed with an authored arm must still publish every one of its
+/// members.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
+    /// A helper whose return the substrate cannot produce a surface for:
+    /// a return-bearing loop.
+    const NO_SURFACE_PROPS: &str =
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
+         return { label: \"y\" } }";
+    const NO_SURFACE_EMITS: &str =
+        "function makeEmits() { for (let i = 0; i < 1; i++) { return { evA: (p: string) => true } } \
+         return { evA: (p: string) => true } }";
+
+    /// `(canonical, script, macro call, option key)` — the runtime lane must
+    /// REFUSE, because one of the composed producers has no member set.
+    const REFUSES: &[(&str, &str, &str, &str)] = &[
+        // An INTERSECTION type argument: the authored arm contributes
+        // `extra`, the no-surface arm contributes nothing.
+        (
+            "/src/X1InterProps.vue",
+            NO_SURFACE_PROPS,
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+        ),
+        // The same composition on `defineEmits`: publishing `["evB"]` sends
+        // every `@evA` listener silently through to `$attrs`.
+        (
+            "/src/X2InterEmits.vue",
+            NO_SURFACE_EMITS,
+            "defineEmits<ReturnType<typeof makeEmits> & { evB: (n: number) => void }>()",
+            "emits: ",
+        ),
+        // `withDefaults` reaches the same projection through a wrapper, and
+        // the defaults association must not make the incomplete surface look
+        // deliberate.
+        (
+            "/src/X3WithDefaults.vue",
+            NO_SURFACE_PROPS,
+            "withDefaults(defineProps<ReturnType<typeof makeProps> & { extra?: string }>(), \
+             { extra: \"z\" })",
+            "props: ",
+        ),
+        // A HERITAGE clause composes the same two producers through a
+        // declared interface rather than a type-argument intersection.
+        (
+            "/src/X4Heritage.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
+             return { label: \"y\" } }\n\
+             interface Props extends ReturnType<typeof makeProps> { extra: string }",
+            "defineProps<Props>()",
+            "props: ",
+        ),
+    ];
+
+    for (canonical, script, macro_call, option_key) in REFUSES {
+        match render_runtime_composed(canonical, script, macro_call, option_key) {
+            RenderedRuntime::Refused => {}
+            RenderedRuntime::Props(emitted) => panic!(
+                "{canonical}: one composed producer yielded NO member set, so the assembled \
+                 surface is missing declared members — the runtime lane must refuse rather \
+                 than publish the sibling arm alone as `{emitted}`"
+            ),
+        }
+    }
+
+    /// `(canonical, script, macro call, option key, needles)` — a composed
+    /// surface whose flow arm degraded FAITHFULLY (a marker at one position,
+    /// every sibling exact) still has a complete member set, so it must
+    /// publish it.
+    const PUBLISHES: &[(&str, &str, &str, &str, &[&str])] = &[
+        (
+            "/src/X5FaithfulInter.vue",
+            "class Box { readonly tag = \"box\" }\n\
+             function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+            &[
+                "label: { type: String",
+                "made: { type: null",
+                "extra: { type: String",
+            ],
+        ),
+        (
+            "/src/X6ModelledInter.vue",
+            "function makeProps() { return { label: \"x\" } }",
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+            &["label: { type: String", "extra: { type: String"],
+        ),
+    ];
+
+    for (canonical, script, macro_call, option_key, expected) in PUBLISHES {
+        let RenderedRuntime::Props(emitted) =
+            render_runtime_composed(canonical, script, macro_call, option_key)
+        else {
+            panic!(
+                "{canonical}: every composed producer left a member set — refusing here would \
+                 delete the module over a degradation that named no missing member"
+            );
+        };
+        for needle in *expected {
+            assert!(
+                emitted.contains(needle),
+                "{canonical}: expected `{needle}` in the emitted option:\n{emitted}"
+            );
+        }
+    }
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — a no-surface producer at a MEMBER
+/// VALUE position degrades that member, and only that member.
+///
+/// The no-surface class faults the option-rendering runtime lane, and the
+/// precision of that fault is the whole claim: it says "a producer this
+/// derivation asked for yielded no member set", and the member SET is what
+/// the fault protects. A producer that yielded no value for ONE member's
+/// TYPE has not removed that member from the surface — the name is
+/// authored right there in the macro's own type argument — so the honest
+/// emit is the complete name set with that member's validation off, the
+/// same encoding the lane already uses for any member it could not
+/// resolve.
+///
+/// This is the discrimination between "the class faults the lane" and "the
+/// class deletes the module". Faulting the whole projection here would
+/// delete every byte over one member's return type, for a component whose
+/// other props the same tree resolves exactly.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// the type argument's keys are `"a" | "b"`, and `b` is `string`.
+///
+/// Discrimination: refusing fails the `Props` destructure; a fabricated
+/// constructor for `a` fails the `type: null` assertion; collapsing every
+/// member on the frame-level observation fails the `b: { type: String`
+/// assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
+    let RenderedRuntime::Props(props) = render_runtime_composed(
+        "/src/X7MemberNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineProps<{ a: ReturnType<typeof makeProps>; b: string }>()",
+        "props: ",
+    ) else {
+        panic!(
+            "/src/X7MemberNoSurface.vue: the member SET is authored in the macro's own type \
+             argument and is complete — a producer that could not type ONE member's value has \
+             not removed a member, so the lane must publish rather than delete the module"
+        );
+    };
+    assert!(
+        props.contains("a: { type: null"),
+        "the member whose value has no surface publishes with validation off:\n{props}"
+    );
+    assert!(
+        props.contains("b: { type: String"),
+        "its exactly-typed sibling keeps its real constructor:\n{props}"
+    );
+
+    // `defineModel` reaches the classifier with the WHOLE model type as
+    // its subject. The binding is authored, so the honest emit is the
+    // binding with validation off — not a deleted module.
+    let RenderedRuntime::Props(model) = render_runtime_composed(
+        "/src/X8ModelNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineModel<ReturnType<typeof makeProps>>()",
+        "props: ",
+    ) else {
+        panic!("/src/X8ModelNoSurface.vue: the model binding is authored and present");
+    };
+    assert!(
+        model.contains("modelValue: { type: null"),
+        "the model binding publishes with validation off:\n{model}"
+    );
+
+    // `defineEmits` carries NAMES, not member types, so a member-value
+    // position that has no surface cannot shorten the event set — and
+    // must not be read as if it had.
+    let RenderedRuntime::Props(emits) = render_runtime_composed(
+        "/src/X9EmitsMemberNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineEmits<{ evA: [p: ReturnType<typeof makeProps>]; evB: [n: number] }>()",
+        "emits: ",
+    ) else {
+        panic!("/src/X9EmitsMemberNoSurface.vue: the event NAMES are authored and complete");
+    };
+    assert!(
+        emits.contains("\"evA\"") && emits.contains("\"evB\""),
+        "both authored events survive a member-value position with no surface:\n{emits}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — the `defineEmits` twin of the
+/// spread-source refusal.
+///
+/// A spread source the evaluator cannot produce a surface for is a fact
+/// about the literal's KEY SET, so the literal fails closed and the emits
+/// projection has no member set. The previous implementation published
+/// `["evB"]` for this program — silently dropping `evA`, which routes every
+/// `@evA` listener to `$attrs` instead of the declared emit. Refusing is the
+/// block's deliberate trade and it needs a landed assertion of its own: the
+/// props side is pinned by
+/// `a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props`,
+/// and nothing pinned the emits side.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// `ReturnType<typeof makeEmits>` is `{ evA: (p: string) => boolean; evB:
+/// (n: number) => boolean }`, so `["evB"]` is a member-missing surface
+/// rather than a conservative one.
+///
+/// Discrimination: publishing `["evB"]` again fails the `Refused` match;
+/// the control row (a MODELLED spread source) fails under a blanket
+/// "any spread refuses" regression.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event() {
+    match render_runtime_emits(
+        "/src/E3NewSpread.vue",
+        "class Box { readonly evA = (p: string) => true }\n\
+         function makeEmits() { return { ...new Box(), evB: (n: number) => true } }",
+    ) {
+        RenderedRuntime::Refused => {}
+        RenderedRuntime::Props(emitted) => panic!(
+            "/src/E3NewSpread.vue: the spread source has no evaluable surface, so the event \
+             set is incomplete — publishing `{emitted}` drops `evA` and routes its listeners \
+             to `$attrs`"
+        ),
+    }
+
+    // CONTROL — a MODELLED spread source leaves a complete event set and
+    // must still publish both events.
+    let RenderedRuntime::Props(emitted) = render_runtime_emits(
+        "/src/E4ModelledSpread.vue",
+        "function base() { return { evA: (p: string) => true } }\n\
+         function makeEmits() { return { ...base(), evB: (n: number) => true } }",
+    ) else {
+        panic!("/src/E4ModelledSpread.vue: a modelled spread source leaves a complete event set");
+    };
+    assert!(
+        emitted.contains("\"evA\"") && emitted.contains("\"evB\""),
+        "/src/E4ModelledSpread.vue: both events must survive:\n{emitted}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — an object return whose ENTRY FORM
+/// the substrate once could not lower structurally reaches the runtime
+/// lane intact, over a CALL-sourced spread.
+///
+/// SECONDARY evidence. The thing under test is the substrate's answer for
+/// these shapes, asserted against tsgo in
+/// `typeinfo_tests::value_inference::
+/// object_return_entry_forms_lower_structurally_over_a_call_spread`. This
+/// row set exists to prove that answer reaches a consumer that DERIVES
+/// bytes from it, rather than being correct only at the graph.
+///
+/// The regression it pins: three entry forms — a computed key, a numeric
+/// key, and a type carrier — bailed the WHOLE literal to the shared
+/// shallow-pass leaf answer, and that answer embeds a call-sourced
+/// spread's unreduced `ReturnType<callee>` carrier, which the leaf's
+/// fabricated-value gate refuses. One unmodellable ENTRY therefore failed
+/// the whole RETURN closed, and every module built on it lost every byte.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// the computed-key row is `{ label: string; z: number }`, the `as const`
+/// row `{ readonly label: string; readonly n: 1 }`, the `as const`-only row
+/// `{ readonly label: string }`, and the `satisfies` row `{ label: string;
+/// n: number }`.
+///
+/// Discrimination: restoring the whole-literal bail refuses every row and
+/// fails the `Props` destructure; dropping the spread's contribution fails
+/// the `label` assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_entry_form_over_a_call_spread_reaches_the_runtime_lane_intact() {
+    const PRELUDE: &str = "function base() { return { label: \"x\" } }\nconst k = \"z\"";
+
+    /// `(canonical, makeProps body, needles)`.
+    const ROWS: &[(&str, &str, &[&str])] = &[
+        (
+            "/src/F1ComputedKey.vue",
+            "function makeProps() { return { ...base(), [k]: 1 } }",
+            &["label: { type: String", "z: { type: Number"],
+        ),
+        (
+            "/src/F3AsConst.vue",
+            "function makeProps() { return { ...base(), n: 1 } as const }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/F4AsConstOnly.vue",
+            "function makeProps() { return { ...base() } as const }",
+            &["label: { type: String"],
+        ),
+        (
+            "/src/F5Satisfies.vue",
+            "function makeProps() { return { ...base(), n: 1 } satisfies object }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+    ];
+
+    for (canonical, body, expected) in ROWS {
+        let RenderedRuntime::Props(emitted) =
+            render_runtime_props(canonical, &format!("{PRELUDE}\n{body}"))
+        else {
+            panic!(
+                "{canonical}: the literal lowers structurally, so the call-sourced spread rides \
+                 the evaluator's call sink and reduces — there is a complete member set to \
+                 publish"
+            );
+        };
+        for needle in *expected {
+            assert!(
+                emitted.contains(needle),
+                "{canonical}: expected `{needle}` in the emitted props object:\n{emitted}"
+            );
+        }
+        assert!(
+            !emitted.contains("type: null"),
+            "{canonical}: every member here has a real constructor:\n{emitted}"
+        );
+    }
+
+    // A NUMERIC-named member reaches the substrate exactly (the semantic
+    // test pins `{ label: string; 1: number }`) but does NOT reach this
+    // option object: the runtime projection names members through their
+    // STRING name and skips a numeric key. The row is here so the gap is
+    // an asserted fact rather than an unnoticed one — a Vue projection
+    // question, not a substrate one.
+    let RenderedRuntime::Props(numeric) = render_runtime_props(
+        "/src/F2NumericKey.vue",
+        &format!("{PRELUDE}\nfunction makeProps() {{ return {{ ...base(), 1: 2 }} }}"),
+    ) else {
+        panic!("/src/F2NumericKey.vue: the spread's member is modelled and must publish");
+    };
+    assert!(
+        numeric.contains("label: { type: String"),
+        "/src/F2NumericKey.vue: the spread-contributed member survives:\n{numeric}"
+    );
+    assert!(
+        !numeric.contains("1:"),
+        "/src/F2NumericKey.vue: the numeric-named member does not reach the runtime props \
+         option today — if it starts to, this assertion is the place that says so:\n{numeric}"
     );
 }

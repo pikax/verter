@@ -58,10 +58,13 @@ fn function_with_return_span(
     return_type: SemanticNodeId,
     return_type_span: Option<verter_span::Span>,
 ) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Function {
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span,
     })
@@ -104,11 +107,13 @@ fn object_surface(
     let members: Vec<SurfaceMember> = members
         .iter()
         .map(|(name, value)| SurfaceMember {
-            name: Arc::from(*name),
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
             value: *value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
@@ -1152,7 +1157,11 @@ fn first_param_object_surface_projects_param_members() {
     let surface = view
         .first_param_object_surface(&host, shallow())
         .expect("the first-param object projects a one-level surface");
-    let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let mut names: Vec<&str> = surface
+        .members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1244,7 +1253,9 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         .expect("the instance owner has a prepared `Props` declaration");
     assert_eq!(prepared.root_identity.owner, owner);
     assert!(
-        prepared.member_index.contains_key("row"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")),
         "the exact-owner prepared declaration indexes `row`"
     );
     assert!(
@@ -1339,9 +1350,9 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     };
     assert!(
         instantiated_surface
-            .members
+            .positive_members()
             .iter()
-            .any(|member| member.name.as_ref() == "row"),
+            .any(|member| member.string_name().expect("string-key fixture") == "row"),
         "ResolveDecl → Instantiate preserves the exact-owner `row` member"
     );
 
@@ -1358,9 +1369,9 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     };
     assert!(
         surface
-            .members
+            .positive_members()
             .iter()
-            .any(|member| member.name.as_ref() == "row"),
+            .any(|member| member.string_name().expect("string-key fixture") == "row"),
         "the exact-owner body locator preserves the `row` member"
     );
 }
@@ -1422,7 +1433,9 @@ fn direct_import_preparation_has_cold_warm_exact_owner_parity() {
             "cold and warm direct targets preserve the defining owner"
         );
         assert_eq!(external.symbol_name, "Snippet");
-        assert!(prepared.member_index.contains_key("row"));
+        assert!(prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")));
     }
 }
 
@@ -1606,7 +1619,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1619,7 +1632,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         assert!(
             matches!(
                 node_data_for(dispatch.ctx, arm).as_deref(),
-                Some(SemanticNodeData::Function { .. })
+                Some(SemanticNodeData::Signature { .. })
             ),
             "`{name}`'s callable arm is a Function node"
         );
@@ -1647,7 +1660,10 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         "the view returns the stripped callable ARM, not the raw member value"
     );
     let arm_data = node_data_for(dispatch.ctx, arm).expect("arm node data");
-    let SemanticNodeData::Function { params, .. } = arm_data.as_ref() else {
+    let SemanticNodeData::Signature {
+        kind: _, params, ..
+    } = arm_data.as_ref()
+    else {
         panic!("the stripped arm is a Function node, got {arm_data:?}");
     };
     assert_eq!(
@@ -1727,7 +1743,7 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1819,7 +1835,7 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1923,7 +1939,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1947,7 +1963,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     assert!(
         matches!(
             node_data_for(dispatch.ctx, arm).as_deref(),
-            Some(SemanticNodeData::Function { .. })
+            Some(SemanticNodeData::Signature { .. })
         ),
         "the resolved callable arm is a `Function` node"
     );
@@ -2024,7 +2040,7 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2136,7 +2152,7 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
     let onprops = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "onprops")
+        .find(|m| m.string_name().expect("string-key fixture") == "onprops")
         .expect("the `onprops` member is present")
         .value;
 
@@ -2163,7 +2179,7 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
             .expect("the first-param object projects a one-level surface")
             .members
             .iter()
-            .map(|m| m.name.to_string())
+            .map(|m| m.string_name().expect("string-key fixture").to_string())
             .collect();
         n.sort();
         n
@@ -2256,7 +2272,7 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2315,7 +2331,7 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2466,7 +2482,7 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
     let toowide = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "toowide")
+        .find(|m| m.string_name().expect("string-key fixture") == "toowide")
         .expect("the `toowide` member is present")
         .value;
 
@@ -2523,7 +2539,7 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
     let mut_ref = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .expect("the `mutual` member is present")
         .value;
     // Precondition: the rest param type is the mutual-cycle `DeclRef` carrier.
@@ -2575,7 +2591,7 @@ fn demand_validated_structural_node_partial_yields_none() {
     let mut_ref = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .expect("the `mutual` member is present")
         .value;
 
@@ -2634,7 +2650,7 @@ fn event_names_direct_self_reference_terminates_complete() {
     let onself = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "onself")
+        .find(|m| m.string_name().expect("string-key fixture") == "onself")
         .expect("the `onself` member is present")
         .value;
 
@@ -2703,7 +2719,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2957,15 +2973,16 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
 
 #[test]
 fn event_names_constructor_type_arm_is_skipped_not_failed() {
-    // [P2] CONTROL against over-failing on the `ConstructorType` sibling of
+    // [P2] CONTROL against over-failing on the construct-`Signature` sibling of
     // `Function`: a mixed first-param union `'a' | (new () => X)` — the
-    // `ConstructorType` arm (`new () => X`) is a CONCRETE callable shape that,
+    // construct-`Signature` arm (`new () => X`) is a CONCRETE callable shape that,
     // exactly like `Function`, can neither BE nor HIDE a string-literal event
     // name, so it is SKIPPED (complete-no-name), NOT fail-closed. `event_names`
     // surfaces `["a"]`.
     //
     // FLIP (the cycle-4 partition-completeness gap both codex legs caught):
-    // pre-fix `ConstructorType` fell into the `_ => false` fail-closed bucket
+    // a construct signature outside the concrete bucket would fall into the
+    // `_ => false` fail-closed bucket
     // (only its sibling `Function` was in the `true`/skip set), so the
     // `new () => X` arm returned `false`, the whole union fail-closed, and
     // `event_names` wrongly returned `None` instead of `Some(["a"])` — an
@@ -2982,9 +2999,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
     // collector (it can neither BE nor HIDE a string-literal event name).
     let x = prim(&graph, PrimitiveKind::Object);
     let ctor_signature = function(&graph, vec![], x);
-    let ctor = graph.intern_node(SemanticNodeData::ConstructorType {
-        signature: ctor_signature,
-    });
+    let ctor = graph.intern_construct_twin_for_tests(ctor_signature);
     let names_union = union(&graph, vec![a, ctor]);
     let f = function(
         &graph,
@@ -2994,7 +3009,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
     assert_eq!(
         CallableNodeView::new(&dispatch, f).event_names(navigate()),
         Some(vec![Arc::<str>::from("a")]),
-        "a `ConstructorType` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like `Function` — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
+        "a construct `Signature` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like a call signature — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
     );
 }
 
@@ -3060,14 +3075,14 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
     let row = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "row")
+        .find(|m| m.string_name().expect("string-key fixture") == "row")
         .unwrap_or_else(|| {
             panic!(
                 "the `row` member is present; observed members: {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|member| member.name.as_ref())
+                    .map(|member| member.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })
@@ -3165,14 +3180,14 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
     let mutual = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .unwrap_or_else(|| {
             panic!(
                 "the `mutual` member is present; observed members: {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|member| member.name.as_ref())
+                    .map(|member| member.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })
@@ -3315,7 +3330,7 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
     let toowide = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "toowide")
+        .find(|m| m.string_name().expect("string-key fixture") == "toowide")
         .expect("the `toowide` member is present")
         .value;
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3483,7 +3498,7 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
     let x = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "x")
+        .find(|m| m.string_name().expect("string-key fixture") == "x")
         .expect("the `x` member is present")
         .value;
     // PRECONDITION: the `Args` arg is a `DeclRef` carrier (NOT a literal tuple).

@@ -86,14 +86,14 @@ fn member<'a>(surface: &'a TypeInfoSurface, name: &str) -> &'a TypeInfoSurfaceMe
     surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == name)
+        .find(|m| m.string_name().expect("string-key fixture") == name)
         .unwrap_or_else(|| {
             panic!(
                 "member `{name}` must be on the surface; got {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|m| m.name.as_ref())
+                    .map(|m| m.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })

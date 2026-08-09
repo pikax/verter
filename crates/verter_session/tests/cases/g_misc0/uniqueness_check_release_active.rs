@@ -17,15 +17,16 @@
 //!
 //! The runtime regression test
 //! (`host_compile_atomic_upsert_tests.rs::upsert_duplicate_canonical_panics_before_submit_batch_atomic`)
-//! proves the check EXISTS and fires BEFORE submission, but it can only do
-//! so in the DEBUG test profile: it drives the scheduler's per-admit epoch
-//! trace, whose hooks (`test_install_batch_admit_epoch_trace` /
-//! `test_take_batch_admit_epochs`) are gated `#[cfg(any(test,
-//! debug_assertions))]` in the scheduler crate, so a `--release` test run
-//! does not even compile that test. It therefore CANNOT prove the check is
-//! release-active.
+//! proves the check EXISTS and fires BEFORE submission. Its scheduler
+//! epoch-trace hooks (`test_install_batch_admit_epoch_trace` /
+//! `test_take_batch_admit_epochs`) are gated on `test` / the scheduler's
+//! opt-in `test-support` feature, not on the build profile, so it compiles
+//! and runs under any profile — including the gate's shipped-cfg surface,
+//! where `debug_assertions` is off and a downgraded check would not panic.
 //!
-//! This static guard closes that gap. It extracts the
+//! This guard enforces the same invariant at the SOURCE level, so a
+//! downgrade is rejected wherever it is written rather than only where a
+//! runtime surface happens to execute the path. It extracts the
 //! `assert_canonicals_unique` fn body from production source and asserts
 //! its enforcement is a release-active macro (`assert!` / `assert_eq!` /
 //! `assert_ne!` / `panic!`) and is NOT downgraded to a debug-only form

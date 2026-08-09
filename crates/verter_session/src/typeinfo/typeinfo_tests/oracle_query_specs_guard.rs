@@ -3,25 +3,26 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 46 lifted rows — the authoritative enumeration
+//! The real table seats the 67 lifted rows — the authoritative enumeration
 //! lives on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 //! `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`.
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProbeRhsSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    BRANDED_TYPES_SOURCE, CLASS_FEATURES_SOURCE, DECORATORS_SOURCE, DEEP_PATH_SOURCE,
-    FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE, JSX_SOURCE, MAPPED_MODIFIERS_SOURCE,
-    MAPPED_TEMPLATE_SOURCE, MODERN_TS_FEATURES_SOURCE, MODE_BOUNDARY_REEXPORT_BARREL_SOURCE,
-    MODE_BOUNDARY_REEXPORT_LEAF_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE,
-    MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE,
-    MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE,
-    MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE, MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE,
-    MODULE_FEATURES_BASE_SOURCE, MODULE_FEATURES_CJS_SOURCE, MODULE_FEATURES_CONSUMER_SOURCE,
-    MODULE_FEATURES_LEAF_SOURCE, MODULE_FEATURES_PATCH_SOURCE, MODULE_FEATURES_SOURCE,
-    ORACLE_QUERY_SPECS, SUBSTITUTION_TYPES_SOURCE, TEMPLATE_LITERAL_INFERENCE_SOURCE,
-    TYPESCRIPT_RULES_SOURCE, UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE,
-    UTILITY_EDGE_SOURCE, UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
+    BRANDED_TYPES_SOURCE, CALL_RESOLUTION_SOURCE, CLASS_FEATURES_SOURCE, CONST_TYPE_PARAM_SOURCE,
+    DECORATORS_SOURCE, DEEP_PATH_SOURCE, FUNCTION_ADVANCED_SOURCE, INDEX_SIGNATURES_SOURCE,
+    JSX_SOURCE, MAPPED_MODIFIERS_SOURCE, MAPPED_TEMPLATE_SOURCE, MODERN_TS_FEATURES_SOURCE,
+    MODE_BOUNDARY_REEXPORT_BARREL_SOURCE, MODE_BOUNDARY_REEXPORT_LEAF_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_1_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_2_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_3_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_4_SOURCE,
+    MODE_BOUNDARY_REEXPORT_LINK_5_SOURCE, MODE_BOUNDARY_REEXPORT_LINK_6_SOURCE,
+    MODE_BOUNDARY_REEXPORT_PRINCIPAL_SOURCE, MODULE_FEATURES_BASE_SOURCE,
+    MODULE_FEATURES_CJS_SOURCE, MODULE_FEATURES_CONSUMER_SOURCE, MODULE_FEATURES_LEAF_SOURCE,
+    MODULE_FEATURES_PATCH_SOURCE, MODULE_FEATURES_SOURCE, ORACLE_QUERY_SPECS,
+    SUBSTITUTION_TYPES_SOURCE, TEMPLATE_LITERAL_INFERENCE_SOURCE, TYPESCRIPT_RULES_SOURCE,
+    UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE, UTILITY_EDGE_SOURCE,
+    UTILITY_TOP_BOTTOM_SOURCE, VALUE_INFERENCE_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -41,6 +42,24 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         include_str!("fixtures/class_features.ts"),
         "CLASS_FEATURES_SOURCE (inlined in the registry) drifted from \
          fixtures/class_features.ts"
+    );
+    assert_eq!(
+        CALL_RESOLUTION_SOURCE,
+        include_str!("fixtures/call_resolution.ts"),
+        "CALL_RESOLUTION_SOURCE (inlined in the registry) drifted from \
+         fixtures/call_resolution.ts"
+    );
+    assert_eq!(
+        VALUE_INFERENCE_SOURCE,
+        include_str!("fixtures/value_inference.ts"),
+        "VALUE_INFERENCE_SOURCE (inlined in the registry) drifted from \
+         fixtures/value_inference.ts"
+    );
+    assert_eq!(
+        CONST_TYPE_PARAM_SOURCE,
+        include_str!("fixtures/const_type_param.ts"),
+        "CONST_TYPE_PARAM_SOURCE (inlined in the registry) drifted from \
+         fixtures/const_type_param.ts"
     );
     assert_eq!(
         FUNCTION_ADVANCED_SOURCE,
@@ -240,6 +259,12 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "TEMPLATE_LITERAL_INFERENCE_SOURCE (inlined in the registry) drifted from \
          fixtures/template_literal_inference.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        VALUE_INFERENCE_SOURCE,
+        include_str!("fixtures/value_inference.ts"),
+        "VALUE_INFERENCE_SOURCE (inlined in the registry) drifted from \
+         fixtures/value_inference.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -274,7 +299,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat 46 queries: the two index-signature publication
+    // The lifts seat 67 queries: the two index-signature publication
     // queries, the two built-in modifier-utility queries, the three U2
     // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
     // `-?` optional-remover query, the three keyof-expansion carve-out
@@ -291,11 +316,24 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
     // intrinsic-lookup lifts (`IntrinsicPropsFor<"div">` /
     // `IntrinsicPropsFor<"span">`), and the two U2.MAPPED_TEMPLATE-era lifts
     // (the `RecordTemplateRootSlot` string-literal index-chain query + the
-    // `CounterHandlers` key-remap mapped-type query); the table is well-formed
+    // `CounterHandlers` key-remap mapped-type query), and the three
+    // U6.FLOW_RETURN_SUBSTRATE value-inference queries (the `ReturnType<typeof
+    // bodyReturn>` per-return-site union row and the two `ReturnType<typeof
+    // directArrow>` arrow-body rows), and the ten
+    // U6.CALL_RESOLVE-era lifts (the three optional/rest overload-arity rows,
+    // the union-compatible + two literal-specific overload-picking rows, the
+    // three generic-inference rows [positional argument through a callback
+    // signature, callback return type, object literal with excess properties],
+    // the `this`-receiver method-call row, and the extracted-prototype
+    // `Function.prototype.call` row whose receiver widens through the ambient
+    // apparent callable surface), and the U6.FLOW_RETURN_SUBSTRATE
+    // block-callback value-inference lift, and the seven sibling
+    // U6.CALL_RESOLVE call-site lifts in `function_advanced` /
+    // `const_type_param`; the table is well-formed
     // (non-empty `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY those 46 rows, one query each. A stray
+    // The seated set is EXACTLY those 67 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -534,6 +572,39 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
                 "template_literal_key_remap_capitalises_each_event_key",
                 0
             ),
+            (
+                "value_inference.rs",
+                "value_inference_function_body_return_union_from_return_statements",
+                0
+            ),
+            (
+                "value_inference.rs",
+                "value_inference_arrow_expression_body_publishes_return_shape",
+                0
+            ),
+            (
+                "value_inference.rs",
+                "value_inference_arrow_expression_body_substitutes_parameter_references",
+                0
+            ),
+            ("call_resolution.rs", "call_resolution_optional_overload_picks_first_arity_matching_signature", 0),
+            ("call_resolution.rs", "call_resolution_optional_overload_picks_two_arg_signature_when_required", 0),
+            ("call_resolution.rs", "call_resolution_rest_overload_picks_rest_signature_when_required", 0),
+            ("call_resolution.rs", "call_resolution_union_argument_picks_union_compatible_overload", 0),
+            ("call_resolution.rs", "call_resolution_specific_literal_argument_picks_matching_overload_first", 0),
+            ("call_resolution.rs", "call_resolution_specific_literal_argument_skips_non_matching_first_overload", 0),
+            ("call_resolution.rs", "call_resolution_generic_infers_from_positional_argument_through_callback_signature", 0),
+            ("call_resolution.rs", "call_resolution_generic_infers_from_callback_return_type", 0),
+            ("call_resolution.rs", "call_resolution_generic_infers_object_literal_including_excess_properties", 0),
+            ("call_resolution.rs", "call_resolution_this_receiver_method_call_returns_declared_return", 0),
+            ("call_resolution.rs", "call_resolution_extracted_prototype_method_call_returns_declared_return", 0),
+            ("function_advanced.rs", "function_advanced_overload_call_picks_matching_signature_return", 0),
+            ("function_advanced.rs", "function_advanced_void_callback_return_preserves_void", 0),
+            ("function_advanced.rs", "function_advanced_overload_generic_first_binds_to_literal_argument", 0),
+            ("function_advanced.rs", "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument", 0),
+            ("function_advanced.rs", "function_advanced_constrained_generic_infers_literal_under_as_const", 0),
+            ("const_type_param.rs", "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths", 0),
+            ("const_type_param.rs", "const_type_param_string_call_preserves_readonly_literal_string_tuple", 0),
         ],
     );
 }
@@ -602,4 +673,307 @@ fn registry_ordinals_must_be_unique_and_contiguous() {
         spec("row_b", 1, "tuple_projection"),
     ];
     assert_eq!(registry_well_formed(&two_rows), Ok(()));
+}
+
+// ---------------------------------------------------------------------------
+// The v4 `relation_verdict` registry (addendum §4/§5)
+// ---------------------------------------------------------------------------
+
+use super::oracle::identity;
+use super::oracle::query_specs::{
+    relation_registry_well_formed, EngineObservationPin, RelationEngineVerdict,
+    RelationRegistryError, RELATION_QUERY_SPECS,
+};
+use super::oracle::relation_probe;
+
+/// The 28 `relation_semantics.rs` projection-contract row names — the
+/// authoritative list the 26 relation identities map onto (the two collapse
+/// pairs are named explicitly below).
+const EXPECTED_CONTRACT_ROWS: &[&str] = &[
+    "relation_any_extends_string_distributes_both_branches",
+    "relation_unknown_extends_string_selects_false_branch",
+    "relation_never_extends_string_directly_selects_true_branch",
+    "relation_never_via_generic_helper_collapses_to_never",
+    "relation_string_extends_any_selects_true_branch",
+    "relation_string_extends_unknown_selects_true_branch",
+    "relation_string_extends_never_selects_false_branch",
+    "relation_required_property_assignable_to_optional",
+    "relation_optional_property_not_assignable_to_required",
+    "relation_empty_object_assignable_to_all_optional",
+    "relation_mutable_property_assignable_to_readonly",
+    "relation_readonly_property_assignable_to_mutable",
+    "relation_function_with_wider_param_assignable_to_narrower_target",
+    "relation_function_with_narrower_param_not_assignable_to_wider_target",
+    "relation_fixed_tuple_assignable_to_first_plus_rest",
+    "relation_rest_tuple_not_assignable_to_fixed_tuple",
+    "relation_one_tuple_assignable_to_one_with_optional_second_slot",
+    "relation_empty_tuple_assignable_to_readonly_array",
+    "relation_distributive_conditional_over_union_emits_branch_union",
+    "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+    "relation_intersection_assignable_to_one_base_arm",
+    "relation_one_arm_not_assignable_to_intersection",
+    "relation_infer_value_of_object_property",
+    "relation_infer_head_of_tuple_pattern",
+    "relation_infer_tail_of_tuple_pattern",
+    "relation_infer_return_of_function",
+    "relation_infer_params_of_function_preserves_optional_undefined",
+    "relation_infer_single_param_of_function",
+];
+
+#[test]
+fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
+    assert_eq!(
+        relation_registry_well_formed(RELATION_QUERY_SPECS),
+        Ok(()),
+        "the relation registry is well-formed"
+    );
+    // Exactly 26 specs — NO strict-axis multiplication (no ON/OFF pairs).
+    assert_eq!(
+        RELATION_QUERY_SPECS.len(),
+        26,
+        "the registry seats exactly the 26 relation identities"
+    );
+
+    // The 28 projection contracts map onto exactly the 26 specs: the contract
+    // rows' union IS the 28-name set, each named exactly once.
+    let mut mapped: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .flat_map(|s| s.contract_rows.iter().copied())
+        .collect();
+    mapped.sort_unstable();
+    let mut expected: Vec<&str> = EXPECTED_CONTRACT_ROWS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        mapped, expected,
+        "the contract-row mapping covers exactly the 28 projection contracts"
+    );
+
+    // The two collapses are EXPLICIT: exactly two specs cover two contract
+    // rows each — the `never`→`string` pair (direct + via-generic) and the
+    // `string|number`→`string` pair (distributive + tuple-wrapped).
+    let two_row_specs: Vec<&super::oracle::query_specs::RelationQuerySpec> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| s.contract_rows.len() == 2)
+        .collect();
+    assert_eq!(two_row_specs.len(), 2, "exactly two collapse specs");
+    let never = RELATION_QUERY_SPECS
+        .iter()
+        .find(|s| s.row_function == "relation_never_extends_string")
+        .expect("the never collapse spec");
+    assert_eq!(never.source_text, "never");
+    assert_eq!(never.target_text, "string");
+    assert_eq!(
+        never.contract_rows,
+        &[
+            "relation_never_extends_string_directly_selects_true_branch",
+            "relation_never_via_generic_helper_collapses_to_never",
+        ]
+    );
+    let union = RELATION_QUERY_SPECS
+        .iter()
+        .find(|s| s.row_function == "relation_whole_union_not_assignable")
+        .expect("the whole-union collapse spec");
+    assert_eq!(union.source_text, "string | number");
+    assert_eq!(union.target_text, "string");
+    assert_eq!(
+        union.contract_rows,
+        &[
+            "relation_distributive_conditional_over_union_emits_branch_union",
+            "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+        ]
+    );
+
+    // The known-mismatch ledger is exactly 7 rows: 6 `UnsupportedKey` pins
+    // (exactly the binder-carrying infer rows — a direct inference target is
+    // outside the engine's supported key) + 1 named `MismatchedVerdict` pin
+    // with its source-proven engine answer.
+    let pins: Vec<(&str, EngineObservationPin)> = RELATION_QUERY_SPECS
+        .iter()
+        .filter_map(|s| s.engine_pin.map(|p| (s.row_function, p)))
+        .collect();
+    assert_eq!(pins.len(), 7, "the ledger seats exactly 7 rows");
+    let unsupported: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| s.engine_pin == Some(EngineObservationPin::UnsupportedKey))
+        .map(|s| s.row_function)
+        .collect();
+    let binder_rows: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| !s.binder_layout.is_empty())
+        .map(|s| s.row_function)
+        .collect();
+    assert_eq!(unsupported.len(), 6);
+    assert_eq!(
+        unsupported, binder_rows,
+        "the UnsupportedKey pins are exactly the 6 infer rows"
+    );
+    let (row, pinned) = (
+        "relation_fixed_to_first_rest",
+        RelationEngineVerdict::NotAssignable,
+    );
+    let spec = RELATION_QUERY_SPECS
+        .iter()
+        .find(|s| s.row_function == row)
+        .unwrap_or_else(|| panic!("registry seats {row}"));
+    assert_eq!(
+        spec.engine_pin,
+        Some(EngineObservationPin::MismatchedVerdict(pinned)),
+        "{row}: the pinned engine answer is the source-proven mismatch"
+    );
+}
+
+#[test]
+fn relation_registry_derives_26_distinct_snapshot_ids() {
+    // Every spec derives its v4 identity (the shared tsgo-free derivation —
+    // proving every operand canonicalizes and every binder layout set-matches
+    // its target operand's reserved refs), and the 26 derived snapshot_ids are
+    // ALL DISTINCT (the two collapse pairs genuinely collapsed: no two specs
+    // share a raw relation identity).
+    let env = super::oracle::driver::pinned_env();
+    let mut ids: Vec<String> = Vec::new();
+    for spec in RELATION_QUERY_SPECS {
+        let id = relation_probe::relation_identity_from_spec(spec).unwrap_or_else(|e| {
+            panic!(
+                "{}: the registry spec must derive its identity: {e:?}",
+                spec.row_function
+            )
+        });
+        ids.push(identity::derive_relation_snapshot_id(&id, &env));
+    }
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "the 26 specs derive 26 DISTINCT snapshot_ids"
+    );
+}
+
+#[test]
+fn relation_registry_well_formed_is_discriminating() {
+    use super::oracle::query_specs::{HostSetupKindSpec, RelationBinderSpec, RelationQuerySpec};
+
+    fn rel_spec(
+        row_function: &'static str,
+        binder_layout: &'static [RelationBinderSpec],
+        contract_rows: &'static [&'static str],
+        engine_pin: Option<EngineObservationPin>,
+    ) -> RelationQuerySpec {
+        RelationQuerySpec {
+            row_file: "relation_verdict_oracle.rs",
+            row_function,
+            query_ordinal: 0,
+            oracle_family: "relation_verdict",
+            host_project: super::oracle::query_specs::HostProjectSpec {
+                project_root: "/",
+                workspace_root: "/",
+                tsconfig_path: "/oracle.tsconfig.json",
+                host_setup_kind: HostSetupKindSpec::Standalone,
+            },
+            source_text: "string",
+            target_text: "number",
+            binder_layout,
+            contract_rows,
+            engine_pin,
+        }
+    }
+
+    // A duplicate (row_file, row_function, query_ordinal) key rejects.
+    let dup = [
+        rel_spec("row_a", &[], &["c1"], None),
+        rel_spec("row_a", &[], &["c2"], None),
+    ];
+    assert!(matches!(
+        relation_registry_well_formed(&dup),
+        Err(RelationRegistryError::DuplicateKey { .. })
+    ));
+
+    // A binder layout with a broken ordinal sequence rejects.
+    let bad_ord = [rel_spec(
+        "row_b",
+        &[RelationBinderSpec {
+            ordinal: 7,
+            name: "A",
+            constraint: None,
+        }],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_ord),
+        Err(RelationRegistryError::BinderOrdinalSequence { .. })
+    ));
+
+    // A duplicate binder name rejects.
+    let dup_name = [rel_spec(
+        "row_c",
+        &[
+            RelationBinderSpec {
+                ordinal: 0,
+                name: "A",
+                constraint: None,
+            },
+            RelationBinderSpec {
+                ordinal: 1,
+                name: "A",
+                constraint: None,
+            },
+        ],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&dup_name),
+        Err(RelationRegistryError::DuplicateBinderName { .. })
+    ));
+
+    // An UnsupportedKey pin on a binder-free spec rejects (only an inference
+    // context is an unsupported key).
+    let bad_pin = [rel_spec(
+        "row_d",
+        &[],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_pin),
+        Err(RelationRegistryError::PinShape { .. })
+    ));
+
+    // A MismatchedVerdict pin on a binder-carrying spec rejects (an inference
+    // key has no engine verdict to pin).
+    let bad_pin2 = [rel_spec(
+        "row_e",
+        &[RelationBinderSpec {
+            ordinal: 0,
+            name: "A",
+            constraint: None,
+        }],
+        &["c1"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::Assignable,
+        )),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_pin2),
+        Err(RelationRegistryError::PinShape { .. })
+    ));
+
+    // A contract row named by two specs rejects.
+    let dup_contract = [
+        rel_spec("row_f", &[], &["shared_contract"], None),
+        rel_spec("row_g", &[], &["shared_contract"], None),
+    ];
+    assert!(matches!(
+        relation_registry_well_formed(&dup_contract),
+        Err(RelationRegistryError::DuplicateContractRow { .. })
+    ));
+
+    // An empty contract-row mapping rejects.
+    let empty_contract = [rel_spec("row_h", &[], &[], None)];
+    assert!(matches!(
+        relation_registry_well_formed(&empty_contract),
+        Err(RelationRegistryError::EmptyField { .. })
+    ));
 }

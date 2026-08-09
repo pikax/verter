@@ -554,3 +554,59 @@ fn corpus_root_of_current_env_corpus_exists_on_disk() {
         root.display()
     );
 }
+
+// -- oracle_snapshot_tree_is_exact_no_orphans_no_missing ---------------
+
+/// The on-disk snapshot tree is EXACTLY the two registries' derived id set —
+/// no orphans (a stale / hand-dropped file), no missing (a registry row
+/// without a checked-in snapshot). Registry-derivable + tsgo-free: the
+/// expected set comes from the registries ALONE (`ORACLE_QUERY_SPECS` via the
+/// v3 derivation, `RELATION_QUERY_SPECS` via the v4 relation derivation), the
+/// on-disk set from a recursive `*.json` walk.
+#[test]
+fn oracle_snapshot_tree_is_exact_no_orphans_no_missing() {
+    let env = pinned_env();
+    let mut expected: Vec<String> = Vec::new();
+    for spec in super::super::query_specs::ORACLE_QUERY_SPECS {
+        let id = identity_from_spec(spec).expect("v3 spec derives its identity");
+        let snapshot_id = identity::derive_snapshot_id(&id, &env);
+        expected.push(snapshot_relative_tail(spec.oracle_family, &snapshot_id));
+    }
+    for spec in super::super::query_specs::RELATION_QUERY_SPECS {
+        let id = super::super::relation_probe::relation_identity_from_spec(spec)
+            .expect("relation spec derives its identity");
+        let snapshot_id = identity::derive_relation_snapshot_id(&id, &env);
+        expected.push(snapshot_relative_tail(spec.oracle_family, &snapshot_id));
+    }
+    expected.sort();
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(super::SNAPSHOT_TREE_INFIX);
+    let mut on_disk: Vec<String> = Vec::new();
+    for fam in std::fs::read_dir(&root).expect("snapshot tree root exists") {
+        let fam_dir = fam.expect("family entry").path();
+        if !fam_dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&fam_dir).expect("family dir") {
+            let path = entry.expect("snapshot entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("snapshot under the tree root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                on_disk.push(rel);
+            }
+        }
+    }
+    on_disk.sort();
+
+    assert_eq!(
+        on_disk,
+        expected,
+        "the on-disk snapshot tree must be EXACTLY the registries' derived id set \
+         ({} on disk, {} expected)",
+        on_disk.len(),
+        expected.len()
+    );
+}

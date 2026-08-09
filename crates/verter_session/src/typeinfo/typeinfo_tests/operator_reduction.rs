@@ -211,7 +211,7 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
     //     carrier (discriminating against widening / dropping the mode gate —
     //     remove the gate and this reduces to `string` and fails).
     // (b) The bare `Instantiate { context: structural_transit(Skeleton) }`
-    //     dispatch — the path `ref_root_reaches_transitive_cycle_node` drives —
+    //     dispatch — the path the materialization cycle gate drives —
     //     returns the un-reduced operator node (bare Instantiate stays
     //     identity-preserving; the bridge never fires on it).
     let host = make_host_with_footprint();

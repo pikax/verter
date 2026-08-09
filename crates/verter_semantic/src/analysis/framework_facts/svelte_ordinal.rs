@@ -201,8 +201,9 @@ fn leaf_members_from_lowered(
             TypeExpr::Literal(LiteralValue::Boolean(flag)) => LeafTypeFact::BooleanLiteral(*flag),
             _ => return None,
         };
+        let name = property.key.as_string()?;
         members.push(SynthesizedLeafMember {
-            name: property.name.clone(),
+            name: name.to_string(),
             optional: property.optional,
             ty: leaf,
         });

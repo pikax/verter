@@ -22,14 +22,18 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 use verter_span::Span;
 
+mod property_key;
+pub use property_key::{AuthoredPropertyKey, CanonicalIndexInt, PropertyKey};
+
 /// In-place declaration-site span transforms over [`TypeExpr`]
 /// ([`TypeExpr::shift_spans`] / [`TypeExpr::clear_spans`]).
 mod span_transform;
 
 /// Depth-safe iterative `Drop` + byte-identical-to-derive iterative
 /// `Hash` for [`TypeExpr`] (orphan-rule-permitted in this crate-local
-/// implementation module).
+/// implementation module), plus the exhaustive referenced-name walk.
 mod recursive_traversal;
+pub use recursive_traversal::{referenced_names, ReferencedNames, ReferencedTypeName};
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
 mod display;
@@ -42,9 +46,16 @@ pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayErr
 mod type_expr_json;
 pub use type_expr_json::type_expr_from_json;
 
+/// The opaque [`TypeExpr::Unknown`] payload (kept out of the crate root for
+/// file-size hygiene).
+mod unknown;
+pub use unknown::{UnknownProvenance, UnknownValue};
+
 /// Content-free authored-body locators — the keyable inverse of a session
 /// `HotTypeRef` (the cross-boundary escape a closed fact routes through).
 pub mod locators;
+mod member_origin;
+pub use member_origin::{ExcessPropertyOrigin, SpreadMember};
 
 /// Producer-emitted span-recovery origin locators (one per identity-participating
 /// span class) + the `SourceSynthetic` marker.
@@ -55,8 +66,20 @@ pub mod span_origins;
 pub mod facts;
 pub use facts::{
     merge_route_demands, DeclBindingKey, RouteDemand, RouteKeySet, TopLevelOwnerId,
-    TopLevelOwnerKind,
+    TopLevelOwnerKind, ValueDeclIdentityPart,
 };
+
+mod indexed_expression;
+pub use indexed_expression::{
+    IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
+    IndexedValueLiteralMode,
+};
+
+/// Property-key identity stored by authored type IR.
+pub type TypePropertyKey = PropertyKey<ValueDeclIdentityPart>;
+
+/// Authored type-IR key. Computed syntax owns its typed expression child.
+pub type TypeAuthoredPropertyKey = AuthoredPropertyKey<TypeExpr, ValueDeclIdentityPart>;
 
 /// Closed feature-role facts derived from resolved symbol identity.
 pub mod feature_roles;
@@ -371,8 +394,14 @@ pub enum TypeExpr {
     },
 
     /// A type the lowering could not represent.
-    /// Carries the raw source text for diagnostics.
-    Unknown { raw: String },
+    /// Carries the raw source text for diagnostics inside an opaque
+    /// [`UnknownValue`] — genuinely unrepresentable AUTHORED/raw syntax only.
+    /// Resolver DEGRADATION (a dispatch miss, an exhausted budget, an
+    /// unrepresentable surface) is NOT encoded here: it travels as typed
+    /// `QueryError` data through the session's materialization sidecar and
+    /// only projects back into an `UnknownValue` compatibility spelling at
+    /// the terminal output boundary.
+    Unknown(UnknownValue),
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +606,13 @@ pub enum ObjectMember {
     ConstructSignature(FunctionExpr),
     /// Method signature: `method(x: T): R`.
     Method(MethodSignature),
+    /// Object-literal spread entry: `{ ...operand }`, carried IN SOURCE ORDER
+    /// among the other members. Only the object-literal expression producer
+    /// emits this variant (type annotations have no spread syntax); the shared
+    /// spread materializer folds the ordered entry list left-to-right into the
+    /// final member surface, so the pre-fold IR preserves both spread position
+    /// and per-property provenance.
+    Spread(SpreadMember),
 }
 
 /// OXC-derived declaration-site spans for a named member (property or method).
@@ -751,7 +787,7 @@ impl MemberVisibility {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ObjectProperty {
-    pub name: String,
+    pub key: TypeAuthoredPropertyKey,
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
@@ -762,12 +798,27 @@ pub struct ObjectProperty {
     /// field deserializes as `Public`.
     #[serde(default)]
     pub visibility: MemberVisibility,
+    /// Excess-property provenance (see [`ExcessPropertyOrigin`]). Participates
+    /// in node identity (Eq / Hash); read only by excess-property candidate
+    /// selection. `NonLiteral` for every annotation / synthetic origin (the
+    /// constructors' choice — annotations have no literal syntax); the
+    /// object-literal producer and the spread materializer mint `FreshOwn` /
+    /// `SpreadTainted` via [`Self::with_excess_origin`]. Serialized with
+    /// `#[serde(default)]` for wire compatibility.
+    #[serde(default)]
+    pub excess_origin: ExcessPropertyOrigin,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
 }
 
 impl ObjectProperty {
+    /// Borrow the ordinary string spelling when this property has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
     /// Construct a genuinely SOURCE-LESS, semantically-public property: no
     /// single declaration site and no accessibility origin (a synthesized
     /// framework member, an interface / type-literal / object-literal / enum
@@ -778,13 +829,19 @@ impl ObjectProperty {
     /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`] so a
     /// non-public member can never be silently minted as `Public`.
     #[must_use]
-    pub fn synthetic_public(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
+    pub fn synthetic_public_key(
+        key: TypeAuthoredPropertyKey,
+        ty: TypeExpr,
+        optional: bool,
+        readonly: bool,
+    ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -795,19 +852,20 @@ impl ObjectProperty {
     /// a visibility that must be preserved (so a non-public member is never
     /// re-minted as `Public`), but the reconstruction has no single span.
     #[must_use]
-    pub fn synthetic_with_visibility(
-        name: String,
+    pub fn synthetic_key_with_visibility(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -818,19 +876,20 @@ impl ObjectProperty {
     /// correct by construction. Source-DERIVED reconstructions MUST use
     /// [`Self::with_visibility`].
     #[must_use]
-    pub fn with_spans_public(
-        name: String,
+    pub fn with_key_spans_public(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
     }
@@ -839,8 +898,8 @@ impl ObjectProperty {
     /// OXC declaration-site spans. Used by the analyzer's class lowerer to mint
     /// non-public class members onto the shared surface.
     #[must_use]
-    pub fn with_visibility(
-        name: String,
+    pub fn with_key_visibility(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
@@ -848,13 +907,25 @@ impl ObjectProperty {
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
+    }
+
+    /// Re-stamp this property's excess-property provenance. The ONLY producers
+    /// of a non-`NonLiteral` origin are direct object-literal materialization
+    /// (`FreshOwn`) and the shared spread materializer (`SpreadTainted` /
+    /// `FreshOwn` re-mint on later-direct overwrite) — plus the graph raise
+    /// boundary, which threads an existing member's recorded origin verbatim.
+    #[must_use]
+    pub fn with_excess_origin(mut self, excess_origin: ExcessPropertyOrigin) -> Self {
+        self.excess_origin = excess_origin;
+        self
     }
 }
 
@@ -918,7 +989,7 @@ impl IndexSignature {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct MethodSignature {
-    pub name: String,
+    pub key: TypeAuthoredPropertyKey,
     pub function: FunctionExpr,
     pub optional: bool,
     /// Syntax-owned class method kind. Non-class object methods use `Method`.
@@ -934,13 +1005,30 @@ pub struct MethodSignature {
     /// field deserializes as `Public`.
     #[serde(default)]
     pub visibility: MemberVisibility,
+    /// Excess-property provenance (see [`ExcessPropertyOrigin`]). `NonLiteral`
+    /// for every annotation / synthetic origin; an object-literal method /
+    /// accessor is `FreshOwn` via [`Self::with_excess_origin`]. Participates in
+    /// node identity (Eq / Hash); read only by excess-property candidate
+    /// selection.
+    #[serde(default)]
+    pub excess_origin: ExcessPropertyOrigin,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
 }
 
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectMethodKind {
@@ -951,6 +1039,12 @@ pub enum ObjectMethodKind {
 }
 
 impl MethodSignature {
+    /// Borrow the ordinary string spelling when this method has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
     /// Construct a genuinely SOURCE-LESS, semantically-public method signature:
     /// no single declaration site and no accessibility origin (a synthesized
     /// framework member, an interface / type-literal method, a test fixture).
@@ -958,14 +1052,19 @@ impl MethodSignature {
     /// accessibility. Source-DERIVED reconstructions MUST use
     /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`].
     #[must_use]
-    pub fn synthetic_public(name: String, function: FunctionExpr, optional: bool) -> Self {
+    pub fn synthetic_public_key(
+        key: TypeAuthoredPropertyKey,
+        function: FunctionExpr,
+        optional: bool,
+    ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -975,19 +1074,20 @@ impl MethodSignature {
     /// / Pick reconstruction where the navigated method already carries a
     /// visibility that must be preserved.
     #[must_use]
-    pub fn synthetic_with_visibility(
-        name: String,
+    pub fn synthetic_key_with_visibility(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         visibility: MemberVisibility,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -998,19 +1098,20 @@ impl MethodSignature {
     /// by construction. Source-DERIVED reconstructions MUST use
     /// [`Self::with_visibility`].
     #[must_use]
-    pub fn with_spans_public(
-        name: String,
+    pub fn with_key_spans_public(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
     }
@@ -1019,22 +1120,33 @@ impl MethodSignature {
     /// and its OXC declaration-site spans. Used by the analyzer's class lowerer
     /// to mint non-public class methods onto the shared surface.
     #[must_use]
-    pub fn with_visibility(
-        name: String,
+    pub fn with_key_visibility(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         visibility: MemberVisibility,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
+    }
+
+    /// Re-stamp this method's excess-property provenance. Mirrors
+    /// [`ObjectProperty::with_excess_origin`]: only direct object-literal
+    /// materialization, the shared spread materializer, and the graph raise
+    /// boundary (verbatim thread-through) produce a non-`NonLiteral` value.
+    #[must_use]
+    pub fn with_excess_origin(mut self, excess_origin: ExcessPropertyOrigin) -> Self {
+        self.excess_origin = excess_origin;
+        self
     }
 }
 
@@ -1051,6 +1163,15 @@ pub struct FunctionExpr {
     /// OXC signature / return spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: FunctionSpans,
+    /// The served function position of a BODY-DERIVED return (in-memory
+    /// producer provenance; not serialized). Present exactly when the
+    /// function's return comes from its body rather than an authored /
+    /// JSDoc annotation: the session's whole-function producer answers the
+    /// return for this position. The anchor is producer-local (the owning
+    /// declaration's name is filled at extraction; canonical / owner fill
+    /// at the lowering scope).
+    #[serde(skip)]
+    pub flow_return: Option<Box<crate::facts::FlowFunctionReturnIdentity>>,
 }
 
 impl FunctionExpr {
@@ -1066,6 +1187,7 @@ impl FunctionExpr {
             return_type,
             type_parameters,
             spans: FunctionSpans::default(),
+            flow_return: None,
         }
     }
 
@@ -1082,6 +1204,7 @@ impl FunctionExpr {
             return_type,
             type_parameters,
             spans,
+            flow_return: None,
         }
     }
 }
@@ -1203,6 +1326,10 @@ pub struct TypeParam {
     pub name: String,
     pub constraint: Option<Arc<TypeExpr>>,
     pub default: Option<Arc<TypeExpr>>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>` is
+    /// valid) — never a session-wide flag.
+    #[serde(default)]
+    pub is_const: bool,
 }
 
 /// Modifier for mapped type `optional` and `readonly` fields.
@@ -1371,7 +1498,7 @@ impl TypeExpr {
 
     /// Returns `true` if this is an `Unknown` node.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown { .. })
+        matches!(self, Self::Unknown(_))
     }
 
     /// Returns `true` if this is a primitive type.

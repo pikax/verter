@@ -12,8 +12,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use crate::{
-    FunctionExpr, FunctionParam, LiteralValue, MappedModifier, ObjectMember, PrimitiveName,
-    TupleElement, TypeExpr, TypeParam,
+    AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, LiteralValue,
+    MappedModifier, ObjectMember, PrimitiveName, TupleElement, TypeAuthoredPropertyKey, TypeExpr,
+    TypeParam,
 };
 
 /// A complete TypeScript display projection and the named type references
@@ -158,7 +159,9 @@ enum Frame<'a> {
     Text(&'static str),
     Borrowed(&'a str),
     MemberName(&'a str),
+    PropertyKey(&'a TypeAuthoredPropertyKey),
     SingleQuoted(&'a str),
+    CanonicalIndex(CanonicalIndexInt),
     Number(f64),
     BigInt(&'a str),
 }
@@ -186,7 +189,28 @@ pub fn render_type_expr_display(
                 write!(&mut text, "_arg{index}").expect("writing to String cannot fail");
             }
             Frame::MemberName(name) => push_member_name(&mut text, name),
+            Frame::PropertyKey(key) => match key {
+                AuthoredPropertyKey::String(name) => {
+                    work.push(Frame::MemberName(name));
+                }
+                AuthoredPropertyKey::Number(index) => {
+                    work.push(Frame::CanonicalIndex(*index));
+                }
+                AuthoredPropertyKey::UniqueSymbol(identity) => {
+                    work.push(Frame::Text("]"));
+                    work.push(Frame::Borrowed(&identity.symbol));
+                    work.push(Frame::Text("["));
+                }
+                AuthoredPropertyKey::Computed(expr) => {
+                    work.push(Frame::Text("]"));
+                    work.push(Frame::Expr(expr, Precedence::Lowest));
+                    work.push(Frame::Text("["));
+                }
+            },
             Frame::SingleQuoted(value) => push_single_quoted(&mut text, value),
+            Frame::CanonicalIndex(value) => {
+                write!(&mut text, "{value}").expect("writing to String cannot fail");
+            }
             Frame::Number(value) => {
                 if !value.is_finite() {
                     return Err(TypeExprDisplayError::NonFiniteNumberLiteral);
@@ -422,11 +446,11 @@ pub fn render_type_expr_display(
                         work.push(Frame::Text("typeof "));
                     }
                 }
-                TypeExpr::Unknown { raw } => {
-                    if raw.trim().is_empty() {
+                TypeExpr::Unknown(value) => {
+                    if value.is_empty() {
                         return Err(TypeExprDisplayError::EmptyUnknownSource);
                     }
-                    work.push(Frame::Borrowed(raw));
+                    work.push(Frame::Borrowed(value.raw()));
                 }
             },
             Frame::ObjectMember(member) => match member {
@@ -436,7 +460,7 @@ pub fn render_type_expr_display(
                     if property.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::MemberName(&property.name));
+                    work.push(Frame::PropertyKey(&property.key));
                     if property.readonly {
                         work.push(Frame::Text("readonly "));
                     }
@@ -467,7 +491,14 @@ pub fn render_type_expr_display(
                     if method.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::MemberName(&method.name));
+                    work.push(Frame::PropertyKey(&method.key));
+                }
+                ObjectMember::Spread(spread) => {
+                    // Diagnostic-only spelling: TS type syntax has no spread
+                    // member; render the pre-fold operand as `...(T)`.
+                    work.push(Frame::Text(")"));
+                    work.push(Frame::Expr(&spread.ty, Precedence::Lowest));
+                    work.push(Frame::Text("...("));
                 }
             },
             Frame::Function(function, style) => {
@@ -583,7 +614,7 @@ fn expression_precedence(expression: &TypeExpr) -> Precedence {
         TypeExpr::IndexedAccess { .. } => Precedence::Postfix,
         // The raw carrier can contain any authored type expression. Treat it
         // as the loosest form so embedding contexts preserve its parse tree.
-        TypeExpr::Unknown { .. } => Precedence::Lowest,
+        TypeExpr::Unknown(_) => Precedence::Lowest,
         _ => Precedence::Primary,
     }
 }

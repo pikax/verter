@@ -86,18 +86,19 @@ fn snapshot_id_v2_includes_probe_rhs_kind() {
         "an unknown capture-strategy tag is a closed-set decode failure"
     );
 
-    // The `snapshot_id` HASH-INPUT field set is unchanged by v3 (the migration
-    // mirror is NOT a `snapshot_id` input), so the domain tag stays v2 — but the
-    // file-shape version is v3 (the migration-fidelity field-set change), and it
-    // flows into `snapshot_id` through `PinnedEnv.oracle_schema_version`, so every
-    // derived `snapshot_id` value still changes.
+    // The `snapshot_id` HASH-INPUT field set is unchanged by v3/v4 (the migration
+    // mirror is NOT a `snapshot_id` input, and the v4 relation family hashes
+    // under its OWN domain tag), so the v3-family domain tag stays v2 — but the
+    // file-shape version is v4 (the `relation_verdict` kind addition), and it
+    // flows into `snapshot_id` through `PinnedEnv.oracle_schema_version`, so
+    // every derived `snapshot_id` value still changes.
     assert_eq!(
         SNAPSHOT_ID_DOMAIN_TAG, b"verter.oracle.snapshot_id.v2",
-        "the snapshot_id HASH-INPUT field set is unchanged by v3; the domain tag stays v2"
+        "the snapshot_id HASH-INPUT field set is unchanged by v4; the domain tag stays v2"
     );
     assert_eq!(
-        ORACLE_SCHEMA_VERSION, 3,
-        "migration_fingerprint_version + migration_fingerprint are the v3 schema-shape change"
+        ORACLE_SCHEMA_VERSION, 4,
+        "the relation_verdict kind addition is the v4 schema-shape change"
     );
     assert_eq!(
         PROBE_SYNTHESIS_VERSION, 2,
@@ -371,5 +372,260 @@ fn env_corpus_dir_name_of_current_corpus_is_ntfs_safe() {
     assert!(
         !dir.ends_with('.') && !dir.ends_with(' '),
         "no trailing dot/space: {dir}"
+    );
+}
+
+// =========================================================================
+// relation_snapshot_id_discriminates_every_axis
+// =========================================================================
+
+use super::{
+    derive_relation_snapshot_id, BinderLayoutEntry, FreshnessTag, InferenceModeTag,
+    OverloadSelectionTag, RelationKindTag, RelationPolicyRecord, RelationVerdictIdentity,
+    VarianceTag, RELATION_SNAPSHOT_ID_DOMAIN_TAG,
+};
+
+fn base_relation_identity() -> RelationVerdictIdentity {
+    RelationVerdictIdentity {
+        row_file: "relation_verdict_oracle.rs".to_string(),
+        row_function: "relation_infer_multi".to_string(),
+        query_ordinal: 0,
+        workspace_files: vec![WorkspaceFileRef {
+            path: "/fixtures/relation_verdict/relation_infer_multi.ts".to_string(),
+            content_hash: "sha256:4d2a".to_string(),
+        }],
+        source_operand: json!({ "kind": "tuple", "elements": [
+            { "kind": "literal", "value": 1 },
+            { "kind": "literal", "value": 2 }
+        ] }),
+        target_operand: json!({ "kind": "tuple", "elements": [
+            { "kind": "ref", "name": "__oracle_binder__B" },
+            { "kind": "ref", "name": "__oracle_binder__A" }
+        ] }),
+        binder_layout: vec![
+            BinderLayoutEntry {
+                ordinal: 0,
+                name: "B".to_string(),
+                constraint: None,
+            },
+            BinderLayoutEntry {
+                ordinal: 1,
+                name: "A".to_string(),
+                constraint: None,
+            },
+        ],
+        relation: RelationKindTag::Assignable,
+        policy: RelationPolicyRecord::default_record(),
+        freshness: FreshnessTag::Regular,
+        inference_mode: InferenceModeTag::TargetPattern,
+        host_project: HostProject {
+            project_root: "/".to_string(),
+            workspace_root: "/".to_string(),
+            tsconfig_path: "/oracle.tsconfig.json".to_string(),
+            host_setup_kind: HostSetupKind::Standalone,
+        },
+        oracle_value_kind: OracleValueKind::RelationVerdict,
+    }
+}
+
+#[test]
+fn relation_snapshot_id_discriminates_every_axis() {
+    let env = base_env();
+    let base = base_relation_identity();
+    let base_id = derive_relation_snapshot_id(&base, &env);
+    assert!(base_id.starts_with("u_"));
+    assert_eq!(
+        base_id.len(),
+        2 + 64,
+        "the FULL 32-byte digest, never truncated"
+    );
+
+    // Deterministic redrive.
+    assert_eq!(
+        base_id,
+        derive_relation_snapshot_id(&base_relation_identity(), &env),
+        "the relation id re-derives deterministically"
+    );
+
+    // EVERY value-affecting axis is an input.
+    let mut source = base.clone();
+    source.source_operand = json!({ "kind": "primitive", "name": "string" });
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&source, &env),
+        "source_operand is an input"
+    );
+
+    let mut target = base.clone();
+    target.target_operand = json!({ "kind": "tuple", "elements": [
+        { "kind": "ref", "name": "__oracle_binder__A" },
+        { "kind": "ref", "name": "__oracle_binder__B" }
+    ] });
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&target, &env),
+        "target_operand is an input"
+    );
+
+    // The binder layout's ORDER is an identity input (preorder, NOT name sort):
+    // swapping the two binders' layout order changes the id.
+    let mut swapped = base.clone();
+    swapped.binder_layout = vec![
+        BinderLayoutEntry {
+            ordinal: 0,
+            name: "A".to_string(),
+            constraint: None,
+        },
+        BinderLayoutEntry {
+            ordinal: 1,
+            name: "B".to_string(),
+            constraint: None,
+        },
+    ];
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&swapped, &env),
+        "binder layout order is an input (preorder, not name sort)"
+    );
+
+    let mut relation = base.clone();
+    relation.relation = RelationKindTag::Subtype;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&relation, &env),
+        "relation kind is an input"
+    );
+
+    let mut policy = base.clone();
+    policy.policy.overload_selection = OverloadSelectionTag::FirstApplicable;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&policy, &env),
+        "policy.overload_selection is an input"
+    );
+    let mut policy2 = base.clone();
+    policy2.policy.excess_property_check = true;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&policy2, &env),
+        "policy.excess_property_check is an input"
+    );
+    let mut policy3 = base.clone();
+    policy3.policy.variance = VarianceTag::StrictContravariance;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&policy3, &env),
+        "policy.variance is an input"
+    );
+
+    let mut freshness = base.clone();
+    freshness.freshness = FreshnessTag::Fresh;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&freshness, &env),
+        "freshness is an input"
+    );
+
+    let mut mode = base.clone();
+    mode.inference_mode = InferenceModeTag::None;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&mode, &env),
+        "inference_mode is an input"
+    );
+
+    let mut host = base.clone();
+    host.host_project.tsconfig_path = "/other.tsconfig.json".to_string();
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&host, &env),
+        "host/config identity is an input"
+    );
+
+    let mut files = base.clone();
+    files.workspace_files[0].content_hash = "sha256:ffff".to_string();
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&files, &env),
+        "workspace identity is an input"
+    );
+
+    // The config/env axes (the pinned env) are inputs.
+    let mut other_env = env.clone();
+    other_env.compiler_options_hash = "sha256:00000000".to_string();
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&base, &other_env),
+        "compiler_options_hash is an input"
+    );
+    let mut other_env2 = env.clone();
+    other_env2.oracle_schema_version = 99;
+    assert_ne!(
+        base_id,
+        derive_relation_snapshot_id(&base, &other_env2),
+        "oracle_schema_version is an input"
+    );
+
+    // DOMAIN SEPARATION: the relation family hashes under its own tag — the
+    // same row-ref + env under the v3 TypeExpr derivation yields a DIFFERENT id
+    // (no cross-family collision).
+    assert_eq!(
+        RELATION_SNAPSHOT_ID_DOMAIN_TAG, b"verter.oracle.snapshot_id.relation.v1",
+        "the v4 family hashes under its own domain tag"
+    );
+    let v3_identity = SnapshotIdentity {
+        row_file: base.row_file.clone(),
+        row_function: base.row_function.clone(),
+        query_ordinal: base.query_ordinal,
+        query_helper_kind: QueryHelperKind::ResolveExpr,
+        workspace_files: base.workspace_files.clone(),
+        primary_canonical: "/fixtures/relation_verdict/relation_infer_multi.ts".to_string(),
+        symbol_or_expression: "X".to_string(),
+        type_arguments: vec![],
+        projection_mode: ProjectionModeKind::Expanded,
+        probe_rhs_kind: ProbeRhsKind::Bare,
+        host_project: base.host_project.clone(),
+        oracle_value_kind: OracleValueKind::StructuredTypeExpr,
+    };
+    assert_ne!(
+        base_id,
+        derive_snapshot_id(&v3_identity, &env),
+        "the v4 relation id is domain-separated from the v3 TypeExpr id"
+    );
+
+    // The closed tag sets round-trip; unknown tags are closed-set failures.
+    assert_eq!(
+        RelationKindTag::from_tag("assignable"),
+        Some(RelationKindTag::Assignable)
+    );
+    assert_eq!(RelationKindTag::from_tag("extends"), None);
+    assert_eq!(
+        OverloadSelectionTag::from_tag("all"),
+        Some(OverloadSelectionTag::All)
+    );
+    assert_eq!(OverloadSelectionTag::from_tag("best"), None);
+    assert_eq!(
+        VarianceTag::from_tag("method_parameter_bivariance"),
+        Some(VarianceTag::MethodParameterBivariance)
+    );
+    assert_eq!(VarianceTag::from_tag("covariance"), None);
+    assert_eq!(
+        FreshnessTag::from_tag("regular"),
+        Some(FreshnessTag::Regular)
+    );
+    assert_eq!(FreshnessTag::from_tag("stale"), None);
+    assert_eq!(
+        InferenceModeTag::from_tag("target_pattern"),
+        Some(InferenceModeTag::TargetPattern)
+    );
+    assert_eq!(InferenceModeTag::from_tag("infer"), None);
+    assert_eq!(
+        RelationPolicyRecord::default_record(),
+        RelationPolicyRecord {
+            overload_selection: OverloadSelectionTag::All,
+            excess_property_check: false,
+            variance: VarianceTag::MethodParameterBivariance,
+        },
+        "the default policy record is the only admissible capture policy"
     );
 }

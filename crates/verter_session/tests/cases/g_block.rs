@@ -91,9 +91,9 @@ mod r6_query_identity_keys_content_free;
 #[path = "g_block/separation_of_concerns.rs"]
 mod separation_of_concerns;
 #[path = "g_block/typeinfo_audit_contract_guards.rs"]
-mod typeinfo_audit_contract_guards;
+pub(crate) mod typeinfo_audit_contract_guards;
 #[path = "g_block/typeinfo_graph_contract_guards.rs"]
-mod typeinfo_graph_contract_guards;
+pub(crate) mod typeinfo_graph_contract_guards;
 #[path = "g_block/typeinfo_graph_taxonomy.rs"]
 mod typeinfo_graph_taxonomy;
 #[path = "g_block/typeinfo_request_contract_guards.rs"]
@@ -101,18 +101,20 @@ mod typeinfo_request_contract_guards;
 #[path = "g_block/typeinfo_wire_surface_guards.rs"]
 mod typeinfo_wire_surface_guards;
 #[path = "g_block/u2_demand_lattice_guards.rs"]
-mod u2_demand_lattice_guards;
+pub(crate) mod u2_demand_lattice_guards;
 #[path = "g_block/u2_display_projection_guards.rs"]
 mod u2_display_projection_guards;
 #[path = "g_block/u2_spec_table_guards.rs"]
-mod u2_spec_table_guards;
+pub(crate) mod u2_spec_table_guards;
 #[path = "g_block/u2_value_domain_design_guards.rs"]
 mod u2_value_domain_design_guards;
 #[path = "g_block/u2b5_class_ns_enum_overload_guards.rs"]
-mod u2b5_class_ns_enum_overload_guards;
+pub(crate) mod u2b5_class_ns_enum_overload_guards;
 #[path = "g_block/u2b6_apparent_template_guards.rs"]
-mod u2b6_apparent_template_guards;
+pub(crate) mod u2b6_apparent_template_guards;
 #[path = "g_block/u2b7_flow_contextual_guards.rs"]
-mod u2b7_flow_contextual_guards;
+pub(crate) mod u2b7_flow_contextual_guards;
 #[path = "g_block/u2b8_relate_upgrade_guards.rs"]
-mod u2b8_relate_upgrade_guards;
+pub(crate) mod u2b8_relate_upgrade_guards;
+#[path = "g_block/u6_call_resolve_guards.rs"]
+mod u6_call_resolve_guards;

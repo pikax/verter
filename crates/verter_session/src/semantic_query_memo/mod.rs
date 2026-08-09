@@ -44,20 +44,39 @@ use crate::semantic_query::{
 use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 
 mod arena;
-mod budgeted_caches;
 mod derivation;
 mod family;
+mod family_retention;
+mod flow_return_memo;
 mod hash_cons_memos;
 mod inflight;
 mod interner;
 mod member_index;
+mod origin_edges;
 mod prepared;
+mod relation_memo;
+mod resolve_call_memo;
 mod reverse_index;
+mod scc_publish;
+#[cfg(test)]
+mod scc_publish_tests;
+mod unresolved_reach;
+
+pub(crate) use flow_return_memo::InlineFlowReturnFlight;
+pub(crate) use relation_memo::InlineRelationFlight;
+pub(crate) use resolve_call_memo::InlineResolveCallFlight;
+pub(crate) use scc_publish::{
+    PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
+};
+
 mod stats;
+mod wait_cycle;
 // `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
 // helpers live in a sibling continuation-impl file so the hot-path memo
 // logic here stays under the Tier-2 module-size budget.
 mod store_test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use store_test_support::BatchExpandError;
 #[cfg(any(test, feature = "test-support"))]
 mod test_gates;
 mod trait_impls;
@@ -79,13 +98,18 @@ pub use test_support::{
 pub use interner::DepSignatureInterner;
 #[cfg(test)]
 use interner::SWEEP_INTERVAL;
+#[cfg(test)]
 pub use member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX;
 
-use crate::semantic_query::demand::{cached_satisfies, MaterializedSet};
+#[cfg(test)]
+mod object_spread_projection_tests;
+
+use crate::semantic_query::demand::{
+    cached_satisfies, MaterializedPoint, MaterializedSet, ProjectionPath,
+};
 use arena::NodeArena;
 #[cfg(test)]
 use arena::{shard_index_for, NUM_SHARDS};
-use budgeted_caches::BudgetedRelationMemo;
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
@@ -102,6 +126,7 @@ use inflight::{
 };
 use prepared::PreparedKeyHandle;
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard, InFlightStatsGuard};
+use wait_cycle::{ExecutionOwnerScope, WaitForGraph};
 
 #[cfg(any(test, feature = "test-support"))]
 use test_gates::validate_running_probe;
@@ -121,6 +146,24 @@ pub fn family_variant_label_for_tests(
 ) -> &'static str {
     let (family, _slot) = family_and_slot(key);
     family.variant_label()
+}
+
+/// Whether the family's warm reads additionally hard-gate on
+/// `validated_at_generation` equality with the LIVE project generation.
+/// A `ProjectGeneration` reset bumps no file content, so the carrier
+/// alone would miss it — a stale judgement must not warm-serve across a
+/// project-shape boundary. The gated families all read cross-file state
+/// that can shift with a project-shape change touching no tracked file
+/// content: `Relate` (cross-file judgements),
+/// `ClassifyMaterializationCycleGate` (cross-file declaration bodies),
+/// and `FlowReturn` (cross-file callees and object-spread programs).
+fn family_requires_live_generation_gate(family: &FamilyKey) -> bool {
+    matches!(
+        family,
+        FamilyKey::Relate { .. }
+            | FamilyKey::ClassifyMaterializationCycleGate { .. }
+            | FamilyKey::FlowReturn { .. }
+    )
 }
 
 fn narrow_value_result(result: QueryResult<SemanticQueryValue>) -> QueryResult<SemanticNodeId> {
@@ -144,6 +187,7 @@ fn narrow_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -155,6 +199,7 @@ fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: true,
+        partial_reasons: crate::semantic_query::PartialReasonSet::CANCELLED,
     }
 }
 
@@ -212,7 +257,43 @@ pub struct SemanticGraphStore {
     /// [`family::slot_domain_siblings`]). Never by enum rank, so the
     /// lattice-unsound `Shallow → Navigate` clone is REJECTED. Narrower
     /// builds NEVER backfill broader slots, and only into an empty slot.
+    ///
+    /// **Relation judgements live here too**, under the dedicated
+    /// [`FamilyKey::Relate`] family (the full-identity
+    /// [`RelateMemoKey`](crate::semantic_query::RelateMemoKey) — source /
+    /// target / relation kind / policy / source freshness / inference
+    /// context / env+substitution+projection-reduction context — boxed, 1:1
+    /// with the key the relation engine builds) in the [`ModeSlot::Single`]
+    /// slot. The stored candidate's value is the PUBLIC
+    /// [`SemanticQueryValue::Relation`] payload — decided binary
+    /// `Assignable`/`NotAssignable` outcomes ONLY (an undecided judgement
+    /// has no value-domain form and is never admitted; a `BudgetExceeded`
+    /// payload is public but ReturnOnly). Warm reads validate the carrier
+    /// strictly AND hard-miss on a `validated_at_generation` mismatch, so a
+    /// same-canonical content edit to either the source's or the target's
+    /// originating file — or a `ProjectGeneration` bump — misses the warm
+    /// relation judgement and forces a recompute. Retention rides the
+    /// family rails (per-family cap, invalid-first / LRU eviction, the
+    /// family `memo_budget` global bound, reverse-index drains).
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
+    /// The payload-side relation-proof table backing (design Decision 4):
+    /// proofs a [`SemanticQueryValue::Relation`] payload references by
+    /// opaque [`crate::semantic_query::RelationProofId`], interned
+    /// append-only and deduplicated by value. The proof is a descriptive
+    /// witness, NEVER a validity oracle — it rides OFF the type-values
+    /// surface.
+    relation_proof_table: Mutex<(
+        Vec<crate::semantic_query::RelationProof>,
+        FxHashMap<crate::semantic_query::RelationProof, crate::semantic_query::RelationProofId>,
+    )>,
+    /// The co-discharged full `Relate` keys a `CoinductiveCycle` proof
+    /// references by opaque [`crate::semantic_query::RelateKeyId`],
+    /// interned append-only (content-free — never a session-bearing
+    /// identity).
+    relate_key_table: Mutex<(
+        Vec<crate::semantic_query::RelateMemoKey>,
+        FxHashMap<crate::semantic_query::RelateMemoKey, crate::semantic_query::RelateKeyId>,
+    )>,
     /// In-flight admission keyed by the prepared query token
     /// ([`PreparedKeyHandle`]) whose equality IS full
     /// [`SemanticQueryKey`] equality (bijection pinned by the
@@ -224,27 +305,18 @@ pub struct SemanticGraphStore {
     /// the prepared `(family, slot)` projection, so invalidation sweeps
     /// read it instead of re-running `family_and_slot` per entry.
     inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
-    /// Relation-engine memo. Maps the FULL relation identity
-    /// [`RelateMemoKey`](crate::semantic_query::RelateMemoKey) (source / target
-    /// / relation kind / policy / source freshness / inference context /
-    /// env+substitution+projection-reduction context) to the tri-state
-    /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
-    /// self-version-rooted carrier + the self-root canonical set used
-    /// for strict warm-hit validation. Separate from the family memo
-    /// because relation identity is over the full `RelateMemoKey`, not a
-    /// single node.
-    ///
-    /// The stored `RelationMemoEntry` is validated on every warm read
-    /// (`get_relation`) — every self-root canonical's `FileWholeHash` is
-    /// validated strictly, so a same-canonical content edit to either
-    /// the source's or the target's originating file misses the warm
-    /// relation judgement and forces a recompute.
-    ///
-    /// The map and its retention budget are mutated within one lock
-    /// domain ([`BudgetedRelationMemo`]) — `insert` runs under the
-    /// wrapper's `retention_gate` read guard, `clear` under its write
-    /// guard.
-    relation_memo: BudgetedRelationMemo,
+    /// Generation-qualified execution owners plus the cooperative wait-for
+    /// graph. Nested semantic queries on one synchronous dispatch stack share
+    /// an owner; cross-thread joiners add a temporary edge before parking.
+    wait_for_graph: WaitForGraph,
+    /// Independently-owned binding relation flights. Binding roots carry
+    /// transaction-local inference candidates, so concurrent callers must
+    /// never join one another's cold work. They still register here while
+    /// building so cancellation and invalidation can revoke their publish
+    /// right under the same store-owned admission fence as ordinary flights.
+    /// The value is a list because multiple independent owners may compute
+    /// the same full key concurrently.
+    independent_inflight: Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>,
     /// Sibling derivation/origin layer. Edges are keyed by
     /// `(result_node, kind)`; multiple derivations of the same structural
     /// result store multiple edges per key. Edge dep-signatures are
@@ -283,6 +355,23 @@ pub struct SemanticGraphStore {
     /// already takes the entries lock, so the cost is in the noise and
     /// production cold-abort-sweep behaviour is unchanged.
     force_cold_abort_sweep: std::sync::atomic::AtomicBool,
+    /// Memoized `reaches an unresolved carrier` bit, per interned node id.
+    ///
+    /// The semantic graph is hash-consed and IMMUTABLE: a node's payload
+    /// never changes after intern, and its children are interned before
+    /// it. "This value reaches a carrier whose own resolution answered
+    /// nothing" is therefore a pure INDUCTIVE function of the node id —
+    /// computed once, from the children's bits, and true forever after.
+    ///
+    /// That is what makes the answer budget-free. A bounded walk that
+    /// reports "unresolved" on exhaustion is not a conservative
+    /// approximation of this function, it is a DIFFERENT function: a
+    /// 4,100-arm literal union with no miss in it is fully known, and
+    /// stamping it unresolved propagates a factually false permanent warm
+    /// refusal into every enclosing result. Memoizing removes the reason
+    /// the bound existed (re-walking the same structure per SCC fixpoint
+    /// iteration) instead of trading correctness for it.
+    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
     /// Per-store test-only injection point for the
     /// [`Self::invalidate_all`] post-`entries`-clear tail. When a test
     /// arms it (via [`Self::test_invalidate_all_post_entries_clear_gate`])
@@ -349,6 +438,14 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, feature = "test-support"))]
     cold_winner_pre_backfill_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside
+    /// [`Self::execute_cooperative`]'s cold-winner path, fired immediately
+    /// after [`Self::warm_publish_one`] admits the parent candidate and before
+    /// prefix backfill begins. A test can cancel the owning request in this
+    /// exact window and verify that the completed admission remains the
+    /// operation's linearization point.
+    #[cfg(any(test, feature = "test-support"))]
+    cold_winner_post_admission_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`],
     /// fired right BEFORE the `canonical_to_entries` reverse-index clear —
     /// and, in final-state code, with the `entries` lock STILL held. A
@@ -386,6 +483,14 @@ pub struct SemanticGraphStore {
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
     #[cfg(any(test, feature = "test-support"))]
     publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point immediately before an inline
+    /// relation member takes the entries lock for publication.
+    #[cfg(any(test, feature = "test-support"))]
+    relation_member_pre_entries_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point after a relation root publishes
+    /// and before its transaction drains completed SCC members.
+    #[cfg(any(test, feature = "test-support"))]
+    relation_root_pre_member_drain_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`]'s
     /// in-flight abort loop, fired while iterating the COLLECTED entry
     /// handles and locking each entry's `state` — with the `inflight`
@@ -536,36 +641,23 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
 }
 
-/// Value-side relation admission decision. The relation engine supplies only
-/// the observed self-roots and judgement; [`SemanticGraphStore`] owns the
-/// tracer, finalization, carrier construction, and storage write.
-pub(crate) enum RelationPublishDecision {
-    Publish {
-        observed_self_roots: Vec<ObservedGraphSelfRoot>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    },
-    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+/// Exact memo candidate admitted by one cold-winner publication.
+///
+/// The `admission_seq` is the store-owned ABA token for this candidate; the
+/// remaining fields are the fact carrier that downstream atomic admissions
+/// must inherit from this exact publication.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedMemoCandidate {
+    pub(crate) read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
+    pub(crate) validated_at_generation: u64,
+    pub(crate) admission_seq: u64,
 }
 
-impl RelationPublishDecision {
-    #[inline]
-    pub(crate) fn publish(
-        observed_self_roots: Vec<ObservedGraphSelfRoot>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) -> Self {
-        Self::Publish {
-            observed_self_roots,
-            result,
-            validated_at_generation,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
-        Self::ReturnOnly(reason)
-    }
+enum WarmPublishOutcome {
+    Published(PublishedMemoCandidate),
+    Skipped,
+    Aborted,
 }
 
 /// Reverse-index type alias. See
@@ -627,6 +719,30 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mint an explicit fixture-only infer identity. Production lowering has
+    /// no graph allocator: authored identities come from the shared exact
+    /// typed-root [`crate::semantic_query::InferBinderFactory`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn synthetic_infer_binder_id_for_tests(
+        &self,
+        ordinal: u64,
+    ) -> crate::semantic_query::InferBinderId {
+        crate::semantic_query::InferBinderFactory::synthetic(ordinal)
+    }
+
+    /// Compatibility mint for older in-crate fixtures. This is compiled out
+    /// of production and delegates exclusively to the private synthetic
+    /// identity variant; authored lowering never reaches this counter.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn alloc_infer_binder_id(&self) -> crate::semantic_query::InferBinderId {
+        static NEXT_SYNTHETIC_FIXTURE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let ordinal = NEXT_SYNTHETIC_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        self.synthetic_infer_binder_id_for_tests(ordinal)
     }
 
     /// Test-only constructor pinning a small `memo_budget` cap. Lets a
@@ -725,8 +841,7 @@ impl SemanticGraphStore {
     /// The constructor installs provenance via field mutation on a
     /// `Default`-built store so it stays compatible with the dispatch
     /// invariant tests that require single-owner cardinality for
-    /// `arena: NodeArena` and `relation_memo: BudgetedRelationMemo` in
-    /// production code.
+    /// `arena: NodeArena` in production code.
     #[must_use]
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
         let mut store = Self::default();
@@ -1163,37 +1278,15 @@ impl SemanticGraphStore {
                     );
                 }
             }
-        }
-
-        // Drop
-        // in-flight entries for any (family, slot) whose warm slot
-        // was just evicted. Joiners waiting on the condvar observe
-        // `aborted = true` on wake and re-enter dispatch from step 1
-        // of `execute_cooperative`. The completed sentinel wakes any
-        // joiner whose wait predicate only checks `completed`.
-        //
-        // `affected_pairs` is populated from the reverse-index drained set —
-        // even slots that the ptr_eq step rejected (because a fresh
-        // post-publish write replaced the registered Arc) are included
-        // so any in-flight entry under that pair still aborts correctly.
-        //
-        // The `affected_pairs.is_empty()` guard short-circuits the
-        // whole phase when no canonical-keyed entries existed,
-        // avoiding an unnecessary `self.inflight.lock()` acquisition.
-        //
-        // **Lock order — collect-then-release.** This loop is SELECTIVE
-        // (it aborts only the in-flight entries whose `(family, slot)`
-        // is in `affected_pairs`, not every entry like `invalidate_all`)
-        // — but it obeys the SAME lock discipline: it must NOT hold the
-        // `inflight` table lock while it takes each entry's `state`
-        // lock. Under the table lock, `retain` keeps the unmatched
-        // entries and COLLECTS the `Arc<InflightEntry>` handles of the
-        // matched ones (removing them from the table); the table lock is
-        // then released; only THEN is each collected entry's `state`
-        // locked to set `aborted`. Global rule: `state` is never taken
-        // while the `inflight` table lock is held — see the matching
-        // comment in `invalidate_all`.
-        if !affected_pairs.is_empty() {
+            // Revoke matching ordinary flights and every independently-owned
+            // binding flight before releasing `entries`. Independent binding
+            // builds are rare and can discover transitive dependencies while
+            // running, so a per-canonical edit conservatively aborts the whole
+            // independent set. Both registries are collect-then-release:
+            // no per-entry state lock is acquired while a registry lock is
+            // held. Keeping the `entries` lock through the state update closes
+            // the publish-after-invalidation window because both store-owned
+            // publish paths re-check `aborted` under this same lock.
             let aborted_entries: Vec<Arc<InflightEntry>> = {
                 let mut table = self.inflight.lock();
                 let mut collected: Vec<Arc<InflightEntry>> = Vec::new();
@@ -1216,9 +1309,19 @@ impl SemanticGraphStore {
                 });
                 collected
             };
-            // Table lock released — now mark each collected entry
-            // `aborted` and wake its waiters with no table lock held.
-            for inflight in &aborted_entries {
+            let independent_aborted_entries: Vec<Arc<InflightEntry>> = {
+                let mut table = self.independent_inflight.lock();
+                let collected = table
+                    .values()
+                    .flat_map(|entries| entries.iter().map(Arc::clone))
+                    .collect();
+                table.clear();
+                collected
+            };
+            for inflight in aborted_entries
+                .iter()
+                .chain(independent_aborted_entries.iter())
+            {
                 {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
@@ -1295,10 +1398,12 @@ impl SemanticGraphStore {
     /// - `memo_budget`, `canonical_to_entries` — the family memo's FIFO
     ///   retention ledger and reverse index. Both are cleared under the
     ///   same `entries`-lock hold as `entries.clear()` (see below).
-    /// - `relation_memo`, `derivation` — the other
-    ///   `SemanticNodeId`-keyed semantic caches. Clearing them on a
-    ///   project-generation bump drops the stale judgements those caches
-    ///   hold.
+    /// - `derivation` — the other
+    ///   `SemanticNodeId`-keyed semantic cache. Clearing it on a
+    ///   project-generation bump drops the stale judgements it holds.
+    ///   (The relation memo needs no separate clear: its entries live in
+    ///   the family memo's `Relate` family and are dropped by the
+    ///   `entries` / `memo_budget` / `canonical_to_entries` clear above.)
     ///
     /// Each bounded cache has a retention ledger; the ledger is cleared
     /// in lockstep with the map it bounds so no budget retains a key
@@ -1312,11 +1417,9 @@ impl SemanticGraphStore {
     /// `memo_budget` admission and registers each `canonical_to_entries`
     /// entry while holding the `entries` lock that landed the slot, so a
     /// publish cannot strand a live family with no ledger record nor a
-    /// live memo entry with no reverse-index registration. For the
-    /// relation memo the map and its
-    /// ledger live in one lock domain too — the wrapper's `clear` holds a
-    /// `retention_gate` write guard across both clears, exclusive against
-    /// concurrent inserts.
+    /// live memo entry with no reverse-index registration. The relation
+    /// memo rides the SAME cluster (its entries are `Relate` families),
+    /// so its map and ledger are cleared in the same lock domain too.
     ///
     /// ## The node arena is append-only
     ///
@@ -1351,10 +1454,9 @@ impl SemanticGraphStore {
     /// a counter-acquirer of these two locks at all: it locks `state`,
     /// *releases* it, and only then acquires the `inflight` table lock —
     /// two sequential acquisitions, never nested — so it can neither
-    /// deadlock nor establish a competing order. The relation memo
-    /// takes its own `retention_gate` write
-    /// guard independently of `entries` — no path holds `entries` across a
-    /// `retention_gate` acquisition.
+    /// deadlock nor establish a competing order. The relation memo rides
+    /// the same `entries` lock domain (its entries are `Relate` families
+    /// in the family memo) — no separate relation gate exists.
     pub fn invalidate_all(&self) -> usize {
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
@@ -1392,9 +1494,21 @@ impl SemanticGraphStore {
                 table.clear();
                 collected
             };
+            let independent_aborted_entries: Vec<Arc<InflightEntry>> = {
+                let mut table = self.independent_inflight.lock();
+                let collected = table
+                    .values()
+                    .flat_map(|entries| entries.iter().map(Arc::clone))
+                    .collect();
+                table.clear();
+                collected
+            };
             // Table lock released — now mark each collected entry
             // `aborted` and wake its waiters with no table lock held.
-            for inflight in &aborted_entries {
+            for inflight in aborted_entries
+                .iter()
+                .chain(independent_aborted_entries.iter())
+            {
                 {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
@@ -1508,418 +1622,15 @@ impl SemanticGraphStore {
         }
         // Drop every other `SemanticNodeId`-keyed semantic cache so no
         // stale id-keyed judgement survives the project-generation bump.
-        // The relation memo clears its map and retention budget under its
-        // own `retention_gate` write guard — a concurrent insert is
-        // excluded across the whole map+budget clear. The family memo's
-        // three-member cluster (`entries`, `memo_budget`,
-        // `canonical_to_entries`) was cleared above under the `entries`
-        // lock.
-        self.relation_memo.clear();
+        // Relation judgements live in the family memo's `Relate` family,
+        // so they were already dropped by the family memo's three-member
+        // cluster clear (`entries`, `memo_budget`, `canonical_to_entries`)
+        // above under the `entries` lock.
         self.derivation.lock().clear();
         // Hash-cons memos (substitute, evaluate-deferred) — see
         // `hash_cons_memos.rs` for the invalidation contract.
         self.clear_hash_cons_memos();
         removed
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Relation memo
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Strict warm-hit read of a cached relation judgement for the full
-    /// relation identity `key`.
-    ///
-    /// Returns the tri-state
-    /// [`RelationResult`](crate::semantic_query::RelationResult) plus
-    /// a dispatch-plumbing [`empty_signature`] (the relation carrier
-    /// is the sole fact rail; the tuple shape is preserved for
-    /// `relate_nodes` call-site compatibility) **only when** the
-    /// stored entry's self-version-rooted carrier validates against
-    /// the live store view — every self-root canonical's
-    /// `FileWholeHash` is validated strictly AND the entry's
-    /// `validated_at_generation` still equals the live project
-    /// generation. A stale entry (same-canonical content edit,
-    /// untracked self-root, or `ProjectGeneration` bump) returns
-    /// `None`. Validation failure does NOT bubble the carrier.
-    ///
-    /// A `key` differing only in relation kind / policy / source freshness /
-    /// inference context / env from a cached one is a DISTINCT slot and misses
-    /// — the warm hit is on the FULL identity, not the bare `(source, target)`
-    /// pair.
-    #[must_use]
-    pub(crate) fn get_relation(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<(DepSignature, crate::semantic_query::RelationResult)> {
-        // Clone the entry OUT of the `DashMap` shard guard before
-        // validating: `validate_with_self_roots` / `bubble` consult the
-        // resolver store view and fan into TLS tracers, which may
-        // re-enter the relation memo — holding the shard guard across
-        // that re-entry would deadlock. `BudgetedRelationMemo::get_cloned`
-        // performs exactly that clone-out-of-guard.
-        let entry = self.relation_memo.get_cloned(key)?;
-        // Project-generation gate — carrier alone misses a reset.
-        if entry.validated_at_generation != ctx.project_type_store().current_project_generation()
-            || !entry
-                .carrier
-                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
-        {
-            return None;
-        }
-        entry.carrier.bubble(ctx);
-        // Dispatch-plumbing payload; every `relate_nodes` caller
-        // discards it. The carrier is the cache-validity oracle
-        // (validated above); there is no second rail to return.
-        Some((empty_signature(), entry.result))
-    }
-
-    /// Run the complete cold relation computation inside a store-owned fact
-    /// tracer, finalize the dependency evidence, build the self-rooted carrier,
-    /// and perform the sole production relation-memo write.
-    pub(crate) fn compute_relation_and_admit<R, Compute, Decide>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        key: crate::semantic_query::RelateMemoKey,
-        compute: Compute,
-        decide: Decide,
-    ) -> R
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> RelationPublishDecision,
-    {
-        let (value, read_set) = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
-            .with_fact_tracer(compute);
-        match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
-                RelationPublishDecision::Publish {
-                    observed_self_roots,
-                    result,
-                    validated_at_generation,
-                } => {
-                    let completed =
-                        crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
-                            semantic_graph_read_set_signature(view, &observed_self_roots, &facts)
-                        });
-                    match completed {
-                        Ok((facts, self_root_canonicals)) => self.insert_relation_owned(
-                            key,
-                            crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                            self_root_canonicals,
-                            result,
-                            validated_at_generation,
-                        ),
-                        Err(reason) => {
-                            crate::cache_runtime::admission::propagate_non_admission(reason)
-                        }
-                    }
-                }
-                RelationPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
-                }
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    crate::cache_runtime::NonAdmissionReason::MutationUnstable,
-                );
-            }
-        }
-        value
-    }
-
-    /// Publish a relation judgement for the full relation identity `key`.
-    /// Writes to the dedicated relation memo DashMap, separate from the family
-    /// memo so pairwise identity does not inflate the single-node keyspace.
-    ///
-    /// The entry is self-version-rooted: `carrier` is built by
-    /// [`semantic_graph_read_set_signature`] from the relation build's
-    /// observed self-roots; `self_root_canonicals` is checked strictly,
-    /// and `validated_at_generation` gates on a project-shape bump.
-    fn insert_relation_owned(
-        &self,
-        key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) {
-        // Map insert + budget admission run under the gate's read
-        // guard; `DashMap::entry` makes the new-vs-replace decision
-        // atomic. `admission_seq` stays paired with the ledger record.
-        self.relation_memo.insert(
-            key,
-            carrier,
-            self_root_canonicals,
-            result,
-            validated_at_generation,
-        );
-    }
-
-    /// Test-support seed seam for relation-memo fixtures. Production writes
-    /// route through [`Self::compute_relation_and_admit`].
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn insert_relation(
-        &self,
-        key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) {
-        self.insert_relation_owned(
-            key,
-            carrier,
-            self_root_canonicals,
-            result,
-            validated_at_generation,
-        );
-    }
-
-    /// Count of relation memo entries. Useful for tests and counters.
-    #[must_use]
-    pub fn relation_memo_count(&self) -> usize {
-        self.relation_memo.len()
-    }
-
-    /// Drop every entry in the relation memo. Invoked on
-    /// project-generation bumps so warm relation judgements cannot leak
-    /// across a version boundary. The map and its retention budget are
-    /// cleared in one lock domain under the `BudgetedRelationMemo`'s
-    /// `retention_gate` write guard, exclusive against concurrent
-    /// inserts.
-    pub fn clear_relation_memo(&self) {
-        self.relation_memo.clear();
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Derivation / origin layer
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Record a derivation/origin edge for `result`. Builders call this
-    /// whenever they produce a reusable result — the edge captures the
-    /// source-set, per-edge metadata, and a snapshot of the publishing
-    /// builder's active fence (`builder_fence`). The fence snapshot is
-    /// interned in the store's signature pool so identical fences share
-    /// one allocation.
-    ///
-    /// Origin edges are bounded best-effort provenance for the audit
-    /// origin-graph trace, NOT an invalidation source — the stored fence
-    /// snapshot is never reconstructed into a `CompletionFence`. See the
-    /// `derivation` module docs.
-    ///
-    /// Multiple derivations of the same structural `result` produce
-    /// multiple edges with the same `(result, kind)` — the layer supports
-    /// this; the walker walks all edges. The per-`(result, kind)` edge
-    /// list is FIFO-capped (`DERIVATION_EDGES_PER_BUCKET_CAP`): a result
-    /// re-derived more times than the cap retains only its most recent
-    /// edges, so one bucket cannot grow without bound in a long-lived
-    /// session. An evicted edge loses only best-effort provenance —
-    /// origin edges are not an invalidation source.
-    ///
-    /// Edges are deduplicated by identity at the call site: before
-    /// recording into [`DerivationStore::edges`], an edge with the exact
-    /// same `(result, kind, sources, meta, fence)` identity tuple already
-    /// present is skipped, so repeated walks through the same
-    /// intermediate hop do not inflate the bucket or the per-request
-    /// audit cost. The audit-mining contract is preserved: the
-    /// [`request_context::current_accumulator`] push remains
-    /// unconditional so the footprint miner observes every derivation hop
-    /// the production hot path would have emitted.
-    pub fn record_origin_edge(
-        &self,
-        result: SemanticNodeId,
-        kind: OriginEdgeKind,
-        sources: Arc<[SemanticNodeId]>,
-        meta: crate::semantic_query::OriginMeta,
-        builder_fence: DepSignature,
-    ) {
-        // Diagnosis instrumentation: bracket the entire
-        // `record_origin_edge` call with `Instant::now()` deltas so the
-        // capture token can attribute per-call wall-clock cost. The
-        // timing measurement itself is two RDTSC reads (Linux) /
-        // QueryPerformanceCounter (Windows) — no allocation, no lock —
-        // so it does not perturb the production hot path beyond the
-        // `with_active_capture` thread-local lookup that is already
-        // present below. The deltas are only consumed when a token is
-        // bound (test/debug instrumentation only); the diagnosis
-        // benchmark is the only consumer; production-path behaviour is
-        // unchanged when no token is bound. The timestamp read and the
-        // recording site below both gate on the instrumentation module so
-        // release does not pay for them.
-        #[cfg(any(test, feature = "test-support"))]
-        let start = Instant::now();
-        // Build the edge under the derivation lock, then release the
-        // lock before pushing into the accumulator — the accumulator
-        // acquires its own mutex and we must not hold the graph lock
-        // across that boundary.
-        //
-        // The edge identity tuple is checked
-        // under the derivation lock for an existing match. When found,
-        // the ledger write is skipped (no `store.record` call) and the
-        // `already_recorded` flag flows through the rest of the
-        // function so the capture-token edge ledger and the
-        // `origin_edges_emitted` stats counter mirror the dedup. The
-        // audit-accumulator push and the `record_origin_edge_total_ns`
-        // wall-clock attribution are intentionally NOT gated by this
-        // flag — see the audit-mining contract preservation note above.
-        let (edge, already_recorded) = {
-            let mut store = self.derivation.lock();
-            let edge_dep_signature = store.intern_signature(builder_fence);
-            let edge = OriginEdge {
-                sources,
-                meta,
-                edge_dep_signature,
-            };
-            // Identity check: scan the existing `(result, kind)` bucket
-            // for an entry that matches this edge's full identity tuple
-            // (sources content, meta value, and interned dep_signature
-            // pointer). The interner guarantees identical signatures
-            // share a single Arc, so `Arc::ptr_eq` is a sound identity
-            // probe; `OriginMeta` derives `PartialEq` and `sources` is
-            // a content-comparable slice.
-            let already_recorded = store
-                .bucket_for(result, kind)
-                .map(|existing| {
-                    existing.iter().any(|e| {
-                        Arc::ptr_eq(&e.edge_dep_signature, &edge.edge_dep_signature)
-                            && e.sources.as_ref() == edge.sources.as_ref()
-                            && e.meta == edge.meta
-                    })
-                })
-                .unwrap_or(false);
-            if !already_recorded {
-                store.record(result, kind, edge.clone());
-            }
-            (edge, already_recorded)
-        };
-        if !already_recorded {
-            self.stats
-                .origin_edges_emitted
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        // Feed the accumulator of the active audited
-        // request so the footprint miner sees every derivation hop.
-        // No-op when no request context is installed.
-        //
-        // Audit-mining contract preservation: this push is
-        // intentionally unconditional — it runs even on the dedup path
-        // so dropped ledger writes still surface in the audit trace.
-        if let Some(acc) = crate::request_context::current_accumulator() {
-            acc.push_derivation_edge(result, kind, edge.clone());
-        }
-        // Test harness hook: when a CaptureToken is bound on the current
-        // thread, record the edge identity tuple in the per-request
-        // ledger so duplicate-derivation tests can read snapshots. The
-        // closure runs OUTSIDE the derivation lock (released above).
-        // The `with_active_capture` call returns immediately when no
-        // token is bound (the production hot path) — no lock, no
-        // allocation, one thread-local lookup.
-        //
-        // Skip the capture-token edge ledger insert + the
-        // `origin_edge_count` bump on the dedup path. The ledger / count
-        // mirror the production-side ledger writes so test snapshots
-        // observe the same dedup property.
-        #[cfg(any(test, feature = "test-support"))]
-        let elapsed_ns = start.elapsed().as_nanos();
-        #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
-            if !already_recorded {
-                let dep_signature_hash =
-                    crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
-                let identity = crate::capture_token::EdgeIdentity::from_record(
-                    result,
-                    kind,
-                    edge.sources.as_ref(),
-                    &edge.meta,
-                    dep_signature_hash,
-                );
-                t.record_edge(identity);
-                // Bump the per-call counter +
-                // wall-clock cost only on actual ledger emissions. The
-                // dedup-skipped path bypasses both so `origin_edge_count`
-                // mirrors the ledger-write count and
-                // `record_origin_edge_total_ns` reflects only the
-                // cold-path wall-clock.
-                t.record_origin_edge_call(elapsed_ns);
-            }
-        });
-    }
-
-    /// Read-only origin walk for a result node — yields every edge
-    /// reachable from `node`, regardless of kind.
-    ///
-    /// Test-only enumeration accessor. Production origin consumption
-    /// goes through [`Self::walk_origin_chain`] (the audit origin-graph
-    /// builder); this whole-vector form exists for the derivation-layer
-    /// tests. Origin edges are bounded best-effort provenance — see the
-    /// `derivation` module docs.
-    #[cfg(test)]
-    #[must_use]
-    pub fn origins(&self, node: SemanticNodeId) -> Vec<(OriginEdgeKind, OriginEdge)> {
-        let store = self.derivation.lock();
-        store.origins(node).map(|(k, e)| (k, e.clone())).collect()
-    }
-
-    /// Filtered read-only origin walk: only edges of the given kind.
-    ///
-    /// Test-only enumeration accessor — see [`Self::origins`].
-    #[cfg(test)]
-    #[must_use]
-    pub fn origins_of_kind(&self, node: SemanticNodeId, kind: OriginEdgeKind) -> Vec<OriginEdge> {
-        let store = self.derivation.lock();
-        store.origins_of_kind(node, kind).cloned().collect()
-    }
-
-    /// Convenience helper: invoke `visitor` for every origin edge on
-    /// `node`. The derivation lock is released before any visitor
-    /// callback fires so visitors that recursively walk the chain
-    /// (e.g. transitively via `origins_of_kind`) cannot deadlock against
-    /// the same lock.
-    pub fn walk_origin_chain<F>(&self, node: SemanticNodeId, mut visitor: F)
-    where
-        F: FnMut(OriginEdgeKind, &OriginEdge),
-    {
-        let edges = {
-            let store = self.derivation.lock();
-            store
-                .origins(node)
-                .map(|(kind, edge)| (kind, edge.clone()))
-                .collect::<Vec<_>>()
-        };
-        for (kind, edge) in &edges {
-            visitor(*kind, edge);
-        }
-    }
-
-    /// Total origin edges across all result nodes. Mirrors the public
-    /// [`SemanticGraphStats::origin_edge_count`].
-    #[must_use]
-    pub fn origin_edge_count(&self) -> usize {
-        self.derivation.lock().edge_count()
-    }
-
-    /// Number of distinct `(result, kind)` derivation edge buckets
-    /// currently retained. The derivation store bounds this with a FIFO
-    /// retention budget; the bounded-retention proof asserts the count
-    /// stays capped across many content edits.
-    #[must_use]
-    pub fn derivation_bucket_count(&self) -> usize {
-        self.derivation.lock().bucket_count()
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
-        self.derivation.lock().all_edges()
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -2049,6 +1760,7 @@ impl SemanticGraphStore {
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 }
             })
         });
@@ -2128,6 +1840,15 @@ impl SemanticGraphStore {
         requested: &crate::semantic_query::demand::MaterializedPoint,
         ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        // Relation warm-read generation gate (the retired dedicated
+        // relation memo's contract, carried onto the family path): a
+        // `ProjectGeneration` bump misses the warm read even when the
+        // carrier still validates on file-content terms.
+        let live_generation = if family_requires_live_generation_gate(family) {
+            Some(ctx.project_type_store().current_project_generation())
+        } else {
+            None
+        };
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -2142,15 +1863,17 @@ impl SemanticGraphStore {
         // Both must pass; see `try_warm_hit_fast_path` for the rationale.
         let validated = snapshot.and_then(|list| {
             list.into_iter().find(|entry| {
-                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
+                live_generation.is_none_or(|generation| entry.validated_at_generation == generation)
+                    && cached_satisfies(&entry.satisfied_projection, requested)
+                    && entry.validate(ctx)
             })
         });
         if let Some(entry) = &validated {
-            // Brief LRU bookkeeping — reacquire ONLY to update FIFO
-            // order so subsequent lookups treat this candidate as
-            // freshest. The match is by discriminant identity; if a
-            // concurrent invalidation drained it between snapshot and
-            // here, the update is a no-op.
+            // Brief LRU bookkeeping — reacquire ONLY to update the
+            // slot's LRU order so subsequent lookups treat this
+            // candidate as freshest. The match is by discriminant
+            // identity; if a concurrent invalidation drained it between
+            // snapshot and here, the update is a no-op.
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, entry);
@@ -2165,6 +1888,7 @@ impl SemanticGraphStore {
                 walker_diagnostics: entry.walker_diagnostics,
                 cache_suppress: false,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2201,50 +1925,6 @@ impl SemanticGraphStore {
         entries
             .get(&family)
             .is_some_and(|slots| slots.slot_peek_any(slot).is_some())
-    }
-
-    /// Per-key result for the BFS bridge's batch dispatch (D103). Each
-    /// frontier handle is resolved into either a node-id (success) or a
-    /// typed reason describing why expansion could not proceed. Per-key
-    /// errors are returned, NOT panic'd (D41 invariant: one batch entry → N
-    /// keys → K admissions).
-    ///
-    /// Lookups happen via the validated warm read `get_validated(key,
-    /// ctx)` only — `execute_cooperative_batch` is a non-admission
-    /// probe; a stale (or absent) entry surfaces as
-    /// [`BatchExpandError::EvictedNode`] so the BFS bridge re-issues a
-    /// per-key cooperative cold build. Cold builds stay the
-    /// responsibility of the per-query cooperative path.
-    ///
-    /// `#[cfg(test)]`: the non-admission batch probe has no production
-    /// warm-read caller — the per-query cooperative path is the sole
-    /// production warm-read entry point. The probe is retained for the
-    /// substrate test suite that characterises its non-admission
-    /// contract.
-    #[cfg(test)]
-    pub(crate) fn execute_cooperative_batch(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        keys: &[crate::semantic_query::SemanticQueryKey],
-    ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
-        keys.iter()
-            .map(|key| {
-                if let Some(hit) = self.get_validated(key, ctx) {
-                    match hit.value {
-                        QueryResult::Value(node) => Ok(node),
-                        QueryResult::Recursive(node) => Ok(node),
-                        QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
-                    }
-                } else {
-                    // Cold or stale: from the BFS bridge's perspective,
-                    // an unmaterialized OR stale key is treated as
-                    // evicted; the bridge will surface a typed
-                    // StaleAtFrontier envelope and the caller can decide
-                    // whether to issue a per-key cooperative cold build.
-                    Err(BatchExpandError::EvictedNode)
-                }
-            })
-            .collect()
     }
 
     /// Cooperative execution entry point. Semantics:
@@ -2336,6 +2016,50 @@ impl SemanticGraphStore {
         O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
+        self.execute_cooperative_value_with_publication_capture(
+            ctx,
+            key,
+            recursion_sentinel,
+            build,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_cooperative_value_capturing_publication<F, R, O>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+        publication: &mut Option<PublishedMemoCandidate>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
+    where
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
+        R: FnOnce() -> SemanticNodeId,
+    {
+        self.execute_cooperative_value_with_publication_capture(
+            ctx,
+            key,
+            recursion_sentinel,
+            build,
+            Some(publication),
+        )
+    }
+
+    fn execute_cooperative_value_with_publication_capture<F, R, O>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+        publication: Option<&mut Option<PublishedMemoCandidate>>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
+    where
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
+        R: FnOnce() -> SemanticNodeId,
+    {
         // Loop-5 instrumentation — count every logical entry. Logged
         // unconditionally so call counts include both fast-path and
         // slow-path entries.
@@ -2348,6 +2072,18 @@ impl SemanticGraphStore {
         if ctx.is_cancelled() {
             return cancelled_cache_read();
         }
+
+        // Binding relations carry transaction-local inference candidates.
+        // Their cold owners therefore retain the complete cooperative
+        // build/admission funnel but never join another transaction's
+        // in-flight build for the same key.
+        let independent_owner = matches!(
+            &key,
+            SemanticQueryKey::Relate {
+                inference_context: Some(_),
+                ..
+            }
+        );
 
         // Prepare the query token ONCE per execute: one
         // `family_and_slot` projection, one requested-point build, one
@@ -2383,7 +2119,14 @@ impl SemanticGraphStore {
 
         // Slow path — cooperative-admission flow. Handles same-path
         // recursion, joiner-condvar waits, cold-build publish.
-        self.execute_cooperative_value_slow(ctx, prepared, recursion_sentinel, build)
+        self.execute_cooperative_value_slow(
+            ctx,
+            prepared,
+            recursion_sentinel,
+            build,
+            independent_owner,
+            publication,
+        )
     }
 
     /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
@@ -2420,9 +2163,9 @@ impl SemanticGraphStore {
     /// dropped, so an unrelated warm read or cold publish does not
     /// serialise on the single global memo mutex for the duration of
     /// validation. LRU bookkeeping briefly reacquires the lock to move
-    /// the matching candidate to the back of the FIFO — a constant-time
-    /// `Vec` reorder, no fact-rail work. Mirrors the relation memo's
-    /// `get_relation`.
+    /// the matching candidate to the back of the slot's LRU order — a
+    /// constant-time `Vec` reorder, no fact-rail work. Mirrors the
+    /// relation memo's `get_relation`.
     #[inline]
     fn try_warm_value_hit_fast_path(
         &self,
@@ -2433,8 +2176,18 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
 
+        // Relation warm-read generation gate (the retired dedicated
+        // relation memo's contract, carried onto the fast path): a
+        // `ProjectGeneration` bump misses the warm read even when the
+        // carrier still validates on file-content terms.
+        let live_generation = if family_requires_live_generation_gate(family) {
+            Some(ctx.project_type_store().current_project_generation())
+        } else {
+            None
+        };
+
         // Snapshot the candidate list under the lock; validate OUTSIDE
-        // the lock. With the cap-4 multi-candidate substrate the
+        // the lock. With the multi-candidate substrate the
         // validation walk over the path-precise fact rail is bounded
         // but still non-trivial, and holding the single global memo
         // mutex across it would serialise every unrelated warm read
@@ -2451,11 +2204,13 @@ impl SemanticGraphStore {
         // the live view. BOTH must pass; a candidate failing either is
         // skipped without bubbling.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?
-            .into_iter()
-            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
+        let entry: MemoEntry = snapshot?.into_iter().find(|e| {
+            live_generation.is_none_or(|generation| e.validated_at_generation == generation)
+                && cached_satisfies(&e.satisfied_projection, requested)
+                && e.validate(ctx)
+        })?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
-        // candidate to the back of the FIFO order so subsequent
+        // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
         // identity; if a concurrent invalidation drained it between
         // snapshot and here, the update is a no-op (the caller still
@@ -2477,6 +2232,7 @@ impl SemanticGraphStore {
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
 
         // Instrumentation — fast-path attribution.
@@ -2546,12 +2302,16 @@ impl SemanticGraphStore {
         prepared: PreparedKeyHandle,
         recursion_sentinel: R,
         build: F,
+        independent_owner: bool,
+        mut publication: Option<&mut Option<PublishedMemoCandidate>>,
     ) -> CacheRead<QueryResult<SemanticQueryValue>>
     where
         F: FnOnce() -> O,
         O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let execution_owner_scope = ExecutionOwnerScope::enter(&self.wait_for_graph);
+        let execution_owner = execution_owner_scope.owner();
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
@@ -2637,12 +2397,27 @@ impl SemanticGraphStore {
                     cache_suppress: false,
                     // Same-path recursion sentinel is a partial — gate out of warm caches.
                     result_is_partial: true,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
                 };
             }
 
             // 3. Register or join the in-flight entry. The table key is
             //    the prepared token — an `Arc` refcount bump, not a
             //    full `SemanticQueryKey` clone.
+            if independent_owner {
+                let inflight = Arc::new(InflightEntry::new());
+                {
+                    let mut state = inflight.state.lock();
+                    state.claimed = true;
+                    state.owner = Some(execution_owner);
+                }
+                self.independent_inflight
+                    .lock()
+                    .entry(prepared.clone())
+                    .or_default()
+                    .push(Arc::clone(&inflight));
+                break inflight;
+            }
             let inflight = {
                 let mut table = self.inflight.lock();
                 table
@@ -2654,6 +2429,31 @@ impl SemanticGraphStore {
             // Claim ownership or wait for the winner to publish.
             let mut state = inflight.state.lock();
             if state.claimed {
+                let wait_registration = if state.completed.is_none()
+                    && !state.aborted
+                    && !ctx.is_cancelled()
+                {
+                    let winner = state.owner.unwrap_or(execution_owner);
+                    match self.wait_for_graph.register_wait(execution_owner, winner) {
+                        Ok(registration) => Some(registration),
+                        Err(wait_cycle::WaitCycle) => {
+                            drop(state);
+                            return CacheRead {
+                                value: QueryResult::Recursive(recursion_sentinel()),
+                                dep_signature: empty_signature(),
+                                walker_diagnostics: Arc::from([]),
+                                // A cross-thread wait-cycle carrier is an
+                                // operational escape, never a warm fact.
+                                cache_suppress: true,
+                                result_is_partial: true,
+                                partial_reasons:
+                                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                            };
+                        }
+                    }
+                } else {
+                    None
+                };
                 // Cooperative wait — block on the per-entry condvar until
                 // `completed` is set OR the entry is aborted by a
                 // canonical-invalidation sweep. Joiners never busy-spin.
@@ -2679,6 +2479,7 @@ impl SemanticGraphStore {
                         .ready
                         .wait_for(&mut state, std::time::Duration::from_millis(2));
                 }
+                drop(wait_registration);
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -2727,6 +2528,7 @@ impl SemanticGraphStore {
                 // the carrier bubble below) its dep facts.
                 let cache_suppress = state.cache_suppress;
                 let result_is_partial = state.result_is_partial;
+                let partial_reasons = state.partial_reasons;
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
@@ -2810,26 +2612,33 @@ impl SemanticGraphStore {
                 // (`get_validated`, validated under the follower's
                 // `ctx`) also misses the winner's published entry, so
                 // the follower runs its own cold build.
-                if let Some(ref carrier) = graph_carrier {
-                    let carrier_view_validates =
-                        carrier.validate_with_self_roots(ctx, &winner_self_roots);
-                    let lacks_view_discriminating_self_root =
-                        !carrier.has_view_discriminating_self_root(&winner_self_roots);
-                    if !carrier_view_validates || lacks_view_discriminating_self_root {
-                        self.stats
-                            .joiner_view_mismatch_forks
-                            .fetch_add(1, Ordering::Relaxed);
-                        {
-                            let mut table = self.inflight.lock();
-                            if table
-                                .get(&prepared)
-                                .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+                // A recursion carrier is an operational ReturnOnly escape,
+                // not a view-specific semantic value. Propagate it around a
+                // broken wait cycle without forcing the follower to fork and
+                // re-enter the just-retired flight. Value and error payloads
+                // retain the existing strict follower-view validation.
+                if !matches!(result, QueryResult::Recursive(_)) {
+                    if let Some(ref carrier) = graph_carrier {
+                        let carrier_view_validates =
+                            carrier.validate_with_self_roots(ctx, &winner_self_roots);
+                        let lacks_view_discriminating_self_root =
+                            !carrier.has_view_discriminating_self_root(&winner_self_roots);
+                        if !carrier_view_validates || lacks_view_discriminating_self_root {
+                            self.stats
+                                .joiner_view_mismatch_forks
+                                .fetch_add(1, Ordering::Relaxed);
                             {
-                                table.remove(&prepared);
+                                let mut table = self.inflight.lock();
+                                if table
+                                    .get(&prepared)
+                                    .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+                                {
+                                    table.remove(&prepared);
+                                }
                             }
+                            drop(inflight);
+                            continue;
                         }
-                        drop(inflight);
-                        continue;
                     }
                 }
 
@@ -2860,9 +2669,11 @@ impl SemanticGraphStore {
                     walker_diagnostics,
                     cache_suppress,
                     result_is_partial,
+                    partial_reasons,
                 };
             }
             state.claimed = true;
+            state.owner = Some(execution_owner);
             drop(state);
             break inflight;
         };
@@ -2883,8 +2694,15 @@ impl SemanticGraphStore {
         //    Both guards share the prepared token — two `Arc` bumps,
         //    zero `SemanticQueryKey` clones.
         let _recursion_guard = RecursionStackGuard::push(prepared.clone());
-        let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone());
+        let mut panic_guard = if independent_owner {
+            InflightPanicGuard::new_independent(
+                Arc::clone(&inflight),
+                &self.independent_inflight,
+                prepared.clone(),
+            )
+        } else {
+            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone())
+        };
         let build_start = Instant::now();
         let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
@@ -2896,6 +2714,7 @@ impl SemanticGraphStore {
             walker_diagnostics,
             cache_suppress,
             result_is_partial,
+            partial_reasons,
             taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
@@ -2903,6 +2722,7 @@ impl SemanticGraphStore {
             pending_prefix_backfills,
             satisfied_projection,
         } = build_output;
+        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
         // `TypeOf`, …) leaves `satisfied_projection` EMPTY (it has no
         // path-walk hops to record). Default it to the single terminal
@@ -2940,7 +2760,7 @@ impl SemanticGraphStore {
         // follower retries as a fresh cold owner. The computed value is
         // intentionally discarded and can never enter the warm memo.
         if ctx.is_cancelled() {
-            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            self.abort_inflight_for_cancellation(&prepared, &inflight, independent_owner);
             return cancelled_cache_read();
         }
 
@@ -3019,11 +2839,13 @@ impl SemanticGraphStore {
                 Some(&broadcast_carrier)
             };
         if ctx.is_cancelled() {
-            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            self.abort_inflight_for_cancellation(&prepared, &inflight, independent_owner);
             return cancelled_cache_read();
         }
+        let mut admission_linearized = false;
+        let mut root_publication: Option<PublishedMemoCandidate> = None;
         if let Some(carrier) = publish_carrier {
-            let published = self.warm_publish_one(
+            let publish_outcome = self.warm_publish_one(
                 ctx,
                 &prepared,
                 &result,
@@ -3034,6 +2856,30 @@ impl SemanticGraphStore {
                 &satisfied_projection,
                 &inflight,
             );
+            let published = match publish_outcome {
+                WarmPublishOutcome::Published(candidate) => {
+                    admission_linearized = true;
+                    root_publication = Some(candidate);
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        let gate = self.cold_winner_post_admission_gate.lock().clone();
+                        if let Some(barrier) = gate {
+                            barrier.wait();
+                            barrier.wait();
+                        }
+                    }
+                    true
+                }
+                WarmPublishOutcome::Skipped => true,
+                WarmPublishOutcome::Aborted => false,
+            };
+            if !admission_linearized && ctx.is_cancelled() {
+                if let Some(capture) = publication.as_deref_mut() {
+                    *capture = None;
+                }
+                self.abort_inflight_for_cancellation(&prepared, &inflight, independent_owner);
+                return cancelled_cache_read();
+            }
             // Test-only injection point — parked AFTER `warm_publish_one`
             // published the parent and BEFORE the prefix-backfill loop,
             // so a race test can run `invalidate_all` (which marks this
@@ -3066,7 +2912,7 @@ impl SemanticGraphStore {
             // docs and `warm_publish_one_if_absent`'s abort fence.
             if published {
                 for backfill in pending_prefix_backfills {
-                    self.warm_publish_one_if_absent(
+                    admission_linearized |= self.warm_publish_one_if_absent(
                         ctx,
                         backfill.key,
                         QueryResult::Value(backfill.node),
@@ -3075,6 +2921,7 @@ impl SemanticGraphStore {
                         Arc::clone(&self_root_canonicals),
                         backfill.satisfied_projection,
                         &inflight,
+                        admission_linearized,
                     );
                 }
             }
@@ -3094,9 +2941,15 @@ impl SemanticGraphStore {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if ctx.is_cancelled() {
-            self.abort_inflight_for_cancellation(&prepared, &inflight);
+        if !admission_linearized && ctx.is_cancelled() {
+            if let Some(capture) = publication.as_deref_mut() {
+                *capture = None;
+            }
+            self.abort_inflight_for_cancellation(&prepared, &inflight, independent_owner);
             return cancelled_cache_read();
+        }
+        if let (Some(capture), Some(candidate)) = (publication, root_publication) {
+            *capture = Some(candidate);
         }
         {
             // Bubble the build's carrier fact rail into this winner
@@ -3170,6 +3023,7 @@ impl SemanticGraphStore {
                 state.cache_suppress = cache_suppress;
                 // Propagate the partial signal so a joiner inherits the taint.
                 state.result_is_partial = result_is_partial;
+                state.partial_reasons = partial_reasons;
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
@@ -3192,15 +3046,7 @@ impl SemanticGraphStore {
         //    removes only while the table still holds this winner's own
         //    `Arc` — exactly the entry whose stale `completed` flag
         //    step 7 exists to retire.
-        {
-            let mut table = self.inflight.lock();
-            if table
-                .get(&prepared)
-                .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
-            {
-                table.remove(&prepared);
-            }
-        }
+        self.retire_inflight(&prepared, &inflight, independent_owner);
         // `_inflight_stats_guard` decrements `in_flight_current` on
         // scope exit (here on the normal-return path, also on panic
         // before this point thanks to the Drop impl).
@@ -3211,6 +3057,7 @@ impl SemanticGraphStore {
             walker_diagnostics,
             cache_suppress,
             result_is_partial,
+            partial_reasons,
         }
     }
 
@@ -3222,6 +3069,7 @@ impl SemanticGraphStore {
         &self,
         prepared: &PreparedKeyHandle,
         inflight: &Arc<InflightEntry>,
+        independent_owner: bool,
     ) {
         {
             let mut state = inflight.state.lock();
@@ -3232,14 +3080,35 @@ impl SemanticGraphStore {
             state.walker_diagnostics = None;
             state.cache_suppress = true;
             state.result_is_partial = true;
+            // A cancellation abort is a partial with its own precise class.
+            state.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
         }
         inflight.ready.notify_all();
-        let mut table = self.inflight.lock();
-        if table
-            .get(prepared)
-            .is_some_and(|entry| Arc::ptr_eq(entry, inflight))
-        {
-            table.remove(prepared);
+        self.retire_inflight(prepared, inflight, independent_owner);
+    }
+
+    fn retire_inflight(
+        &self,
+        prepared: &PreparedKeyHandle,
+        inflight: &Arc<InflightEntry>,
+        independent_owner: bool,
+    ) {
+        if independent_owner {
+            let mut table = self.independent_inflight.lock();
+            if let Some(entries) = table.get_mut(prepared) {
+                entries.retain(|entry| !Arc::ptr_eq(entry, inflight));
+                if entries.is_empty() {
+                    table.remove(prepared);
+                }
+            }
+        } else {
+            let mut table = self.inflight.lock();
+            if table
+                .get(prepared)
+                .is_some_and(|entry| Arc::ptr_eq(entry, inflight))
+            {
+                table.remove(prepared);
+            }
         }
     }
 
@@ -3261,11 +3130,11 @@ impl SemanticGraphStore {
     /// simulates a concurrent sweep without racing a real
     /// invalidation window.
     ///
-    /// **Return value.** Returns `false` IFF the TOCTOU re-check
-    /// observed `aborted == true` and the publish was skipped; returns
-    /// `true` otherwise (published, or skipped for a non-abort reason —
-    /// a non-`Value` result). The
-    /// caller's prefix-backfill loop is gated on this: an aborted winner
+    /// **Return value.** Returns [`WarmPublishOutcome::Aborted`] IFF the
+    /// TOCTOU re-check observed `aborted == true`, `Skipped` for a
+    /// non-value, and `Published` with the exact admitted candidate token
+    /// after the entry and reverse index have landed under the entries lock.
+    /// The caller's prefix-backfill loop is gated on the abort arm: an aborted winner
     /// was raced by a project-generation reset, so its build interned
     /// against a stale id epoch and its narrower backfills must be
     /// skipped too — see [`Self::invalidate_all`]'s serialization docs.
@@ -3280,13 +3149,13 @@ impl SemanticGraphStore {
         self_root_canonicals: &Arc<[Arc<str>]>,
         satisfied_projection: &MaterializedSet,
         inflight: &Arc<InflightEntry>,
-    ) -> bool {
+    ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
         if !publishable {
             // Not an abort — an error / recursion sentinel that never
             // promotes to a warm entry. The winner's build epoch is
             // still consistent, so backfills (if any) stay valid.
-            return true;
+            return WarmPublishOutcome::Skipped;
         }
         let family = prepared.family();
         let slot = prepared.slot();
@@ -3319,6 +3188,14 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
+        // Per-family bounded retention: plan the cap eviction against the
+        // publishing caller's stable view BEFORE the publish lock (the
+        // plan releases `entries` before validating fact rails; the
+        // TOCTOU abort re-check below still runs under the publish lock,
+        // so an invalidation racing the plan is caught by the fence).
+        let cap = family.candidate_cap();
+        let eviction =
+            family::plan_family_slot_eviction(&self.entries, family, slot, &entry, cap, ctx);
         let mut entries = self.entries_lock_diagnosed();
         // Test forcing: simulate a concurrent sweep that aborted
         // this in-flight entry just before the TOCTOU re-check —
@@ -3343,16 +3220,18 @@ impl SemanticGraphStore {
             // the prefix-backfill loop too — the build's ids were
             // interned against a now-stale epoch.
             record_cold_abort_swept(&self.stats);
-            return false;
+            return WarmPublishOutcome::Aborted;
         }
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
         let family_was_new = !entries.contains_key(family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, requested_path);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            requested_path,
+            cap,
+            eviction,
+        );
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -3370,7 +3249,8 @@ impl SemanticGraphStore {
         }
         // Drain per-candidate reverse-index registrations for every
         // candidate this publish DISPLACED (same-discriminant
-        // replacements + per-slot FIFO cap-eviction victims). Each
+        // replacements + per-family bounded-retention cap-eviction
+        // victims, at whatever slot position the victim occupied). Each
         // displaced candidate's `admission_seq` keys its own
         // registrations, so siblings in the same slot keep theirs
         // (R20 overlay isolation). Runs UNDER the held `entries`
@@ -3412,11 +3292,17 @@ impl SemanticGraphStore {
             &dispatch_dep_signature,
             admission_seq,
         );
+        let published = PublishedMemoCandidate {
+            read_set_signature,
+            self_root_canonicals: Arc::clone(self_root_canonicals),
+            validated_at_generation,
+            admission_seq,
+        };
         drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
         // winner's id epoch is consistent, so the caller may proceed to
         // publish its narrower prefix-backfills.
-        true
+        WarmPublishOutcome::Published(published)
     }
 
     /// Variant of [`Self::warm_publish_one`]: publish
@@ -3468,9 +3354,10 @@ impl SemanticGraphStore {
         self_root_canonicals: Arc<[Arc<str>]>,
         satisfied_projection: MaterializedSet,
         parent_inflight: &Arc<InflightEntry>,
-    ) {
+        admission_already_linearized: bool,
+    ) -> bool {
         if !matches!(result, QueryResult::Value(_)) {
-            return;
+            return false;
         }
         // Prepare the backfill key's token once — the same
         // family/slot/path/point projection the by-key helpers ran
@@ -3502,11 +3389,11 @@ impl SemanticGraphStore {
                 .get(family)
                 .is_some_and(|slots| slots.slot_peek_any(slot).is_some())
             {
-                return;
+                return false;
             }
         }
         if self.inflight.lock().contains_key(&prepared) {
-            return;
+            return false;
         }
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
@@ -3526,6 +3413,16 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
+        // Per-family bounded retention: plan the cap eviction against the
+        // publishing caller's stable view BEFORE the publish lock —
+        // symmetric with `warm_publish_one` (a concurrent cold winner may
+        // have filled the slot to its family cap between the presence
+        // probe above and this publish). The plan releases `entries`
+        // before validating fact rails; the parent abort fence below
+        // still runs under the publish lock.
+        let cap = family.candidate_cap();
+        let eviction =
+            family::plan_family_slot_eviction(&self.entries, family, slot, &entry, cap, ctx);
         let mut entries = self.entries_lock_diagnosed();
         // Abort fence — re-check the parent winner's in-flight `aborted`
         // flag UNDER the `entries` lock, symmetric with
@@ -3537,17 +3434,22 @@ impl SemanticGraphStore {
         // therefore this backfill's — `SemanticNodeId`s were interned
         // against a now-stale id epoch: skip the publish so no stale
         // warm slot survives the reset.
+        if !admission_already_linearized && ctx.is_cancelled() {
+            parent_inflight.state.lock().aborted = true;
+        }
         if parent_inflight.state.lock().aborted {
             drop(entries);
             record_cold_abort_swept(&self.stats);
-            return;
+            return false;
         }
         let family_was_new = !entries.contains_key(family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, requested_path);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            requested_path,
+            cap,
+            eviction,
+        );
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -3586,141 +3488,9 @@ impl SemanticGraphStore {
             &dispatch_dep_signature_clone,
             admission_seq,
         );
+        let admitted = !populated_slots.is_empty();
         drop(entries);
-    }
-
-    /// Record a newly-admitted family against the memo retention
-    /// budget and FIFO-evict the oldest families once the family count
-    /// exceeds the budget cap. Evicting a still-valid family only forces
-    /// a recompute; it never yields an incorrect result.
-    ///
-    /// Called exactly once per family that newly enters the `entries`
-    /// memo (a re-publish into a different slot of an already-present
-    /// family does not re-record).
-    ///
-    /// **Family-memo consistency-cluster fence.** The caller passes the
-    /// `entries` guard it is already holding — the `memo_budget`
-    /// admission is recorded, the FIFO victims are removed from
-    /// `entries`, AND each evicted victim's `canonical_to_entries`
-    /// reverse-index registrations are pruned, ALL WITHIN that same lock
-    /// hold. The family memo is a three-member consistency cluster
-    /// (`entries`, `memo_budget`, `canonical_to_entries`); a concurrent
-    /// [`Self::invalidate_all`] clears all three under the SAME `entries`
-    /// lock, so the publish's `(entries slot, memo_budget record,
-    /// reverse-index register)` triple is atomic against the reset.
-    ///
-    /// Pruning the victim's reverse index here — rather than deferring it
-    /// past the `entries`-lock drop — closes the race where a fresh
-    /// same-`(family, slot)` re-publish registers into
-    /// `canonical_to_entries` between the victim's `entries` removal and
-    /// a deferred key-only reverse-index cleanup, which would delete the
-    /// fresh registration and leave the live re-published memo slot
-    /// invisible to `invalidate_canonical`. With the prune inside the
-    /// `entries` lock — and the publish-side `register_reverse_index`
-    /// also under that lock — no concurrent publish can register a fresh
-    /// `(family, slot)` in the gap, so there is no gap. The `entries →
-    /// canonical_to_entries shards` lock order PERMITS taking a shard
-    /// mutex while `entries` is held (`entries` is outermost), and no
-    /// path takes a `canonical_to_entries` shard mutex then `entries`, so
-    /// this nesting is sound.
-    ///
-    /// The injection point armed by
-    /// [`Self::test_publish_post_memo_budget_record_gate`] fires after
-    /// the admission lands; the one armed by
-    /// [`Self::test_publish_post_reverse_index_prune_gate`] fires after
-    /// the victims' reverse-index registrations are pruned — both with
-    /// the `entries` lock still held.
-    fn record_family_admission_locked(
-        &self,
-        entries: &mut FxHashMap<FamilyKey, FamilySlots>,
-        family: &FamilyKey,
-    ) {
-        let seq = crate::bounded_query_retention::next_retention_seq();
-        let victims = self.memo_budget.record_admission(seq, family.clone());
-        // Test-only injection point — parked after the `memo_budget`
-        // admission lands and with the `entries` lock still held, so a
-        // race test can assert the admission is recorded in the `entries`
-        // lock domain. `None` (the production default) is a no-op.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let gate = self.publish_post_memo_budget_record_gate.lock().clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
-        // `record_admission` hands back `(seq, FamilyKey)` victims. The
-        // removal here is by `FamilyKey` alone, NOT by admission seq —
-        // sound because this whole method runs under the caller's
-        // exclusive `entries` lock (`&mut FxHashMap<FamilyKey,
-        // FamilySlots>`), the same lock domain every
-        // `record_family_admission_locked` records under and that
-        // `invalidate_all` clears `entries` + `memo_budget` under. With
-        // the exclusive lock held no concurrent writer can re-admit a
-        // FIFO victim's `FamilyKey` between `record_admission` and this
-        // drain, so a key-based removal cannot evict a fresh same-key
-        // re-admission. The `GlobalRetentionBudget` victim-identity
-        // contract permits a key-based removal for exactly this
-        // exclusive-lock-serialised case.
-        // Tracks whether at least one victim reverse-index registration
-        // was pruned, so the post-prune injection point fires only when a
-        // FIFO eviction actually happened. `cfg`-gated — absent from
-        // release builds, where the gate block is also compiled out.
-        #[cfg(any(test, feature = "test-support"))]
-        let mut pruned_any = false;
-        for (_victim_seq, victim) in victims {
-            // Remove the victim from `entries` (keeping map and budget
-            // in lockstep), then prune its reverse-index registrations
-            // under the same lock. The prune walks the SAME union
-            // `register_reverse_index` iterates — carrier
-            // `canonical_ids()` PLUS `dispatch_dep_signature` — so a
-            // dispatch-only registration (notably `<project>` from
-            // `project_generation_signature()`) cannot survive FIFO
-            // eviction. `prune_reverse_index_registration` is
-            // idempotent, so a canonical in both rails is pruned twice
-            // harmlessly. Each candidate's registrations are keyed
-            // PER-CANDIDATE on `(family, slot, admission_seq)` so a
-            // multi-view slot's cleanup strips only this candidate's
-            // seq — surviving sibling candidates in the same slot
-            // keep their own seq registrations.
-            if let Some(slots) = entries.remove(&victim) {
-                // Walk every candidate in every slot — a multi-view
-                // slot must drain reverse-index registrations for
-                // each candidate, not just the first.
-                for (slot, entry) in slots.iter_populated_slots_all() {
-                    let carrier_canonicals = entry.read_set_signature.canonical_ids();
-                    let dispatch_canonicals = entry.dispatch_dep_signature.iter().map(|(c, _)| c);
-                    for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
-                        reverse_index::prune_reverse_index_registration(
-                            &self.canonical_to_entries,
-                            canonical,
-                            &(victim.clone(), slot, entry.admission_seq),
-                        );
-                        #[cfg(any(test, feature = "test-support"))]
-                        {
-                            pruned_any = true;
-                        }
-                    }
-                }
-            }
-        }
-        // Test-only injection point — parked after the FIFO victims'
-        // `canonical_to_entries` reverse-index registrations have been
-        // pruned and with the `entries` lock still held, so a race test
-        // can assert the reverse-index prune runs in the `entries` lock
-        // domain. Fires only when at least one victim registration was
-        // pruned (so a publish that evicts nothing does not park).
-        // `None` (the production default) is a no-op.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            if pruned_any {
-                let gate = self.publish_post_reverse_index_prune_gate.lock().clone();
-                if let Some(barrier) = gate {
-                    barrier.wait();
-                    barrier.wait();
-                }
-            }
-        }
+        admitted
     }
 }
 
@@ -3733,33 +3503,6 @@ impl SemanticGraphStore {
 // each backfilled memo entry's carrier holds the parent's
 // authoritative path-precise fact signature instead of a fence-only
 // derivation that drops Parse/ResolveImports/RouteSurface facts.
-
-/// Per-key error returned by `SemanticGraphStore::execute_cooperative_batch`
-/// (D103). Mirrors the proto `BatchExpandError` enum so the BFS bridge can
-/// project per-key failures into a typed `BridgeError::StaleAtFrontier`
-/// envelope without losing the reason.
-///
-/// `execute_cooperative_batch` (the constructing consumer) is a
-/// `#[cfg(test)]` non-admission probe, but the enum is also re-exported
-/// through the `for_tests` shim (gated `cfg(any(test, feature = "test-support"))`)
-/// so the integration suite can probe its existence; gate to match the
-/// shim so it is not a dead symbol in release.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BatchExpandError {
-    /// Canonical's content hash changed between the surface envelope's
-    /// `TypeHandle` stamp and this batch's read.
-    StaleContentChanged,
-    /// Canonical was deleted from the host between stamp and read.
-    FileDeleted,
-    /// The declaration the handle pointed at no longer exists under the
-    /// current view.
-    DeclarationRemoved,
-    /// The semantic node was evicted from the warm memo (e.g. by a
-    /// generation bump under memory pressure) and would require a cold
-    /// rebuild that the batch path is not authorised to perform.
-    EvictedNode,
-}
 
 /// One observed self-root: a query-identity memo entry's keyed (or
 /// file-derived input) canonical paired with the content version the
@@ -3902,24 +3645,10 @@ fn empty_signature() -> DepSignature {
 // Counter helpers (Decision #5: single helper, dual-target write)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// `inflight_aborted_retries` and `cold_aborts_swept` need both
-// host-owned global aggregates AND per-request attribution. Bumping
-// only the global leaves the audit miner's `CacheOutcomeTally` blind;
-// bumping only the per-request breaks every existing telemetry
-// consumer that reads `stats_snapshot()`. The helpers below collapse
-// both writes into one call site so the two halves cannot diverge.
-//
-// The helpers consult `current_request_context()` directly (the
-// session-side TLS slot installed by `RequestContextGuard::install`).
-// This matches the existing per-request helpers in `host_manage`
-// (`record_materialize_structure_call`, `record_dep_signature_merge`,
-// etc.) and keeps the audit-mining flow homogeneous: every counter
-// the miner reads from `RequestContext` is written through a helper
-// that consulted `current_request_context()`.
-//
-// Architecture guard `audit_counter_single_helper` (in
-// `crates/verter_session/tests/cases/architecture_guards.rs`) rejects any
-// direct `self.stats.<counter>.fetch_add` for these two counters
+// `inflight_aborted_retries` and `cold_aborts_swept` write both the global
+// aggregate AND the per-request mirror through one helper so the two halves
+// cannot diverge. Architecture guard `audit_counter_single_helper` rejects
+// any direct `self.stats.<counter>.fetch_add` for these two counters
 // outside the helper bodies in this module.
 
 /// Bump `inflight_aborted_retries` on both the global
@@ -3965,4 +3694,6 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 #[cfg(test)]
 mod cancellation_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod wait_cycle_tests;

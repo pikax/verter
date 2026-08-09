@@ -232,7 +232,7 @@ fn overload_set_key(callee: SemanticNodeId, resolve_env: u8) -> SemanticQueryKey
 // ---------------------------------------------------------------------------
 
 #[test]
-fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
+pub(crate) fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
     let base = class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 0);
 
     // `side` is a MANDATORY identity discriminator. Instance vs Static of
@@ -438,7 +438,7 @@ fn resolve_ambient_namespace_do_not_warm_hit() {
 }
 
 #[test]
-fn resolve_enum_do_not_warm_hit() {
+pub(crate) fn resolve_enum_do_not_warm_hit() {
     let env_a = enum_key("/e.ts", "E", 0);
     let env_b = enum_key("/e.ts", "E", 1);
     assert_eq!(
@@ -674,11 +674,16 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
                 "static surface must carry the class construct signature"
             );
             assert!(
-                view.members.iter().any(|m| m.name.as_ref() == "y"),
+                view.positive_members()
+                    .iter()
+                    .any(|m| m.string_name() == Some("y")),
                 "static surface must carry the own static member `y`"
             );
             assert!(
-                !view.members.iter().any(|m| m.name.as_ref() == "x"),
+                !view
+                    .positive_members()
+                    .iter()
+                    .any(|m| m.string_name() == Some("x")),
                 "instance member `x` must NOT leak onto the static surface"
             );
         }

@@ -57,6 +57,7 @@ pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
 mod authored_evidence_producer;
+pub mod binder_identity_facts;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
 mod block_content;
@@ -125,6 +126,8 @@ mod component_meta_canonical_reuse_tests;
 mod component_meta_component_config_fast_path_tests;
 #[cfg(test)]
 mod component_meta_concurrency_tests;
+#[cfg(test)]
+pub(crate) mod component_meta_flow_return_admission_tests;
 pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;
@@ -165,6 +168,7 @@ mod decl_body_dispatch_equivalence_tests;
 pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
+pub mod flow_return_audit;
 pub mod framework;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
@@ -180,6 +184,9 @@ pub use crate::fact_signature_helpers::ReadSetSignature;
 mod error_propagation_lattice_tests;
 pub mod external_ts;
 pub mod file_artifact_store;
+pub(crate) mod flow_slice_content;
+#[cfg(test)]
+mod flow_slice_content_tests;
 mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering
@@ -211,6 +218,8 @@ pub mod parse_stable_hash;
 mod project_semantic_dispatch_invariants_tests;
 pub mod resolved_import_facts;
 pub mod resolved_import_facts_producer;
+#[cfg(test)]
+mod typeinfo_guard_bindings_tests;
 // `host_compile` is the host-backed parallel SFC batch compile module.
 // It is bundler/runtime-only and uses Rayon, which is not available on
 // WASM, so the module is gated to native targets. WASM continues to use
@@ -223,6 +232,8 @@ mod svelte_vertical_tests;
 // Content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
+#[cfg(test)]
+mod program_analysis_fact_tests;
 #[cfg(test)]
 mod request_bundle_memo_tests;
 // `SessionView::content_hash_for` is a view-authoritative current-
@@ -275,6 +286,7 @@ mod host_construction;
 pub(crate) mod host_executor;
 #[cfg(test)]
 mod host_executor_lowering_tests;
+pub mod host_flow_return_audit;
 mod host_lifecycle;
 pub mod host_lsp_audit;
 pub mod host_manage;
@@ -360,7 +372,7 @@ mod upsert;
 // sees only non-test `pub` lib items) can invoke it. NEVER on the default build:
 // the default closure has no tsgo (design §3 inv 1).
 #[cfg(feature = "oracle-gen")]
-pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v3, GenError};
+pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v4, GenError};
 
 // Test harness module — defines the per-request `CaptureToken` API
 // consumed by counter assertions across the verter_session test suite.
@@ -403,9 +415,7 @@ pub use verter_language::{
     LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 
-// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation).
-// through the `#[track_caller]` rail from the warm-hit validator
-// down to `HostStoreView::from_host`.
+// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation.
 // The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
 pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
@@ -434,8 +444,9 @@ use shared::Shared;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
-/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is designed to be long-lived (one per Vite dev server or
-/// WASM session) and provides the full upsert-resolve-load lifecycle:
+/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is
+/// designed to be long-lived (one per Vite dev server or WASM session) and provides the full
+/// upsert-resolve-load lifecycle:
 ///
 /// 1. [`upsert`](Self::upsert) â€” parse and store a file, returning change info
 /// 2. [`resolve`](Self::resolve) â€” map a raw import ID to canonical + virtual IDs
@@ -445,15 +456,8 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
-    pub(crate) registered_source_authority: carrier_publication_store::SourceAuthorityHandle,
-    pub(crate) carrier_grammar_authority: carrier_publication_store::GrammarAuthorityHandle,
-    pub(crate) carrier_publication_store: carrier_publication_store::PublicationStoreHandle,
-    pub(crate) block_content_state: Shared<crate::block_content::BlockContentState>,
-    pub(crate) block_content_admission_fence: parking_lot::Mutex<()>,
-    pub(crate) block_content_correlation_counter: std::sync::atomic::AtomicU64,
-    #[cfg(test)]
-    pub(crate) block_content_admission_seam_hook:
-        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) carrier_publication: carrier_publication_store::CarrierPublicationHostHandles,
+    pub(crate) block_content: crate::block_content::BlockContentHostLane,
     /// The single host-level language classification authority:
     /// composes the static `LanguageRegistry` with the project
     /// capability snapshot (empty until a capability producer lands).
@@ -506,7 +510,6 @@ pub struct VerterHost {
     /// Scheduler for async per-file staging and blocker management.
     /// Upsert delegates coherent source transitions to it.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
-    pub(crate) registered_envelope_ingest: carrier_publication_store::RegisteredEnvelopeIngest,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,
@@ -784,15 +787,10 @@ pub struct VerterHost {
     /// the exact production admission-refusal path, with a
     /// deterministic trigger. Self-disarms after one fire.
     pub(crate) materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool,
-    /// Per-host test-injection knob for the relation engine's cold
-    /// judgement path — the relation-memo analogue of
-    /// [`Self::materialize_force_overflow_observations`]. When set to `N >
-    /// 0`, the cold relation compute observes `N` synthetic `FileWholeHash`
-    /// facts onto the active tracer, forcing the relation memo's
-    /// `FactReadSetFinalise::Overflow` non-admission path (the judgement is
-    /// returned to the caller but refused memo admission). Set directly in
-    /// the inline relation tests.
-    pub(crate) relation_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host relation-engine knobs: the overflow / budget test-injection
+    /// triggers plus the strict-family relax bits — see
+    /// [`crate::host_construction::RelationHostKnobs`].
+    pub(crate) relation_knobs: host_construction::RelationHostKnobs,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`crate::project_semantic_dispatch`]'s
     /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in
@@ -853,3 +851,5 @@ mod framework_parse_characterization_tests;
 #[cfg(test)]
 #[path = "plain_script_dialect_tests.rs"]
 mod plain_script_dialect_tests;
+#[cfg(test)]
+mod u6_flow_shape_corpus_tests;

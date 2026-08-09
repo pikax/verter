@@ -24,6 +24,7 @@ mod family_warm_read_releases_mutex_before_validate;
 mod framework_corpus_svelte;
 mod framework_known_bug_manifest;
 mod g_audit;
+mod g_binder;
 mod g_block;
 mod g_cache;
 mod g_compile;

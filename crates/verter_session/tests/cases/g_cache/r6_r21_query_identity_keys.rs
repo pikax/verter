@@ -3,7 +3,7 @@
 //! - [`ComponentMetaResultKey`] — final component-meta result.
 //! - `RouteNameKey` / `BarrelSurfaceKey` — RouteDb per-name + barrel
 //!   surface.
-//! - `RefCycleResultKey` — transitive-cycle BFS result.
+//! - `MaterializationCycleGateKey` — materialization cycle gate.
 //! - `MaterializationCacheKey` — structural materialiser.
 //!
 //! Each is a **query-identity** cache key (R5): its slot identity is
@@ -438,208 +438,158 @@ fn route_keys_env_axes_discriminate() {
 }
 
 // ---------------------------------------------------------------------------
-// RefCycleResultDb — RefCycleResultKey
+// ClassifyMaterializationCycleGate — MaterializationCycleGateKey
 // ---------------------------------------------------------------------------
 
-/// R6 source guard: the `RefCycleResultKey` struct body must be a
+/// R6 source guard: the `MaterializationCycleGateKey` struct body must be a
 /// content-free slot key — it roots on the env-bearing
 /// `ResolvedDeclSlotIdentity` slot (which carries `type_env_hash` /
-/// `lib_env_hash` / `project_identity`), carries the extra
-/// `resolve_env_hash` + `version`, and must NOT embed the versioned
-/// `DeclIdentity` (which carries `whole_hash`) nor any content/version
-/// marker. Per-content-version rooting lives on the cached value's
-/// `ReadSetSignature.facts` + `self_root_canonicals`.
+/// `lib_env_hash` / `project_identity`), plus the extra `parse_env_hash`
+/// and `resolve_env_hash` dims, and must NOT embed the versioned
+/// `DeclIdentity` (which carries `whole_hash`), a generation, or an
+/// algorithm version. Per-content-version rooting lives on the cached
+/// value's `ReadSetSignature.facts` + observed self-roots.
 #[test]
-fn ref_cycle_result_key_is_content_free_slot_keyed() {
-    let source = read_file("crates/verter_session/src/component_meta_caches.rs");
-    let body = extract_brace_block(&source, "pub struct RefCycleResultKey {").expect(
-        "R6 GUARD: could not locate `pub struct RefCycleResultKey` body in \
-         component_meta_caches.rs — the versioned `DeclIdentity` key must be replaced \
-         by a content-free slot key",
+fn materialization_cycle_gate_key_is_content_free_slot_keyed() {
+    let source = read_file("crates/verter_session/src/semantic_query.rs");
+    let body = extract_brace_block(&source, "pub struct MaterializationCycleGateKey {").expect(
+        "R6 GUARD: could not locate `pub struct MaterializationCycleGateKey` body in          semantic_query.rs — the cycle gate key must be a content-free slot key",
     );
-    let required = &["ResolvedDeclSlotIdentity", "resolve_env_hash", "version"];
-    // The versioned `DeclIdentity` (embeds `whole_hash`) is forbidden as an
-    // embed; `ResolvedDeclSlotIdentity` does NOT contain the substring
+    let required = &[
+        "ResolvedDeclSlotIdentity",
+        "parse_env_hash",
+        "resolve_env_hash",
+    ];
+    // The versioned `DeclIdentity` (embeds `whole_hash`), a generation
+    // stamp, and an algorithm version are forbidden as key axes;
+    // `ResolvedDeclSlotIdentity` does NOT contain the substring
     // `DeclIdentity`, so the check does not false-trip on the slot type.
     let forbidden: Vec<&str> = FORBIDDEN_KEY_MARKERS
         .iter()
         .copied()
-        .chain(std::iter::once("DeclIdentity"))
+        .chain(["DeclIdentity", "generation", "version"])
         .collect();
     let violations = key_shape_violations(&body, required, &forbidden);
     assert!(
         violations.is_empty(),
-        "R6 GUARD VIOLATION — `RefCycleResultKey` must be a content-free slot key \
-         (root: ResolvedDeclSlotIdentity + resolve_env_hash + version), NOT a versioned \
-         `DeclIdentity`. Per-version rooting lives on the cached value's self-roots. \
-         Violations:\n  {}\nBody:\n{}",
+        "R6 GUARD VIOLATION — `MaterializationCycleGateKey` must be a content-free          slot key (root: ResolvedDeclSlotIdentity + parse_env_hash + resolve_env_hash),          NOT a versioned `DeclIdentity` / generation / algorithm version. Per-version          rooting lives on the cached value's self-roots. Violations:\n  {}\nBody:\n{}",
         violations.join("\n  "),
         body
     );
 }
 
-/// R6 storage-type source guard: the `RefCycleResultDb` store + inflight
-/// table must be keyed on the content-free `RefCycleResultKey`, NOT the
-/// versioned `DeclIdentity` (which embeds `whole_hash` — a content/version
-/// hash in the cache key, the R6 violation). The struct body must therefore
-/// reference no `DeclIdentity`.
+/// Runtime lock: `MaterializationCycleGateKey` is content-free (two
+/// content versions of the same root → the SAME key, so they co-locate
+/// as candidates in one slot), and every env axis discriminates: the
+/// slot-embedded `project_identity` / `type_env_hash` / `lib_env_hash`
+/// (T/L/J) plus `parse_env_hash` (P) and `resolve_env_hash` (R). An
+/// exhaustive destructure pins the field set (no `whole_hash`, no
+/// embedded `DeclIdentity`, no generation, no algorithm version).
 #[test]
-fn ref_cycle_db_is_keyed_on_content_free_slot_not_decl_identity() {
-    let source = read_file("crates/verter_session/src/component_meta_caches.rs");
-    let body = extract_brace_block(&source, "pub struct RefCycleResultDb {").expect(
-        "R6 GUARD: could not locate `pub struct RefCycleResultDb` body in \
-         component_meta_caches.rs",
-    );
-    assert!(
-        !body.contains("DeclIdentity"),
-        "R6 GUARD VIOLATION — `RefCycleResultDb` keys its store/inflight on the \
-         versioned `DeclIdentity` (which embeds `whole_hash`). A query-identity cache \
-         key must be content-free — key on `RefCycleResultKey` and root the content \
-         version on the cached value. Body:\n{}",
-        body
-    );
-}
+fn materialization_cycle_gate_key_is_content_free_and_env_discriminating() {
+    use verter_session::semantic_query::{MaterializationCycleGateKey, ResolvedDeclSlotIdentity};
 
-/// Runtime lock: `RefCycleResultKey` is content-free (two content versions
-/// of the same root → the SAME key, so they co-locate as candidates in one
-/// slot), and it discriminates on `resolve_env_hash` + `version` + the
-/// slot's identity. An exhaustive destructure pins the field set (no
-/// `whole_hash`, no embedded `DeclIdentity`).
-#[test]
-fn ref_cycle_result_key_is_content_free_and_env_discriminating() {
-    use verter_session::component_meta_caches::{RefCycleResultKey, REF_CYCLE_RESULT_VERSION};
-    use verter_session::semantic_query::ResolvedDeclSlotIdentity;
-
-    // The slot builder takes NO content/version input — two content
-    // versions of `/a.ts:Foo` yield the identical slot, hence the identical
-    // key. That is the content-version co-location the migration delivers:
-    // the whole-hash never enters the key, only the value's self-roots.
-    let slot_v1 = ResolvedDeclSlotIdentity::type_slot_unscoped(
-        Arc::from("/a.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Foo"),
-    );
-    let slot_v2 = ResolvedDeclSlotIdentity::type_slot_unscoped(
-        Arc::from("/a.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Foo"),
-    );
-    let key_v1 = RefCycleResultKey {
-        root: slot_v1,
-        resolve_env_hash: [2u8; 16],
-        version: REF_CYCLE_RESULT_VERSION,
+    let slot = || {
+        ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/a.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Foo"),
+        )
     };
-    let key_v2 = RefCycleResultKey {
-        root: slot_v2,
+    let key_v1 = MaterializationCycleGateKey {
+        root: slot(),
+        parse_env_hash: [3u8; 16],
         resolve_env_hash: [2u8; 16],
-        version: REF_CYCLE_RESULT_VERSION,
+    };
+    let key_v2 = MaterializationCycleGateKey {
+        root: slot(),
+        parse_env_hash: [3u8; 16],
+        resolve_env_hash: [2u8; 16],
     };
     assert_eq!(
         hash_of(&key_v1),
         hash_of(&key_v2),
-        "content-free: two content versions of the same root must hash to the same \
-         RefCycleResultKey slot (they co-locate as candidates)",
+        "content-free: two content versions of the same root must hash to the same          MaterializationCycleGateKey slot (they co-locate as candidates)",
     );
 
-    // Exhaustive destructure — no `whole_hash`, no `DeclIdentity` embed.
-    let RefCycleResultKey {
+    // Exhaustive destructure — no `whole_hash`, no `DeclIdentity` embed,
+    // no generation, no algorithm version.
+    let MaterializationCycleGateKey {
         root: _,
+        parse_env_hash: _,
         resolve_env_hash: _,
-        version: _,
     } = &key_v1;
 
-    // resolve_env_hash discriminates.
-    let mut env_variant = key_v1.clone();
-    env_variant.resolve_env_hash = [9u8; 16];
+    // P and R discriminate independently.
+    let mut p_variant = key_v1.clone();
+    p_variant.parse_env_hash = [8u8; 16];
     assert_ne!(
         hash_of(&key_v1),
-        hash_of(&env_variant),
-        "resolve_env_hash must distinguish the RefCycleResultKey slot",
+        hash_of(&p_variant),
+        "parse_env_hash must distinguish the MaterializationCycleGateKey slot",
     );
-
-    // version discriminates.
-    let mut version_variant = key_v1.clone();
-    version_variant.version = REF_CYCLE_RESULT_VERSION.wrapping_add(1);
+    let mut r_variant = key_v1.clone();
+    r_variant.resolve_env_hash = [9u8; 16];
     assert_ne!(
         hash_of(&key_v1),
-        hash_of(&version_variant),
-        "version must distinguish the RefCycleResultKey slot",
+        hash_of(&r_variant),
+        "resolve_env_hash must distinguish the MaterializationCycleGateKey slot",
     );
 
     // A different root (different decl name) discriminates.
-    let other = RefCycleResultKey {
+    let other = MaterializationCycleGateKey {
         root: ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Bar"),
         ),
+        parse_env_hash: [3u8; 16],
         resolve_env_hash: [2u8; 16],
-        version: REF_CYCLE_RESULT_VERSION,
     };
     assert_ne!(
         hash_of(&key_v1),
         hash_of(&other),
-        "a different root declaration must distinguish the RefCycleResultKey slot",
+        "a different root declaration must distinguish the MaterializationCycleGateKey slot",
     );
 }
 
-/// R21 breadth: the `RefCycleResultKey`'s SLOT-EMBEDDED env axes
+/// R21 breadth: the `MaterializationCycleGateKey`'s SLOT-EMBEDDED env axes
 /// (`project_identity` / `type_env_hash` / `lib_env_hash`, carried on the
 /// `ResolvedDeclSlotIdentity` root) each independently discriminate the key,
 /// and an IDENTICAL slot env co-locates (content-free equivalence). The
-/// sibling `ref_cycle_result_key_is_content_free_and_env_discriminating`
-/// builds its root via `type_slot_unscoped` (ZERO env) and varies only
-/// `resolve_env_hash` / `version` / the root NAME — it never moves the slot's
-/// embedded env dimensions. This pairs that gap (the slot env axes) the way
-/// `materialization_cache_key_is_content_free_and_env_discriminating` already
-/// covers the materialize key's slot.
-///
-/// This is the R21 scoping rule for a `lib`-BEARING query-identity cache: the
-/// five env dimensions are orthogonal, so two `RefCycleResultKey`s that differ
-/// in EXACTLY one slot-embedded dimension MUST hash distinctly. If the slot
-/// dimensions collapsed into one bundled hash (the R21 violation), a key
-/// resolved under project/env A would alias a lookup under project/env B.
-///
-/// Discriminates: if `project_identity` / `lib_env_hash` / `type_env_hash`
-/// were dropped from `ResolvedDeclSlotIdentity`'s `Hash`/`Eq` (env-collapse),
-/// the per-axis `assert_ne!`s flip — two cross-project / cross-lib /
-/// cross-type-env keys would hash-collide and over-share one cache slot.
+/// sibling `materialization_cycle_gate_key_is_content_free_and_env_discriminating`
+/// varies only P / R / the root NAME — it never moves the slot's embedded
+/// env dimensions. If the slot dimensions collapsed into one bundled hash
+/// (the R21 violation), a key differing in exactly one slot dimension would
+/// false-hit across envs.
 #[test]
-fn ref_cycle_result_key_slot_env_axes_discriminate() {
-    use verter_session::component_meta_caches::{RefCycleResultKey, REF_CYCLE_RESULT_VERSION};
-    use verter_session::semantic_query::ResolvedDeclSlotIdentity;
+fn materialization_cycle_gate_key_slot_env_axes_discriminate() {
+    use verter_session::semantic_query::{MaterializationCycleGateKey, ResolvedDeclSlotIdentity};
 
-    // `type_slot` carries the env-bearing, content-free subject identity:
-    // (canonical, name, project_identity, type_env_hash, lib_env_hash).
-    let slot = |project_identity: u32, type_env: [u8; 16], lib_env: [u8; 16]| {
+    let slot = |project: u32, t: [u8; 16], l: [u8; 16]| {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
-            project_identity,
-            type_env,
-            lib_env,
+            project,
+            t,
+            l,
         )
     };
-
-    let base = RefCycleResultKey {
+    let base = MaterializationCycleGateKey {
         root: slot(1, [2u8; 16], [3u8; 16]),
-        resolve_env_hash: [4u8; 16],
-        version: REF_CYCLE_RESULT_VERSION,
+        parse_env_hash: [4u8; 16],
+        resolve_env_hash: [5u8; 16],
     };
-
-    // Content-free equivalence: an IDENTICAL slot env (same project / type-env /
-    // lib-env / canonical / name) co-locates onto the same key.
-    let same = RefCycleResultKey {
+    let same = MaterializationCycleGateKey {
         root: slot(1, [2u8; 16], [3u8; 16]),
-        resolve_env_hash: [4u8; 16],
-        version: REF_CYCLE_RESULT_VERSION,
+        parse_env_hash: [4u8; 16],
+        resolve_env_hash: [5u8; 16],
     };
     assert_eq!(
         hash_of(&base),
         hash_of(&same),
-        "content-free equivalence: an identical slot env must hash to the same \
-         RefCycleResultKey slot (candidates co-locate)",
+        "content-free equivalence: an identical slot env must hash to the same          MaterializationCycleGateKey slot (candidates co-locate)",
     );
 
     // Each slot-embedded env axis independently discriminates.
@@ -648,17 +598,15 @@ fn ref_cycle_result_key_slot_env_axes_discriminate() {
         ("type_env_hash", slot(1, [99u8; 16], [3u8; 16])),
         ("lib_env_hash", slot(1, [2u8; 16], [99u8; 16])),
     ] {
-        let variant = RefCycleResultKey {
+        let variant = MaterializationCycleGateKey {
             root: variant_slot,
-            resolve_env_hash: [4u8; 16],
-            version: REF_CYCLE_RESULT_VERSION,
+            parse_env_hash: [4u8; 16],
+            resolve_env_hash: [5u8; 16],
         };
         assert_ne!(
             hash_of(&base),
             hash_of(&variant),
-            "the slot-embedded `{label}` axis MUST distinguish the RefCycleResultKey \
-             slot (R21 — the lib/type/project env dimensions are orthogonal; a \
-             collapse would alias cross-{label} keys)",
+            "the slot-embedded `{label}` axis MUST distinguish the              MaterializationCycleGateKey slot (R21 — the lib/type/project env              dimensions are orthogonal; a collapse would alias cross-{label} keys)",
         );
     }
 }
@@ -953,7 +901,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
 // SemanticNodeId ban would be UNSOUND (it would catch legitimate
 // intra-graph operands like `SemanticQueryKey::Instantiate.args`,
 // `ProjectMember.base`, `ProjectPath.base`, `ResolveOverloadSet.callee`,
-// or `IndexKey::TypeNode`), so the scope is the shape/materialize keys
+// or `IndexKey::Computed`), so the scope is the shape/materialize keys
 // ONLY.
 
 /// Content/version field markers forbidden in a shape/materialize
@@ -1710,7 +1658,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 /// SCOPE: shape/materialize keys ONLY. A blanket `SemanticNodeId` ban
 /// would be unsound — it would flag the legitimate intra-graph operands
 /// (`SemanticQueryKey::Instantiate.args` / `ProjectMember.base` /
-/// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::TypeNode`),
+/// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::Computed`),
 /// which are NOT shape/materialize keys and stay allowed.
 /// The sanctioned `ShapeSubject` variant inventory. The scanner extracts
 /// the `MemberValueNode` / `SyntheticBinding` arms by name, so a NEW arm

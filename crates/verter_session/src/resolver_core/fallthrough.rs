@@ -1674,14 +1674,24 @@ fn known_spread_keys_from_object(object: &verter_type_expr::ObjectExpr) -> Known
     for member in &object.properties {
         match member {
             verter_type_expr::ObjectMember::Property(prop) => {
-                normalize_public_spread_key(&prop.name, &mut result.attrs, &mut result.listeners)
+                if let Some(name) = prop.key.as_string() {
+                    normalize_public_spread_key(name, &mut result.attrs, &mut result.listeners)
+                } else {
+                    result.exact = false;
+                }
             }
             verter_type_expr::ObjectMember::Method(method) => {
-                normalize_public_spread_key(&method.name, &mut result.attrs, &mut result.listeners)
+                if let Some(name) = method.key.as_string() {
+                    normalize_public_spread_key(name, &mut result.attrs, &mut result.listeners)
+                } else {
+                    result.exact = false;
+                }
             }
             verter_type_expr::ObjectMember::IndexSignature(_)
             | verter_type_expr::ObjectMember::CallSignature(_)
-            | verter_type_expr::ObjectMember::ConstructSignature(_) => {
+            | verter_type_expr::ObjectMember::ConstructSignature(_)
+            // An unfolded spread entry contributes an open key set.
+            | verter_type_expr::ObjectMember::Spread(_) => {
                 result.exact = false;
             }
         }
@@ -2483,23 +2493,25 @@ mod tests {
     fn known_spread_keys_from_type_expr_intersects_union_keys() {
         let summary = known_spread_keys_from_type_expr(&TypeExpr::union(vec![
             TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "id".to_string(),
-                    TypeExpr::primitive(PrimitiveName::String),
-                    false,
-                    false,
-                ))],
+                properties: vec![ObjectMember::Property(
+                    ObjectProperty::synthetic_public_key(
+                        "id".to_string().into(),
+                        TypeExpr::primitive(PrimitiveName::String),
+                        false,
+                        false,
+                    ),
+                )],
             })),
             TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: vec![
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "id".to_string(),
+                    ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                        "id".to_string().into(),
                         TypeExpr::primitive(PrimitiveName::String),
                         false,
                         false,
                     )),
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "title".to_string(),
+                    ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                        "title".to_string().into(),
                         TypeExpr::primitive(PrimitiveName::String),
                         false,
                         false,
@@ -2603,12 +2615,14 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Direct,
                 annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
                     LeafTypeFact::StringLiteral(literal.to_string()),
                 ))),
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2633,6 +2647,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: Some(ValueDeclIdentityPart {
                     canonical_id: std::sync::Arc::from("/source"),
                     owner: target_owner,
@@ -2642,6 +2657,7 @@ mod tests {
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2701,6 +2717,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: Some(ValueDeclIdentityPart {
                     canonical_id: std::sync::Arc::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
@@ -2710,6 +2727,7 @@ mod tests {
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2808,6 +2826,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Direct,
                 annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
@@ -2822,6 +2841,7 @@ mod tests {
                     },
                 ))),
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,

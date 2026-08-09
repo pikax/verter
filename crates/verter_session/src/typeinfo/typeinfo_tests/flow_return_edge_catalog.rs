@@ -207,6 +207,17 @@ macro_rules! future_edge_contract {
     };
 }
 
+/// An edge-catalog row whose contract the engine ALREADY satisfies: it runs on
+/// every gate pass, with no `#[ignore]`.
+macro_rules! edge_contract {
+    ($name:ident, $alias:literal, $check:expr) => {
+        #[test]
+        fn $name() {
+            assert_edge_alias($alias, $check);
+        }
+    };
+}
+
 macro_rules! future_edge_package_contract {
     ($name:ident, $alias:literal, $reason:literal, $check:expr) => {
         #[test]
@@ -323,10 +334,14 @@ future_edge_contract!(
     }
 );
 
-future_edge_contract!(
+// PA14 — `pa14AssertPresent(config.value); return config.value.id` returns
+// `string`. The assertion signature refines the dotted member path
+// `config.value` before the projected return, so the optional member's
+// `undefined` arm is discharged. The assertion discriminates: without the
+// assertion effect the projected return is not the bare `string` primitive.
+edge_contract!(
     flow_return_pa14_assertion_refines_dotted_member_path,
     "PA14",
-    "typeinfo currently does not apply assertion signatures to dotted member paths before projected returns; keep as the future PA14 dotted-assertion contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 

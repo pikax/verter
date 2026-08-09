@@ -1147,6 +1147,7 @@ mod tests {
                 name: "unknownProp".into(),
                 is_bound: false,
                 expression: None,
+                expression_locator: None,
                 constness: crate::input::PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,

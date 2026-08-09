@@ -94,7 +94,7 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
             continue;
         }
         if let OriginEdgeMetaDto::ProjectMember {
-            member_name,
+            member_key,
             provenance,
         } = &edge.meta
         {
@@ -104,9 +104,9 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
             ) {
                 continue;
             }
-            match member_name.as_ref() {
-                "outputSchema" => outputschema_count += 1,
-                "execute" => execute_count += 1,
+            match member_key.as_string() {
+                Some("outputSchema") => outputschema_count += 1,
+                Some("execute") => execute_count += 1,
                 _ => {}
             }
         }
@@ -115,8 +115,8 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
     let mut projection_path_count = 0usize;
     for projection in footprint.projections.iter() {
         for seg in projection.path.iter() {
-            if let verter_audit::origin_graph::ProjectPathSegment::Member { name } = seg {
-                if name.as_ref() == "outputSchema" || name.as_ref() == "execute" {
+            if let verter_audit::origin_graph::ProjectPathSegment::Member { key } = seg {
+                if key.as_string() == Some("outputSchema") || key.as_string() == Some("execute") {
                     projection_path_count += 1;
                 }
             }

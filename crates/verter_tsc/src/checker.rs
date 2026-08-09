@@ -535,12 +535,32 @@ fn generate_all_tsc(
 /// the vite branch lives inside the discovery loop and fires only when NO
 /// tsconfig was found, and this entry performs no discovery and takes no
 /// `ViteConfigOptions`.
+///
+/// The selected tsconfig is canonicalized before the snapshot is built. The
+/// snapshot derives the configured project's ROOT from the tsconfig path
+/// (`build_selected_project_snapshot` takes everything up to the last `/`),
+/// and tsconfig `paths` aliases resolve against that root — while every file
+/// the host knows (upserted carriers, `TsConfig::root_dir`) carries its
+/// CANONICAL identity. Handing the raw `-p` spelling through would root the
+/// project at a symlink-aliased spelling (macOS `TMPDIR` is `/var/folders/…`
+/// → `/private/var/folders/…`; the same holds for any symlinked project
+/// path), so an alias candidate built from it never exact-hits the canonical
+/// file map: [`VerterHost::resolve_import`] answers `None`, the aliased
+/// carrier stays on the empty `*.vue` wildcard shim, and its real surface —
+/// including every attribute-fallthrough rejection — silently vanishes.
+/// Canonicalizing here is the same identity treatment `TsConfig::root_dir`
+/// and the synthetic tsconfig's `extends` target already get; on a failure
+/// the raw spelling is kept, which degrades exactly as before.
 fn install_project_workspace(host: &VerterHost, root_dir: &Path, tsconfig_path: &Path) {
     let workspace = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
         verter_workspace::FilesystemOptions::default(),
     ));
     let root = root_dir.to_string_lossy().replace('\\', "/");
-    let selected = tsconfig_path.to_string_lossy().replace('\\', "/");
+    let selected_path = tsconfig_path
+        .canonicalize()
+        .map(|p| simplify_verbatim_path(&p).into_owned())
+        .unwrap_or_else(|_| tsconfig_path.to_path_buf());
+    let selected = selected_path.to_string_lossy().replace('\\', "/");
     let snapshot = verter_workspace::build_selected_project_snapshot(
         workspace.as_ref(),
         &selected,
@@ -7072,6 +7092,17 @@ mod selected_project_workspace_tests {
 
     fn resolve_alias_under(root: &Path, selected: &Path) -> Option<String> {
         let host = VerterHost::new_standalone(build_host_config());
+        // Speak the production path-identity contract: `TsConfig` canonicalizes
+        // `root_dir` and every discovered carrier before they reach the host,
+        // and `install_project_workspace` canonicalizes the selected tsconfig,
+        // so the snapshot's project roots, the importer id, and the resolver's
+        // candidates all live in ONE identity. Handing the raw tempdir spelling
+        // through (macOS `TMPDIR` is a `/var` → `/private/var` symlink) puts the
+        // importer under a root no configured project owns, and the alias
+        // resolves through nothing — the exact production defect these tests
+        // guard, reproduced by the harness itself.
+        let root = &root.canonicalize().unwrap();
+        let selected = &selected.canonicalize().unwrap();
         install_project_workspace(&host, root, selected);
         let importer = root.join("src").join("App.vue");
         let importer_id = importer.to_string_lossy().replace('\\', "/");

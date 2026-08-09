@@ -130,9 +130,9 @@ fn surface_member_value_ids(
         SemanticNodeData::Object(view) => view.clone(),
         other => panic!("surface must be an Object, got: {other:?}"),
     };
-    view.members
+    view.positive_members()
         .iter()
-        .map(|m| (m.name.as_ref().to_string(), m.value))
+        .filter_map(|m| m.string_name().map(|name| (name.to_string(), m.value)))
         .collect()
 }
 

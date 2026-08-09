@@ -53,6 +53,15 @@ test-util = []
 # NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
 # of the default/production closure — `default` does not list it.
 oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile"]
+# The AUDITED LIFT COMMAND (`src/bin/oracle_lift.rs`) — the sole writer of the
+# retained `LIFTED_ROW_MIGRATIONS` provenance. It reads the ORIGINAL `#[ignore]`d
+# test body through the closed `syn` migration-fidelity extractor and derives the
+# `migration_fingerprint` + `original_body_tokens` from it, so it needs the
+# extractor's `syn` / `quote` / `blake3` closure (`sha2` is already a regular
+# dependency). Gated so the default
+# build and `cargo clippy --workspace --all-targets` skip the command entirely,
+# exactly like `oracle-gen`; `default` does not list it.
+oracle-lift = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:blake3"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -122,6 +131,15 @@ blake3 = { workspace = true, optional = true }
 # + activated ONLY by `oracle-gen`; in `#[cfg(test)]` builds the
 # `[dev-dependencies]` entry below provides it. NEVER on the default closure.
 tempfile = { version = "3.27", optional = true }
+# The migration-fidelity extractor closure the `oracle-lift` command compiles in
+# NON-test mode (the `[dev-dependencies]` copies below serve the `#[cfg(test)]` /
+# integration-test builds). OPTIONAL + activated ONLY by `oracle-lift`, so none of
+# them enter the default/production closure. `span-locations` is what lets the
+# command locate a test fn's attribute + body byte ranges from the parsed item
+# instead of scanning text.
+syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"], optional = true }
+quote = { version = "1.0.45", optional = true }
+proc-macro2 = { version = "1.0", features = ["span-locations"], optional = true }
 # Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
 # (only the `oracle-gen` feature activates it) so it stays off the default closure.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
@@ -130,6 +148,7 @@ dashmap = "6.2"
 hotpath = { version = "0.16", optional = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
@@ -206,6 +225,15 @@ toml = "1.1"
 # unifies feature requirements per-target — for tests/examples/benches
 # the union includes `test-support`; for production it does not.
 verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
+# Activates the `test-support` feature on `verter_semantic` for
+# `cargo test --package verter_session` (and example/bench) builds only —
+# the flow-slice hash invocation counter
+# (`compute_flow_slice_hash_thread_invocations`) that the hash-then-lower
+# behavioral guard (`hash_then_lower_round_trip_serves_lowered_slice_ir`)
+# binds to. The regular dependency above does NOT enable the feature, so
+# production builds compile `compute_flow_slice_hash` without the counter
+# TLS or its increment. Same idiom as the `verter_scheduler` edge above.
+verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 # Self-edge that activates `verter_session`'s OWN `test-support` feature for its
 # test / example / bench targets ONLY (the integration binary `tests/cases/**`
 # among them). Cargo unifies feature requirements per-target: for the test
@@ -269,13 +297,22 @@ name = "oracle_gen"
 path = "src/bin/oracle_gen.rs"
 required-features = ["oracle-gen"]
 
-# Deterministic, tsgo-FREE v2->v3 snapshot schema upgrade (§Q4). Run with
+# Deterministic, tsgo-FREE v3->v4 snapshot schema re-keying (§Q4 + the RI-0
+# relation-verdict addendum). Run with
 # `cargo run -p verter_session --features oracle-gen --bin oracle_upgrade`.
 # `required-features` keeps it out of the default tsgo-free build.
 [[bin]]
 name = "oracle_upgrade"
 path = "src/bin/oracle_upgrade.rs"
 required-features = ["oracle-gen"]
+
+# The AUDITED LIFT COMMAND — the sole writer of `LIFTED_ROW_MIGRATIONS`. Run with
+# `cargo run -p verter_session --features oracle-lift --bin oracle_lift -- --row <file.rs>::<fn>`
+# (or `-- --check`). `required-features` keeps it out of the default build.
+[[bin]]
+name = "oracle_lift"
+path = "src/bin/oracle_lift.rs"
+required-features = ["oracle-lift"]
 
 [[bench]]
 name = "host_bench"

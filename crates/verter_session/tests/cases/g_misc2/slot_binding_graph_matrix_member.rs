@@ -29,7 +29,7 @@ fn slot_binding_graph_fact_tracer_carries_member() {
             canonical_id: "/src/slots.ts".to_owned(),
             key: FactKey::Member {
                 exporter: InternedName::from("Slots"),
-                name: InternedName::from("default"),
+                name: verter_type_expr::facts::FactPropertyKey::identifier("default"),
                 space: SymbolSpace::Type,
             },
             lane: FactLane::Semantic,

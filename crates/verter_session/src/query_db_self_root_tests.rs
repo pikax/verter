@@ -1,6 +1,6 @@
 //! Self-version-root discriminator tests for the component-meta
 //! query-identity caches AND the structural carriers
-//! (`MaterializeStructureDb`, `RefCycleResultDb`).
+//! (`MaterializeStructureDb`).
 //!
 //! Each query-identity cache is keyed by a canonical (the entry's
 //! *keyed canonical*). The warm-read validator must validate the
@@ -61,7 +61,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TypeExpr, UnknownValue};
 
 use crate::component_meta_caches::ComputedEntry;
 use crate::fact_signature_helpers::empty_fact_signature;
@@ -113,7 +113,7 @@ fn host_with_unrelated_file() -> VerterHost {
 
 /// The self-root canonical set for a [`planted_self_root`] signature —
 /// the single keyed canonical it roots. The planted `MaterializeStructureDb`
-/// / `RefCycleResultDb` entries carry an explicit `self_root_canonicals`
+/// / the retired `RefCycleResultDb` carried an explicit `self_root_canonicals`
 /// set; a synthetic prime passes this so the entry's strict-validation
 /// set matches the planted fact.
 fn planted_self_root_canonicals(canonical: &str) -> Arc<[Arc<str>]> {
@@ -431,9 +431,7 @@ fn materialized(
 ) -> MaterializedOutputTypeExpr {
     MaterializedOutputTypeExpr::from_type_expr_for_test(
         None,
-        TypeExpr::Unknown {
-            raw: marker.to_string(),
-        },
+        TypeExpr::Unknown(UnknownValue::unsupported_syntax(marker)),
         dep_signature,
         false,
     )
@@ -552,7 +550,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
          names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 }
@@ -612,7 +610,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
          self-root names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 }
@@ -690,7 +688,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
          whose self-root names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 
@@ -799,7 +797,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
     assert!(
-        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "stale"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "stale"),
         "fixture invariant: cold publish stores the primed materialized expression",
     );
 
@@ -836,7 +834,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
          the entry valid and serve stale.",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected warm entry must not bubble its stale materialized expression",
     );
 }
@@ -1454,7 +1452,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
          stale.",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected warm entry must not bubble its stale materialized expression",
     );
 }
@@ -1608,7 +1606,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
          is no warm hit to short-circuit it",
     );
     assert!(
-        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the refused-admission path still returns the freshly-computed value to the \
          caller — user-visible request output is unaffected",
     );
@@ -1733,7 +1731,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
         })
         .expect("cold publish succeeds");
     assert!(
-        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "stale"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "stale"),
         "fixture invariant: cold publish stores the primed materialised expression",
     );
     assert_eq!(
@@ -1779,7 +1777,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
          entry valid and serve stale.",
     );
     assert!(
-        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected warm entry must not bubble its stale materialised expression",
     );
 }
@@ -2158,7 +2156,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
          hit instead.",
     );
     assert!(
-        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the rejected race-window entry must not bubble its stale materialised expression",
     );
 }
@@ -2754,7 +2752,10 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         .as_ref()
         .expect("the overlay bundle declares Probe");
     assert!(
-        decl.member_index.contains_key("overlayMember"),
+        decl.member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier(
+                "overlayMember"
+            )),
         "fixture invariant: the overlay-aware prepared-decl bundle must yield the \
          overlay `Probe` (member `overlayMember`)",
     );
@@ -2975,7 +2976,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
          is no warm hit to short-circuit it",
     );
     assert!(
-        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "recomputed"),
         "the refused-admission path still returns the freshly-computed value to the caller",
     );
 }
@@ -3420,15 +3421,14 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 }
 
 // ===========================================================================
-// Structural carriers — `MaterializeStructureDb` and `RefCycleResultDb`.
+// Structural carriers — `MaterializeStructureDb`.
 //
-// These two query-identity caches carry an explicit `self_root_canonicals`
+// This query-identity cache carries an explicit `self_root_canonicals`
 // set: `MaterializeStructureDb` roots the materialise SUBJECT's
 // declaration-origin file — the extracted route root for a route-shaped
 // subject, the `base` node's origin for a non-route subject (the consumer
-// materialise scope is NEVER a self-root — R7 cross-owner reuse);
-// `RefCycleResultDb` roots the BFS root
-// file plus every visited declaration's file. Every warm read validates
+// materialise scope is NEVER a self-root — R7 cross-owner reuse).
+// Every warm read validates
 // those self-roots strictly via `ReadSetSignature::validate_with_self_roots`,
 // so a same-canonical / visited-canonical content edit — or an untracked
 // self-root canonical — rejects the entry. The tests below discriminate the
@@ -3448,14 +3448,16 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
     use crate::semantic_query::SemanticNodeData;
     host.project_type_store()
         .semantic_graph()
-        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }))
+        .intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
 }
 
 /// `MaterializeStructureDb::peek` runs its self-root canonicals
@@ -3967,354 +3969,6 @@ fn route_shaped_materialize_self_roots_at_extracted_root_not_consumer_wrapper() 
     );
 }
 
-/// Build a `DeclIdentity` carrying `canonical`'s CURRENT observed whole
-/// hash — the identity shape the BFS root + visited identities use.
-fn ref_cycle_decl_identity(
-    host: &VerterHost,
-    canonical: &str,
-    name: &str,
-) -> crate::semantic_query::DeclIdentity {
-    let whole_hash = host
-        .shallow_file_state(canonical)
-        .map(|s| s.whole_hash)
-        .unwrap_or([0u8; 16]);
-    crate::semantic_query::DeclIdentity {
-        canonical_id: Arc::from(canonical),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash,
-        decl_name: Arc::from(name),
-    }
-}
-
-/// `RefCycleResultDb` rejects a warm entry after a content edit to its
-/// BFS ROOT canonical.
-///
-/// Same-canonical invalidation is lazy: the upsert performs no eager
-/// own-canonical cache drain, so a `RefCycleResultDb` entry for the
-/// edited root physically survives the upsert and must reject the edit
-/// on its own. The BFS records the root identity's `(canonical,
-/// whole_hash)` as a strict self-root; this test edits the root file
-/// through the production `upsert` and asserts the warm `peek` misses.
-/// The BFS cache key is the `DeclIdentity`, which embeds `whole_hash` —
-/// the test holds the identity at its ORIGINAL hash (the `DeclIdentity`
-/// a stale caller would still hold); `peek` on that key finds the entry
-/// and MUST reject it via the strict self-root.
-#[test]
-fn ref_cycle_db_root_edit_rejects_warm_entry() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_root.ts";
-    upsert(&host, root, "export type Probe = { a: number };\n");
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Cold BFS — publishes a warm entry self-rooted on `root`.
-    let mut fence = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
-    let db = host.project_type_store().ref_cycle_db();
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_some(),
-        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry \
-         self-rooted on the root canonical",
-    );
-
-    // Edit the root file through the production `upsert`. The upsert
-    // performs no eager own-canonical drain, so the entry physically
-    // survives and the strict self-root must reject it.
-    upsert(
-        &host,
-        root,
-        "export type Probe = { a: string; b: number };\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady re-materialises after the edit",
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
-        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to its \
-         BFS root canonical — the BFS records the root identity as a strict self-root, \
-         so the shifted FileWholeHash rejects the entry. Same-canonical invalidation is \
-         lazy: with no eager upsert-time drain, the carrier rejects the edit on its own.",
-    );
-}
-
-/// `RefCycleResultDb` rejects a warm entry after a content edit to a
-/// VISITED (non-root) canonical the BFS walked. This is a
-/// **characterization** test: it confirms a visited-canonical edit
-/// rejects the warm entry — same-canonical invalidation is lazy, so the
-/// entry physically survives the upsert and the carrier must reject it
-/// on its own. It is not a strict-vs-lax discriminator — a visited
-/// canonical is also carried in the legacy `DepSignature` rail (the
-/// per-`Instantiate` dispatch dep-signature), which
-/// `validate_dep_signature` already rejects on a content edit to a
-/// tracked file. The strict-self-root discriminator for
-/// `RefCycleResultDb` is the untracked-self-root test below.
-#[test]
-fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_visit_root.ts";
-    let helper = "/struct_carrier_qdb/rc_visit_helper.ts";
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
-    );
-    upsert(
-        &host,
-        root,
-        "import type { Helper } from './rc_visit_helper';\nexport type Probe = Helper<number>;\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady materialises",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Cold BFS — walks `root` then `helper`; publishes a warm entry
-    // whose self-root set includes BOTH the root and the visited
-    // helper.
-    let mut fence = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
-    let db = host.project_type_store().ref_cycle_db();
-    let primed = crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx);
-    assert!(
-        primed.is_some(),
-        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry",
-    );
-
-    // Edit ONLY the visited helper file through the production
-    // `upsert`. The BFS root file is untouched, so a producer that
-    // rooted only the root would keep the entry valid.
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; sibling: string; next: Helper<T> };\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady re-materialises after the edit",
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
-        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to a \
-         VISITED (non-root) canonical the BFS walked — the visited helper is both a \
-         strict self-root (recorded by the BFS) AND a legacy-rail dependency, and a \
-         content edit to it rejects the entry on its own self-root.",
-    );
-}
-
-/// `RefCycleResultDb` validates the BFS root's self-root **strictly**.
-///
-/// Discriminating property: a synthetic `RefCycleEntry` is planted
-/// whose `facts` rail holds a `FileWholeHash` self-root for an
-/// UNTRACKED root canonical and `self_root_canonicals = [root]`, with
-/// an EMPTY legacy rail. The lax `validate(ctx)` routes the untracked
-/// `FileWholeHash` through `StoreView::validates`, whose untracked-accept
-/// arm returns `true`, and an empty legacy rail validates vacuously —
-/// so the pre-self-root tree serves the entry warm. The strict
-/// `validate_with_self_roots(ctx, [root])` routes the `FileWholeHash`
-/// through `validates_self_root_whole_hash`, which rejects an untracked
-/// self-root. The peek misses iff the validator is strict; reverting
-/// `RefCycleResultDb::peek` to `validate(ctx)` flips this test.
-///
-/// (The legacy rail is left empty deliberately: the legacy
-/// `DepSignature` validator's `WholeHash` arm rejects an untracked
-/// canonical, so a `legacy`-rail untracked entry would mask the
-/// strict-vs-lax distinction. The untracked-accept permissiveness lives
-/// ONLY on the `facts` rail's `FileWholeHash` via
-/// `StoreView::validates`.)
-#[test]
-fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
-    let host = host_with_unrelated_file();
-    let root = "/struct_carrier_qdb/rc_never_loaded.ts";
-    assert_untracked(&host, root);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().ref_cycle_db();
-    let id = crate::semantic_query::DeclIdentity {
-        canonical_id: Arc::from(root),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash: PLANTED_HASH,
-        decl_name: Arc::from("Probe"),
-    };
-
-    // Plant a synthetic candidate: the carrier's facts rail holds a
-    // self-root `FileWholeHash` for the untracked root and
-    // `self_root_canonicals` lists the root. A lax validator admits this;
-    // the strict one does not.
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: root.to_string(),
-        hash: PLANTED_HASH,
-    }]);
-    db.insert_for_test(
-        &id,
-        ctx,
-        true,
-        crate::fact_signature_helpers::ReadSetSignature::new(facts),
-        planted_self_root_canonicals(root),
-        // Live project generation — this test exercises the carrier's
-        // strict self-root rejection, not the generation gate, so the
-        // stamp must match the live generation.
-        ctx.project_type_store().current_project_generation(),
-    );
-
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
-        "RefCycleResultDb::peek MUST reject a warm candidate whose self-root FileWholeHash \
-         names an UNTRACKED root canonical — the lax `validate` accepts the untracked \
-         self-root and serves the candidate stale; only the strict `validate_with_self_roots` \
-         rejects it.",
-    );
-}
-
-/// The ref-cycle BFS `ComputeAdmission::ReturnOnly` path MUST propagate
-/// the BFS's read fence into the caller's `local_fence`.
-///
-/// Discriminating property. `ref_root_reaches_transitive_cycle_node`'s
-/// cold path runs the BFS inside `ref_cycle_db_get_or_compute`'s
-/// `compute` closure. When that closure refuses cache admission
-/// (tracer overflow, an unrootable / torn self-root, or a
-/// `RouteGeneration` fence dependency) it returns the computed bool via
-/// `ComputeAdmission::ReturnOnly`. The caller's `Some(read)` arm merges
-/// `read.dep_signature` into the caller's `local_fence` — so an outer
-/// computation that called `ref_root_reaches_transitive_cycle_node` can
-/// be cached without the files the BFS read unless the `ReturnOnly`
-/// `CacheRead` carries the BFS fence.
-///
-/// This test forces the `ReturnOnly` exit AFTER the real BFS has run
-/// (real `root` + `helper` files read, real `compute_fence` populated)
-/// and asserts `local_fence` carries a `WholeHash` fact for BOTH the
-/// BFS root and the visited helper, pinned to their CURRENT observed
-/// content hashes.
-///
-/// - Pre-fix (`return_only_value` builds an empty `dep_signature`):
-///   `local_fence` is empty — the BFS reads are dropped, the stale
-///   outer-cache hole.
-/// - Post-fix (`return_only_value` carries the `legacy` fence built
-///   from `compute_fence`): `local_fence` carries the root + helper
-///   `WholeHash` facts — observably equivalent to the proven `None`-arm
-///   fallback that runs `local_fence.extend(fence)`, without a second
-///   uncached BFS.
-///
-/// Reverting the `component_meta_caches.rs` `ReturnOnly` fence
-/// propagation flips this test RED.
-#[test]
-fn ref_cycle_db_return_only_path_propagates_bfs_fence_to_caller() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-    use crate::semantic_query::DepVersion;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_returnonly_root.ts";
-    let helper = "/struct_carrier_qdb/rc_returnonly_helper.ts";
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
-    );
-    upsert(
-        &host,
-        root,
-        "import type { Helper } from './rc_returnonly_helper';\n\
-         export type Probe = Helper<number>;\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady materialises",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    // The CURRENT observed whole hashes of the two files the BFS reads.
-    // The `ReturnOnly` fence must pin these exact hashes.
-    let root_hash = host
-        .shallow_file_state(root)
-        .map(|s| s.whole_hash)
-        .expect("root shallow state present");
-    let helper_hash = host
-        .shallow_file_state(helper)
-        .map(|s| s.whole_hash)
-        .expect("helper shallow state present");
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Force the cold `compute` closure down a `ComputeAdmission::ReturnOnly`
-    // exit. The BFS still runs in full — `root` then `helper` are read,
-    // `compute_fence` is populated — only the admission decision is
-    // forced, reproducing the production overflow / unrootable-self-root
-    // / RouteGeneration refusal contract.
-    let _refusal = crate::component_meta_caches::force_ref_cycle_return_only_for_tests();
-    let refusals_before = host
-        .provenance
-        .ref_cycle_overflow_refusals
-        .load(std::sync::atomic::Ordering::Relaxed);
-
-    let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut local_fence);
-
-    let refusals_after = host
-        .provenance
-        .ref_cycle_overflow_refusals
-        .load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        refusals_after > refusals_before,
-        "fixture invariant: the forced `ComputeAdmission::ReturnOnly` exit must have \
-         fired (ref_cycle_overflow_refusals advanced) — without it the test would not \
-         be exercising the ReturnOnly path at all",
-    );
-    let db = host.project_type_store().ref_cycle_db();
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
-        "fixture invariant: a `ReturnOnly` compute does NOT admit a warm entry — the \
-         RefCycleResultDb slot stays empty",
-    );
-
-    // Discriminating assertion: the caller's `local_fence` carries a
-    // `WholeHash` fact for the BFS root AND the visited helper, each
-    // pinned to that file's CURRENT observed content hash.
-    let fence_has = |canonical: &str, hash: [u8; 16]| {
-        local_fence.iter().any(|(c, v)| {
-            c.as_ref() == canonical && matches!(v, DepVersion::WholeHash(h) if *h == hash)
-        })
-    };
-    assert!(
-        fence_has(root, root_hash),
-        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
-         caller's `local_fence`: it must carry a `WholeHash` fact for the BFS root \
-         `{root}` pinned to its current observed content hash. Pre-fix the \
-         `ReturnOnly` `CacheRead` carried an empty `dep_signature`, so `local_fence` \
-         was empty and an outer computation could be cached without the BFS's root \
-         file — a stale-cache hole. local_fence = {local_fence:?}",
-    );
-    assert!(
-        fence_has(helper, helper_hash),
-        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
-         caller's `local_fence`: the BFS walked through `root` into the visited helper \
-         `{helper}`, so `local_fence` must also carry a `WholeHash` fact for the \
-         helper pinned to its current observed content hash. local_fence = {local_fence:?}",
-    );
-}
-
 // ===========================================================================
 // Closure guard — every in-scope query-identity cache has a
 // self-version-root discriminator.
@@ -4366,10 +4020,6 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
     (
         "materialize_structure_db",
         "materialize_structure_db_planted_untracked_self_root_rejects_warm_entry",
-    ),
-    (
-        "ref_cycle_db",
-        "ref_cycle_db_untracked_self_root_rejects_warm_entry",
     ),
 ];
 
@@ -4938,7 +4588,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
         Some((
             MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
-                TypeExpr::Unknown { raw: String::new() },
+                TypeExpr::Unknown(UnknownValue::missing_output()),
                 Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 false,
             ),
@@ -4992,7 +4642,6 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             + store.owner_collection_db().live_count()
             + store.shape_cache_db().live_count()
             + store.materialize_structure_db().live_count()
-            + store.ref_cycle_db().live_count()
     };
 
     // Drive a failed-revalidation cold compute through each of the
@@ -5049,7 +4698,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             Some((
                 MaterializedOutputTypeExpr::from_type_expr_for_test(
                     None,
-                    TypeExpr::Unknown { raw: String::new() },
+                    TypeExpr::Unknown(UnknownValue::missing_output()),
                     Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                     false,
                 ),
@@ -5224,16 +4873,16 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     );
 }
 
-/// `SemanticGraphStore::get_relation` rejects an entry whose
+/// `SemanticGraphStore::get_relation_payload` rejects an entry whose
 /// `validated_at_generation` no longer equals the live project
 /// generation — a `ProjectGeneration` reset bumps no file content, so
 /// the relation carrier's `FileWholeHash`-only fact rail cannot
 /// detect a project-shape change. Mirror of the `ComponentMetaResultDb`
 /// test for the relation memo carrier.
 #[test]
-fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
+fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation() {
     use crate::semantic_query::{
-        PrimitiveKind, RelateMemoKey, RelationContext, RelationResult, SemanticNodeData,
+        PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome, SemanticNodeData,
         SemanticNodeId,
     };
     use crate::semantic_query_memo::SemanticGraphStore;
@@ -5250,18 +4899,18 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
     // Plant a relation judgement with a valid (empty + empty
     // self-roots) carrier tagged at the CURRENT project generation.
     let gen0 = host.project_type_store().current_project_generation();
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        RelationResult::NotAssignable,
+        store.relation_payload_for_tests(RelationOutcome::NotAssignable),
         gen0,
     );
 
     // Same generation — the carrier validates vacuously and the
-    // generation matches, so `get_relation` HITs.
+    // generation matches, so `get_relation_payload` HITs.
     assert!(
-        store.get_relation(ctx, &key).is_some(),
+        store.get_relation_payload(ctx, &key).is_some(),
         "a relation memo entry with a valid carrier and a matching \
          project generation must warm-hit",
     );
@@ -5278,18 +4927,18 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
          the generation stamp alone",
     );
 
-    // DISCRIMINATOR: `get_relation` must now MISS — the entry's
+    // DISCRIMINATOR: `get_relation_payload` must now MISS — the entry's
     // `validated_at_generation` no longer equals the live generation.
-    // Without the generation gate `get_relation`'s carrier check
+    // Without the generation gate `get_relation_payload`'s carrier check
     // alone still passes (no file content changed) and the stale
     // relation judgement is served.
     assert!(
-        store.get_relation(ctx, &key).is_none(),
-        "STALE-GENERATION READ: `SemanticGraphStore::get_relation` \
+        store.get_relation_payload(ctx, &key).is_none(),
+        "STALE-GENERATION READ: `SemanticGraphStore::get_relation_payload` \
          served a relation memo entry whose `validated_at_generation` \
          is superseded — a `ProjectGeneration` reset bumps no file \
          content, so the carrier's `FileWholeHash`-only rail cannot \
-         detect it. `get_relation` must reject an entry whose \
+         detect it. `get_relation_payload` must reject an entry whose \
          generation stamp no longer matches.",
     );
 }
@@ -5400,12 +5049,14 @@ fn shape_member(
     value: crate::semantic_query::SemanticNodeId,
 ) -> crate::semantic_query::SurfaceMember {
     crate::semantic_query::SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -5512,7 +5163,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         })
         .expect("member A primes a warm entry");
     assert!(
-        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "alpha-shape"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "alpha-shape"),
         "fixture invariant: the primed entry carries member A's shape",
     );
     assert_eq!(
@@ -5540,7 +5191,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
          that share a value node onto ONE warm entry, not split per member name/metadata",
     );
     assert!(
-        matches!(&sibling.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "alpha-shape"),
+        matches!(&sibling.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "alpha-shape"),
         "the sibling must receive member A's WARM shape (`alpha-shape`), not recompute \
          its own — proving the collapse onto one entry",
     );
@@ -5611,11 +5262,21 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // directly via the `#[cfg(test)]` test ctor with synthetic member + cursor
     // values (it asserts the per-member cache subject, not admission policy).
     let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
-    let seam_shared = SemanticNodeId(73);
+    // REAL interned value nodes (a never-interned id is a torn read — the
+    // `OutputMaterializationLoss` non-cacheable channel refuses it; the cache
+    // subject identity the seam exercise needs is a genuinely raisable node).
+    let seam_graph = host.project_type_store().semantic_graph();
+    let seam_shared = seam_graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let seam_other_node =
+        seam_graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
     let seam_member_a = shape_member("seamAlpha", seam_shared);
     let mut seam_member_b = shape_member("seamBeta", seam_shared);
     seam_member_b.optional = true;
-    let seam_member_other = shape_member("seamAlpha", SemanticNodeId(88));
+    let seam_member_other = shape_member("seamAlpha", seam_other_node);
     let seam_owner = DeclIdentity {
         canonical_id: std::sync::Arc::from(seam_scope),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
@@ -5680,7 +5341,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // A different-`.value` member admits a disjoint entry through the seam.
     let admitted_other = AdmittedPublishedMember::admitted_for_test(
         seam_owner,
-        SemanticNodeId(88),
+        seam_other_node,
         seam_member_other,
         projection.cursor(),
         PublishedSurfaceKind::Props,
@@ -5713,7 +5374,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 ///
 /// A fenced serve is non-cacheable but NOT partial, so the
 /// `MaterializedOutputTypeExpr` `result_is_partial()`-only admission gate cannot
-/// reject it; the nested fact tracer wrapping the cold reduce (the `RefCycleResultDb`
+/// reject it; the nested fact tracer wrapping the cold reduce (the
 /// / `app_config_no_override_proof` / `ResolvabilityDb` sibling pattern, identical to
 /// the stabiliser twin) is the only rail that does. The subject here is a `typeof`
 /// value node, which is a reducible operator (`needs_reduction == true`), so it
@@ -5755,6 +5416,9 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::instance(0),
+                            ),
                         },
                         name: Arc::from("definitelyMissingSeamValue"),
                     },
@@ -5887,6 +5551,9 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::instance(0),
+                            ),
                         },
                         name: Arc::from("definitelyMissingOverflowValue"),
                     },
@@ -6081,7 +5748,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
         })
         .expect("same-overlay-view read returns the primed value");
     assert!(
-        matches!(&overlay_same_view.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "overlay-shape"),
+        matches!(&overlay_same_view.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "overlay-shape"),
         "the same-overlay-view warm hit must return the OVERLAY-primed shape \
          (`overlay-shape`), proving the entry was admitted under the overlay view",
     );
@@ -6104,7 +5771,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          read MUST mismatch and recompute cold — never warm-hit the overlay entry.",
     );
     assert!(
-        matches!(&base_read.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "base-shape"),
+        matches!(&base_read.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "base-shape"),
         "the base read must surface its OWN recomputed shape (`base-shape`), never the \
          overlay entry's `overlay-shape`",
     );
@@ -6137,7 +5804,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          recompute is vacuous.",
     );
     assert!(
-        matches!(&base_same_view.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "base-shape"),
+        matches!(&base_same_view.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "base-shape"),
         "the same-base-view warm hit must return the admitted BASE shape \
          (`base-shape`, from direction 1's base recompute), proving the entry is \
          admitted + reusable under the base view",
@@ -6163,7 +5830,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          mismatch the base-rooted entry and recompute cold.",
     );
     assert!(
-        matches!(&overlay_read.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "overlay-shape-2"),
+        matches!(&overlay_read.type_expr_for_test(), TypeExpr::Unknown(v) if v.raw() == "overlay-shape-2"),
         "the overlay read must surface its OWN recomputed shape (`overlay-shape-2`), \
          never a base-rooted entry's value",
     );

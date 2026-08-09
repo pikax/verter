@@ -245,26 +245,29 @@ fn expanded_shape_from_surface_view(
 ) -> ExpandedObjectShape {
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let properties = surface
-        .members
+        .positive_members()
         .iter()
-        .map(|member| ExpandedProperty {
-            name: member.name.as_ref().to_string(),
-            // Intrinsic surface members are open-position SUCCESSES: the
-            // degraded Unknown leaf here is an intentionally-open position
-            // (`Present(Closed(Leaf(unknown)))`), never a failure state.
-            ty: verter_type_expr::facts::SourcePosition::Present(member_value_source(
-                &dispatch,
-                member.value,
-                member.name.as_ref(),
-                parent,
-            )),
-            optional: member.optional,
-            readonly: member.readonly,
-            // Carry the surface member's declared accessibility verbatim so a
-            // downstream key-filtering derivation (`Pick`/`Omit` over the
-            // shape) can re-apply the public-keyspace gate.
-            visibility: member.visibility,
-            declared_in_macro_type_arg: member.declared_in_macro_type_arg.get(),
+        .filter_map(|member| {
+            let name = member.published_name()?;
+            Some(ExpandedProperty {
+                name: name.to_string(),
+                // Intrinsic surface members are open-position SUCCESSES: the
+                // degraded Unknown leaf here is an intentionally-open position
+                // (`Present(Closed(Leaf(unknown)))`), never a failure state.
+                ty: verter_type_expr::facts::SourcePosition::Present(member_value_source(
+                    &dispatch,
+                    member.value,
+                    name.as_ref(),
+                    parent,
+                )),
+                optional: member.optional,
+                readonly: member.readonly,
+                // Carry the surface member's declared accessibility verbatim so a
+                // downstream key-filtering derivation (`Pick`/`Omit` over the
+                // shape) can re-apply the public-keyspace gate.
+                visibility: member.visibility,
+                declared_in_macro_type_arg: member.declared_in_macro_type_arg.get(),
+            })
         })
         .collect::<Vec<_>>();
 
@@ -298,7 +301,7 @@ fn expanded_shape_from_surface_view(
             .collect::<Vec<_>>();
     // Genuinely-open surface (flag set, no concrete payload) → open placeholder
     // (string keyspace, typed-degraded value).
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
+    if surface.has_known_index_signature() && surface.index_signatures.is_empty() {
         index_signatures.push(ExpandedIndexSignature {
             key_type: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                 ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
@@ -359,7 +362,7 @@ fn expanded_call_signature_from_node(
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
     let data = node_data_for(dispatch.ctx, node)?;
-    let SemanticNodeData::Function {
+    let SemanticNodeData::Signature {
         params,
         return_type,
         type_parameters,
@@ -392,6 +395,7 @@ fn expanded_call_signature_from_node(
                     ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
                     constraint: None,
                     default: None,
+                    is_const: param.is_const,
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),

@@ -1,7 +1,8 @@
 //! Raw template data extracted during compilation.
 //!
-//! These are core-native types with no dependency on `verter_semantic::analysis`.
-//! `verter_session` converts them into `verter_semantic::analysis::TemplateAnalysisSnapshot`.
+//! These are core-native DTOs; indexed value expressions use the shared
+//! `verter_type_expr` carrier. `verter_session` converts them into
+//! `verter_semantic::analysis::TemplateAnalysisSnapshot`.
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
 use crate::common::Span;
@@ -147,6 +148,7 @@ pub struct RawPropData {
     pub name: String,
     pub is_bound: bool,
     pub expression: Option<String>,
+    pub indexed_expression: Option<verter_type_expr::IndexedValueExpression>,
     pub referenced_bindings: Vec<String>,
     /// Whether all referenced bindings resolve to static (const) types.
     /// `None` = unknown (parse error, complex expression).
@@ -249,6 +251,7 @@ pub struct RawDirectiveData {
     pub argument: Option<String>,
     pub modifiers: Vec<String>,
     pub expression: Option<String>,
+    pub indexed_expression: Option<verter_type_expr::IndexedValueExpression>,
     pub span: Span,
     /// Byte offset end of the directive name (e.g., end of `v-show` or `@` or `:`).
     pub name_end: u32,
@@ -429,6 +432,7 @@ fn walk_node_for_extraction(
             extract_element_data(
                 ctx.ast,
                 el,
+                oxc_data,
                 &tag_name,
                 depth,
                 parent_tag,
@@ -606,6 +610,7 @@ fn extract_tag_name(el: &ElementNode, source: &str) -> String {
 fn extract_element_data(
     ast: &TemplateAst,
     el: &ElementNode,
+    oxc_data: &OxcNodeData<'_>,
     tag_name: &str,
     depth: u16,
     parent_tag: Option<&str>,
@@ -622,7 +627,11 @@ fn extract_element_data(
     let mut directives = Vec::new();
 
     // Extract from el.props (non-cached directives and static attributes)
-    for prop in &el.props {
+    let oxc_element = match oxc_data {
+        OxcNodeData::Element(element) => Some(element.as_ref()),
+        _ => None,
+    };
+    for (prop_index, prop) in el.props.iter().enumerate() {
         let prop_end = prop_span_end(prop, source);
         if prop.is_directive {
             let raw_name = &source[prop.start as usize..prop.name_end as usize];
@@ -644,6 +653,22 @@ fn extract_element_data(
                 .value_start
                 .zip(prop.value_end)
                 .map(|(s, e)| Span::new(s, e));
+            let indexed_expression = oxc_element
+                .and_then(|element| element.prop(prop_index))
+                .and_then(|prop| prop.exp.as_ref())
+                .and_then(|parsed| {
+                    parsed.expression.as_ref().map(|ast| {
+                        let mut indexed = verter_semantic::analysis::type_eval_build::lower_indexed_value_expression(
+                            ast,
+                            expression.as_deref().unwrap_or_default(),
+                        );
+                        verter_semantic::analysis::type_eval_build::offset_indexed_value_expression(
+                            &mut indexed,
+                            parsed.offset,
+                        );
+                        indexed
+                    })
+                });
             let arg_span = prop
                 .arg_start
                 .zip(prop.arg_end)
@@ -655,6 +680,7 @@ fn extract_element_data(
                 argument,
                 modifiers,
                 expression,
+                indexed_expression,
                 span: Span::new(prop.start, prop_end),
                 name_end: prop.name_end,
                 arg_span,
@@ -705,6 +731,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression,
+            indexed_expression: None,
             span: Span::new(cond.prop.start, prop_span_end(&cond.prop, source)),
             name_end: cond.prop.name_end,
             arg_span: None,
@@ -728,6 +755,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression,
+            indexed_expression: None,
             span: Span::new(v_for.start, prop_span_end(v_for, source)),
             name_end: v_for.name_end,
             arg_span: None,
@@ -760,6 +788,7 @@ fn extract_element_data(
             argument,
             modifiers: Vec::new(),
             expression,
+            indexed_expression: None,
             span: Span::new(v_slot.start, prop_span_end(v_slot, source)),
             name_end: v_slot.name_end,
             arg_span: slot_arg_span,
@@ -775,6 +804,7 @@ fn extract_element_data(
             argument: None,
             modifiers: Vec::new(),
             expression: None,
+            indexed_expression: None,
             span: Span::new(v_once.start, prop_span_end(v_once, source)),
             name_end: v_once.name_end,
             arg_span: None,
@@ -1037,6 +1067,23 @@ fn extract_component_usage(
             .value_start
             .zip(prop.value_end)
             .map(|(s, e)| source[s as usize..e as usize].to_string());
+        let indexed_expression = oxc_el
+            .and_then(|element| element.prop(i))
+            .and_then(|prop| prop.exp.as_ref())
+            .and_then(|parsed| {
+                parsed.expression.as_ref().map(|ast| {
+                    let mut indexed =
+                        verter_semantic::analysis::type_eval_build::lower_indexed_value_expression(
+                            ast,
+                            expression.as_deref().unwrap_or_default(),
+                        );
+                    verter_semantic::analysis::type_eval_build::offset_indexed_value_expression(
+                        &mut indexed,
+                        parsed.offset,
+                    );
+                    indexed
+                })
+            });
 
         // Extract referenced bindings from OXC data
         let mut referenced = Vec::new();
@@ -1094,6 +1141,7 @@ fn extract_component_usage(
             name: actual_name,
             is_bound,
             expression,
+            indexed_expression,
             referenced_bindings: referenced,
             all_bindings_static: all_static,
             from_spread: false,
@@ -1109,6 +1157,7 @@ fn extract_component_usage(
             name: String::new(),
             is_bound: true,
             expression: None,
+            indexed_expression: None,
             referenced_bindings: Vec::new(),
             all_bindings_static: None,
             from_spread: true,

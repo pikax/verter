@@ -64,9 +64,9 @@ use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext}
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SemanticQueryValueTag, SignatureRef,
+    PropertyKey, QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue, SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;
@@ -87,9 +87,11 @@ use verter_type_expr::PrimitiveName;
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 pub(crate) mod absorb;
+mod apparent_type;
 mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod carrier;
+pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod locator_shape;
@@ -101,12 +103,37 @@ pub(crate) mod query_error_disposition;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
+mod call_resolve;
+#[cfg(test)]
+mod call_resolve_tests;
+pub(crate) mod dispatch_txn;
+pub(crate) mod flow_return;
+pub(crate) mod flow_return_callee;
+#[cfg(test)]
+pub(crate) mod flow_return_coverage_tests;
+#[cfg(test)]
+pub(crate) mod flow_return_frame_seal_tests;
+#[cfg(test)]
+pub(crate) mod flow_return_lexical_tests;
+#[cfg(test)]
+pub(crate) mod flow_return_positional_tests;
+#[cfg(test)]
+pub(crate) mod flow_return_root_gate_tests;
+#[cfg(test)]
+pub(crate) mod flow_return_tests;
+mod object_spread_program_lowering;
+mod object_spread_projection_eval;
 mod output_materialization_guards;
+pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
+pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
+mod return_equation;
+#[cfg(test)]
+mod return_equation_tests;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -114,6 +141,9 @@ pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
 pub(crate) mod walk;
+
+#[cfg(test)]
+mod object_spread_projection_eval_tests;
 
 // Private leaf module sealing the `InstantiateBodySource` construction
 // witness: the unit field is private to THIS module, so the witness is
@@ -162,6 +192,20 @@ mod body_source_witness {
     }
 }
 pub(crate) use body_source_witness::BodySourceWitness;
+
+// Private leaf module sealing object-spread projection context construction.
+// The witness is mintable only inside the dispatch module tree; the semantic
+// query context requires it but cannot construct it.
+mod object_spread_projection_context_witness {
+    pub(crate) struct ObjectSpreadProjectionContextWitness(());
+
+    impl ObjectSpreadProjectionContextWitness {
+        pub(super) const fn mint_for_dispatch_factory() -> Self {
+            Self(())
+        }
+    }
+}
+pub(crate) use object_spread_projection_context_witness::ObjectSpreadProjectionContextWitness;
 // Module-level alias for the demand primitives' typed outcome (returned by the
 // `pub(crate)` structural-fact demand methods). Production callers consume it
 // through `StructuralFactDemandOutcome::into_complete_node` without naming the
@@ -321,6 +365,27 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// Lexical demand-scope stack: the canonical containing the
+    /// member-access/call site currently being evaluated. Installed by the
+    /// flow evaluator around member-projection dispatches (RAII guard,
+    /// panic-safe) and read ONLY by [`Self::apparent_type_of`] to scope a
+    /// ROOTLESS callable's ambient lookup — the canonical is copied into
+    /// the `ApparentType` key's demand-scope witness, so the produced
+    /// value is a pure function of its key (this stack never reaches a
+    /// build closure). Rootless apparent values are `cache_suppress`, and
+    /// that taint folds through every enclosing member/path/call query, so
+    /// nothing scoped through this stack is ever admitted to a shared
+    /// cache. Empty when no member-access/call site is on the stack — a
+    /// rootless apparent demand then fails closed (`Miss`).
+    pub(super) lexical_demand_scope: std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+    /// The transient per-obligation-root cold-compute frame (design
+    /// `docs/arch/u2-relation-infer-design.md` §2.1): the ONE shared
+    /// tagged re-entry / cycle-id space with its generic frame /
+    /// lowlink machinery, the tagged pending ledger, the inference
+    /// session stack, and the deferred-admission ledger. TRANSIENT, never
+    /// a cache key, never thread-local — it rides this dispatch exactly
+    /// like the other cold-compute cycle guards above.
+    pub(super) dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
     connected_demand: ConnectedDemandState,
     #[cfg(test)]
     connected_work_limit_for_tests: std::cell::Cell<usize>,
@@ -341,6 +406,12 @@ pub(super) struct BuildLocalTaint {
     /// frame was the top of the build-local stack. Inner-memo
     /// non-cacheability — benign or partial-derived.
     pub(super) cache_suppress: bool,
+    /// UNION of the partial CLASSES behind [`Self::result_is_partial`] —
+    /// see [`crate::semantic_query::CacheRead::partial_reasons`]. The
+    /// enclosing build copies this onto its `QueryBuildOutput`, so the
+    /// class a nested producer named survives out through the returned
+    /// `CacheRead` instead of being re-lifted as the anonymous bridge.
+    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 /// Panic-safe RAII guard for a cold-build-local taint frame.
@@ -398,6 +469,31 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
     }
 }
 
+/// Panic-safe RAII frame for the dispatch's
+/// [`ProjectSemanticDispatch::lexical_demand_scope`] stack: pushes the
+/// member-access/call-site canonical on construction and pops it on drop,
+/// so an unwinding evaluation can never leak its scope onto a later
+/// build's rootless apparent lookup.
+pub(super) struct LexicalDemandScopeGuard<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+}
+
+impl<'g> LexicalDemandScopeGuard<'g> {
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+        canonical: Arc<str>,
+    ) -> Self {
+        stack.borrow_mut().push(canonical);
+        Self { stack }
+    }
+}
+
+impl<'g> Drop for LexicalDemandScopeGuard<'g> {
+    fn drop(&mut self) {
+        self.stack.borrow_mut().pop();
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to `ctx`.
     ///
@@ -426,6 +522,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            dispatch_txn: std::cell::RefCell::new(
+                dispatch_txn::CheckerDispatchTransaction::default(),
+            ),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,
                 MAX_CONNECTED_QUERY_DEPTH,
@@ -506,6 +606,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             trip,
         )
+    }
+
+    /// Whether the connected-demand ledger has ALREADY tripped on this
+    /// dispatch. A sub-query suppressed under a tripped ledger is never
+    /// evidence about the queried surface — the caller must report the
+    /// budget, not a semantic verdict.
+    pub(super) fn connected_demand_tripped(&self) -> bool {
+        !self.connected_demand.tripped.get().is_empty()
     }
 
     pub(super) fn charge_connected_work(
@@ -693,6 +801,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .unwrap_or_else(|| Arc::from([])),
             cache_suppress: true,
             result_is_partial: true,
+            partial_reasons: reasons,
         }
     }
 
@@ -757,9 +866,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result_is_partial: bool,
         cache_suppress: bool,
     ) {
+        self.fold_into_top_build_local_taint_with(
+            result_is_partial,
+            cache_suppress,
+            crate::semantic_query::PartialReasonSet::empty(),
+        );
+    }
+
+    /// [`Self::fold_into_top_build_local_taint`] carrying the partial
+    /// CLASSES as well as the boolean.
+    ///
+    /// An unnamed partial (`reasons` empty) records the anonymous bridge
+    /// so the frame never reports "partial with no class"; a named one
+    /// records its own class, which is what lets a consumer subtract a
+    /// CONTAINED class without also having to subtract an anonymous
+    /// duplicate of the same cause.
+    pub(super) fn fold_into_top_build_local_taint_with(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
             top.result_is_partial |= result_is_partial;
             top.cache_suppress |= cache_suppress;
+            if result_is_partial {
+                top.partial_reasons = top.partial_reasons.union(if reasons.is_empty() {
+                    crate::semantic_query::PartialReasonSet::PROPAGATED
+                } else {
+                    reasons
+                });
+            }
         }
     }
 
@@ -778,11 +915,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// A top-level read with no active build frame naturally no-ops the
     /// build-local fold (the stack is empty); the sticky mark still fires.
-    pub(super) fn fold_cache_read_rails(&self, result_is_partial: bool, cache_suppress: bool) {
+    pub(super) fn fold_cache_read_rails(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
         if result_is_partial {
-            crate::request_context::mark_request_result_partial();
+            crate::request_context::mark_request_result_partial_from_read_with(reasons);
         }
-        self.fold_into_top_build_local_taint(result_is_partial, cache_suppress);
+        self.fold_into_top_build_local_taint_with(result_is_partial, cache_suppress, reasons);
+    }
+
+    /// [`Self::fold_cache_read_rails`] for the ONE sealed function-return
+    /// consumer: the same two rails, folded under the NAMED class the
+    /// outcome's own classification produced instead of the
+    /// boolean-bridge `PROPAGATED`.
+    ///
+    /// The classes have to be named because the consumers disagree about
+    /// what they mean, and a boolean cannot carry that: publishing the
+    /// inferred type makes any of them a genuine partial, while emitting
+    /// the authored declaration for an external checker leaves the output
+    /// complete, and emitting a runtime option object derived from the
+    /// value sits in between (safe for a faithful surface, unsafe for an
+    /// unverified one).
+    pub(super) fn fold_flow_return_consumer_rails(
+        &self,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
+        crate::request_context::mark_request_result_partial_with_reasons(reasons);
+        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /
@@ -811,6 +973,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ctx.bump_type_resolution_hop(context.mode);
                 ctx.bump_type_resolution_projection_op();
             }
+            SemanticQueryKey::ProjectObjectSpread { context, .. } => {
+                ctx.bump_type_resolution_hop(context.projection_reduction().mode);
+                ctx.bump_type_resolution_projection_op();
+            }
             SemanticQueryKey::ProjectMember { mode, .. }
             | SemanticQueryKey::IndexedAccess { mode, .. } => {
                 ctx.bump_type_resolution_hop(*mode);
@@ -831,16 +997,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The ONE generalized slot-finalization choke point: derive the
+    /// env-bearing, content-free
+    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+    /// from an env-free
+    /// [`DeclarationSlotSeed`](crate::semantic_query::DeclarationSlotSeed)
+    /// at query-key construction —
+    /// `ResolvedDeclSlotIdentity = DeclarationSlotSeed + SlotEnvIdentity`.
+    ///
+    /// The seed's four fields copy verbatim; `env` is filled from the
+    /// DEFINING canonical's live per-canonical slot environment —
+    /// `project_identity` (`J`) folds from
+    /// `host_view_project_identity_for`, `type_env_hash` (`T`) and
+    /// `lib_env_hash` (`L`) come from `host_view_env_hashes_for` — and is
+    /// attached through the sealed `SlotEnvIdentity` constructor. The
+    /// env dimensions enter ONLY the (content-free, R21-scoped)
+    /// `SemanticQueryKey`, never the family-A artifact. Every production
+    /// slot derivation routes through here (`type_slot_for`,
+    /// `builtin_type_slot`, …); the zero-env constructors stay
+    /// test/fixture-only.
+    #[must_use]
+    pub(crate) fn finalize_slot_seed(
+        &self,
+        seed: crate::semantic_query::DeclarationSlotSeed,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(seed.defining_canonical.as_ref());
+        let project_identity = host
+            .host_view_project_identity_for(seed.defining_canonical.as_ref())
+            .fold_u32();
+        seed.finalize(crate::locator_identity::SlotEnvIdentity::from_raw(
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        ))
+    }
+
     /// Build the env-bearing, content-free type-space
     /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
     /// for the declaration `name` defined in `canonical`.
     ///
     /// This is the SINGLE production derivation point for an
-    /// `Instantiate` / `ResolveMacroPayload` base/owner slot: it reads
-    /// the DEFINING file's per-canonical env
-    /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
-    /// identity (`J`) from `host_view_project_identity_for`, building the
-    /// slot DIRECTLY (no `DeclBindingKey` ↔ slot adapter). `symbol_space` is
+    /// `Instantiate` / `ResolveMacroPayload` base/owner slot: it builds
+    /// the env-free TYPE-space seed for `(canonical, owner, name)` and
+    /// routes it through the
+    /// [`Self::finalize_slot_seed`] choke point, which reads the
+    /// DEFINING file's per-canonical env (`type_env_hash` = `T`,
+    /// `lib_env_hash` = `L`) and folds the project identity (`J`) from
+    /// `host_view_project_identity_for`. `symbol_space` is
     /// always `Type` — an `Instantiate` base / macro owner is a
     /// type-space carrier (interface / type alias / class-type / builtin
     /// utility / synthetic SFC owner). The slot stays content-free (R6);
@@ -852,19 +1056,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical.as_ref());
-        let project_identity = host
-            .host_view_project_identity_for(canonical.as_ref())
-            .fold_u32();
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+        self.finalize_slot_seed(crate::semantic_query::DeclarationSlotSeed::new(
             canonical,
             owner,
             name,
-            project_identity,
-            env.type_env_hash,
-            env.lib_env_hash,
-        )
+            crate::semantic_query::SemanticSymbolSpace::Type,
+        ))
     }
 
     /// Build the env-bearing type-space slot for a built-in utility
@@ -896,6 +1093,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical)
             .resolve_env_hash
+    }
+
+    /// Construct the complete sealed context for an authored object-spread
+    /// projection. This is the sole production mint: all `R/T/L/J` dimensions
+    /// are sourced from the program owner's canonical, while the caller's
+    /// reduction, canonical substitution, and exact-optional policy remain
+    /// explicit value-affecting identity.
+    #[must_use]
+    pub(crate) fn object_spread_projection_context_for(
+        &self,
+        canonical: &str,
+        projection_reduction: crate::semantic_query::ProjectionReductionContext,
+        substitution: crate::semantic_query::SubstitutionCanonicalHash,
+        optional_property_policy: crate::semantic_query::ExactOptionalPropertyPolicy,
+    ) -> crate::semantic_query::ObjectSpreadProjectionContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(canonical);
+        crate::semantic_query::ObjectSpreadProjectionContext::new(
+            projection_reduction,
+            env.resolve_env_hash,
+            env.type_env_hash,
+            env.lib_env_hash,
+            host.host_view_project_identity_for(canonical).0,
+            substitution,
+            optional_property_policy,
+            ObjectSpreadProjectionContextWitness::mint_for_dispatch_factory(),
+        )
     }
 
     /// Derive the exact modeless `{R,T,L,J}` identity for a broad-runtime
@@ -1008,24 +1232,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// value-domain conversion for `ResolveOverloadSet` (call bucket
     /// first, then construct; a lone `Function` IS its one-element set).
     /// Returns `None` for a non-signature-bearing node (only reachable
-    /// through a poisoned synthetic publish).
+    /// through a poisoned synthetic publish) AND for any candidate whose
+    /// node carries no occurrence — an occurrence-less candidate is an
+    /// honest `Miss`, never a fabricated occurrence.
     fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
         let graph = self.ctx.project_type_store().semantic_graph();
         let data = graph.node_data(node)?;
-        match &*data {
-            SemanticNodeData::Function { .. } => {
-                Some(Arc::from(vec![SignatureRef { node }].into_boxed_slice()))
+        let to_ref = |sig: SemanticNodeId, arm_ordinal: u32| -> Option<SignatureRef> {
+            let sig_data = graph.node_data(sig)?;
+            // The sealed index-composed carrier is read through the
+            // `ResolveOverloadSet` consumer witness — its occurrence is
+            // always authored and its return is deferred to the carrier.
+            if let SemanticNodeData::DeferredCallable(callable) = &*sig_data {
+                let parts =
+                    callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
+                return Some(SignatureRef {
+                    node: sig,
+                    occurrence: crate::semantic_query::SignatureCandidateOrigin::Authored(
+                        self.signature_occurrence_for(parts.occurrence),
+                    ),
+                    return_carrier: parts.return_carrier.clone(),
+                    arm_ordinal,
+                });
             }
-            SemanticNodeData::Object(surface) => Some(Arc::from(
-                surface
+            let SemanticNodeData::Signature {
+                occurrence,
+                return_carrier,
+                ..
+            } = &*sig_data
+            else {
+                return None;
+            };
+            // A signature authored at a served declaration position
+            // carries its content-free occurrence; an ANONYMOUS callable
+            // type (an inline function value, a function-typed
+            // annotation, an object-type call signature) has no authored
+            // position and is ROOTLESS — never a fabricated declaration
+            // slot and never a graph-instance node id standing in for an
+            // occurrence.
+            let occurrence = match occurrence {
+                Some(occurrence) => crate::semantic_query::SignatureCandidateOrigin::Authored(
+                    self.signature_occurrence_for(occurrence),
+                ),
+                None => crate::semantic_query::SignatureCandidateOrigin::Rootless,
+            };
+            Some(SignatureRef {
+                node: sig,
+                occurrence,
+                return_carrier: return_carrier.clone(),
+                arm_ordinal,
+            })
+        };
+        let refs_for_arm = |arm: SemanticNodeId, arm_ordinal: u32| -> Option<Vec<SignatureRef>> {
+            let arm_data = graph.node_data(arm)?;
+            match &*arm_data {
+                // Both kinds intentionally: a lone signature of EITHER
+                // kind is its own overload set (mirroring the Object
+                // arm, which chains the call AND construct buckets);
+                // each `SignatureRef` node carries its kind for
+                // consumers to discriminate.
+                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                    Some(vec![to_ref(arm, arm_ordinal)?])
+                }
+                SemanticNodeData::Object(surface) => surface
                     .call_signatures
                     .iter()
                     .chain(surface.construct_signatures.iter())
-                    .map(|sig| SignatureRef { node: *sig })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )),
-            _ => None,
+                    .map(|sig| to_ref(*sig, arm_ordinal))
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            }
+        };
+        match &*data {
+            // A UNION group-bearing node is the composite union-signature
+            // group: one ordered bucket per arm, tagged with its arm
+            // ordinal — the executor selects a first-applicable signature
+            // in EVERY callable arm and unions the selected returns.
+            SemanticNodeData::Union(members) => {
+                let mut refs = Vec::new();
+                for (ordinal, member) in members.iter().enumerate() {
+                    refs.extend(refs_for_arm(*member, u32::try_from(ordinal).ok()?)?);
+                }
+                Some(Arc::from(refs.into_boxed_slice()))
+            }
+            _ => refs_for_arm(node, 0).map(|refs| Arc::from(refs.into_boxed_slice())),
+        }
+    }
+
+    /// The env-bearing occurrence identity of one candidate — the env-free
+    /// node occurrence finalized through the ONE slot-finalization choke
+    /// point (the same one the `FlowReturn` key surface uses). The
+    /// declaration's symbol space comes from the occurrence anchor (an
+    /// interface method is a TYPE-space member; a function declaration is
+    /// a VALUE-space position).
+    pub(crate) fn signature_occurrence_for(
+        &self,
+        occurrence: &crate::semantic_query::SignatureNodeOccurrence,
+    ) -> crate::semantic_query::SignatureOccurrenceIdentity {
+        crate::semantic_query::SignatureOccurrenceIdentity {
+            function: {
+                let mut function = self.flow_function_slot_for(
+                    Arc::clone(&occurrence.function.anchor.canonical_id),
+                    occurrence.function.anchor.owner,
+                    Arc::clone(&occurrence.function.anchor.symbol),
+                    occurrence.function.function_part.clone(),
+                    occurrence.function.overload_ordinal,
+                );
+                function.declaration_slot.symbol_space = match occurrence.function.anchor.space {
+                    verter_type_expr::locators::LocatorSymbolSpace::Type => {
+                        crate::semantic_query::SemanticSymbolSpace::Type
+                    }
+                    verter_type_expr::locators::LocatorSymbolSpace::Value => {
+                        crate::semantic_query::SemanticSymbolSpace::Value
+                    }
+                    verter_type_expr::locators::LocatorSymbolSpace::Namespace => {
+                        crate::semantic_query::SemanticSymbolSpace::Namespace
+                    }
+                };
+                function
+            },
+            signature_ordinal: occurrence.signature_ordinal,
         }
     }
 
@@ -1183,6 +1509,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.graph().intern_node(SemanticNodeData::Opaque(err))
     }
 
+    /// Intern the `Opaque(RecursiveRef)` back-edge sentinel under the
+    /// DECLARING file's scope. The sentinel's name alone does not identify
+    /// the declaration, so the scope sidecar carries the file identity the
+    /// relation engine's carrier unwrap re-resolves the back-edge through
+    /// (an interface's own body referencing itself relates exactly like
+    /// the `DeclRef` the same reference lowers to at any other position).
+    pub(super) fn recursive_ref_sentinel(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                name: Arc::clone(&identity.decl_name),
+            }),
+            NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: identity.whole_hash,
+                local_scope: None,
+            },
+        )
+    }
+
     /// Build the dep-signature fragment for a canonical file at a given
     /// content hash. Carries both the file-version fact and the current
     /// project generation so the completion fence picks up both.
@@ -1254,7 +1603,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             OriginEdgeKind::ProjectMember,
             Arc::from(vec![parent_surface].into_boxed_slice()),
             OriginMeta::ProjectedMember {
-                name: Arc::clone(name),
+                key: PropertyKey::identifier(Arc::clone(name)),
                 provenance: verter_audit::MemberEdgeProvenance::PublishedField,
             },
             fence,
@@ -1556,25 +1905,14 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Tri-state result of [`ProjectSemanticDispatch::shallow_relation_check`].
-/// The relation authority is [`ProjectSemanticDispatch::relate_nodes`];
-/// this enum only carries the hot-path fast-decision cases handled
-/// inline by `build_conditional` before falling through to the full
-/// engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShallowRelation {
-    Assignable,
-    NotAssignable,
-    Unknown,
-}
-
 /// Tri-state outcome of
 /// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
 /// shared conditional branch-selection oracle, factored out of
-/// `build_conditional`'s relation path (the pre-relation infer-pattern
-/// cases, then `shallow_relation_check`, then the full memoised
-/// `relate_nodes` engine) and reused by the key-domain closedness
-/// classifiers in `raise.rs` for selected-branch-only classification.
+/// `build_conditional`'s relation path (the infer-pattern cases and the
+/// full memoised relation engine, both through the sole relation
+/// authority `execute(SemanticQueryKey::Relate)`) and reused by the
+/// key-domain closedness classifiers in `raise.rs` for
+/// selected-branch-only classification.
 /// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
 /// the lattice-extreme checks that semantically use both branches
 /// (`any`) or dominate (`error`).
@@ -1583,27 +1921,6 @@ pub(super) enum ConditionalBranchSelection {
     True,
     False,
     Deferred,
-}
-
-/// Payload of a PRE-RELATION infer-pattern branch selection
-/// ([`ProjectSemanticDispatch::pre_relation_infer_selection`]) — the
-/// structural cases that select the TRUE branch before any relation
-/// query, owned by the shared oracle so `build_conditional`'s reduction
-/// and the `raise.rs` closedness classifiers cannot diverge on them.
-/// The payload carries what the selection BINDS: `build_conditional`
-/// substitutes the bindings into the true branch; the classifiers bind
-/// the branch's infer names to the same check-derived identities.
-#[derive(Debug, Clone)]
-pub(super) enum InferPatternSelection {
-    /// `check extends infer X ? T : F` — an infer pattern matches
-    /// anything ⇒ TRUE selected with `X := check`, for ANY check.
-    BareInfer { name: Arc<str> },
-    /// `check extends (x: infer U, …) => infer R ? T : F` — TRUE
-    /// selected with the positional `name := node` bindings extracted
-    /// from the materialised check signature (params zip + return).
-    FunctionInfer {
-        bindings: Vec<(Arc<str>, SemanticNodeId)>,
-    },
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -1645,6 +1962,8 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
         | "Parameters"
         | "ConstructorParameters"
         | "InstanceType"
+        | "ThisParameterType"
+        | "OmitThisParameter"
         | "Uppercase"
         | "Lowercase"
         | "Capitalize"
@@ -1688,6 +2007,7 @@ fn widen_node_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -1709,6 +2029,7 @@ fn narrow_value_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -1832,10 +2153,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output.map_result(|result| match result {
             QueryResult::Value(node) => match self.overload_set_refs_for(node) {
                 Some(refs) => QueryResult::Value(SemanticQueryValue::OverloadSet(refs)),
-                None => QueryResult::Error(QueryError::ValueDomainMismatch {
-                    expected: SemanticQueryValueTag::OverloadSet,
-                    actual: SemanticQueryValueTag::TypeNode,
-                }),
+                None => {
+                    // A signature-bearing node whose candidate set cannot
+                    // be read (a torn node payload) is an honest `Miss`;
+                    // only a genuinely non-signature node (a poisoned
+                    // synthetic publish) is a domain mismatch.
+                    match self
+                        .ctx
+                        .project_type_store()
+                        .semantic_graph()
+                        .node_data(node)
+                        .as_deref()
+                    {
+                        Some(SemanticNodeData::Signature { .. })
+                        | Some(SemanticNodeData::Object(_)) => QueryResult::Error(QueryError::Miss),
+                        _ => QueryResult::Error(QueryError::ValueDomainMismatch {
+                            expected: SemanticQueryValueTag::OverloadSet,
+                            actual: SemanticQueryValueTag::TypeNode,
+                        }),
+                    }
+                }
             },
             QueryResult::Recursive(node) => QueryResult::Recursive(node),
             QueryResult::Error(error) => QueryResult::Error(error),
@@ -1846,6 +2183,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        // `FlowReturn` is the one family whose cold build defers a
+        // member batch for its machinery root to release, so it never
+        // takes the bare helper: every entry — the typed producer's and
+        // the generic `SemanticQueryApi`'s alike — routes through the
+        // single publication-capturing executor that drains or retires
+        // that batch.
+        if matches!(key, SemanticQueryKey::FlowReturn(_)) {
+            return self.execute_flow_return_cold_build(key);
+        }
+        self.execute_via_cold_build_helper_with_publication_capture(key, None)
+    }
+
+    fn execute_via_cold_build_helper_capturing_publication(
+        &self,
+        key: SemanticQueryKey,
+        publication: &mut Option<crate::semantic_query_memo::PublishedMemoCandidate>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        self.execute_via_cold_build_helper_with_publication_capture(key, Some(publication))
+    }
+
+    fn execute_via_cold_build_helper_with_publication_capture(
+        &self,
+        key: SemanticQueryKey,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        if let SemanticQueryKey::Relate { .. } = &key {
+            let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
+            if !self.relation_raw_key_has_exact_inference_context(&relate) {
+                return CacheRead {
+                    value: QueryResult::Error(QueryError::Miss),
+                    dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: true,
+                    result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                };
+            }
+        }
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
         // until the canonical memo identity is known so an exact same-path key
@@ -1884,7 +2259,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
+                    path: Arc::from(
+                        vec![PathSegment::Member(PropertyKey::identifier(member))]
+                            .into_boxed_slice(),
+                    ),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
@@ -2075,6 +2453,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
                 return self.build_classify_broad_runtime(subject);
             }
+            if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = &key_for_build {
+                return self.build_classify_materialization_cycle_gate(key);
+            }
+            // The SOLE relation authority (design
+            // `docs/arch/u2-relation-infer-design.md`): `execute(Relate)`
+            // is a LIVE producer — decided binary judgements admit into
+            // the `Relate` family slot, `BudgetExceeded` returns-but-
+            // never-admits, undecided judgements surface `Miss`. The
+            // degenerate `Opaque(Miss)` arm and the execute-invisibility
+            // fence are deleted.
+            if let SemanticQueryKey::Relate { .. } = &key_for_build {
+                return self.build_relate(&crate::semantic_query::RelateMemoKey::from_query_key(
+                    &key_for_build,
+                ));
+            }
+            if let SemanticQueryKey::FlowReturn(key) = &key_for_build {
+                return self.build_flow_return(key);
+            }
+            if let SemanticQueryKey::ResolveCall(key) = &key_for_build {
+                return self.build_resolve_call(key);
+            }
+            if let SemanticQueryKey::ProjectObjectSpread {
+                program,
+                selector,
+                context,
+            } = &key_for_build
+            {
+                return self.build_project_object_spread(*program, selector, *context);
+            }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
                 if let Err(reasons) = self.charge_connected_work() {
@@ -2127,8 +2534,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // these variants on the rewritten key; the arms below
                 // are pure exhaustiveness.
                 SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                    let path: Arc<[PathSegment]> = Arc::from(
+                        vec![PathSegment::Member(PropertyKey::identifier(Arc::clone(
+                            member,
+                        )))]
+                        .into_boxed_slice(),
+                    );
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
@@ -2166,16 +2577,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::NormalizeIntersection { members } => {
                     self.build_normalize_intersection(members)
                 }
-                // The relation engine routes through its dedicated
-                // `SemanticGraphStore::relation_memo` (keyed on the full
-                // `RelateMemoKey`) via `relate_nodes`, not the family memo.
-                // The family `execute` path for `Relate` is therefore
-                // degenerate: it owns no relation logic and always yields
-                // `Opaque(Miss)`, fenced on the project generation so a stale
-                // miss never warms.
+                SemanticQueryKey::ProjectObjectSpread { .. } => {
+                    unreachable!(
+                        "ProjectObjectSpread returns its typed projection value before node-domain build"
+                    )
+                }
+                // The relation authority is handled BEFORE this match
+                // (the `build_relate` branch in `raw_build` above) — this
+                // arm is unreachable.
                 SemanticQueryKey::Relate { .. } => {
-                    let fence = self.project_generation_signature();
-                    (QueryResult::Error(QueryError::Miss), fence).into()
+                    unreachable!("execute(Relate) routes through build_relate, not the node-domain match")
                 }
                 SemanticQueryKey::ResolveMacroPayload {
                     owner,
@@ -2223,20 +2634,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ClassifyBroadRuntime { .. } => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
-                // ResolveAmbientNamespace / ResolveEnum / ApparentType /
-                // FlowNarrowingAt / ContextualTypeAt —
+                SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
+                    unreachable!("typed classifier returned before node-domain build")
+                }
+                // ApparentType — LIVE producer for the CALLABLE arm. A base
+                // that carries call signatures widens to the project's
+                // registered ambient callable-function interface, so its
+                // `.call` / `.apply` / `.bind` members are reachable. Every
+                // other base kind (the primitive-to-wrapper widening) is an
+                // honest `Miss` from inside the producer.
+                SemanticQueryKey::ApparentType { base, context } => {
+                    self.build_apparent_type(*base, context)
+                }
+                // ResolveAmbientNamespace / ResolveEnum / FlowNarrowingAt /
+                // ContextualTypeAt —
                 // non-producing: these variants have no execute-side reducer.
                 // The build returns `Opaque(Miss)` verbatim (mirroring the
                 // `Relate` arm above); an `Error` result is never
                 // warm-published, so nothing is admitted or cached. Returning
-                // a fabricated apparent surface for `ApparentType` (whose
-                // lib-member index does not exist yet) — or a fabricated
-                // narrowed / contextual node for `FlowNarrowingAt` /
-                // `ContextualTypeAt` (whose flow / contextual engines land in
-                // U6) — would be a stub; `Miss` is the honest non-result.
+                // a fabricated narrowed / contextual node for `FlowNarrowingAt`
+                // / `ContextualTypeAt` (whose flow / contextual engines land in
+                // U6) would be a stub; `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::ApparentType { .. }
                 | SemanticQueryKey::FlowNarrowingAt { .. }
                 | SemanticQueryKey::ContextualTypeAt { .. } => {
                     let fence = self.project_generation_signature();
@@ -2246,6 +2666,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // build: worker-side lease-only deref of the authored body,
                 // then the carrier-only role-free graph lowering.
                 SemanticQueryKey::LowerLocator { key } => self.build_lower_locator(key),
+                // FlowReturn is a typed producer handled by the early
+                // if-let arm above (with the other non-node-domain
+                // producers); it never reaches the node-domain match.
+                SemanticQueryKey::FlowReturn(_) => unreachable!(
+                    "FlowReturn builds through the early typed-producer arm"
+                ),
+                SemanticQueryKey::ResolveCall(_) => unreachable!(
+                    "ResolveCall builds through the early typed-producer arm"
+                ),
             }
             };
             let output = build_node();
@@ -2344,6 +2773,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let build_local = taint_guard.finish();
             output.result_is_partial |= build_local.result_is_partial;
             output.cache_suppress |= build_local.cache_suppress;
+            output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
             // ReturnOnly never publishes — fenced-serve arm. A build
             // whose traced scope consumed a FENCED (ReturnOnly)
             // `IndexedReady` serve computed its value basis from a
@@ -2367,8 +2797,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &carrier_prelude_for_build,
             )
         };
-        let cache_read =
-            graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build);
+        let cache_read = match publication {
+            Some(publication) => graph.execute_cooperative_value_capturing_publication(
+                self.ctx,
+                key.clone(),
+                sentinel,
+                traced_build,
+                publication,
+            ),
+            None => graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build),
+        };
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
@@ -2485,7 +2923,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
             }
         }
-        self.fold_cache_read_rails(cache_read.result_is_partial, cache_read.cache_suppress);
+        self.fold_cache_read_rails(
+            cache_read.result_is_partial,
+            cache_read.cache_suppress,
+            cache_read.partial_reason_classes(),
+        );
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,
@@ -2778,6 +3220,7 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::Conditional { .. }
             | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::TypeOf { .. }
+            | SemanticQueryKey::ProjectObjectSpread { .. }
     )
 }
 
@@ -2792,6 +3235,19 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // also calls this so its callers keep counting after switching to
         // `execute_read`).
         self.record_dispatch_intent_counters(&key);
+        if matches!(key, SemanticQueryKey::Relate { .. }) && self.relation_redischarge_active() {
+            #[cfg(test)]
+            relation::record_redischarge_execute_visit_for_tests();
+            let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
+            return match self.execute_relate_redischarge_from_api(relate) {
+                QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
+                    value,
+                    provenance: ResultProvenance::clean(),
+                }),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            };
+        }
         // Delegate to the shared cold-build helper. Both `execute`
         // (this method) and `execute_read` route through the helper
         // so the fact-tracer wrapper, sentinel construction, and
@@ -2801,11 +3257,13 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         //
         // The helper already returns the typed semantic value held by the
         // family memo. This boundary adds only clean result provenance. The
-        // remaining non-producing keys (`Relate`, `ResolveAmbientNamespace`,
-        // `ResolveEnum`, `ApparentType`, `FlowNarrowingAt`,
-        // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap.
-        // The boundary provenance is `clean` — a wrapper only, never a
-        // cached semantic fact.
+        // remaining non-producing keys (`ResolveAmbientNamespace`,
+        // `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt`) return
+        // `Error(Miss)` and never reach the wrap.
+        // `Relate` is a LIVE producer (`build_relate`): its decided binary
+        // payloads reach the wrap; its undecided judgements surface
+        // `Error(Miss)`. The boundary provenance is `clean` — a wrapper
+        // only, never a cached semantic fact.
         match self.execute_via_cold_build_helper(key).value {
             QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
                 value,
@@ -2888,6 +3346,7 @@ pub fn resolve_decl_key(
             canonical_id: Arc::from(canonical_id),
             owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
         name: Arc::from(name),
     }
@@ -3078,8 +3537,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
         // Hop 1: Navigate to the slot member off the macro payload base.
-        let slot_path: Arc<[PathSegment]> =
-            Arc::from(vec![PathSegment::Member(Arc::from(slot_name))].into_boxed_slice());
+        let slot_path: Arc<[PathSegment]> = Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
+        );
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: slot_path,
@@ -3096,6 +3556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
             QueryResult::Error(e) => {
@@ -3105,12 +3566,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
         };
         // Hop 2: the slot value's first-parameter type holds the bindings.
+        // CALL kind only — a construct-signature slot value is not a
+        // callable slot shape and holds no bindings.
         let param0_ty = match node_data_for(self.ctx, slot_node).as_deref() {
-            Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+            Some(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                params,
+                ..
+            }) => match params.first() {
                 Some(param) => param.ty,
                 None => {
                     return CacheRead {
@@ -3119,6 +3587,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         walker_diagnostics: slot_read.walker_diagnostics,
                         cache_suppress: slot_read.cache_suppress,
                         result_is_partial: slot_read.result_is_partial,
+                        partial_reasons: slot_read.partial_reasons,
                     };
                 }
             },
@@ -3129,14 +3598,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
         };
         // Hop 3: project the binding member off the param Object at the
         // caller's terminal mode (path-precise rule — only the terminal
         // runs in the requested mode).
-        let binding_path: Arc<[PathSegment]> =
-            Arc::from(vec![PathSegment::Member(Arc::from(binding_name))].into_boxed_slice());
+        let binding_path: Arc<[PathSegment]> = Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
+        );
         let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,
@@ -3148,6 +3619,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .cloned()
             .chain(binding_read.dep_signature.iter().cloned())
             .collect();
+        let composed_partial_reasons = slot_read
+            .partial_reason_classes()
+            .union(binding_read.partial_reason_classes());
         let value = match binding_read.value {
             QueryResult::Value(terminal_id) => {
                 // A non-shell-raisable terminal node maps to the SAME `Error(Miss)`
@@ -3175,20 +3649,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // partial on the Navigate slot hop must taint the composed
             // result even when the terminal binding hop completed.
             result_is_partial: slot_read.result_is_partial || binding_read.result_is_partial,
+            partial_reasons: composed_partial_reasons,
         }
     }
 
     /// Trivial helper: lower a `[String]` member-name
     /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
     ///
-    /// Each member name becomes a `PathSegment::Member(Arc<str>)`. The
+    /// Each member name becomes a typed string property-key segment. The
     /// result has the same length and order as the input.
     #[must_use]
     #[allow(dead_code)]
     pub fn lower_path_segments(p: &[String]) -> Arc<[PathSegment]> {
         let segs: Vec<PathSegment> = p
             .iter()
-            .map(|s| PathSegment::Member(Arc::from(s.as_str())))
+            .map(|s| PathSegment::Member(PropertyKey::identifier(s.as_str())))
             .collect();
         Arc::from(segs.into_boxed_slice())
     }
@@ -3487,5 +3962,8 @@ mod raised_shape_tests;
 
 #[cfg(test)]
 mod broad_runtime_tests;
+
+#[cfg(test)]
+mod cycle_gate_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;

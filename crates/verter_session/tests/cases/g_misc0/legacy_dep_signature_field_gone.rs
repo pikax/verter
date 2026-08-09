@@ -8,7 +8,7 @@
 //! is retired. No cache-carrier struct may carry a `DepSignature`
 //! field under any visibility class except for the single sanctioned
 //! sibling `dispatch_dep_signature` field on `MemoEntry` /
-//! `MaterializeStructureEntry` / `RefCycleEntry`.
+//! `MaterializeStructureEntry`.
 //!
 //! This guard scans `crates/verter_session/src/**/*.rs` (production
 //! source) for any `<vis> <name>: DepSignature` field declaration
@@ -135,7 +135,7 @@ fn struct_is_cache_carrier(name: &str) -> bool {
 
 /// The single sanctioned cache-carrier `DepSignature` field name. The
 /// dispatch-return accumulator on `MemoEntry` /
-/// `MaterializeStructureEntry` / `RefCycleEntry` is an internal
+/// `MaterializeStructureEntry` is an internal
 /// sibling rail (not a cache-validity rail), so it is allowed to live
 /// on a cache-carrier struct under `pub(crate)` / `pub(super)`. Any
 /// other name under restricted visibility is a regression.
@@ -454,7 +454,7 @@ fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
 /// `*Signature` / `*Snapshot`) may carry a `DepSignature` field under
 /// `pub`, `pub(crate)`, or `pub(super)` visibility, except for the
 /// single sanctioned `dispatch_dep_signature` sibling field on
-/// `MemoEntry` / `MaterializeStructureEntry` / `RefCycleEntry`
+/// `MemoEntry` / `MaterializeStructureEntry`
 /// (allowed under restricted visibility only — never `pub`).
 /// Re-introducing one resurrects the retired bundled rail.
 #[test]
@@ -666,7 +666,7 @@ fn scanner_discriminating_property_fixtures() {
     // Fixture J: `pub(crate) dispatch_dep_signature: DepSignature`
     // on a cache carrier — ACCEPTED. The same sanctioned name under
     // the `pub(crate)` visibility class. This is the exact production
-    // shape on `MaterializeStructureEntry` / `RefCycleEntry`.
+    // shape on `MaterializeStructureEntry`.
     let fixture_j = r#"
         pub struct MaterializeStructureEntry {
             pub(crate) dispatch_dep_signature: DepSignature,

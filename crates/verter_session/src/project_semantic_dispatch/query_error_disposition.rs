@@ -171,6 +171,20 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::UnsupportedSurface,
             ClosedLiteralDomainUnresolvedReason::Unsupported,
         ),
+        // A projected surface whose member set is not closed-world: the
+        // domain cannot be enumerated exactly, so the published reason is the
+        // same unsupported-surface class, never a fault.
+        QueryError::OpenSurface => (
+            QueryErrorDisposition::UnsupportedSurface,
+            ClosedLiteralDomainUnresolvedReason::Unsupported,
+        ),
+        // A position the flow substrate has no model for is a well-formed
+        // "no resolved node", exactly like `Miss` — the flow rail already
+        // folded its own partial rails at the consumer boundary.
+        QueryError::UnmodeledPosition => (
+            QueryErrorDisposition::OptionalAbsence,
+            ClosedLiteralDomainUnresolvedReason::MissingDependency,
+        ),
         // Resource / completion-fence control — typed partials, `ReturnOnly`.
         // The three publish DIFFERENT reasons: a budget trip, a cancellation
         // and a fence that gave up because the world moved under the read are

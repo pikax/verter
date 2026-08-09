@@ -76,7 +76,7 @@ pub(super) fn prepare_type_decl_from_lowered(
                 member_path: match &dep.route {
                     verter_type_expr::RouteDemand::MemberPath(path) => path
                         .iter()
-                        .map(|part| Arc::<str>::from(part.as_str()))
+                        .filter_map(|part| part.as_string().map(Arc::<str>::from))
                         .collect::<Vec<_>>()
                         .into(),
                     _ => Arc::from([]),
@@ -290,7 +290,7 @@ pub(super) fn prepare_authored_partial_type_decl(
                 member_path: match &dep.route {
                     verter_type_expr::RouteDemand::MemberPath(path) => path
                         .iter()
-                        .map(|part| Arc::<str>::from(part.as_str()))
+                        .filter_map(|part| part.as_string().map(Arc::<str>::from))
                         .collect::<Vec<_>>()
                         .into(),
                     _ => Arc::from([]),

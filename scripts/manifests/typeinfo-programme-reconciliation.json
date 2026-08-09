@@ -1,0 +1,396 @@
+{
+  "schema": "verter.typeinfo-programme-reconciliation.v1",
+  "comment": "One-time retrospective reconciliation record (arch rulings Q2/Q4, u-programme-arch-out.txt + F1/F4, u-programme-arch-followup-out.txt, 2026-08-04). Block statuses, contract amendments, landing transactions, and the restored row identities are recorded here as data; scripts/gen-typeinfo-ignore-manifest.mjs reads this file and emits the typed Rust metadata. Landing evidence commits are verifiable in git history; no Typeinfo-Block trailer exists for any historical landing, which is why no block may hold status `landed` without a landing transaction.",
+  "blocks": [
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/native-typeinfo-parity.md#10.3 (LANDED SHAPE (U0-FINISH-B))",
+        "doc:docs/arch/native-typeinfo-parity-u2-reducers.md (STATUS: (1) landed under U0-FINISH-B)"
+      ]
+    },
+    {
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "status": "landing_unverified",
+      "evidence": [
+        "rows:all 21 owned partition rows carry status lifted",
+        "guards:crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs + u2_spec_table_guards.rs"
+      ]
+    },
+    {
+      "block": "U2.BINDER_IDENTITY_FACTS",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:0a6c3bd9b",
+        "commit:29155de2c",
+        "guards:crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs"
+      ]
+    },
+    {
+      "block": "U8.WIRE_SURFACE_CLOSURE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U12.EXPORTER",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U13.PROJECTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.RELATION_INFER",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:2ee921b9c",
+        "rows:relation_semantics.rs::relation_optional_property_not_assignable_to_required removed from the partition at 2ee921b9c"
+      ]
+    },
+    {
+      "block": "U2.UTILITIES",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.INDEXED_ACCESS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.MAPPED_TEMPLATE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.CLASS_SURFACES",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.ENUMS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.MODULE_AUGMENTATION",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (codex STEP-0 ruling SPINEMODAUG: what U2.MODULE_AUGMENTATION actually landed, branch mom/u2-module-aug)"
+      ]
+    },
+    {
+      "block": "U2.JSX_FOUNDATIONS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:a8eef6202",
+        "rows:3 value_inference.rs partition identities removed at a8eef6202",
+        "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)",
+        "scc-10:share-vs-split record — the five storage-condition checks ran against the LANDED shared artifact (FunctionBodySkeleton + FunctionFlowGraph on one memoized FunctionFlowGraphStore bundle) and ALL FIVE PASS: checks 1-3 (structural detach: arena-free Send+Sync+'static NoTypeExpr skeleton/graph; build-time no-type-lowering; query-independent once-per-content-version identity) via flow_graph_is_arena_free_send_sync_static + flow_graph_build_is_deterministic_over_one_skeleton + skeleton_build_is_deterministic_per_content_version; check 4 against the production store via cache_runtime::flow_slice_node_tests::two_demands_one_function_flow_graph_build (build_count == 1 across two demands); check 5 end-to-end through the projector via component_meta_flow_return_admission_tests::return_type_member_demand_loads_only_the_walked_member (side.ts parse count 0, zero dispatch keys naming it). Recorded outcome per SCC-10: the shared implementation is SHARE-ELIGIBLE-AND-EVIDENCED — a shared artifact passing all five conditions is equally conforming; this records evidence, not a sharing preference.",
+        "debt:R2-UNAPPLIED-WRITE-EFFECT-SOURCE-ORDER — recon-confirmed over-degradation, fail-closed only (no wrong answer ever publishes): `function f(x: string | number) { return { b: x, a: (x = \"s\") }; }` degrades a correct `string | number` to UnappliedWriteEffect / ReturnOnly because the evaluator seeds the degradation for ANY whole-slot write into a value-selected/parameter slot without applying write effects. Durable owner: the narrowing / value-inference work on this same graph (U6.NARROW_SUBSTITUTION / U6.VALUE_INFERENCE own actual write-effect application; sound suppression needs evaluation-order reasoning across function boundaries). Resolution gate: no later than the U6 lane close — the U6 lane may not close with this entry open. Acceptance test (owed with the owning work): flow_return_source_order_object_read_before_write_publishes_clean — `{ b: x, a: (x = \"s\") }` publishes `{ b: string | number; a: string }` CLEAN + warm-admissible, WITH the deferred-read negative `{ b: () => x, a: (x = \"s\") }` still observing the write (`b: () => string`). The proposed span-comparison suppression (drop the degradation when every read span precedes the write span) is REJECTED AS UNSOUND: the deferred closure read observes the write despite preceding it in source (recon-executed against the pinned oracle tsgo `7.0.0-dev.20260526.1`).",
+        "debt:CONDITIONAL-VAR-BRANCH-JOIN — recon-confirmed over-degradation, fail-closed only (no wrong answer ever publishes): `function f(flag: boolean) { if (flag) var x: any = 1; else var x: any = \"s\"; return x; }` and `function f(flag: boolean) { if (flag) { var y: number | undefined = 1; } return y; }` degrade a usable value to ConditionalVarDefinition / ReturnOnly because the FUNCTION-scoped `var` layer survives the `if`-arm restore (as it must — `var` hoists), while nothing folds the arms: the surviving reaching definition is the last-evaluated arm's rather than the join over every arm and the never-assigned path. Durable owner: the narrowing work on this same graph (U6.NARROW_* own the join algebra, built on the shared FlowFrame lattice over the ONE FunctionFlowGraph's narrowing-predicate edge class — never a second flow structure; a merge algebra over the evaluator's `locals` / `var_locals` maps IS that second structure and is REJECTED AS OUT OF CONTRACT). Resolution gate: no later than the U6 lane close — the U6 lane may not close with this entry open. Acceptance tests (owed with the owning work): branchVar — `if (flag) var x: any = 1; else var x: any = \"s\"; return x` publishes `any` CLEAN + warm-admissible; branchVarUndef — `if (flag) { var y: number | undefined = 1; } return y` publishes `number | undefined` CLEAN + warm-admissible. Accepted cost until then: `if (flag) { var w = 1 } return w` returned a coincidentally-correct warm `number` and is now degraded — tsc REJECTS that program (TS2454, used before being assigned), so fail-closed is the correct trade.",
+        "debt:TYPE-SPACE-OWNER-PROBE-CARRIER-SETTLEMENT — DEFER-RATIFIED by the architecture authority (codex D2 ruling, `.feedback/orchestration/u6-d2-defer-out.txt`); RATIFIED and does NOT block U6.FLOW_RETURN_SUBSTRATE landing. The documented “owner scope answers nothing ⇒ evaluate unchanged” escape hatch is structurally dead for TYPE space: the probe lowers to a `BareRef` carrier rather than `Opaque`, so `owner_scope_answers_name` (crates/verter_session/src/project_semantic_dispatch/flow_return.rs) returns `true` even for a name owner scope does not bind. RULED: a `BareRef` is an UNRESOLVED CARRIER, not positive proof that owner scope answers the name — the probe must settle through the shared head-resolution authority and distinguish resolved / genuine miss / degraded uncertainty. Durable owner: U6.VALUE_INFERENCE. Resolution gate: same — no later than that block's landing, necessarily before the U6 lane close. Acceptance test (owed with the owning work): flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier — owner-absent class/enum names preserve the UNCHANGED unresolved carrier, while a real owner-scope collision still fails closed and never substitutes or warm-publishes a wrong value. Leaving it unchanged would contradict the documented escape-hatch contract.",
+        "debt:RESIDUAL-NON-CALL-ANY-FABRICATION — DEFER with a recorded ledger entry, fail-closed direction not yet reached. The leaf gate (`leaf_answer_is_fabricated_at_a_call_position`, crates/verter_session/src/flow_slice_content.rs) refuses a leaf answer that embeds `any` only when the expression's value COMPOSES over a call with no structural arm. A residual set of NON-CALL forms still answers the shared shallow pass's `_ => Ok(Primitive(Any))` fallback and publishes it CLEAN and WARM: `JSXElement` / `JSXFragment`, a bare `Super`, `MetaProperty`, `ImportExpression` (`import(\"m\")`), `ClassExpression`, an OPTIONAL MEMBER READ over a non-call base (`maybeObj?.b`, checker `string | undefined`), and `await x` over a NON-call operand. Ruled disposition: ADOPT-NOW for the call-composing half (`f()[\"q\"]`, `f?.()?.q`, `fs() + \"x\"`, `z = fs()`, an array element at a call position, a non-structural object member at a call position — all now positional markers); DEFER for the residual non-call half, because telling a FABRICATED bare `any` from an AUTHORED one is a per-form modelling question owned downstream, not a gate widening. NOTE (measured, correcting the original justification): the tree already refuses the authored one whenever its OPERAND is a frame binding — `function f() { const raw: unknown = 1; return { label: \"x\", made: raw as any } }` publishes the typed positional marker with `UnmodeledPosition` and zero candidates, because the root-identifier gate fires on `raw` before the leaf's `any` answer is read. It is only the FREE-operand spelling (`declare const outerRaw: unknown; outerRaw as any`) that still publishes `Primitive(Any)` clean and warm. So the deferral is not \"we cannot refuse `any` without refusing the authored one\" — it is that the two are already treated differently by operand provenance, and unifying them needs the per-form modelling, not a wider gate. Durable owner: U6.VALUE_INFERENCE for the shallow pass's per-expression fallback (JSX / Super / MetaProperty / ImportExpression / ClassExpression), U6.ASYNC_GENERATOR + U6.CALL_RESOLVE for `await x`. Resolution gate: no later than the U6 lane close — the U6 lane may not close with this entry open. Acceptance tests (already in tree as executable parked canaries, un-ignored by the owning work): flow_return_coverage_tests::jsx_element_fragment_and_attribute_call_returns_are_not_any, ::class_expression_return_is_not_any, ::dynamic_import_expression_return_is_not_any, ::super_method_call_return_resolves_to_the_base_member, ::awaited_call_return_is_the_awaited_value_wrapped_again. Accepted cost until then: these rows publish a fabricated `any` warm. That `any` is NOT “under the checker’s answer” — `any` is bidirectionally assignable and silences checks in both directions — so the cost is a real wrong-answer class, bounded to these named forms.",
+        "owed:VUE-DEGRADED-ARM-PROJECTION-POLICY — the SUBSTRATE half is landed; the FRAMEWORK POLICY half is owed to the Vue owner. Substrate: a flow-return producer that yielded NO surface now carries its own partial class (`PartialReasonSet::FLOW_RETURN_NO_SURFACE`), distinct from the two degraded-SUCCESS classes whose member set is complete by definition, so a consumer can tell WHICH producer contributed nothing to a MERGED surface instead of only asking whether the assembled surface came out empty. The containment set is a per-consumer `MacroProjectionLane` method, and the axis is whether the consumer DERIVES its output from the value: an option-rendering demand faults, while a names-only (TSX/IDE) demand, the authored-splice TSC lane, the per-MEMBER classification, and the file-level aggregate all contain it. POLICY (owed): what `defineProps` / `defineEmits` should DO when one composed arm yielded nothing — refuse, publish partial, or mark — is a Vue framework rule, not a substrate one. The interim choice landed here is REFUSE, selected as the safe default because it is loud and matches the pre-substrate behaviour; the alternative that must NOT be chosen silently is publishing the sibling arms alone, which ships a module whose props omit a member the checker has with ZERO diagnostics, while the TSX lane splices the AUTHORED macro call so the external checker reports nothing — types and runtime disagreeing in silence. Shapes and checker answers, so the decision arrives with its evidence (all Eq<keyof T, ...>-probed against tsgo `7.0.0-dev.20260526.1` `--noEmit --strict --ignoreConfig`, each with a negative control the checker REJECTS): `defineProps<ReturnType<typeof loopHelper> & { extra: string }>()` keys are `extra | label`; `defineEmits<ReturnType<typeof loopEmits> & { evB: (n: number) => void }>()` keys are `evA | evB`; `withDefaults(defineProps<... & { extra?: string }>(), { extra: 'z' })` keys are `extra | label`; `interface Props extends ReturnType<typeof loopHelper> { extra: string }` keys are `label | extra`. Durable owner: the Vue framework pass after the origin/main merge. Resolution gate: that pass. Acceptance tests already in tree asserting the interim refusal, to be re-pointed by whichever policy is chosen: meta_tests::a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes and meta_tests::an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event. The PRECISION of the substrate half is separately pinned and does NOT move with the policy: meta_tests::a_no_surface_producer_at_a_member_value_degrades_only_that_member (a producer that yielded no surface for ONE member VALUE degrades that member alone and leaves its exactly-typed siblings intact, including the defineModel and defineEmits twins) and vue_macro_codegen::runtime::lane_containment_tests::only_the_no_surface_class_separates_the_two_macro_codegen_lanes."
+      ]
+    },
+    {
+      "block": "U6.NARROW_TYPEOF",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_EQUALITY",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_TRUTHINESS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_IN",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_INSTANCEOF",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_DISCRIMINATED",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_SUBSTITUTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_INVALIDATION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.PREDICATE_ASSERTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.CALL_RESOLVE",
+      "status": "implemented_unlanded_rebase_required",
+      "evidence": [
+        "ruling:F1 (hold as IMPLEMENTED_UNLANDED / REBASE_REQUIRED; never landed)",
+        "worktree:branch block/u6-call-resolve"
+      ]
+    },
+    {
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.VALUE_INFERENCE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.ASYNC_GENERATOR",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.CROSS_FILE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.LOOP_CLOSURE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U3.CACHE_FACT_MODEL",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U3.ADAPTIVE_FAMILY_RETENTION",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (Landed bridge block — U3.ADAPTIVE_FAMILY_RETENTION (LANDED))",
+        "guards:crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs"
+      ]
+    },
+    {
+      "block": "U10.RESULT_DB",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U14.MACRO_ADAPTER",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "status": "pending",
+      "evidence": []
+    }
+  ],
+  "amendments": [
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "replace",
+      "guard": "ignored_test_row_table_holds_exactly_356_rows",
+      "replacement": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label named fn ignored_test_row_table_holds_exactly_356_rows, which existed at a39f95687 but was absent at the reconciliation base (E9)."
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "action": "replace",
+      "guard": "ignored_test_row_table_holds_exactly_356_rows",
+      "replacement": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): same amendment as U0.MANIFEST_SUBSTRATE."
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "action": "remove",
+      "guard": "svelte_adapter_stop_gate_is_registered_out_of_scope",
+      "authority": "F4 (u-programme-arch-followup-out.txt, 2026-08-04): U15 removes svelte_adapter_stop_gate.rs; Svelte is co-equal and may not retain a STOP-gate. Only the unchanged React STOP-gate registration remains a U15 obligation."
+    },
+    {
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "action": "add",
+      "guard": "no_depth_sentinel_on_flow_return_path",
+      "authority": "F1 (u-programme-arch-followup-out.txt, 2026-08-04): restore no_depth_sentinel_on_flow_return_path as a substrate-owned required guard before either U6 block lands. The test fn is live on this tree (crates/verter_session/tests/cases/g_misc0/no_depth_sentinel_on_flow_return_path.rs)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "landed_typeinfo_blocks_have_required_guards",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): executable contract enforcement."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "no_landed_typeinfo_block_has_live_ignored_rows",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): done-predicate row part; the label previously existed only as a forward-declared U15 string."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "no_vacuous_parent_u_block_landing",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): parent-aggregate landing is derived-only, never row-vacuous."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "zero_row_blocks_land_exactly_once",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): zero-row block lifecycle enforcement."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): the landing-transaction check; Typeinfo-Block trailers are enforced prospectively, never fabricated for history."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): counts derive from the append-only registry."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_matches_discovered_tests",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): independent discovery cross-check so generation is not self-validating."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_is_append_only_against_head",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): the 362 baseline is append-only; identity removal is the failure class that erased 14 rows."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_contains_pinned_baseline_cohort",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04) append-only intent, closed against committed removals: the HEAD-diff check only fires on uncommitted dirty-tree removals and self-heals once an erasing commit lands, so the registry is asserted to CONTAIN the pinned immutable baseline cohort (scripts/manifests/typeinfo-row-baseline-cohort.json), which no regeneration can rewrite or shrink."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "guard_registry_live_integration_bindings_are_complete",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (integration target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "live_integration_guards_are_harness_registered_and_not_ignored",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): execution/default-gate-membership proof from the harness inventory (integration target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "guard_registry_lib_bindings_are_complete",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (lib target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "live_lib_guards_are_harness_registered_and_not_ignored",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): execution/default-gate-membership proof from the harness inventory (lib target)."
+    }
+  ],
+  "landing_transactions": [],
+  "restored_rows": [
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "footprint.rs",
+      "function": "typeinfo_footprint_is_attached_for_named_symbol_request",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_optional_property_not_assignable_to_required",
+      "removed_at": "2ee921b9c"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_symbol_key_access_projects_wrapped_value_type",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_unique_symbol_wrapper_publishes_branded_surface",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_string_key_access_returns_sibling_value",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_const_object_literal_expands_nested_shape",
+      "note": "not a removed-identity restoration: transitioned ignored -> running_unratified by the U6.FLOW_RETURN_SUBSTRATE landing (the demand-sliced substrate makes the test pass, so the stale mutable-Array ignore reason no longer holds), while the oracle lift stays blocked on the closed migration extractor (ControlFlowAroundQuery on the original two-query body)"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct05_return_type_contextual_flow",
+      "note": "not a removed-identity restoration: transitioned ignored -> running_unratified by the U6.FLOW_RETURN_SUBSTRATE landing (the direct-call rail now honours the declarator's authored annotation, so the test passes and its recorded ignore reason — which claimed the arrow BODY needs contextual typing — was false), while ratification of the lift belongs to U6.CALL_RESOLVE, which owns final declarator-annotated call semantics"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct06_parenthesized_expression_preserves_context",
+      "note": "not a removed-identity restoration: transitioned ignored -> running_unratified by the U6.FLOW_RETURN_SUBSTRATE landing (the direct-call rail now honours the declarator's authored annotation, so the test passes and its recorded ignore reason — which claimed the arrow BODY needs contextual typing — was false), while ratification of the lift belongs to U6.CALL_RESOLVE, which owns final declarator-annotated call semantics"
+    }
+  ]
+}

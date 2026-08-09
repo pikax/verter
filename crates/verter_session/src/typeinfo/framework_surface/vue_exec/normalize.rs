@@ -16,7 +16,7 @@ use verter_semantic::analysis::types::AnalyzedPropField;
 use verter_semantic::analysis::AnalyzedMacroKind;
 use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypeExprScope,
-    TypePublication,
+    TypePublication, UnknownValue,
 };
 
 use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
@@ -112,7 +112,8 @@ pub(crate) fn props_from_typeinfo_surface(
         // non-public class members, but Vue does NOT expose `private` /
         // `protected` class fields as props.
         .filter(|member| member.visibility.is_public())
-        .map(|member| {
+        .filter_map(|member| {
+            let member_name = member.published_name()?.to_string();
             // Display-only render of the member's one-level value, minted ONCE
             // at this terminal sink (the by-name `.and_then` form — no decision
             // on the materialized value).
@@ -122,7 +123,7 @@ pub(crate) fn props_from_typeinfo_surface(
             // addressing this member name WITH a stamped payload locator.
             let candidates: Vec<&AnalyzedPropField> = analyzer_prop_fields
                 .iter()
-                .filter(|field| field.name == member.name.as_ref() && field.payload.is_some())
+                .filter(|field| field.name == member_name && field.payload.is_some())
                 .collect();
             // A contributor locator is published for EXACTLY ONE analyzer
             // candidate — the flat member sink's authored-position parity
@@ -235,22 +236,24 @@ pub(crate) fn props_from_typeinfo_surface(
             // is an own-body `member_index` member).
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-            crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
-                AnalyzedPropField {
-                    name: member.name.as_ref().to_string(),
-                    is_optional: member.optional,
-                    span: verter_span::Span::default(),
-                    type_annotation,
-                    payload: authored_payload,
-                    type_expr_scope,
-                    description,
-                    tags,
-                    resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                    resolution_error: None,
-                    declared_in_macro_type_arg,
-                },
-                type_source,
-                verter_type_expr::PropCallableRole::Other,
+            Some(
+                crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                    AnalyzedPropField {
+                        name: member_name,
+                        is_optional: member.optional,
+                        span: verter_span::Span::default(),
+                        type_annotation,
+                        payload: authored_payload,
+                        type_expr_scope,
+                        description,
+                        tags,
+                        resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                        declared_in_macro_type_arg,
+                    },
+                    type_source,
+                    verter_type_expr::PropCallableRole::Other,
+                ),
             )
         })
         .collect()
@@ -291,6 +294,7 @@ fn member_value_source(
     if let Some(tuple) = closed_tuple_fact(dispatch, member.value) {
         return Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
     }
+    let member_key = member.key.cloned_known()?;
     // The arg-preserving authored USE-SITE body slot (the declaring
     // declaration's member-value slot, whose deref replays the authored
     // generic instantiation WITH its type arguments through the one shared
@@ -298,7 +302,7 @@ fn member_value_source(
     // member — preferred over the member-path replay when recoverable.
     if let Some(slot) = crate::meta_resolve::arg_preserving_member_use_site_slot(
         dispatch,
-        member.name.as_ref(),
+        &member_key,
         member.origin.canonical_file.as_deref(),
         member.value,
     ) {
@@ -309,7 +313,7 @@ fn member_value_source(
     crate::meta_resolve::projectors::structural_member_value_source(
         dispatch,
         member.value,
-        member.name.as_ref(),
+        &member_key,
         type_arg_base,
     )
 }
@@ -344,9 +348,9 @@ pub(crate) fn object_members_from_typeinfo_surface(
         // shared surface RECORDS non-public class members, but the published
         // object surface exposes only public members.
         .filter(|member| member.visibility.is_public())
-        .map(
-            |member| crate::typeinfo::framework_surface::results::NamedTypeMember {
-                name: member.name.as_ref().to_string(),
+        .filter_map(
+            |member| Some(crate::typeinfo::framework_surface::results::NamedTypeMember {
+                name: member.published_name()?.to_string(),
                 is_optional: member.optional,
                 value: raise_member_value(ctx, member).map(|raised| {
                     crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::classify_shallow(&raised)
@@ -354,7 +358,7 @@ pub(crate) fn object_members_from_typeinfo_surface(
                 type_annotation: None,
                 type_references: Vec::new(),
                 source_span: None,
-            },
+            }),
         )
         .collect()
 }
@@ -402,7 +406,8 @@ pub(crate) fn exposed_from_typeinfo_surface(
         .members
         .iter()
         .filter(|member| member.visibility.is_public())
-        .map(|member| {
+        .filter_map(|member| {
+            let member_name = member.published_name()?.to_string();
             let (description, tags) = member_jsdoc_from_spans(host, member);
             // The published member-value SOURCE POSITION: the graph-native
             // closed / shallow-ref / projected member-path source. An
@@ -415,9 +420,9 @@ pub(crate) fn exposed_from_typeinfo_surface(
                 .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                     verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
                 ));
-            crate::typeinfo::framework_surface::results::ResolvedExposeField {
+            Some(crate::typeinfo::framework_surface::results::ResolvedExposeField {
                 analysis: verter_semantic::analysis::types::AnalyzedExposeField {
-                    name: member.name.as_ref().to_string(),
+                    name: member_name,
                     span: None,
                     payload: None,
                     type_expr_scope: None,
@@ -425,7 +430,7 @@ pub(crate) fn exposed_from_typeinfo_surface(
                     tags,
                 },
                 type_source,
-            }
+            })
         })
         .collect()
 }
@@ -939,14 +944,16 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
         .iter()
         .map(|param| {
             // Position-preserving: mint the param's `ty` node ONCE; a node that
-            // does not materialize keeps its tuple SLOT with the opaque `Unknown`
-            // raise-miss value (the `output_sink::raise_node_to_sealed_carrier`
-            // convention) so subsequent payload params never shift. A declared
-            // param's `ty` always mints, so the fallback is robustness only.
+            // does not materialize keeps its tuple SLOT with an exact empty
+            // `Unknown` (DISPLAY robustness only — the seam notes a
+            // present-but-unraisable failure as an `OutputMaterializationLoss`
+            // non-cacheable read, so the payload is never admitted complete). A
+            // declared param's `ty` always mints, so the fallback is robustness
+            // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
                 .map(|raised| raised.into_type_expr(&cap))
-                .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() });
+                .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             verter_type_expr::TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
                 // display-facing tuple `label` (`Option<String>`).
@@ -1023,6 +1030,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         .unwrap_or(&[]);
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
     {
+        let member_name = member.published_name()?.to_string();
         let raised = raise_member_value(ctx, member);
         let payload_type = raised.as_ref().and_then(render_type_expr_display);
         // LOCAL authored position candidates: analyzer emit fields
@@ -1108,11 +1116,11 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member.name.as_ref().to_string()]),
+                    Arc::from([member_name.clone()]),
                 ),
                 0,
             ),
-            name: member.name.as_ref().to_string(),
+            name: member_name,
             span: member
                 .name_span
                 .as_ref()
@@ -1195,15 +1203,13 @@ fn inherited_emit_payload_source(
         return Some(SemanticTypeSource::Projected(
             ProjectedTypeFact::MemberPath {
                 base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
-                path: std::sync::Arc::from(
-                    vec![member.name.as_ref().to_string()].into_boxed_slice(),
-                ),
+                path: std::sync::Arc::from(vec![member.key.cloned_known()?].into_boxed_slice()),
             },
         ));
     }
     crate::meta_resolve::arg_preserving_member_use_site_slot(
         dispatch,
-        member.name.as_ref(),
+        &member.key.cloned_known()?,
         member.origin.canonical_file.as_deref(),
         member.value,
     )

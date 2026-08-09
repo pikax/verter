@@ -3,9 +3,9 @@
 //! lowering.
 //!
 //! Verter has exactly ONE structural-carrier producer, and it is confined to
-//! a SINGLE implementation module: [`macro_arg_producer`]. That module owns
-//! everything producer-capable — the raw lowerer `lower_type_expr_structural`,
-//! the `<script setup generic="…">` binder-seed builder
+//! a SINGLE producer-capable implementation module:
+//! [`macro_arg_producer`]. That module owns everything producer-capable — the
+//! raw lowerer `lower_type_expr_structural`, the `<script setup generic="…">` binder-seed builder
 //! `build_script_setup_seed_frames`, and the macro hot-mirror builder
 //! `build_macro_hot_ref` — ALL of which are PRIVATE to the module (no
 //! visibility modifier). Its ONLY crate-visible producer entry is
@@ -26,10 +26,13 @@
 //! producer implementation plus compiler bugs / build substitution /
 //! out-of-tree proc-macros.
 //!
-//! The owner module's boundary stays NARROW: it contains only
-//! [`macro_arg_producer`], this `mod.rs`, and the producer's test modules — no
-//! second production producer surface may be added here.
+//! The owner module's boundary stays NARROW: beside [`macro_arg_producer`],
+//! this `mod.rs`, and test modules, it contains only the private lexical-binder
+//! context and typed import boundary for canonical infer-binder identities. As
+//! a sibling it cannot name the child-private producer builders, so it is not
+//! producer-capable and does not create a second producer surface.
 
+mod infer_binder_names;
 mod macro_arg_producer;
 
 // External consumers reach the macro hot mirror through these re-exports; the

@@ -131,7 +131,7 @@ pub(crate) fn build_origin_graph(
                     SemanticNodeData::Tuple { .. } => Some("[...]".to_string()),
                     SemanticNodeData::Union(_) => Some("A | B".to_string()),
                     SemanticNodeData::Intersection(_) => Some("A & B".to_string()),
-                    SemanticNodeData::Function { .. } => Some("(...) => R".to_string()),
+                    SemanticNodeData::Signature { .. } => Some("(...) => R".to_string()),
                     _ => None,
                 };
                 (k, l)

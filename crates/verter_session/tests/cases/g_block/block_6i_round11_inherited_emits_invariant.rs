@@ -15,9 +15,10 @@
 //! the `Published(Expanded)` rail so the inherited-emits branch-merge
 //! protocol can enumerate both branches' event rows. The
 //! materialiser changes live BELOW the macro publication entry —
-//! `reduce_field_type_expr_with_mode` runs AFTER the macro publication
-//! layer has decided whether the root is Conditional and routed
-//! accordingly. The materialiser never sees a Conditional macro
+//! `reduce_published_field_types` / sink-private `reduce_field_value_node`
+//! run AFTER the macro publication layer has decided whether the root is
+//! Conditional and routed accordingly. The materialiser never sees a
+//! Conditional macro
 //! payload root directly, so the invariant is preserved.
 //!
 //! It mirrors the Conditional-emits-merge fixture and asserts the

@@ -5,9 +5,12 @@
 
 mod deep_drop_is_iterative;
 mod exact_size_factories;
+mod excess_origin_discrimination;
 mod hash_byte_stream_contract;
 mod member_visibility_discrimination;
 mod member_visibility_json_roundtrip;
+mod referenced_names_walk;
 mod source_self_anchoring;
 mod synthetic_slot_binding_discrimination;
 mod type_expr_display;
+mod unknown_wire_preservation;

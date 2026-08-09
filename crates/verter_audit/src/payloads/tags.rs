@@ -163,6 +163,20 @@ pub enum FileArtifactCacheAction {
     Evict,
 }
 
+/// Which flow-slice budget axis tripped — the substrate mirror of the
+/// planner's `FlowSliceBudgetAxis` (the audit leaf crate cannot name
+/// the semantic type; producers convert at the emission site). Carried
+/// by
+/// [`super::super::structured_event::StructuredAuditEvent::FlowSliceBudgetExceeded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum FlowSliceBudgetAxisTag {
+    /// Too many demand-origin return sites.
+    ReturnSites,
+    /// Too many selected nodes.
+    SelectedNodes,
+}
+
 /// Discriminator naming the shape of a parse-domain
 /// [`FactKey`] published into the registry. Carried by
 /// [`super::super::structured_event::StructuredAuditEvent::FactRegistryWrite`].
@@ -209,6 +223,21 @@ pub enum FactKeyKindTag {
     /// `FactKey::ModuleAugmentation` — one `declare module "X" {}`
     /// augmenting declaration.
     ModuleAugmentation,
+    /// `FactKey::AugmentationContributionSet` — set-shape fingerprint
+    /// of one augmentation target's contribution set in one file.
+    AugmentationContributionSet,
+    /// `FactKey::AugmentationContributionOrder` — order-sensitive
+    /// fingerprint of one augmentation target's contribution sequence.
+    AugmentationContributionOrder,
+    /// `FactKey::DeclContributionOrder` — order-sensitive fingerprint
+    /// of one file-surface declaration slot's contributor sequence.
+    DeclContributionOrder,
+    /// `FactKey::AugmentationTargetSet` — whole-file augmentation
+    /// target set fingerprint.
+    AugmentationTargetSet,
+    /// `FactKey::NamespaceScopeSet` — whole-file namespace-block set
+    /// fingerprint.
+    NamespaceScopeSet,
 }
 
 /// Caller-requested compile cache mode — mirror of

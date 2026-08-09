@@ -538,7 +538,7 @@ fn materialize_macro_shape_member_type_expr_cycle_short_circuits() {
 // the test does not compile against a pre-bump tree. Post-bump it
 // compiles AND the eviction returns > 0 (drains real entries).
 //
-// `RefCycleResultDb` is intentionally OUT of the cohort — it caches
+// The retired `RefCycleResultDb` was intentionally OUT of the cohort — it cached
 // booleans / cycle identities only. Confirm the absence by inspection.
 
 use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
@@ -574,28 +574,83 @@ fn pre_call_signature_span_schema_v6_artifacts_are_rejected_by_v7() {
 
 // @ai-generated - Pins rejection of cached import targets carrying a resolved canonical.
 #[test]
-fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v8() {
+fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v9() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
     const RESOLVED_IMPORT_TARGET_SCHEMA: u32 = 7;
-    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 8);
-    assert_eq!(STALE_SCHEMA_VERSION, RESOLVED_IMPORT_TARGET_SCHEMA);
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
 
     let stale = FileArtifactStore::new_with_schema_version_for_test(RESOLVED_IMPORT_TARGET_SCHEMA);
     stale.insert_synthetic_for_schema_test("/workspace/resolved-import-target-v7.ts");
     assert_eq!(
         stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         1,
-        "a v7 artifact cannot be read under the authored-import-only v8 schema"
+        "a v7 artifact cannot be read under the authored-import-only v8+ schema"
     );
     assert_eq!(stale.len(), 0);
 
     let current = FileArtifactStore::new();
-    current.insert_synthetic_for_schema_test("/workspace/authored-import-only-v8.ts");
+    current.insert_synthetic_for_schema_test("/workspace/authored-import-only-v9.ts");
     assert_eq!(
         current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         0,
-        "a v8 artifact survives a matching-schema roundtrip"
+        "a v9 artifact survives a matching-schema roundtrip"
+    );
+    assert_eq!(current.len(), 1);
+}
+
+// @ai-generated - Pins rejection of cached object-spread surface materializations.
+#[test]
+fn object_spread_program_schema_v8_artifacts_are_rejected_by_v10() {
+    use verter_session::file_artifact_store::FileArtifactStore;
+
+    const PRE_OBJECT_SPREAD_PROGRAM_SCHEMA: u32 = 8;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
+    let stale =
+        FileArtifactStore::new_with_schema_version_for_test(PRE_OBJECT_SPREAD_PROGRAM_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/object-spread-program-v8.ts");
+    assert_eq!(
+        stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        1,
+        "a v8 artifact cannot be read under the object-spread-program v9+ schema"
+    );
+    assert_eq!(stale.len(), 0);
+
+    let current = FileArtifactStore::new();
+    current.insert_synthetic_for_schema_test("/workspace/object-spread-program-v9.ts");
+    assert_eq!(
+        current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        0,
+        "a current-schema artifact survives a matching-schema roundtrip"
+    );
+    assert_eq!(current.len(), 1);
+}
+
+// @ai-generated - Pins rejection of artifacts predating the indexed
+// call-site / expression-source fact shape.
+#[test]
+fn call_resolve_fact_schema_v9_artifacts_are_rejected_by_v10() {
+    use verter_session::file_artifact_store::FileArtifactStore;
+
+    const PRE_CALL_RESOLVE_FACT_SCHEMA: u32 = 9;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
+    assert_eq!(STALE_SCHEMA_VERSION, PRE_CALL_RESOLVE_FACT_SCHEMA);
+
+    let stale = FileArtifactStore::new_with_schema_version_for_test(PRE_CALL_RESOLVE_FACT_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/call-resolve-facts-v9.ts");
+    assert_eq!(
+        stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        1,
+        "a v9 artifact cannot be read under the indexed-call-site v10 schema"
+    );
+    assert_eq!(stale.len(), 0);
+
+    let current = FileArtifactStore::new();
+    current.insert_synthetic_for_schema_test("/workspace/call-resolve-facts-v10.ts");
+    assert_eq!(
+        current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        0,
+        "a v10 artifact survives a matching-schema roundtrip"
     );
     assert_eq!(current.len(), 1);
 }

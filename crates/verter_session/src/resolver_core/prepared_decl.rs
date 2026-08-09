@@ -168,9 +168,13 @@ pub struct ImportCanonicalization {
 /// `<script setup lang="ts" generic="T extends Item = Item">`
 /// parameters.
 ///
-/// The binding carries the parameter name plus its declaration-site
-/// `extends` constraint and `=` default as **unlowered** [`TypeExpr`]
-/// values; the dispatch lowering path interns them on demand into
+/// The binding carries ONLY the parameter name plus its 0-based clause
+/// ordinal — the content-free FACT pair. The declaration-site `extends`
+/// constraint and `=` default are NEVER stored: at query time the ONE
+/// dispatch lowering helper re-borrows the full parameter clause lease-only
+/// from the pinned [`crate::project_type_store::IndexedReady`] (raw source +
+/// framework parse) and selects + validates the transient parameter by
+/// `(ordinal, name)`, interning its bounds into
 /// [`SemanticNodeData::TypeParam`](crate::semantic_query::SemanticNodeData::TypeParam)
 /// via `shallow_lower_type_expr`. `PreparedTypeDecl` would be the
 /// wrong category for this data — type parameters do not have alias
@@ -181,7 +185,7 @@ pub struct ImportCanonicalization {
 /// `SemanticNodeData::TypeParam.param_index`, disambiguating same-name
 /// parameters across multiple script-setup declarations within one
 /// file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct TypeParamBinding {
     pub name: Arc<str>,
     /// 0-based position in the
@@ -190,8 +194,6 @@ pub struct TypeParamBinding {
     /// so multiple script-setup parameters in one file get distinct
     /// identity tuples.
     pub ordinal: u16,
-    pub constraint: Option<Arc<verter_type_expr::TypeExpr>>,
-    pub default: Option<Arc<verter_type_expr::TypeExpr>>,
 }
 
 /// Canonicalize ONE import target to the FINAL defining-file identity for the

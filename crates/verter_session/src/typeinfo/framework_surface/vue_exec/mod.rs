@@ -251,7 +251,7 @@ impl VueMacroSurface {
     /// instantiates a generic emit interface
     /// (`Emits extends TabsRootEmits<string | number>`): the call signature is
     /// declared in the package, and the SFC-supplied generic argument is encoded
-    /// in the typed `payload_expr` (a `Tuple` whose element types carry their
+    /// in the raised payload type (a `Tuple` whose element types carry their
     /// own scope), NOT by re-anchoring the whole signature's scope to the SFC.
     ///
     /// Falls back to the SFC owner when the signature carries no span (a
@@ -1227,5 +1227,102 @@ fn surface_kind_for_macro(
         AnalyzedMacroKind::DefineSlots => FrameworkSurfaceKind::Slots,
         AnalyzedMacroKind::DefineOptions => FrameworkSurfaceKind::Options,
         AnalyzedMacroKind::DefineExpose => FrameworkSurfaceKind::Expose,
+    }
+}
+
+#[cfg(test)]
+mod partial_admission_tests {
+    //! Vue lane: a degraded output or a present-but-unraisable fold `None`
+    //! is noted as an `OutputMaterializationLoss` NON-CACHEABLE read at the
+    //! seam / terminal unwrap (never admitted complete) — while the compute's
+    //! completeness stays `Complete`.
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
+    use crate::resolver_core::FactReadSetFinalise;
+    use crate::semantic_query::{
+        PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    };
+    use crate::VerterHost;
+
+    fn surface_with_broken_member(value: SemanticNodeId) -> SurfaceView {
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    key: crate::semantic_query::AuthoredPropertyKey::string("broken"),                    value,
+                    optional: false,
+                    readonly: false,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }
+    }
+
+    #[test]
+    fn vue_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
+        let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let absent = SemanticNodeId(u64::MAX);
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+
+        // Degraded output: an object whose member value is unraisable
+        // degrades (typed `UnrepresentableSurfaceMember` leaf) — the terminal
+        // unwrap must note the loss as a NON-CACHEABLE read before discarding
+        // the sidecar, while the compute's completeness stays `Complete`.
+        let broken_obj =
+            graph.intern_node(SemanticNodeData::Object(surface_with_broken_member(absent)));
+        let _scope = ColdComputeCompletenessScope::enter();
+        let (_tree, facts) =
+            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                let sealed = cap
+                    .materialize_output_type_expr(broken_obj)
+                    .expect("the object raises (degraded member)");
+                sealed.into_type_expr(&cap)
+            });
+        assert!(
+            matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
+            "a degraded output must finalise NON-CACHEABLE (OutputMaterializationLoss)"
+        );
+        assert!(
+            !current_cold_compute_completeness().is_partial(),
+            "the ACTIVE scope's completeness stays Complete (a contained degradation never faults it)"
+        );
+
+        // Fold None: a present-but-unraisable composite fails the fold — the
+        // seam notes the loss before returning `None`, completeness Complete.
+        let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![str_id, absent].into_boxed_slice(),
+        )));
+        let _scope = ColdComputeCompletenessScope::enter();
+        let (_raised, facts) = host
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                cap.materialize_output_type_expr(union_absent)
+            });
+        assert!(_raised.is_none(), "the composite fold fails");
+        assert!(
+            matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
+            "a present-but-unraisable fold failure must finalise NON-CACHEABLE"
+        );
+        assert!(
+            !current_cold_compute_completeness().is_partial(),
+            "a torn read never faults the ACTIVE scope's completeness"
+        );
     }
 }

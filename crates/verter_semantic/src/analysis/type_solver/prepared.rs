@@ -28,7 +28,7 @@ use verter_type_expr::locators::{
     AuthoredAnchor, LocatorSymbolSpace, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use verter_type_expr::span_origins::{DeclContributorAnchor, MemberSpansOrigin, SourceSynthetic};
-use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr, TypePropertyKey};
 
 /// The content-free anchor of a prepared declaration's authored positions.
 fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) -> AuthoredAnchor {
@@ -152,7 +152,7 @@ pub struct PreparedTypeDecl {
     /// Populated for interfaces and object-like aliases. Default: empty.
     /// Each member is a narrowed fact: header flags + the content-free locator
     /// of its authored value position + its span-recovery origin.
-    pub member_index: FxHashMap<String, PreparedMemberFact>,
+    pub member_index: FxHashMap<TypePropertyKey, PreparedMemberFact>,
 
     /// Same-file symbol references needed for local closure.
     pub local_deps: Vec<String>,
@@ -631,7 +631,7 @@ impl PreparedTypeDecl {
     /// object (`IntersectionArm` steps only; empty for an object-root body);
     /// each member's locator appends `[Member { raw_index }, MemberValue]`.
     fn index_object_members(
-        member_index: &mut rustc_hash::FxHashMap<String, PreparedMemberFact>,
+        member_index: &mut rustc_hash::FxHashMap<TypePropertyKey, PreparedMemberFact>,
         obj: &verter_type_expr::ObjectExpr,
         declaration_origin: &DeclarationOrigin,
         contributor: Option<DeclContributorAnchor>,
@@ -654,13 +654,17 @@ impl PreparedTypeDecl {
             };
             match member {
                 ObjectMember::Property(prop) => {
+                    let Some(key) = prop.key.cloned_known() else {
+                        continue;
+                    };
                     // entry API: only insert if not already present
                     member_index
-                        .entry(prop.name.clone())
+                        .entry(key)
                         .or_insert_with(|| PreparedMemberFact {
                             optional: prop.optional,
                             readonly: prop.readonly,
-                            is_method: false,
+                            method_kind: None,
+                            has_implementation_body: false,
                             // Carry the IR property's declared accessibility.
                             visibility: prop.visibility,
                             // Stamp this declaration's defining file.
@@ -703,6 +707,9 @@ impl PreparedTypeDecl {
                         });
                 }
                 ObjectMember::Method(method) => {
+                    let Some(key) = method.key.cloned_known() else {
+                        continue;
+                    };
                     // Own method members are also direct own-body members —
                     // index them so the macro-surface own-member overlay can
                     // stamp `declared_in_macro_type_arg` for an own interface
@@ -710,11 +717,12 @@ impl PreparedTypeDecl {
                     // surface; the dispatch lowers its function shape on
                     // demand.
                     member_index
-                        .entry(method.name.clone())
+                        .entry(key)
                         .or_insert_with(|| PreparedMemberFact {
                             optional: method.optional,
                             readonly: false,
-                            is_method: true,
+                            method_kind: Some(method.method_kind),
+                            has_implementation_body: method.has_implementation_body,
                             // Carry the IR method's declared accessibility.
                             visibility: method.visibility,
                             // Stamp this declaration's defining file.
@@ -748,7 +756,7 @@ impl PreparedTypeDecl {
     /// order); a parenthesized layer is structurally transparent to the deref
     /// and takes no step.
     fn index_transparent_object_members(
-        member_index: &mut rustc_hash::FxHashMap<String, PreparedMemberFact>,
+        member_index: &mut rustc_hash::FxHashMap<TypePropertyKey, PreparedMemberFact>,
         body: &TypeExpr,
         declaration_origin: &DeclarationOrigin,
         contributor: Option<DeclContributorAnchor>,
@@ -798,8 +806,8 @@ impl PreparedTypeDecl {
     }
 
     /// Look up a member by name. O(1) if the member index is populated.
-    pub fn member(&self, name: &str) -> Option<&PreparedMemberFact> {
-        self.member_index.get(name)
+    pub fn member(&self, key: &TypePropertyKey) -> Option<&PreparedMemberFact> {
+        self.member_index.get(key)
     }
 
     /// Classify using the broader PreparedDeclKind.
@@ -1038,7 +1046,7 @@ fn closedness_recipe_of(
         TypeExpr::TypeOf(_)
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => ClosednessRecipe::Unsupported,
+        | TypeExpr::Unknown(_) => ClosednessRecipe::Unsupported,
         // Everything else — generic/builtin instantiations, conditionals,
         // mapped/indexed/keyof/template operators, tuples, arrays, rests,
         // infer placeholders, import-type carriers — escapes to the
@@ -1303,7 +1311,7 @@ fn is_param_or_param_intersect_string(expr: &TypeExpr, param: &str) -> bool {
 fn classify_projection_inner(
     body: &TypeExpr,
     type_params: &[NarrowTypeParam],
-    member_index: &FxHashMap<String, PreparedMemberFact>,
+    member_index: &FxHashMap<TypePropertyKey, PreparedMemberFact>,
     wrapper_shape: &PreparedWrapperShapeFact,
     root_identity: &ResolvedRootIdentity,
 ) -> PreparedProjectionClassFact {
@@ -1405,10 +1413,12 @@ impl PreparedValueDecl {
             exported_name: None,
             kind,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Absent,
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -1451,13 +1461,13 @@ mod tests {
     fn prepared_type_decl_member_index_from_object_body() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "count".into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     true,
@@ -1475,18 +1485,24 @@ mod tests {
         // Each indexed member's `ty` is the content-free LOCATOR of its
         // authored value position — anchored at the declaration, with the
         // source-order member ordinal. No body is stored.
-        let label = decl.member("label").expect("label should exist");
+        let label = decl
+            .member(&verter_type_expr::PropertyKey::identifier("label"))
+            .expect("label should exist");
         assert!(!label.optional);
         assert_eq!(&*label.ty.anchor.canonical_id, "/types.ts");
         assert_eq!(&*label.ty.anchor.symbol, "Props");
         assert_eq!(label.ty.anchor.space, LocatorSymbolSpace::Type);
         assert_eq!(&*label.ty.path, &member_value_path(0));
 
-        let count = decl.member("count").expect("count should exist");
+        let count = decl
+            .member(&verter_type_expr::PropertyKey::identifier("count"))
+            .expect("count should exist");
         assert!(count.optional);
         assert_eq!(&*count.ty.path, &member_value_path(1));
 
-        assert!(decl.member("missing").is_none());
+        assert!(decl
+            .member(&verter_type_expr::PropertyKey::identifier("missing"))
+            .is_none());
     }
 
     /// The prepared member index mints the member's AUTHORED reference head at
@@ -1516,7 +1532,7 @@ mod tests {
         let annotated_span = verter_span::Span::new(10, 30);
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "annotated".into(),
                     TypeExpr::Ref {
                         name: "Ref".into(),
@@ -1534,7 +1550,7 @@ mod tests {
                 )),
                 // An initializer-inferred field: reference-SHAPED type, but no
                 // authored annotation span — the exact fabrication hazard.
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "inferred".into(),
                     TypeExpr::Ref {
                         name: "ReturnType".into(),
@@ -1560,7 +1576,7 @@ mod tests {
 
         assert!(
             matches!(
-                &decl.member("annotated").expect("annotated row").reference_head,
+                &decl.member(&TypePropertyKey::from("annotated")).expect("annotated row").reference_head,
                 verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. }
                     if local_name.as_ref() == "Ref"
             ),
@@ -1569,7 +1585,7 @@ mod tests {
         assert!(
             matches!(
                 &decl
-                    .member("inferred")
+                    .member(&TypePropertyKey::from("inferred"))
                     .expect("inferred row")
                     .reference_head,
                 verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable
@@ -1577,7 +1593,9 @@ mod tests {
             "an INFERRED member type must mint Unavailable — a Bare head here is \
              fabricated authored evidence with a locator addressing no source, \
              got {:?}",
-            decl.member("inferred").unwrap().reference_head
+            decl.member(&TypePropertyKey::from("inferred"))
+                .unwrap()
+                .reference_head
         );
     }
 
@@ -1585,7 +1603,7 @@ mod tests {
     fn prepared_member_index_mints_authored_reference_heads_per_member() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "variant".into(),
                     TypeExpr::Ref {
                         name: "Ref".into(),
@@ -1601,7 +1619,7 @@ mod tests {
                         type_annotation: Some(verter_span::Span::new(1, 2)),
                     },
                 )),
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "plain".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
@@ -1612,7 +1630,7 @@ mod tests {
                         type_annotation: Some(verter_span::Span::new(3, 4)),
                     },
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public_key(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1635,7 +1653,9 @@ mod tests {
         );
         decl.build_member_index(&body, None);
 
-        let variant = decl.member("variant").expect("variant indexed");
+        let variant = decl
+            .member(&TypePropertyKey::from("variant"))
+            .expect("variant indexed");
         let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args } =
             &variant.reference_head
         else {
@@ -1657,14 +1677,18 @@ mod tests {
         assert_eq!(&*arg.path, &member_value_path(0));
         assert_eq!(arg.arg_index, 0);
 
-        let plain = decl.member("plain").expect("plain indexed");
+        let plain = decl
+            .member(&TypePropertyKey::from("plain"))
+            .expect("plain indexed");
         assert_eq!(
             plain.reference_head,
             verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             "an authored non-reference annotation is a COMPLETE non-reference proof"
         );
 
-        let greet = decl.member("greet").expect("greet indexed");
+        let greet = decl
+            .member(&TypePropertyKey::from("greet"))
+            .expect("greet indexed");
         assert_eq!(
             greet.reference_head,
             verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
@@ -1680,22 +1704,24 @@ mod tests {
     fn prepared_member_head_locator_carries_the_intersection_arm_prefix() {
         let arm = |name: &str| {
             TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::with_spans_public(
-                    name.into(),
-                    TypeExpr::Ref {
-                        name: "Ref".into(),
-                        type_arguments: Arc::from(
-                            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
-                        ),
-                    },
-                    false,
-                    false,
-                    verter_type_expr::MemberSpans {
-                        declaration: None,
-                        name: None,
-                        type_annotation: Some(verter_span::Span::new(5, 6)),
-                    },
-                ))],
+                properties: vec![ObjectMember::Property(
+                    ObjectProperty::with_key_spans_public(
+                        name.into(),
+                        TypeExpr::Ref {
+                            name: "Ref".into(),
+                            type_arguments: Arc::from(
+                                vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                            ),
+                        },
+                        false,
+                        false,
+                        verter_type_expr::MemberSpans {
+                            declaration: None,
+                            name: None,
+                            type_annotation: Some(verter_span::Span::new(5, 6)),
+                        },
+                    ),
+                )],
             }))
         };
         let body = TypeExpr::intersection(vec![arm("first"), arm("second")]);
@@ -1707,7 +1733,9 @@ mod tests {
         decl.build_member_index(&body, None);
 
         for name in ["first", "second"] {
-            let member = decl.member(name).expect("intersection arm member indexed");
+            let member = decl
+                .member(&TypePropertyKey::from(name))
+                .expect("intersection arm member indexed");
             let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { args, .. } =
                 &member.reference_head
             else {
@@ -1742,18 +1770,18 @@ mod tests {
         // prove BOTH branches of `index_object_members` run.
         //
         // Discrimination: removing the `ObjectMember::Method` arm from
-        // `index_object_members` makes `decl.member("greet")` return `None`
+        // `index_object_members` makes `decl.member(&verter_type_expr::PropertyKey::identifier("greet"))` return `None`
         // (the method is never indexed), so both the `is_some` and the
         // `is_method` assertions below FAIL.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public_key(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1772,20 +1800,22 @@ mod tests {
         decl.build_member_index(&body, None);
 
         // The property member is indexed as a non-method.
-        let label = decl.member("label").expect("property `label` indexed");
+        let label = decl
+            .member(&verter_type_expr::PropertyKey::identifier("label"))
+            .expect("property `label` indexed");
         assert!(
-            !label.is_method,
-            "a property member must carry is_method=false",
+            label.method_kind.is_none(),
+            "a property member must carry no method kind",
         );
 
         // The method-syntax member is indexed AND flagged is_method=true.
         let greet = decl
-            .member("greet")
+            .member(&verter_type_expr::PropertyKey::identifier("greet"))
             .expect("method-syntax member `greet` MUST be indexed (the Method branch)");
         assert!(
-            greet.is_method,
-            "a method-syntax member (`greet(): any`) MUST carry is_method=true; \
-             a property-valued function would carry is_method=false",
+            greet.method_kind.is_some(),
+            "a method-syntax member (`greet(): any`) MUST carry a method kind; \
+             a property-valued function would carry no method kind",
         );
         // The method's value locator addresses its source-order member
         // position; the dispatch lowers the function shape on demand.
@@ -1808,13 +1838,13 @@ mod tests {
         // equality at the end.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public_key(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1841,7 +1871,9 @@ mod tests {
 
         // PROPERTY member: authored span origin (ordinal 0 under the
         // contributor anchor) + the declaration's defining file.
-        let label = decl.member("label").expect("property `label` indexed");
+        let label = decl
+            .member(&verter_type_expr::PropertyKey::identifier("label"))
+            .expect("property `label` indexed");
         assert_eq!(
             label.span_origin,
             MemberSpansOrigin::Authored {
@@ -1861,7 +1893,9 @@ mod tests {
         );
 
         // METHOD member: authored span origin (ordinal 1) + defining file.
-        let greet = decl.member("greet").expect("method `greet` indexed");
+        let greet = decl
+            .member(&verter_type_expr::PropertyKey::identifier("greet"))
+            .expect("method `greet` indexed");
         assert_eq!(
             greet.span_origin,
             MemberSpansOrigin::Authored {
@@ -1880,7 +1914,9 @@ mod tests {
 
         // NEGATIVE: a genuinely-absent member is still absent (the producer
         // did not fabricate entries).
-        assert!(decl.member("missing").is_none());
+        assert!(decl
+            .member(&verter_type_expr::PropertyKey::identifier("missing"))
+            .is_none());
 
         // A GENUINELY SYNTHETIC body (no contributor anchor) records explicit
         // Synthetic origins — never a fabricated authored position.
@@ -1890,7 +1926,10 @@ mod tests {
         );
         synthetic.build_member_index(&body, None);
         assert_eq!(
-            synthetic.member("label").unwrap().span_origin,
+            synthetic
+                .member(&verter_type_expr::PropertyKey::identifier("label"))
+                .unwrap()
+                .span_origin,
             MemberSpansOrigin::Synthetic(SourceSynthetic),
         );
     }
@@ -2053,7 +2092,7 @@ mod tests {
             properties: props
                 .iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
+                    ObjectMember::Property(ObjectProperty::synthetic_public_key(
                         (*name).into(),
                         ty.clone(),
                         *optional,
@@ -2084,7 +2123,7 @@ mod tests {
         // deref fails a bare `Member` step on an intersection), then the raw
         // member index within that object.
         let own = decl
-            .member("own")
+            .member(&verter_type_expr::PropertyKey::identifier("own"))
             .expect("own member from intersection tail should be indexed");
         assert_eq!(
             &*own.ty.path,
@@ -2098,7 +2137,8 @@ mod tests {
         // Negative: 'Bar' heritage ref members should NOT be indexed
         // (they don't exist as direct members)
         assert!(
-            decl.member("Bar").is_none(),
+            decl.member(&verter_type_expr::PropertyKey::identifier("Bar"))
+                .is_none(),
             "heritage ref name should not be indexed as a member"
         );
     }
@@ -2125,7 +2165,9 @@ mod tests {
         // the indexed header facts (here: `optional == true`). Removing the
         // reverse traversal makes the first slice (`optional == false`) win
         // and FAILS this assertion.
-        let mode = decl.member("mode").expect("mode should be indexed");
+        let mode = decl
+            .member(&verter_type_expr::PropertyKey::identifier("mode"))
+            .expect("mode should be indexed");
         assert!(
             mode.optional,
             "own member (last in intersection) should win the indexed facts"
@@ -2176,7 +2218,7 @@ mod tests {
         // RAW arm positions: the trailing object is arm 2, and `own` is its
         // member 0.
         let own = decl
-            .member("own")
+            .member(&verter_type_expr::PropertyKey::identifier("own"))
             .expect("own member should be indexed from trailing object");
         assert_eq!(
             &*own.ty.path,
@@ -2187,8 +2229,12 @@ mod tests {
             ],
         );
         // Heritage Ref names should NOT appear as members
-        assert!(decl.member("A").is_none());
-        assert!(decl.member("B").is_none());
+        assert!(decl
+            .member(&verter_type_expr::PropertyKey::identifier("A"))
+            .is_none());
+        assert!(decl
+            .member(&verter_type_expr::PropertyKey::identifier("B"))
+            .is_none());
     }
 
     #[test]
@@ -2204,13 +2250,17 @@ mod tests {
         );
         decl.build_member_index(&body, None);
 
-        assert!(decl.member("existing").is_some());
+        assert!(decl
+            .member(&verter_type_expr::PropertyKey::identifier("existing"))
+            .is_some());
         assert!(
-            decl.member("nonexistent").is_none(),
+            decl.member(&verter_type_expr::PropertyKey::identifier("nonexistent"))
+                .is_none(),
             "missing member should return None"
         );
         assert!(
-            decl.member("").is_none(),
+            decl.member(&verter_type_expr::PropertyKey::identifier(""))
+                .is_none(),
             "empty string member should return None"
         );
     }
@@ -2251,7 +2301,9 @@ mod tests {
         // Both slices are indexed; each locator is the RAW body path — one
         // `IntersectionArm` step per intersection LEVEL (the deref selects one
         // level per step), then the raw member index within its object.
-        let first = decl.member("first").expect("first indexed");
+        let first = decl
+            .member(&verter_type_expr::PropertyKey::identifier("first"))
+            .expect("first indexed");
         assert_eq!(
             &*first.ty.path,
             &[
@@ -2261,7 +2313,9 @@ mod tests {
                 TypeBodyPathStep::MemberValue,
             ],
         );
-        let second = decl.member("second").expect("second indexed");
+        let second = decl
+            .member(&verter_type_expr::PropertyKey::identifier("second"))
+            .expect("second indexed");
         assert_eq!(
             &*second.ty.path,
             &[
@@ -2286,7 +2340,7 @@ mod tests {
                     Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
                     vec![],
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "p".into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     false,
@@ -2308,7 +2362,9 @@ mod tests {
             }),
         );
 
-        let p = decl.member("p").expect("named member indexed");
+        let p = decl
+            .member(&verter_type_expr::PropertyKey::identifier("p"))
+            .expect("named member indexed");
         assert_eq!(&*p.ty.path, &member_value_path(1));
         // The span-recovery origin indexes the same RAW authored member
         // surface — the call signature occupies position 0 there too.
@@ -2347,7 +2403,9 @@ mod tests {
         );
         decl.build_member_index(&body, None);
 
-        let wrapped = decl.member("wrapped").expect("wrapped indexed");
+        let wrapped = decl
+            .member(&verter_type_expr::PropertyKey::identifier("wrapped"))
+            .expect("wrapped indexed");
         assert_eq!(
             &*wrapped.ty.path,
             &[
@@ -2392,13 +2450,17 @@ mod tests {
 
         // Both intersection-arm members carry the explicit typed miss.
         assert_eq!(
-            decl.member("a").expect("a indexed").span_origin,
+            decl.member(&verter_type_expr::PropertyKey::identifier("a"))
+                .expect("a indexed")
+                .span_origin,
             MemberSpansOrigin::Synthetic(SourceSynthetic),
             "an intersection-arm member has no representable authored span \
              origin — it must record Synthetic, not a top-level-ordinal \
              Authored",
         );
-        let b = decl.member("b").expect("b indexed");
+        let b = decl
+            .member(&verter_type_expr::PropertyKey::identifier("b"))
+            .expect("b indexed");
         assert_eq!(b.span_origin, MemberSpansOrigin::Synthetic(SourceSynthetic));
         // The BODY locator stays intersection-truthful (raw arm + member
         // steps) — the span-origin miss does not degrade the value locator.
@@ -2428,7 +2490,10 @@ mod tests {
             }),
         );
         assert_eq!(
-            plain_decl.member("a").expect("a indexed").span_origin,
+            plain_decl
+                .member(&verter_type_expr::PropertyKey::identifier("a"))
+                .expect("a indexed")
+                .span_origin,
             MemberSpansOrigin::Authored {
                 anchor: DeclContributorAnchor {
                     contributor_index: 0,
@@ -2451,6 +2516,7 @@ mod tests {
             ordinal,
             constraint: None,
             default: None,
+            is_const: false,
         }
     }
 
@@ -3066,12 +3132,14 @@ mod key_domain_closedness_producer_tests {
 
     fn object_body() -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "label".into(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "label".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                ),
+            )],
         }))
     }
 
@@ -3117,6 +3185,7 @@ mod key_domain_closedness_producer_tests {
                 name: "K".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }))],
             false,
         );
@@ -3222,6 +3291,7 @@ mod key_domain_closedness_producer_tests {
                     name: "T".into(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 }),
                 ClosednessRecipe::ParamRef { name: "T".into() },
             ),
@@ -3234,7 +3304,7 @@ mod key_domain_closedness_producer_tests {
                 ClosednessRecipe::OpenLeaf,
             ),
             (
-                TypeExpr::Unknown { raw: "??".into() },
+                TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax("??")),
                 ClosednessRecipe::Unsupported,
             ),
         ];

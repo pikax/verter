@@ -126,7 +126,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
         vec![string_id, array].into_boxed_slice(),
     )));
     let raw = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: Arc::from("SomeText"),
+        value: verter_type_expr::UnknownValue::unsupported_syntax("SomeText"),
     });
 
     let fallback = distinct_fallback_source();

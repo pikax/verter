@@ -18,6 +18,15 @@
 use super::*;
 
 impl SemanticGraphStore {
+    /// Test-only active execution-owner and wait-edge counts.
+    #[cfg(test)]
+    pub(crate) fn wait_graph_counts_for_tests(&self) -> (usize, usize) {
+        (
+            self.wait_for_graph.active_owner_count_for_tests(),
+            self.wait_for_graph.wait_count_for_tests(),
+        )
+    }
+
     /// Test-only driver: set `aborted = true` on the in-flight entry
     /// for `key`, plant an `Error(Other)` sentinel on `completed` if
     /// absent, notify waiters, and remove the entry from the table.

@@ -10,9 +10,11 @@
 //! a generic `Envelope` interface whose `entries` contain mapped tool
 //! payloads (`inputSchema`/`outputSchema`/`execute`). The leak was at
 //! `publish_merged_bindings` calling `raise_node_to_type_expr` on the
-//! `Published(Shallow)`-reduced value node; the fix publishes either
-//! the parser-lowered `binding_expr` (when present) or a symbolic
-//! `TypeExpr::Ref { name }` carrier — both bounded.
+//! `Published(Shallow)`-reduced value node; the fix publishes a shallow
+//! source selected among closed indexed-access, `Authored(DeclBody)`,
+//! named-reference `Ref`, or `SyntheticSlotBinding` — all bounded.
+//! (`AnalyzedSlotFieldBinding.payload` stays `None` because locators
+//! cannot address nested `(slot, binding)` positions.)
 //!
 //! Discrimination: reverting the fix (restoring the deep raise) makes
 //! the serialized binding type expression contain `outputSchema` /

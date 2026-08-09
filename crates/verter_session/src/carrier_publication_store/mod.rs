@@ -33,6 +33,17 @@ pub(crate) type SourceAuthorityHandle = Arc<RegisteredSourceAuthority>;
 pub(crate) type GrammarAuthorityHandle = Arc<CarrierGrammarAuthority>;
 pub(crate) type PublicationStoreHandle = Arc<CarrierPublicationStore>;
 
+/// Host-owned carrier publication handles: the registered-source and
+/// grammar authorities, the publication store, and the one-shot validated
+/// cross-host envelope ingest (T-B R5 §2 — entries are removed on intake;
+/// NOT a cache), grouped so the root `VerterHost` struct stays thin.
+pub(crate) struct CarrierPublicationHostHandles {
+    pub(crate) source_authority: SourceAuthorityHandle,
+    pub(crate) grammar_authority: GrammarAuthorityHandle,
+    pub(crate) publication_store: PublicationStoreHandle,
+    pub(crate) envelope_ingest: RegisteredEnvelopeIngest,
+}
+
 pub const MAX_PUBLICATION_COORDINATION_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

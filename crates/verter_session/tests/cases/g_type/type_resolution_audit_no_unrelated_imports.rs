@@ -63,6 +63,9 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
             canonical_id: Arc::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("UseB"),
     });
@@ -123,6 +126,9 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
             canonical_id: Arc::from("/c.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("C"),
     });

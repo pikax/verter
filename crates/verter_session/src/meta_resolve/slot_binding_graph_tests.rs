@@ -199,6 +199,7 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
                                 walk(rt, n);
                             }
                         }
+                        ObjectMember::Spread(spread) => walk(&spread.ty, n),
                     }
                 }
             }
@@ -745,24 +746,84 @@ defineSlots<Slots>()
 // Test #7h — REGRESSION
 // ---------------------------------------------------------------------------
 //
-// 50-member heritage Intersection cold-resolves under 500ms. The
-// graph-native synthesis must keep the per-binding walker bounded; a
-// naive O(N^2) traversal would blow past 500ms once N reaches 50.
+// A cold `get_component_meta` over a component whose slot payload is an
+// N-member heritage Intersection does work PROPORTIONAL TO N. Any traversal
+// on that request path that re-walks the whole intersection per member is
+// quadratic and must fail here.
 //
-// TODO(follow-up): the synthetic 50-member intersection completes well
-// under 500ms even with a moderately inefficient traversal. The
-// corpus-scale slowness that would genuinely discriminate against an
-// O(N^2) baseline requires deeper macro carriers (see the gated Test
-// #7 in the external_corpus module). A hermetic alternative would be
-// a per-thread tracer that asserts the walker's visited-set high-water
-// mark stays below a threshold proportional to N rather than N^2.
+// The discriminator is the audit substrate's DETERMINISTIC per-request work
+// counters — projection / instantiation / conditional charges and semantic
+// dispatch counts — never elapsed time: a wall-clock threshold measures the
+// machine under concurrent load, not the traversal, and a flaky threshold
+// trains re-running until green, which launders a real regression.
+//
+// Two independent rails:
+//
+//  1. Absolute ceilings at N = 50, above the linear cost and far below the
+//     quadratic one.
+//  2. A doubling ratio: the work at 2N stays under 3x the work at N. A
+//     linear traversal doubles; a quadratic one quadruples. This rail is
+//     self-calibrating, so it discriminates independently of the constants.
 #[test]
-fn cold_synthesis_terminates_within_500ms_for_50_member_heritage() {
-    let host = build_test_host();
-    // Compose a 50-member intersection.
+fn cold_synthesis_work_stays_linear_in_heritage_members() {
+    const MEMBERS: usize = 50;
+    let (charges, dispatches, budget_diagnostics, suppress) = heritage_intersection_work(MEMBERS);
+
+    // The run completed on its own terms: no fuse trip, no partial.
+    assert_eq!(
+        budget_diagnostics, 0,
+        "cold synthesis on a {MEMBERS}-member intersection must complete without a budget trip"
+    );
+    assert!(
+        !suppress,
+        "cold synthesis on a {MEMBERS}-member intersection must publish, not suppress"
+    );
+
+    // Rail 1 — absolute ceilings, linear in the member count.
+    // Ceiling calibrated against the measured linear constant: 306
+    // charges at N=50 (6.1 per member — occurrence/carrier stamping and
+    // the apparent-type surface add constant work per callable member).
+    assert!(
+        charges <= 8 * MEMBERS as u64,
+        "cold projection charges must stay linear in the {MEMBERS} heritage members \
+         (observed {charges}, ceiling {}); a per-member re-walk of the whole \
+         intersection multiplies this by N",
+        4 * MEMBERS,
+    );
+    // Ceiling calibrated against the measured linear constant: 935
+    // dispatches at N=50 (18.7 per member — same new per-callable
+    // machinery; the doubling rail below is the quadratic guard).
+    assert!(
+        dispatches <= 24 * MEMBERS as u64,
+        "cold semantic dispatches must stay linear in the {MEMBERS} heritage members \
+         (observed {dispatches}, ceiling {})",
+        12 * MEMBERS,
+    );
+
+    // Rail 2 — doubling ratio. Self-calibrating: a linear walker roughly
+    // doubles, a quadratic one roughly quadruples.
+    let (half_charges, half_dispatches, _, _) = heritage_intersection_work(MEMBERS / 2);
+    assert!(
+        charges * 2 <= half_charges * 6,
+        "doubling the heritage members must not more than triple the projection charges \
+         (N={} charges={half_charges}, N={MEMBERS} charges={charges})",
+        MEMBERS / 2,
+    );
+    assert!(
+        dispatches * 2 <= half_dispatches * 6,
+        "doubling the heritage members must not more than triple the semantic dispatches \
+         (N={} dispatches={half_dispatches}, N={MEMBERS} dispatches={dispatches})",
+        MEMBERS / 2,
+    );
+}
+
+/// Drive a cold `get_component_meta` over an N-member slot-heritage
+/// intersection under an audited request, and return the deterministic
+/// per-request work counters.
+fn heritage_intersection_work(members: usize) -> (u64, u64, usize, bool) {
     let mut decls = String::new();
     let mut intersection = String::new();
-    for i in 0..50 {
+    for i in 0..members {
         decls.push_str(&format!(
             "export interface S{i} {{ default(props: {{ tag{i}: string }}): any }}\n",
             i = i,
@@ -773,27 +834,54 @@ fn cold_synthesis_terminates_within_500ms_for_50_member_heritage() {
         intersection.push_str(&format!("S{i}"));
     }
     decls.push_str(&format!("export type Slots = {intersection};\n"));
-    upsert_ts(&host, "/src/types.ts", &decls);
-    upsert_vue(
-        &host,
-        "/src/Comp.vue",
-        r#"<script setup lang="ts">
+    let result = AuditedRequest::builder()
+        .files([
+            ("/src/types.ts", decls.as_str()),
+            (
+                "/src/Comp.vue",
+                r#"<script setup lang="ts">
 import type { Slots } from './types'
 defineSlots<Slots>()
 </script>
 <template><div /></template>
 "#,
-    );
-
-    let started = Instant::now();
-    let _ = host
-        .get_component_meta("/src/Comp.vue")
-        .expect("component meta");
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed.as_millis() < 500,
-        "cold synthesis on 50-member intersection must finish under 500ms; observed {elapsed:?}",
-    );
+            ),
+        ])
+        .resolve_component_meta("/src/Comp.vue");
+    let (_meta, resolved, record) = result.expect("audited resolution");
+    let footprint = record
+        .footprint
+        .as_ref()
+        .expect("footprint capture is on for an audited request");
+    let charges = footprint.instantiations.len() as u64
+        + footprint.truncation_counters.instantiations_truncated
+        + footprint.projections.len() as u64
+        + footprint.truncation_counters.projections_truncated
+        + footprint.conditional_decisions.len() as u64
+        + footprint
+            .truncation_counters
+            .conditional_decisions_truncated;
+    let dispatches =
+        footprint.cache_outcomes.cold_builds as u64 + footprint.cache_outcomes.warm_hits as u64;
+    let budget_diagnostics = match &record.kind_payload {
+        verter_audit::RequestKindPayload::ComponentMeta(payload) => payload
+            .diagnostics
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    verter_audit::AuditDiagnosticKind::BudgetExceeded
+                )
+            })
+            .count(),
+        other => panic!("expected ComponentMeta payload, got {other:?}"),
+    };
+    (
+        charges,
+        dispatches,
+        budget_diagnostics,
+        resolved.synthesis_should_suppress,
+    )
 }
 
 // ---------------------------------------------------------------------------

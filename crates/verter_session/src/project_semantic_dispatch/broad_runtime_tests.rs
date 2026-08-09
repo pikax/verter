@@ -138,20 +138,25 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         element: leaf,
         readonly: false,
     });
-    let callable = graph.intern_node(SemanticNodeData::Function {
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from([]),
         return_type: leaf,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(leaf),
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
     });
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
-            name: Arc::from(format!("nested{index}")),
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            key: crate::semantic_query::AuthoredPropertyKey::string(format!("nested{index}")),
             value: crate::semantic_query::SemanticNodeId(u64::MAX - index),
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
@@ -663,6 +668,74 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
         "transient classification is ReturnOnly"
     );
     assert!(!miss_completeness.is_partial());
+    assert_eq!(graph.memo_entry_count(), memo_entries_before);
+}
+
+/// The flow substrate's POSITIONAL MARKER classifies with the flow
+/// substrate's OWN reason class, through the production classification
+/// entry point — not the generic query fault.
+///
+/// The distinction is a publish/refuse boundary downstream:
+/// `FLOW_RETURN_UNINFERRED` is contained by BOTH macro codegen lanes, so
+/// a component one of whose members is unmodelled still emits its member
+/// set with that member's validation off; `SEMANTIC_QUERY_FAULT` is
+/// contained by neither, so the same component's module is deleted
+/// instead.
+///
+/// This test exists because the class choice is invisible to every
+/// SURFACE-level fixture: `runtime_props_derive_each_member_from_that_
+/// members_own_evidence` DOES drive a marker node through this exact arm,
+/// but both spellings stop the classification identically there
+/// (`undecidable`), and the folded class does not escape that per-member
+/// walk to the macro-codegen completeness the refusal reads. So the
+/// observation is taken where the class is still visible — at the
+/// classifier's own completeness — rather than asserted against the
+/// private mapping function, which would test a table rather than a path.
+///
+/// Mutation recipe: mapping the marker to `SEMANTIC_QUERY_FAULT` (the
+/// class every other unrepresentable carrier takes) fails the containment
+/// assertions while leaving every surface-level fixture green.
+#[test]
+fn the_positional_marker_classifies_with_the_flow_class_through_the_classifier() {
+    let host = VerterHost::new_standalone(Default::default());
+    upsert_ts(&host, "/positional-marker.ts", "export type Seed = string");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let subject = graph.intern_node_with_scope(
+        SemanticNodeData::Opaque(QueryError::UnmodeledPosition),
+        file_scope(&dispatch, "/positional-marker.ts"),
+    );
+    let memo_entries_before = graph.memo_entry_count();
+
+    let completeness_scope = ColdComputeCompletenessScope::enter();
+    let output = dispatch.classify_broad_runtime_transient(subject);
+    let completeness = current_cold_compute_completeness();
+    drop(completeness_scope);
+
+    assert_eq!(
+        classification_from_output(&output).kinds(),
+        &[BroadRuntimeKind::Unknown],
+        "a position the substrate cannot name classifies as nothing in particular"
+    );
+    assert!(output.result_is_partial, "the marker is a genuine partial");
+    assert!(
+        output.cache_suppress,
+        "a partial classification never warms"
+    );
+    assert!(
+        completeness
+            .reasons()
+            .contains(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+        "the marker carries the flow substrate's own class: {:?}",
+        completeness.reasons()
+    );
+    assert!(
+        !completeness
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT),
+        "and NOT the generic query fault, which no consumer contains: {:?}",
+        completeness.reasons()
+    );
     assert_eq!(graph.memo_entry_count(), memo_entries_before);
 }
 

@@ -215,8 +215,6 @@ mod tests {
         TypeParamBinding {
             name: Arc::from(name),
             ordinal,
-            constraint: None,
-            default: None,
         }
     }
 

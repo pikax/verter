@@ -76,8 +76,13 @@ impl PreparedKeyHandle {
         let (family, slot) = family_and_slot(&key);
         let requested_path = requested_path_for_key(&key);
         // Same formula as `family::requested_point_for_key`, reusing
-        // the `family_and_slot` result instead of re-projecting.
-        let requested_point = MaterializedPoint::new(point_for_slot(slot, &requested_path));
+        // the `family_and_slot` result instead of re-projecting. Keys
+        // that embed their own demand point (`FlowReturn`) gate on that
+        // point, not the slot preset.
+        let requested_point = match super::family::requested_demand_override(&key) {
+            Some(point) => MaterializedPoint::new(point),
+            None => MaterializedPoint::new(point_for_slot(slot, &requested_path)),
+        };
         let cached_hash = hash_key(&key);
         Self(Arc::new(PreparedQueryIdentity {
             key,
@@ -148,5 +153,26 @@ impl std::fmt::Debug for PreparedKeyHandle {
             .field("key", &self.0.key)
             .field("slot", &self.0.slot)
             .finish_non_exhaustive()
+    }
+}
+
+/// Value-shape gate for the non-node object projection family. A buggy
+/// evaluator (or a poisoned synthetic publish) must not disguise its result
+/// as `TypeNode` or admit that payload into the projection slot.
+pub(crate) fn enforce_projection_value_shape(
+    key: &SemanticQueryKey,
+    result: crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+) -> crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue> {
+    use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValueTag};
+    match (key, result) {
+        (SemanticQueryKey::ProjectObjectSpread { .. }, QueryResult::Value(value))
+            if value.tag() != SemanticQueryValueTag::ObjectProjection =>
+        {
+            QueryResult::Error(QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::ObjectProjection,
+                actual: value.tag(),
+            })
+        }
+        (_, result) => result,
     }
 }

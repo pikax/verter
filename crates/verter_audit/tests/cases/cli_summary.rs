@@ -95,6 +95,9 @@ fn make_record(
         RequestKind::BundlerBatch { .. } => RequestKindPayload::BundlerBatch(Default::default()),
         RequestKind::Custom { .. } => RequestKindPayload::None,
         RequestKind::TypeInfoGraph => RequestKindPayload::TypeInfoGraph(Default::default()),
+        RequestKind::FlowReturnInference => {
+            RequestKindPayload::FlowReturnInference(Default::default())
+        }
     };
     let mut record = RequestAuditRecord {
         request_id,

@@ -38,11 +38,15 @@ pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 /// added (a new kind carries a different required `identity` shape). v2 added
 /// `identity.probe_rhs_kind` + `raw_capture.probe_scaffold` (the capture-
 /// strategy axis); v3 added the REQUIRED top-level `migration_fingerprint_version` +
-/// `migration_fingerprint` migration-fidelity mirror (§Q4). Because it flows
-/// into `snapshot_id` through `PinnedEnv`, the bump changes every `snapshot_id`
-/// (hence every checked-in snapshot filename).
+/// `migration_fingerprint` migration-fidelity mirror (§Q4); v4 added the CLOSED
+/// `relation_verdict` value kind (the relation-tuple-wire capture family — the
+/// migration-fidelity mirror becomes kind-keyed: required for
+/// `structured_type_expr`, forbidden as a cross-kind field on
+/// `relation_verdict`). Because it flows into `snapshot_id` through
+/// `PinnedEnv`, the bump changes every `snapshot_id` (hence every checked-in
+/// snapshot filename).
 #[allow(dead_code)]
-pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 3;
+pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 4;
 
 /// Version of the PROBE-SYNTHESIS + hover-driver + hover-extraction +
 /// admissibility algorithm. Distinct from `normalizer_version`. Enters
@@ -234,19 +238,22 @@ impl HostProject {
     }
 }
 
-/// The closed `oracle_value_kind` taxonomy. Only `StructuredTypeExpr` is written
-/// by this harness; a future kind is an additive closed-tagged discriminant that
+/// The closed `oracle_value_kind` taxonomy. `StructuredTypeExpr` (v1–v3) is the
+/// TypeExpr-projection family; `RelationVerdict` (v4) is the relation-tuple-wire
+/// capture family. A future kind is an additive closed-tagged discriminant that
 /// bumps `oracle_schema_version`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OracleValueKind {
     StructuredTypeExpr,
+    RelationVerdict,
 }
 
 impl OracleValueKind {
     pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::StructuredTypeExpr => "structured_type_expr",
+            Self::RelationVerdict => "relation_verdict",
         }
     }
 
@@ -258,6 +265,7 @@ impl OracleValueKind {
     pub(crate) fn from_tag(tag: &str) -> Option<Self> {
         match tag {
             "structured_type_expr" => Some(Self::StructuredTypeExpr),
+            "relation_verdict" => Some(Self::RelationVerdict),
             _ => None,
         }
     }
@@ -320,6 +328,327 @@ pub(crate) fn projection_mode_from_tag(tag: &str) -> Option<ProjectionModeKind> 
         "Skeleton" => Some(ProjectionModeKind::Skeleton),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The v4 `relation_verdict` identity (a DISTINCT closed shape)
+// ---------------------------------------------------------------------------
+
+/// Which relation the tuple-wire capture asked (v4 identity axis). Mirrors the
+/// engine's `RelationKind` taxonomy as a CLOSED tag set for decode totality;
+/// only `Assignable` is an admissible capture this block (the registry emits
+/// nothing else, and the consumption adapter rejects broader keys).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationKindTag {
+    Assignable,
+    Subtype,
+    StrictSubtype,
+    Identity,
+    Comparable,
+}
+
+impl RelationKindTag {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Assignable => "assignable",
+            Self::Subtype => "subtype",
+            Self::StrictSubtype => "strict_subtype",
+            Self::Identity => "identity",
+            Self::Comparable => "comparable",
+        }
+    }
+
+    /// Inverse of [`tag`] for the strict snapshot decoder. An unknown tag is
+    /// `None` (closed set).
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "assignable" => Some(Self::Assignable),
+            "subtype" => Some(Self::Subtype),
+            "strict_subtype" => Some(Self::StrictSubtype),
+            "identity" => Some(Self::Identity),
+            "comparable" => Some(Self::Comparable),
+            _ => None,
+        }
+    }
+}
+
+/// Overload-selection policy axis (v4 identity). Closed set; only `All` (relate
+/// against the WHOLE overload set) is admissible this block.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverloadSelectionTag {
+    All,
+    FirstApplicable,
+}
+
+impl OverloadSelectionTag {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::FirstApplicable => "first_applicable",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "all" => Some(Self::All),
+            "first_applicable" => Some(Self::FirstApplicable),
+            _ => None,
+        }
+    }
+}
+
+/// Variance-regime policy axis (v4 identity). Closed set; only
+/// `MethodParameterBivariance` is admissible this block (the live oracle
+/// tsconfig's `strict` regime relates function-typed parameters contravariantly
+/// and method-shaped parameters bivariantly — exactly this record).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VarianceTag {
+    MethodParameterBivariance,
+    StrictContravariance,
+}
+
+impl VarianceTag {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::MethodParameterBivariance => "method_parameter_bivariance",
+            Self::StrictContravariance => "strict_contravariance",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "method_parameter_bivariance" => Some(Self::MethodParameterBivariance),
+            "strict_contravariance" => Some(Self::StrictContravariance),
+            _ => None,
+        }
+    }
+}
+
+/// The relation-policy record (v4 identity axis): the three policy axes a
+/// relation judgement depends on. The registry emits only the DEFAULT record
+/// this block (`all` / `false` / `method_parameter_bivariance`).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationPolicyRecord {
+    pub(crate) overload_selection: OverloadSelectionTag,
+    pub(crate) excess_property_check: bool,
+    pub(crate) variance: VarianceTag,
+}
+
+impl RelationPolicyRecord {
+    /// The default record — the only admissible capture policy this block.
+    #[allow(dead_code)]
+    pub(crate) fn default_record() -> Self {
+        Self {
+            overload_selection: OverloadSelectionTag::All,
+            excess_property_check: false,
+            variance: VarianceTag::MethodParameterBivariance,
+        }
+    }
+
+    fn to_canonical_json(self) -> Value {
+        json!({
+            "overload_selection": self.overload_selection.tag(),
+            "excess_property_check": self.excess_property_check,
+            "variance": self.variance.tag(),
+        })
+    }
+}
+
+/// Whether the relation source carries freshness (v4 identity axis). Closed
+/// set; only `Regular` (a widened, non-fresh source — type-position operands
+/// are never fresh literals) is admissible this block.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FreshnessTag {
+    Fresh,
+    Regular,
+}
+
+impl FreshnessTag {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Regular => "regular",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "fresh" => Some(Self::Fresh),
+            "regular" => Some(Self::Regular),
+            _ => None,
+        }
+    }
+}
+
+/// The normalized inference mode the capture ran under (v4 identity axis):
+/// `None` for binder-free relations, `TargetPattern` when the target pattern
+/// carries `infer` binders captured through the tuple wire. Validated for
+/// consistency with `binder_layout` (empty layout ⇔ `None`).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InferenceModeTag {
+    None,
+    TargetPattern,
+}
+
+impl InferenceModeTag {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TargetPattern => "target_pattern",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "none" => Some(Self::None),
+            "target_pattern" => Some(Self::TargetPattern),
+            _ => None,
+        }
+    }
+}
+
+/// One binder of the target-pattern binder layout (v4 identity axis): the
+/// binder's target-pattern PREORDER ordinal (NOT a name sort) and its declared
+/// name. Ordinals must be exactly `0..n-1` in layout order; names must be
+/// unique and set-match the reserved binder refs in `target_operand`.
+/// `constraint` is the canonical normalized AST JSON of the binder's
+/// `infer X extends <constraint>` constraint when the target pattern declares
+/// one (`None` for a bare `infer X`) — an `infer V extends string` and a bare
+/// `infer V` MUST derive DISTINCT identities, so the constraint is an
+/// identity-carrying part of the layout entry, never erased by the binder-ref
+/// substitution.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BinderLayoutEntry {
+    pub(crate) ordinal: u16,
+    pub(crate) name: String,
+    pub(crate) constraint: Option<Value>,
+}
+
+/// The full value-affecting query identity hashed into a `relation_verdict`
+/// `snapshot_id` (v4). A DISTINCT closed shape from [`SnapshotIdentity`] — no
+/// relation fields are bolted onto the v3 TypeExpr identity, and no graph-local
+/// node IDs appear anywhere: the operands are canonical AST JSON lowered from
+/// the registry's TS texts (`infer X` positions encoded as reserved binder refs
+/// `__oracle_binder__X` inside `target_operand`, a closed encoding used ONLY
+/// inside this axis). Every field is registry-derivable + tsgo-free.
+/// `oracle_family` is DELIBERATELY ABSENT (a directory/presentation key only).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelationVerdictIdentity {
+    pub(crate) row_file: String,
+    pub(crate) row_function: String,
+    pub(crate) query_ordinal: u16,
+    /// Canonicalized: sorted by path, duplicate paths forbidden (same rule as
+    /// the v3 identity — exactly one final content per path).
+    pub(crate) workspace_files: Vec<WorkspaceFileRef>,
+    /// Canonical normalized AST JSON of the SOURCE operand.
+    pub(crate) source_operand: Value,
+    /// Canonical normalized AST JSON of the TARGET operand, with each `infer X`
+    /// position encoded as a reserved `__oracle_binder__X` ref.
+    pub(crate) target_operand: Value,
+    /// The target-pattern binder layout in binder preorder.
+    pub(crate) binder_layout: Vec<BinderLayoutEntry>,
+    pub(crate) relation: RelationKindTag,
+    pub(crate) policy: RelationPolicyRecord,
+    pub(crate) freshness: FreshnessTag,
+    pub(crate) inference_mode: InferenceModeTag,
+    pub(crate) host_project: HostProject,
+    pub(crate) oracle_value_kind: OracleValueKind,
+}
+
+/// Domain-separation tag for the v4 `relation_verdict` `snapshot_id` hash
+/// input. The v4 identity is a DISTINCT field set from the v3 TypeExpr
+/// identity, so it hashes under its own tag — the v3 family's
+/// [`SNAPSHOT_ID_DOMAIN_TAG`] field set is UNCHANGED (v3 snapshots re-key under
+/// v4 ONLY through the `PinnedEnv.oracle_schema_version` bump).
+pub(crate) const RELATION_SNAPSHOT_ID_DOMAIN_TAG: &[u8] = b"verter.oracle.snapshot_id.relation.v1";
+
+/// Derive the deterministic `snapshot_id` (the filename stem) for a
+/// `relation_verdict` snapshot from the registry-derivable v4 identity + the
+/// pinned env. Same length-prefixed, domain-separated BLAKE3 recipe as the v3
+/// derivation; the id is `"u_"` + the FULL 32-byte digest hex (never
+/// truncated).
+#[allow(dead_code)]
+pub(crate) fn derive_relation_snapshot_id(
+    identity: &RelationVerdictIdentity,
+    env: &PinnedEnv,
+) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(RELATION_SNAPSHOT_ID_DOMAIN_TAG);
+
+    // The row-ref — one file per (row, query).
+    lp_str(&mut buf, &identity.row_file);
+    lp_str(&mut buf, &identity.row_function);
+    lp_u16(&mut buf, identity.query_ordinal);
+    // The relation identity.
+    lp_str(
+        &mut buf,
+        &workspace_file_set_json(&identity.workspace_files),
+    );
+    lp_str(&mut buf, &canonical_json_string(&identity.source_operand));
+    lp_str(&mut buf, &canonical_json_string(&identity.target_operand));
+    lp_str(&mut buf, &binder_layout_json(&identity.binder_layout));
+    lp_str(&mut buf, identity.relation.tag());
+    lp_str(
+        &mut buf,
+        &canonical_json_string(&identity.policy.to_canonical_json()),
+    );
+    lp_str(&mut buf, identity.freshness.tag());
+    lp_str(&mut buf, identity.inference_mode.tag());
+    lp_str(
+        &mut buf,
+        &canonical_json_string(&identity.host_project.to_canonical_json()),
+    );
+    lp_str(&mut buf, identity.oracle_value_kind.tag());
+    // The pinned env / algorithm versions (incl. the STABLE env_corpus_id).
+    lp_u32(&mut buf, env.normalizer_version);
+    lp_u32(&mut buf, env.probe_synthesis_version);
+    lp_str(&mut buf, &env.compiler_options_hash);
+    lp_str(&mut buf, &env.env_corpus_id);
+    lp_str(&mut buf, &env.tsgo_version);
+    lp_u32(&mut buf, env.oracle_schema_version);
+
+    let digest = blake3::hash(&buf);
+    format!("u_{}", digest.to_hex())
+}
+
+/// Canonical JSON of the binder layout: the ordered array in target-pattern
+/// binder preorder (the order IS an identity input). Each entry carries
+/// `{ name, ordinal }` plus `"constraint": <canonical AST JSON>` when the
+/// binder declares one — OMITTED when unconstrained, so a pre-constraint
+/// snapshot's stored layout stays byte-identical (its id redrives unchanged).
+fn binder_layout_json(layout: &[BinderLayoutEntry]) -> String {
+    let arr = Value::Array(
+        layout
+            .iter()
+            .map(|b| match &b.constraint {
+                Some(constraint) => {
+                    json!({ "ordinal": b.ordinal, "name": b.name, "constraint": constraint })
+                }
+                None => json!({ "ordinal": b.ordinal, "name": b.name }),
+            })
+            .collect(),
+    );
+    canonical_json_string(&arr)
+}
+
+/// The canonical host/config identity block of a relation verdict identity —
+/// re-rendered for the strict decoder's redrive path.
+#[allow(dead_code)]
+pub(crate) fn relation_policy_canonical_json(policy: &RelationPolicyRecord) -> String {
+    canonical_json_string(&policy.to_canonical_json())
 }
 
 // ---------------------------------------------------------------------------

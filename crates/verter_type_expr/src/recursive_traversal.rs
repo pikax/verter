@@ -133,7 +133,7 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
         | TypeExpr::Literal(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => {}
+        | TypeExpr::Unknown(_) => {}
 
         // `typeof C.make<string>` — the instantiation-expression arguments are
         // owned recursive children (a plain `Vec`, no shared-`Arc` gate).
@@ -238,7 +238,10 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
 /// Steal the inline `TypeExpr` children of an owned `ObjectMember`.
 fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
     match member {
-        ObjectMember::Property(mut p) => worklist.push(std::mem::replace(&mut p.ty, drop_leaf())),
+        ObjectMember::Property(mut p) => {
+            drain_authored_property_key(&mut p.key, worklist);
+            worklist.push(std::mem::replace(&mut p.ty, drop_leaf()));
+        }
         ObjectMember::IndexSignature(mut s) => {
             worklist.push(std::mem::replace(&mut s.key_type, drop_leaf()));
             worklist.push(std::mem::replace(&mut s.value_type, drop_leaf()));
@@ -246,7 +249,18 @@ fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
         ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
             drain_function_expr(f, worklist);
         }
-        ObjectMember::Method(m) => drain_function_expr(m.function, worklist),
+        ObjectMember::Method(mut m) => {
+            drain_authored_property_key(&mut m.key, worklist);
+            drain_function_expr(m.function, worklist);
+        }
+        ObjectMember::Spread(mut s) => worklist.push(std::mem::replace(&mut s.ty, drop_leaf())),
+    }
+}
+
+fn drain_authored_property_key(key: &mut TypeAuthoredPropertyKey, worklist: &mut Vec<TypeExpr>) {
+    let replacement = AuthoredPropertyKey::string(Arc::<str>::from(""));
+    if let AuthoredPropertyKey::Computed(child) = std::mem::replace(key, replacement) {
+        worklist.push(child);
     }
 }
 
@@ -314,6 +328,11 @@ enum HashStep<'a> {
     Usize(usize),
     /// Emit a trailing `bool` field.
     Bool(bool),
+    /// Emit an authored object-member key, walking a computed expression
+    /// through the same depth-safe node stack.
+    AuthoredKey(&'a TypeAuthoredPropertyKey),
+    /// Emit a method/accessor kind.
+    MethodKind(ObjectMethodKind),
     /// Emit a trailing non-public `MemberVisibility` marker (a class member's
     /// declared `protected` / `private` accessibility, emitted in declaration
     /// order between `readonly` and `spans` for a property / between `optional`
@@ -322,6 +341,12 @@ enum HashStep<'a> {
     /// all-public surface's byte stream is identical to the pre-visibility
     /// stream. `Protected` / `Private` each fold a distinct marker.
     Visibility(MemberVisibility),
+    /// Emit a trailing non-`NonLiteral` `ExcessPropertyOrigin` marker (a
+    /// property's / method's excess-property provenance, emitted between the
+    /// visibility marker slot and `spans`). Pushed ONLY for `FreshOwn` /
+    /// `SpreadTainted` members — a `NonLiteral` member emits no origin bytes,
+    /// so every pre-freshness surface's byte stream is unchanged.
+    ExcessOrigin(ExcessPropertyOrigin),
     /// Emit a trailing `MappedModifier` field.
     Modifier(MappedModifier),
     /// Emit a trailing `MemberSpans` field.
@@ -363,7 +388,10 @@ impl Hash for TypeExpr {
                 },
                 HashStep::Usize(n) => n.hash(state),
                 HashStep::Bool(b) => b.hash(state),
+                HashStep::AuthoredKey(key) => hash_authored_property_key(key, state, &mut stack),
+                HashStep::MethodKind(kind) => kind.hash(state),
                 HashStep::Visibility(v) => v.hash(state),
+                HashStep::ExcessOrigin(o) => o.hash(state),
                 HashStep::Modifier(m) => m.hash(state),
                 HashStep::MemberSpans(s) => s.hash(state),
                 HashStep::IndexSpans(s) => s.hash(state),
@@ -416,7 +444,7 @@ fn type_expr_discriminant(node: &TypeExpr) -> isize {
         TypeExpr::Parenthesized(_) => 18,
         TypeExpr::RecursiveRef { .. } => 19,
         TypeExpr::SyntheticSlotBinding(_) => 20,
-        TypeExpr::Unknown { .. } => 21,
+        TypeExpr::Unknown(_) => 21,
         TypeExpr::ConstructorType(_) => 22,
         // Added after the original derive: a new variant takes the next free
         // discriminant (NOT its declaration-order index) so 0..=22 stay frozen.
@@ -443,7 +471,7 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
         }
         TypeExpr::Infer { name } => name.hash(state),
         TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(state),
-        TypeExpr::Unknown { raw } => raw.hash(state),
+        TypeExpr::Unknown(value) => value.hash(state),
 
         // -- `Arc<[TypeExpr]>`: len (usize) then each element --
         TypeExpr::Union(items) | TypeExpr::Intersection(items) => {
@@ -603,19 +631,24 @@ fn hash_object_member_step<'a, H: Hasher>(
     match member {
         ObjectMember::Property(p) => {
             0isize.hash(state);
-            p.name.hash(state);
-            // ty, optional, readonly, [visibility marker ONLY if non-public],
-            // spans. Push reverse. A `Public` member emits NO visibility bytes,
-            // so an all-public surface hashes byte-identically to the pre-
-            // visibility stream (zero cache-identity churn); a non-public member
-            // folds a distinguishing marker (`Protected` / `Private`).
             stack.push(HashStep::MemberSpans(p.spans));
+            // ty, optional, readonly, [visibility marker ONLY if non-public],
+            // [excess-origin marker ONLY if non-NonLiteral], spans. Push
+            // reverse. A `Public` member emits NO visibility bytes and a
+            // `NonLiteral` member emits NO origin bytes, so a pre-existing
+            // surface hashes byte-identically to the pre-visibility /
+            // pre-freshness stream (zero cache-identity churn); a non-default
+            // value folds a distinguishing marker.
+            if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                stack.push(HashStep::ExcessOrigin(p.excess_origin));
+            }
             if !p.visibility.is_public() {
                 stack.push(HashStep::Visibility(p.visibility));
             }
             stack.push(HashStep::Bool(p.readonly));
             stack.push(HashStep::Bool(p.optional));
             stack.push(HashStep::Node(&p.ty));
+            stack.push(HashStep::AuthoredKey(&p.key));
         }
         ObjectMember::IndexSignature(s) => {
             1isize.hash(state);
@@ -636,16 +669,54 @@ fn hash_object_member_step<'a, H: Hasher>(
         }
         ObjectMember::Method(m) => {
             4isize.hash(state);
-            m.name.hash(state);
-            // function, optional, [visibility marker ONLY if non-public], spans.
-            // Push reverse. `Public` emits no visibility bytes (pre-visibility
-            // byte stream preserved); a non-public method folds a marker.
+            // function, optional, [visibility marker ONLY if non-public],
+            // [excess-origin marker ONLY if non-NonLiteral], spans. Push
+            // reverse. `Public` emits no visibility bytes and `NonLiteral` no
+            // origin bytes (pre-existing byte stream preserved); a non-default
+            // value folds a marker.
             stack.push(HashStep::MemberSpans(m.spans));
+            if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                stack.push(HashStep::ExcessOrigin(m.excess_origin));
+            }
             if !m.visibility.is_public() {
                 stack.push(HashStep::Visibility(m.visibility));
             }
+            stack.push(HashStep::Bool(m.has_implementation_body));
+            stack.push(HashStep::MethodKind(m.method_kind));
             stack.push(HashStep::Bool(m.optional));
             stack.push(HashStep::Func(&m.function));
+            stack.push(HashStep::AuthoredKey(&m.key));
+        }
+        ObjectMember::Spread(s) => {
+            // New member variant: takes the next free discriminant (5) so the
+            // existing member streams 0..=4 stay frozen.
+            5isize.hash(state);
+            stack.push(HashStep::Node(&s.ty));
+        }
+    }
+}
+
+fn hash_authored_property_key<'a, H: Hasher>(
+    key: &'a TypeAuthoredPropertyKey,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    match key {
+        AuthoredPropertyKey::String(value) => {
+            0isize.hash(state);
+            value.hash(state);
+        }
+        AuthoredPropertyKey::Number(value) => {
+            1isize.hash(state);
+            value.hash(state);
+        }
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            2isize.hash(state);
+            identity.hash(state);
+        }
+        AuthoredPropertyKey::Computed(child) => {
+            3isize.hash(state);
+            stack.push(HashStep::Node(child));
         }
     }
 }
@@ -722,5 +793,328 @@ fn hash_function_step<'a, H: Hasher>(
     stack.push(HashStep::OptNode(func.return_type.as_deref()));
     for p in func.parameters.iter().rev() {
         stack.push(HashStep::Param(p));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Referenced-name collection — depth-safe, exhaustive
+// ---------------------------------------------------------------------------
+
+/// Every NAME a type expression references, split by NAME SPACE.
+///
+/// A consumer that must decide whether a lowered type binds symbols from
+/// the scope it was lowered in reads this instead of re-walking the tree
+/// itself: the walk below is EXHAUSTIVE over `TypeExpr` (no wildcard arm),
+/// so a new variant carrying a name is a compile error here rather than a
+/// silent hole at every consumer.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReferencedNames {
+    /// The ROOT of every `typeof x.y.z` value path (`x`), in encounter
+    /// order. These name VALUE bindings.
+    pub value_roots: Vec<String>,
+    /// Every named type reference (`Ref` / `RecursiveRef` /
+    /// `TypeParameter`) the answer makes into the scope it was lowered
+    /// in, in encounter order — see [`ReferencedTypeName`].
+    ///
+    /// One entry PER OCCURRENCE, never per distinct name: the same head
+    /// may be referenced both bare (`A`) and qualified (`A.B`), and the
+    /// two require different name MEANINGS of the same binding, so a
+    /// deduplicated set would answer one of the two consumers wrongly.
+    pub type_names: Vec<ReferencedTypeName>,
+    /// Whether the answer contains `any` ANYWHERE — at the root or nested
+    /// inside the structure it composed.
+    ///
+    /// It rides this walk rather than a sibling one because the walk is
+    /// already exhaustive over [`TypeExpr`]: a hand-rolled second
+    /// traversal is exactly how one position gets missed, and a MISSED
+    /// `any` is the unsafe direction (it lets a fabricated value publish).
+    ///
+    /// A consumer reads this to distinguish a MODELLED answer from one the
+    /// shallow pass fabricated: the pass answers `any` for every form it
+    /// has no model for, and a fabricated `any` is indistinguishable from
+    /// an authored one at every downstream gate.
+    pub embeds_any: bool,
+}
+
+/// One named type-reference OCCURRENCE, reduced to the single segment
+/// that is a scope lookup plus the bit that selects which name MEANING
+/// that lookup demands.
+///
+/// A QUALIFIED reference contributes its LEFTMOST segment only: `E.M`
+/// and `A.B.C` name `E` and `A`. The trailing segments select members
+/// INSIDE whatever the head denotes, so they are not scope lookups and
+/// never name a binding. This mirrors the value-space rule, where
+/// `typeof x.y.z` contributes `x`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReferencedTypeName {
+    /// The one segment that resolves as a binding.
+    pub head: String,
+    /// Whether the occurrence was DOTTED (`A.B`), so the head is used as
+    /// a NAMESPACE rather than as a type. TypeScript's `SymbolFlags`
+    /// separate the two: a `class N` occupies Type but not Namespace, a
+    /// `namespace N` the reverse — so a consumer deciding whether a
+    /// local declaration shadows the reference must ask about the
+    /// meaning this bit selects.
+    pub qualified: bool,
+}
+
+/// One traversal step of the referenced-name walk.
+///
+/// The walk carries three step kinds rather than bare nodes so a
+/// generic function type's own type parameters can mask their subtree:
+/// the frame is pushed when the function node is reached and popped by
+/// its own [`NameStep::ExitBinders`] marker, which — LIFO — pops after
+/// every node of that subtree and before any sibling.
+enum NameStep<'a> {
+    /// One type node to visit.
+    Node(&'a TypeExpr),
+    /// One object member to visit. Members ride the work stack instead
+    /// of being expanded in a loop, because a method / call signature
+    /// opens a binder frame that must close before the NEXT member is
+    /// visited.
+    Member(&'a ObjectMember),
+    /// Close the innermost binder frame.
+    ExitBinders,
+}
+
+/// Whether `name` is masked by an ACTIVE binder frame — the answer's own
+/// type parameter rather than a reference into the lowering scope.
+fn binder_masks(binders: &[Vec<&str>], name: &str) -> bool {
+    binders.iter().any(|frame| frame.contains(&name))
+}
+
+/// Record one named type reference, split into its head plus the
+/// qualified bit, unless an active binder frame owns the head.
+fn push_type_reference(out: &mut ReferencedNames, binders: &[Vec<&str>], name: &str) {
+    let (head, qualified) = match name.split_once('.') {
+        Some((head, _)) => (head, true),
+        None => (name, false),
+    };
+    if binder_masks(binders, head) {
+        return;
+    }
+    out.type_names.push(ReferencedTypeName {
+        head: head.to_string(),
+        qualified,
+    });
+}
+
+/// Collect every referenced name of `ty` (see [`ReferencedNames`]).
+///
+/// Depth-safe: the traversal runs on an explicit heap work-stack, never
+/// the call stack, exactly like the iterative `Drop` / `Hash` above —
+/// binder enter/exit included.
+#[must_use]
+pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
+    let mut out = ReferencedNames::default();
+    let mut stack: Vec<NameStep<'_>> = vec![NameStep::Node(ty)];
+    // The active binder frames, outermost first. A generic function
+    // type's `<T>` binds `T` throughout its own signature; a consumer
+    // asking "does the lowering scope bind any name this answer
+    // references" must never be handed that `T`.
+    let mut binders: Vec<Vec<&str>> = Vec::new();
+    while let Some(step) = stack.pop() {
+        let node = match step {
+            NameStep::ExitBinders => {
+                binders.pop();
+                continue;
+            }
+            NameStep::Member(member) => {
+                push_object_member_children(member, &mut stack, &mut binders);
+                continue;
+            }
+            NameStep::Node(node) => node,
+        };
+        match node {
+            TypeExpr::TypeOf(value_ref) => {
+                if let Some(root) = value_ref.path.first() {
+                    out.value_roots.push(root.clone());
+                }
+                for arg in &value_ref.type_args {
+                    stack.push(NameStep::Node(arg));
+                }
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                push_type_reference(&mut out, &binders, name.as_ref());
+                for arg in type_arguments.iter() {
+                    stack.push(NameStep::Node(arg));
+                }
+            }
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => {
+                push_type_reference(&mut out, &binders, name.as_ref());
+                for arg in type_arguments.iter() {
+                    stack.push(NameStep::Node(arg));
+                }
+                for frame in conditional_context.iter() {
+                    stack.push(NameStep::Node(&frame.check));
+                    stack.push(NameStep::Node(&frame.extends));
+                }
+            }
+            TypeExpr::TypeParameter(tp) => {
+                // A type-parameter carrier's name is never dotted.
+                push_type_reference(&mut out, &binders, tp.name.as_str());
+                push_type_param_children(tp, &mut stack);
+            }
+            TypeExpr::ImportType {
+                type_arguments,
+                specifier: _,
+                qualifier: _,
+                typeof_query: _,
+            } => {
+                // An import type names a MODULE, never a binding in the
+                // lowering scope, so neither the specifier nor the
+                // qualifier is a scope-resolved name.
+                for arg in type_arguments.iter() {
+                    stack.push(NameStep::Node(arg));
+                }
+            }
+            TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                for member in members.iter() {
+                    stack.push(NameStep::Node(member));
+                }
+            }
+            TypeExpr::Array { element, .. } => stack.push(NameStep::Node(element)),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    stack.push(NameStep::Node(&element.ty));
+                }
+            }
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    stack.push(NameStep::Member(member));
+                }
+            }
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+                push_function_children(func, &mut stack, &mut binders);
+            }
+            TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+                stack.push(NameStep::Node(inner));
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                stack.push(NameStep::Node(object));
+                stack.push(NameStep::Node(index));
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                stack.push(NameStep::Node(check));
+                stack.push(NameStep::Node(extends));
+                stack.push(NameStep::Node(true_type));
+                stack.push(NameStep::Node(false_type));
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                parameter: _,
+                optional: _,
+                readonly: _,
+            } => {
+                stack.push(NameStep::Node(source));
+                stack.push(NameStep::Node(value));
+                if let Some(name_type) = name_type {
+                    stack.push(NameStep::Node(name_type));
+                }
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for expression in expressions.iter() {
+                    stack.push(NameStep::Node(expression));
+                }
+            }
+            // Leaves: no name, no recursive child.
+            TypeExpr::Primitive(name) => {
+                out.embeds_any |= *name == PrimitiveName::Any;
+            }
+            TypeExpr::Literal(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::SyntheticSlotBinding(_)
+            | TypeExpr::Unknown(_) => {}
+        }
+    }
+    out
+}
+
+fn push_type_param_children<'a>(tp: &'a TypeParam, stack: &mut Vec<NameStep<'a>>) {
+    if let Some(constraint) = tp.constraint.as_deref() {
+        stack.push(NameStep::Node(constraint));
+    }
+    if let Some(default) = tp.default.as_deref() {
+        stack.push(NameStep::Node(default));
+    }
+}
+
+/// Push one function-like signature's children, opening a binder frame
+/// for its OWN type parameters first so every node of the signature —
+/// parameters, return type, and the sibling type parameters' own
+/// constraints / defaults — sees them masked.
+fn push_function_children<'a>(
+    func: &'a FunctionExpr,
+    stack: &mut Vec<NameStep<'a>>,
+    binders: &mut Vec<Vec<&'a str>>,
+) {
+    if !func.type_parameters.is_empty() {
+        binders.push(
+            func.type_parameters
+                .iter()
+                .map(|tp| tp.name.as_str())
+                .collect(),
+        );
+        stack.push(NameStep::ExitBinders);
+    }
+    for param in &func.parameters {
+        stack.push(NameStep::Node(&param.ty));
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        stack.push(NameStep::Node(return_type));
+    }
+    for tp in &func.type_parameters {
+        push_type_param_children(tp, stack);
+    }
+}
+
+fn push_object_member_children<'a>(
+    member: &'a ObjectMember,
+    stack: &mut Vec<NameStep<'a>>,
+    binders: &mut Vec<Vec<&'a str>>,
+) {
+    match member {
+        ObjectMember::Property(property) => {
+            push_property_key_children(&property.key, stack);
+            stack.push(NameStep::Node(&property.ty));
+        }
+        ObjectMember::IndexSignature(signature) => {
+            stack.push(NameStep::Node(&signature.key_type));
+            stack.push(NameStep::Node(&signature.value_type));
+        }
+        ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+            push_function_children(func, stack, binders);
+        }
+        ObjectMember::Method(method) => {
+            // The key is pushed FIRST so it pops AFTER the signature's
+            // `ExitBinders`: a method's own type parameters are not in
+            // scope in its computed key.
+            push_property_key_children(&method.key, stack);
+            push_function_children(&method.function, stack, binders);
+        }
+        ObjectMember::Spread(spread) => stack.push(NameStep::Node(&spread.ty)),
+    }
+}
+
+fn push_property_key_children<'a>(key: &'a TypeAuthoredPropertyKey, stack: &mut Vec<NameStep<'a>>) {
+    match key {
+        AuthoredPropertyKey::Computed(child) => stack.push(NameStep::Node(child)),
+        AuthoredPropertyKey::String(_)
+        | AuthoredPropertyKey::Number(_)
+        | AuthoredPropertyKey::UniqueSymbol(_) => {}
     }
 }

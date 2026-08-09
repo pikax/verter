@@ -682,7 +682,7 @@ fn enum_members_emit_header_member_presence_facts() {
     for variant in ["Red", "Green", "Blue"] {
         let key = FactKey::MemberPresence {
             exporter: crate::file_artifact_store::InternedName::from("Color"),
-            name: crate::file_artifact_store::InternedName::from(variant),
+            name: verter_type_expr::facts::FactPropertyKey::identifier(variant),
             space: SymbolSpace::Value,
         };
         assert!(
@@ -693,8 +693,8 @@ fn enum_members_emit_header_member_presence_facts() {
 
     // The presence hash must be variant-discriminating: a different
     // variant name produces a different hash on the same enum.
-    let red = crate::file_artifact_store::InternedName::from("Red");
-    let green = crate::file_artifact_store::InternedName::from("Green");
+    let red = verter_type_expr::facts::FactPropertyKey::identifier("Red");
+    let green = verter_type_expr::facts::FactPropertyKey::identifier("Green");
     let red_fact = emission
         .facts
         .lookup(&FactKey::MemberPresence {
@@ -827,7 +827,7 @@ fn merged_enum_emits_member_facts_for_every_declaration() {
     for variant in ["Red", "Green", "Blue"] {
         let key = FactKey::MemberPresence {
             exporter: crate::file_artifact_store::InternedName::from("Color"),
-            name: crate::file_artifact_store::InternedName::from(variant),
+            name: verter_type_expr::facts::FactPropertyKey::identifier(variant),
             space: SymbolSpace::Value,
         };
         assert!(

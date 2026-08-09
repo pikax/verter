@@ -90,7 +90,7 @@ fn public_member_names(host: &VerterHost, canonical_id: &str) -> Vec<String> {
     let mut names: Vec<String> = surface
         .members
         .iter()
-        .map(|m| m.name.as_ref().to_string())
+        .map(|m| m.string_name().expect("string-key fixture").to_string())
         .collect();
     names.sort();
     names
@@ -136,9 +136,9 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
-                .members
+                .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref().to_string())
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
                 .collect();
             names.sort();
             names
@@ -190,9 +190,9 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
-                .members
+                .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref().to_string())
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
                 .collect();
             names.sort();
             Some(names)
@@ -241,7 +241,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
     };
     let segments: Arc<[PathSegment]> = path
         .iter()
-        .map(|s| PathSegment::Member(Arc::from(*s)))
+        .map(|s| PathSegment::Member(crate::semantic_query::PropertyKey::identifier(*s)))
         .collect::<Vec<_>>()
         .into();
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -316,6 +316,9 @@ fn typeof_default_construct_return_node(
                 canonical_id: Arc::from(canonical_id),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::instance(0),
+                ),
             },
             name: Arc::from("default"),
         },
@@ -342,7 +345,7 @@ fn typeof_default_construct_return_node(
         "the synthesized .vue default's typeof carries exactly one construct signature"
     );
     let ctor_fn = view.construct_signatures[0];
-    let SemanticNodeData::Function { return_type, .. } = graph
+    let SemanticNodeData::Signature { return_type, .. } = graph
         .node_data(ctor_fn)
         .as_deref()
         .cloned()
@@ -460,7 +463,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
         !matches!(
             crate::project_semantic_dispatch::node_data_for(&host_ctx, node).as_deref(),
             Some(SemanticNodeData::Object(view))
-                if view.members.iter().any(|member| member.name.as_ref() == "$props")
+                if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "$props")
         ),
         "a Module(0) slot must not reuse the Instance(0) synthesized default body"
     );
@@ -766,7 +769,9 @@ defineProps<{ peer: InstanceType<typeof A>; b: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "$props" =>
+            {
                 Some(&prop.ty)
             }
             _ => None,
@@ -779,7 +784,11 @@ defineProps<{ peer: InstanceType<typeof A>; b: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "a" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .expect("A.$props.a must exist");
@@ -792,7 +801,11 @@ defineProps<{ peer: InstanceType<typeof A>; b: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "peer" => Some(&prop.ty),
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "peer" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .expect("A.$props.peer must exist");
@@ -881,7 +894,9 @@ defineProps<{ peer: E; f: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "$props" =>
+            {
                 Some(&prop.ty)
             }
             _ => None,
@@ -896,7 +911,11 @@ defineProps<{ peer: E; f: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "e" => Some(&prop.ty),
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "e" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .expect("E.$props.e must exist");
@@ -906,7 +925,11 @@ defineProps<{ peer: E; f: string }>();
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "peer" => Some(&prop.ty),
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "peer" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .expect("E.$props.peer must exist");
@@ -1028,7 +1051,9 @@ fn instance_type_self_cycle_resolves_shallow_instance() {
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "$props" =>
+            {
                 Some(&prop.ty)
             }
             _ => None,
@@ -1041,7 +1066,9 @@ fn instance_type_self_cycle_resolves_shallow_instance() {
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "marker" => {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "marker" =>
+            {
                 Some(&prop.ty)
             }
             _ => None,
@@ -1056,7 +1083,11 @@ fn instance_type_self_cycle_resolves_shallow_instance() {
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "self" => Some(&prop.ty),
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "self" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .expect("Self.$props.self must exist");

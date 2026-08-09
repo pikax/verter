@@ -120,7 +120,7 @@ fn mapped_modifier_plus_optional_marks_every_member_optional() {
 fn mapped_modifier_minus_optional_strips_optional_and_undefined() {}
 
 #[test]
-fn mapped_minus_optional_strips_only_optional_origin_undefined() {
+pub(crate) fn mapped_minus_optional_strips_only_optional_origin_undefined() {
     // Block guard (U2.MAPPED_TEMPLATE): `-?` over an OPTIONAL-origin property
     // (`a?: string`) clears the flag and yields the BARE value type. The
     // optional-origin `undefined` is represented by the flag, never injected
@@ -150,7 +150,7 @@ fn mapped_minus_optional_strips_only_optional_origin_undefined() {
 }
 
 #[test]
-fn mapped_minus_optional_preserves_explicit_undefined_on_required_property() {
+pub(crate) fn mapped_minus_optional_preserves_explicit_undefined_on_required_property() {
     // Block guard (U2.MAPPED_TEMPLATE): `-?` over a REQUIRED property whose
     // `| undefined` is EXPLICIT in the declared type preserves it. Real TS:
     // `Required<{ a: string | undefined }>` = `{ a: string | undefined }` —

@@ -51,6 +51,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             canonical_id: Arc::from("/diamond.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("AB"),
     });
@@ -66,8 +69,12 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("left")),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("a"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("left"),
+                )),
             ]
             .into_boxed_slice(),
         ),
@@ -94,8 +101,12 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("right")),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("b"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("right"),
+                )),
             ]
             .into_boxed_slice(),
         ),
@@ -164,8 +175,12 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("left")),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("a"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("left"),
+                )),
             ]
             .into_boxed_slice(),
         ),

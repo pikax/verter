@@ -24,7 +24,7 @@ use super::core::{DeclLookup, PolicyCtx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ProofPathStep {
-    ObjectMember(u32, std::sync::Arc<str>),
+    ObjectMember(u32, crate::semantic_query::AuthoredPropertyKey),
     ObjectCall(u32),
     ObjectConstruct(u32),
     ObjectIndexKey(u32),
@@ -55,7 +55,7 @@ enum ProofPathStep {
     FunctionTypeParamDefault(u32),
     ReferenceArgument(u32),
     MergedContributor(u32),
-    ConstructorSignature,
+    ObjectSpreadEffect(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,14 +188,11 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                 stack.push(ProofWalkFrame::Enter(*target, path));
             }
             SemanticNodeData::Object(surface) => {
-                for (index, member) in surface.members.iter().enumerate() {
+                for (index, member) in surface.positive_members().iter().enumerate() {
                     push_proof_child(
                         &mut stack,
                         &path,
-                        ProofPathStep::ObjectMember(
-                            index as u32,
-                            std::sync::Arc::clone(&member.name),
-                        ),
+                        ProofPathStep::ObjectMember(index as u32, member.key.clone()),
                         member.value,
                     );
                 }
@@ -281,7 +278,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 push_proof_child(&mut stack, &path, ProofPathStep::IndexedObject, *object);
-                if let IndexKey::TypeNode(index) = index {
+                if let IndexKey::Computed(index) = index {
                     push_proof_child(&mut stack, &path, ProofPathStep::IndexedIndex, *index);
                 }
             }
@@ -341,7 +338,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                     *false_branch_ref,
                 );
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -400,19 +397,25 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                     );
                 }
             }
-            SemanticNodeData::ConstructorType { signature } => {
-                push_proof_child(
-                    &mut stack,
-                    &path,
-                    ProofPathStep::ConstructorSignature,
-                    *signature,
-                );
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                for (index, child) in program.child_nodes().enumerate() {
+                    push_proof_child(
+                        &mut stack,
+                        &path,
+                        ProofPathStep::ObjectSpreadEffect(index as u32),
+                        child,
+                    );
+                }
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::RawFallback { .. }
+            // A sealed callable carrier records no reference identity and
+            // opens only to its two sanctioned consumers — terminal here.
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => {}
         }
     }
@@ -487,20 +490,24 @@ fn normalized_projection_shape_equivalent(
 
         match (left_data.as_ref(), right_data.as_ref()) {
             (SemanticNodeData::Object(left), SemanticNodeData::Object(right)) => {
-                if left.members.len() != right.members.len()
+                if left.positive_members().len() != right.positive_members().len()
                     || left.call_signatures.len() != right.call_signatures.len()
                     || left.construct_signatures.len() != right.construct_signatures.len()
                     || left.index_signatures.len() != right.index_signatures.len()
-                    || left.has_index_signature != right.has_index_signature
+                    || left.has_known_index_signature() != right.has_known_index_signature()
                     || !push_optional_proof_pair(&mut stack, left.keyspace, right.keyspace)
                 {
                     return Some(false);
                 }
-                for (left, right) in left.members.iter().zip(right.members.iter()) {
-                    if left.name != right.name
+                for (left, right) in left
+                    .positive_members()
+                    .iter()
+                    .zip(right.positive_members().iter())
+                {
+                    if left.key != right.key
                         || left.optional != right.optional
                         || left.readonly != right.readonly
-                        || left.is_method != right.is_method
+                        || left.method_kind != right.method_kind
                         || left.visibility != right.visibility
                     {
                         return Some(false);
@@ -629,7 +636,7 @@ fn normalized_projection_shape_equivalent(
                 match (left_index, right_index) {
                     (IndexKey::String(left), IndexKey::String(right)) if left == right => {}
                     (IndexKey::Number(left), IndexKey::Number(right)) if left == right => {}
-                    (IndexKey::TypeNode(left), IndexKey::TypeNode(right)) => {
+                    (IndexKey::Computed(left), IndexKey::Computed(right)) => {
                         stack.push((*left, *right));
                     }
                     _ => return Some(false),
@@ -699,8 +706,17 @@ fn normalized_projection_shape_equivalent(
                     return Some(false);
                 }
             }
-            (SemanticNodeData::Infer { name: left }, SemanticNodeData::Infer { name: right }) => {
-                if left != right {
+            (
+                SemanticNodeData::Infer {
+                    name: left_name,
+                    binder: left_binder,
+                },
+                SemanticNodeData::Infer {
+                    name: right_name,
+                    binder: right_binder,
+                },
+            ) => {
+                if left_name != right_name || left_binder != right_binder {
                     return Some(false);
                 }
             }
@@ -729,20 +745,23 @@ fn normalized_projection_shape_equivalent(
                 stack.push((*left_false, *right_false));
             }
             (
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
+                    kind: left_kind,
                     params: left_params,
                     return_type: left_return,
                     type_parameters: left_type_parameters,
                     ..
                 },
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
+                    kind: right_kind,
                     params: right_params,
                     return_type: right_return,
                     type_parameters: right_type_parameters,
                     ..
                 },
             ) => {
-                if left_params.len() != right_params.len()
+                if left_kind != right_kind
+                    || left_params.len() != right_params.len()
                     || left_type_parameters.len() != right_type_parameters.len()
                 {
                     return Some(false);
@@ -833,17 +852,13 @@ fn normalized_projection_shape_equivalent(
                 stack.extend(left_args.iter().copied().zip(right_args.iter().copied()));
             }
             (
-                SemanticNodeData::RawFallback { raw: left },
-                SemanticNodeData::RawFallback { raw: right },
+                SemanticNodeData::RawFallback { value: left },
+                SemanticNodeData::RawFallback { value: right },
             ) => {
                 if left != right {
                     return Some(false);
                 }
             }
-            (
-                SemanticNodeData::ConstructorType { signature: left },
-                SemanticNodeData::ConstructorType { signature: right },
-            ) => stack.push((*left, *right)),
             (
                 SemanticNodeData::SyntheticBinding {
                     id: left_id,
@@ -855,6 +870,31 @@ fn normalized_projection_shape_equivalent(
                 },
             ) => {
                 if left_id != right_id || left_value != right_value {
+                    return Some(false);
+                }
+            }
+            (
+                SemanticNodeData::ObjectSpreadProgram(left),
+                SemanticNodeData::ObjectSpreadProgram(right),
+            ) => {
+                let left_children: Vec<_> = left.child_nodes().collect();
+                let right_children: Vec<_> = right.child_nodes().collect();
+                if left_children.len() != right_children.len() {
+                    return Some(false);
+                }
+                stack.extend(left_children.into_iter().zip(right_children));
+            }
+            (
+                SemanticNodeData::InferRef {
+                    name: left_name,
+                    binder: left_binder,
+                },
+                SemanticNodeData::InferRef {
+                    name: right_name,
+                    binder: right_binder,
+                },
+            ) => {
+                if left_name != right_name || left_binder != right_binder {
                     return Some(false);
                 }
             }
@@ -1035,7 +1075,7 @@ fn collect_macro_participating_refs(
             }
             Some(SemanticNodeData::IndexedAccess { object, index }) => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }
@@ -1120,9 +1160,9 @@ fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx
     };
     let property_value = match ctx.node_data(body_hot.node()).as_deref() {
         Some(SemanticNodeData::Object(surface)) => surface
-            .members
+            .positive_members()
             .iter()
-            .find(|candidate| candidate.name.as_ref() == member)
+            .find(|candidate| candidate.key.as_string() == Some(member.as_str()))
             .map(|candidate| candidate.value),
         _ => None,
     };
@@ -1175,12 +1215,12 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }
             SemanticNodeData::Object(surface) => {
-                worklist.extend(surface.members.iter().map(|member| member.value));
+                worklist.extend(surface.positive_members().iter().map(|member| member.value));
                 worklist.extend(surface.call_signatures.iter().copied());
                 worklist.extend(surface.construct_signatures.iter().copied());
                 for signature in surface.index_signatures.iter() {
@@ -1188,7 +1228,7 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                     worklist.push(signature.value_type);
                 }
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -1196,7 +1236,6 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                 worklist.extend(params.iter().map(|param| param.ty));
                 worklist.push(*return_type);
             }
-            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
             SemanticNodeData::Conditional {
                 check,
                 extends,

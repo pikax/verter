@@ -17,10 +17,6 @@ use verter_type_expr::TypeExpr;
 use super::route_admission::{
     admit_expanded_surface, admit_expanded_surface_changed, AdmittedRouteProjectionNode,
 };
-use super::{
-    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
-    SEMANTIC_SURFACE_MEMBER,
-};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
@@ -309,10 +305,7 @@ pub(super) fn compound_root_surface_view_via_dispatch(
 /// signature carries nothing to publish (never a COMPLETE compound-root
 /// projection). Node-domain — no materialisation feeds this decision.
 pub(super) fn surface_view_is_empty(surface: &SurfaceView) -> bool {
-    surface.members.is_empty()
-        && surface.call_signatures.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
+    surface.closed().is_empty()
 }
 
 #[cfg_attr(
@@ -325,17 +318,11 @@ pub(super) fn surface_view_is_empty(surface: &SurfaceView) -> bool {
 )]
 pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     match expr {
-        TypeExpr::Unknown { raw } => {
-            // Every sentinel emitted by the `shape_engine::fold_node`
-            // materialisation algebra (exact matches) or by
-            // `semantic_query_error_raw` (prefix matches for parameterised
-            // errors) must round-trip to
-            // "not materialised". The sentinel set
-            // is owned by the shared `raise_sentinel` classifier so the
-            // node-domain raised-shape projection and this `TypeExpr`
-            // recogniser can never disagree on the spelling.
-            !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw)
-        }
+        // A genuine `UnknownValue` is ALWAYS materialised — there is no
+        // raw sentinel classification anywhere. Degradation reaches the
+        // node domain as a typed `QueryError` (classified there), and the
+        // compat tree's projection leaves are inert text to this oracle.
+        TypeExpr::Unknown(_) => true,
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().all(dispatch_route_expr_is_materialized)
         }
@@ -349,6 +336,9 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
         TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
             verter_type_expr::ObjectMember::Property(property) => {
                 dispatch_route_expr_is_materialized(&property.ty)
+            }
+            verter_type_expr::ObjectMember::Spread(spread) => {
+                dispatch_route_expr_is_materialized(&spread.ty)
             }
             verter_type_expr::ObjectMember::Method(method) => {
                 method
@@ -472,8 +462,9 @@ pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
 ///
 /// Production reads the node-domain root-sentinel fact
 /// (`node_root_is_unmaterialized_sentinel_with_dispatch`); this `TypeExpr`
-/// predicate survives ONLY as the `#[cfg(test)]` parity oracle the raised-shape
-/// suite compares that node fact against.
+/// predicate survives ONLY as the `#[cfg(test)]` INERT-DISAGREEMENT WITNESS the
+/// split-parity suite pins as always-false (the compat tree carries no
+/// classification — the typed sidecar is the only channel).
 #[cfg(test)]
 pub(crate) fn type_expr_root_is_unmaterialized_sentinel(expr: &TypeExpr) -> bool {
     let mut current = expr;
@@ -481,20 +472,9 @@ pub(crate) fn type_expr_root_is_unmaterialized_sentinel(expr: &TypeExpr) -> bool
         current = inner;
     }
     match current {
-        TypeExpr::Unknown { .. } => !dispatch_route_expr_is_materialized(current),
+        TypeExpr::Unknown(_) => !dispatch_route_expr_is_materialized(current),
         _ => false,
     }
-}
-
-/// Returns `true` when `expr` is the budget-exceeded sentinel
-/// (`TypeExpr::Unknown { raw }` whose `raw` starts with
-/// [`BUDGET_EXCEEDED_SENTINEL_PREFIX`]). This is the single shared
-/// recognizer for the spelling `semantic_query_error_raw` emits for
-/// `QueryError::BudgetExceeded` — production routing and every test that
-/// scans a published surface for a leaked budget sentinel call this so
-/// the spelling can never drift between producer and detector.
-pub(crate) fn type_expr_is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
-    matches!(expr, TypeExpr::Unknown { raw } if raw.starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX))
 }
 
 /// Returns `true` when `expr` still carries open deferred shell shapes
@@ -527,29 +507,49 @@ pub(crate) fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
     }
 }
 
+/// The terminal compatibility projection of a typed [`QueryError`] — the
+/// inert `Unknown` spelling the compat tree carries. Every spelling/prefix is
+/// built from the owned consts in
+/// [`crate::semantic_query::compat_spelling`] (the single family home), so
+/// producer and detector can never fork a spelling.
 pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
+    use crate::semantic_query::compat_spelling as spell;
     match err {
-        QueryError::Miss => SEMANTIC_MISS.to_string(),
+        QueryError::Miss => spell::SEMANTIC_MISS.to_string(),
         QueryError::Other(text) => text.as_ref().to_string(),
-        QueryError::UnsupportedIntrinsic { name } => format!("unsupportedIntrinsic({name})"),
-        QueryError::BudgetExceeded(failure) => format!("budgetExceeded({:?})", failure.domain),
-        QueryError::Cancelled => "cancelled".to_string(),
-        QueryError::UnstableState { attempts } => format!("unstableState({attempts})"),
-        QueryError::AliasCycle { chain } => format!("aliasCycle({})", chain.len()),
-        QueryError::RecursiveRef { name } => format!("recursiveRef({name})"),
-        QueryError::DeclPlaceholder { name, .. } => format!("declPlaceholder({name})"),
-        QueryError::ValueDomainMismatch { expected, actual } => {
-            format!("valueDomainMismatch(expected={expected:?},actual={actual:?})")
+        QueryError::UnsupportedIntrinsic { name } => {
+            format!("{}{name})", spell::UNSUPPORTED_INTRINSIC_PREFIX)
         }
-        // Typed semantic-sentinel carriers → BYTE-IDENTICAL legacy raw
-        // strings. A future stage that swaps a raw `Unknown { raw: "X" }`
-        // construction for `Opaque(QueryError::…)` must raise to the same
-        // text, so these mappings are pinned by
-        // `typed_query_error_sentinels_round_trip_to_legacy_raw`.
-        QueryError::RaiseAliasCycle => "semanticAliasCycle".to_string(),
-        QueryError::TypeParamCycle => "semanticTypeParamCycle".to_string(),
-        QueryError::RaiseMiss => "<raise miss>".to_string(),
-        QueryError::UnrepresentableSurface => SEMANTIC_OBJECT_SURFACE.to_string(),
-        QueryError::UnrepresentableSurfaceMember => SEMANTIC_SURFACE_MEMBER.to_string(),
+        QueryError::BudgetExceeded(failure) => {
+            format!(
+                "{}{:?})",
+                spell::BUDGET_EXCEEDED_SENTINEL_PREFIX,
+                failure.domain
+            )
+        }
+        QueryError::Cancelled => spell::CANCELLED.to_string(),
+        QueryError::UnstableState { attempts } => {
+            format!("{}{attempts})", spell::UNSTABLE_STATE_PREFIX)
+        }
+        QueryError::AliasCycle { chain } => {
+            format!("{}{})", spell::ALIAS_CYCLE_PREFIX, chain.len())
+        }
+        QueryError::RecursiveRef { name } => format!("{}{name})", spell::RECURSIVE_REF_PREFIX),
+        QueryError::DeclPlaceholder { name, .. } => {
+            format!("{}{name})", spell::DECL_PLACEHOLDER_PREFIX)
+        }
+        QueryError::ValueDomainMismatch { expected, actual } => {
+            format!(
+                "{}expected={expected:?},actual={actual:?})",
+                spell::VALUE_DOMAIN_MISMATCH_PREFIX
+            )
+        }
+        QueryError::RaiseAliasCycle => spell::SEMANTIC_ALIAS_CYCLE.to_string(),
+        QueryError::TypeParamCycle => spell::SEMANTIC_TYPE_PARAM_CYCLE.to_string(),
+        QueryError::RaiseMiss => spell::RAISE_MISS.to_string(),
+        QueryError::UnrepresentableSurface => spell::SEMANTIC_OBJECT_SURFACE.to_string(),
+        QueryError::UnrepresentableSurfaceMember => spell::SEMANTIC_SURFACE_MEMBER.to_string(),
+        QueryError::OpenSurface => spell::OPEN_SURFACE.to_string(),
+        QueryError::UnmodeledPosition => spell::UNMODELED_POSITION.to_string(),
     }
 }

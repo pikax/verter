@@ -12,6 +12,21 @@ pub use verter_language::FileLanguage;
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
 
+/// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
+/// The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on
+/// per-request hot paths (e.g. the `ensure_indexed_ready_fast_hit` trace,
+/// emitted once per warm cache serve) that inflated encoding dominates the
+/// serialized audit footprint. Hex carries the same 16-byte identity
+/// losslessly in exactly 32 chars.
+pub(crate) fn format_hash16_hex(hash: &Hash16) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in hash {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// Content identity of the EXACT source bytes an analysis observed.
 ///
 /// Pairs a [`FileAnalysisSnapshot`] with the buffer its spans and edit anchors
@@ -3665,16 +3680,12 @@ pub struct MetaProvenance {
     //   were therefore NOT admitted to the warm cache (caller
     //   cold-recomputes on next request).
     //
-    // Caches: `MaterializeStructureDb`, `RefCycleResultDb`,
+    // Caches: `MaterializeStructureDb`,
     // `MemoEntry`, `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`.
     /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
     pub materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
     pub materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` wrap count for `RefCycleResultDb`.
-    pub ref_cycle_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for `RefCycleResultDb`.
-    pub ref_cycle_overflow_refusals: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` wrap count for `MemoEntry` (semantic
     /// query memo cold builds).
     pub memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64,
@@ -3773,8 +3784,6 @@ impl Default for MetaProvenance {
             }),
             materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
-            ref_cycle_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
-            ref_cycle_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             memo_entry_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
@@ -4045,8 +4054,6 @@ impl MetaProvenance {
             materialize_structure_overflow_refusals: self
                 .materialize_structure_overflow_refusals
                 .load(Relaxed),
-            ref_cycle_fact_tracer_installs: self.ref_cycle_fact_tracer_installs.load(Relaxed),
-            ref_cycle_overflow_refusals: self.ref_cycle_overflow_refusals.load(Relaxed),
             memo_entry_fact_tracer_installs: self.memo_entry_fact_tracer_installs.load(Relaxed),
             memo_entry_overflow_refusals: self.memo_entry_overflow_refusals.load(Relaxed),
             app_config_proof_fact_tracer_installs: self
@@ -4143,8 +4150,6 @@ impl MetaProvenance {
             .store(0, Relaxed);
         self.materialize_structure_overflow_refusals
             .store(0, Relaxed);
-        self.ref_cycle_fact_tracer_installs.store(0, Relaxed);
-        self.ref_cycle_overflow_refusals.store(0, Relaxed);
         self.memo_entry_fact_tracer_installs.store(0, Relaxed);
         self.memo_entry_overflow_refusals.store(0, Relaxed);
         self.app_config_proof_fact_tracer_installs.store(0, Relaxed);
@@ -4285,10 +4290,6 @@ pub struct MetaProvenanceSnapshot {
     pub materialize_structure_fact_tracer_installs: u64,
     /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
     pub materialize_structure_overflow_refusals: u64,
-    /// `install_fact_tracer` wrap count for `RefCycleResultDb`.
-    pub ref_cycle_fact_tracer_installs: u64,
-    /// `install_fact_tracer` overflow-refusal count for `RefCycleResultDb`.
-    pub ref_cycle_overflow_refusals: u64,
     /// `install_fact_tracer` wrap count for `MemoEntry`.
     pub memo_entry_fact_tracer_installs: u64,
     /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.

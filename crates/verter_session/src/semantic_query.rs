@@ -69,12 +69,31 @@ pub mod display;
 /// generator-is-sole-writer contract.
 pub mod query_key_spec;
 
+/// Selector-aware projection facts for authored object-spread programs.
+///
+/// The result is an opaque correlated formula. Exact absence, emptiness,
+/// `keyof`, exhaustive iteration, and closed materialisation are available
+/// only through the module's sealed complete-domain witnesses.
+pub mod object_spread_projection;
+pub use object_spread_projection::{
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
+    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
+    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
+    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
+    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
+    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
+    ProjectionEvidence,
+};
+
 /// The [`IndexKey::Number`] payload domain: the proof-carrying
 /// [`CanonicalIndexInt`] newtype (private field; construction only via
 /// the module's two blessed constructors) plus the canonical ECMA-262
 /// `Number::toString` spelling ([`index_key::js_number_to_string`]) the
 /// admission predicate is defined against.
 pub mod index_key;
+
+/// Canonical syntax identities for authored conditional-`infer` binders.
+pub(crate) mod infer_binder_names;
 
 /// The §18.2 cache-admission decision for an error-tolerant semantic result:
 /// [`admit_decision`](admit::admit_decision) maps a result's
@@ -92,6 +111,20 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
+mod flow_return_result;
+pub use flow_return_result::FlowReturnResult;
+
+/// The ONE owner of the legacy compatibility-spelling family (exact
+/// spellings + parameterised prefixes) and the shared display-family
+/// predicate. Inert text only — typed [`QueryError`] data is the control
+/// channel.
+pub(crate) mod compat_spelling;
+
+/// The sealed index-composed callable carrier: an
+/// [`SemanticNodeData::DeferredCallable`] payload with no return-type slot,
+/// readable only by the `ResolveOverloadSet` / `ResolveCall` consumers.
+pub mod deferred_callable;
+pub use deferred_callable::{DeferredCallable, ResolveCallConsumer, ResolveOverloadSetConsumer};
 pub use index_key::CanonicalIndexInt;
 
 pub use demand::{
@@ -112,6 +145,437 @@ pub type HashValue = Hash16;
 /// for one project generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticNodeId(pub u64);
+
+/// Canonical lexical identity of one conditional-`infer` declaration.
+///
+/// The representation is deliberately opaque. Production identities are
+/// minted only by [`InferBinderFactory`] from a stable authored source plus
+/// the declaration's exact typed child path; callers cannot forge a
+/// demand-order token or a display-name identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InferBinderId(std::sync::Arc<InferBinderIdentity>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InferBinderIdentity {
+    Authored {
+        scope: NodeScopeId,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        declaration_path: infer_binder_names::InferSyntaxPath,
+    },
+    Transient {
+        scope: NodeScopeId,
+        exact_typed_root: std::sync::Arc<[u8]>,
+        declaration_path: infer_binder_names::InferSyntaxPath,
+    },
+    #[cfg(test)]
+    Synthetic(u64),
+}
+
+#[cfg(test)]
+mod object_spread_program_contract_tests {
+    use super::{
+        AuthoredAccessorEffect, AuthoredIndexEffect, AuthoredMethodEffect, AuthoredPropertyEffect,
+        AuthoredPropertyKey, CanonicalIndexInt, DeclIdentity, MacroOwnBodyStamp, MergeRoleStamp,
+        ObjectConstructionEffect, ObjectSpreadProgram, SemanticNodeData, SemanticNodeId,
+    };
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::Arc;
+
+    fn hash_of(value: &SemanticNodeData) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn semantic_node_object_spread_program_preserves_order_and_identity() {
+        let call = SemanticNodeId(11);
+        let spread = SemanticNodeId(22);
+        let construct = SemanticNodeId(33);
+        let program = ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::DirectCall(call),
+                ObjectConstructionEffect::Spread(spread),
+                ObjectConstructionEffect::DirectConstruct(construct),
+            ]),
+        };
+        let node = SemanticNodeData::ObjectSpreadProgram(program.clone());
+        let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::Spread(spread),
+                ObjectConstructionEffect::DirectCall(call),
+                ObjectConstructionEffect::DirectConstruct(construct),
+            ]),
+        });
+
+        assert_ne!(node, reordered);
+        assert_ne!(hash_of(&node), hash_of(&reordered));
+        assert_eq!(
+            program.child_nodes().collect::<Vec<_>>(),
+            vec![call, spread, construct],
+        );
+    }
+
+    #[test]
+    fn object_spread_program_maps_every_typed_effect_child_without_losing_facets() {
+        let metadata = || {
+            (
+                verter_type_expr::MemberVisibility::Private,
+                verter_type_expr::MemberSpans::default(),
+                Some(Arc::<str>::from("/src/object.ts")),
+                MacroOwnBodyStamp::NEUTRAL,
+                MergeRoleStamp::NEUTRAL,
+                verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+            )
+        };
+        let (visibility, spans, declaration_origin, own_body, merge_role, excess_origin) =
+            metadata();
+        let property = AuthoredPropertyEffect {
+            key: AuthoredPropertyKey::Computed(SemanticNodeId(1)),
+            value: SemanticNodeId(2),
+            optional: true,
+            readonly: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let method = AuthoredMethodEffect {
+            key: AuthoredPropertyKey::string("method"),
+            signature: SemanticNodeId(3),
+            optional: true,
+            has_implementation_body: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let accessor = |key, signature| AuthoredAccessorEffect {
+            key,
+            signature,
+            optional: false,
+            has_implementation_body: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let unique_symbol = DeclIdentity::synthetic("symbol");
+        let unique_symbol_identity = verter_type_expr::facts::ValueDeclIdentityPart {
+            canonical_id: Arc::clone(&unique_symbol.canonical_id),
+            owner: unique_symbol.owner,
+            symbol: Arc::clone(&unique_symbol.decl_name),
+            member_path: Arc::from([]),
+        };
+        let program = ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::DirectProperty(property),
+                ObjectConstructionEffect::DirectMethod(method),
+                ObjectConstructionEffect::DirectGet(accessor(
+                    AuthoredPropertyKey::UniqueSymbol(unique_symbol_identity),
+                    SemanticNodeId(4),
+                )),
+                ObjectConstructionEffect::DirectSet(accessor(
+                    AuthoredPropertyKey::Number(CanonicalIndexInt::from_canonical_i64(5).unwrap()),
+                    SemanticNodeId(5),
+                )),
+                ObjectConstructionEffect::DirectIndex(AuthoredIndexEffect {
+                    key_type: SemanticNodeId(6),
+                    value_type: SemanticNodeId(7),
+                    readonly: true,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin,
+                }),
+                ObjectConstructionEffect::DirectCall(SemanticNodeId(8)),
+                ObjectConstructionEffect::DirectConstruct(SemanticNodeId(9)),
+                ObjectConstructionEffect::Spread(SemanticNodeId(10)),
+            ]),
+        };
+
+        assert_eq!(
+            program.child_nodes().collect::<Vec<_>>(),
+            (1..=10).map(SemanticNodeId).collect::<Vec<_>>()
+        );
+        let mapped = program.map_child_nodes(|node| SemanticNodeId(node.0 + 100));
+        assert_eq!(
+            mapped.child_nodes().collect::<Vec<_>>(),
+            (101..=110).map(SemanticNodeId).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            &mapped.effects[0],
+            ObjectConstructionEffect::DirectProperty(effect)
+                if effect.optional
+                    && effect.readonly
+                    && effect.visibility == verter_type_expr::MemberVisibility::Private
+                    && effect.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+        ));
+        assert!(matches!(
+            &mapped.effects[2],
+            ObjectConstructionEffect::DirectGet(effect)
+                if effect.has_implementation_body
+        ));
+        assert!(matches!(
+            &mapped.effects[3],
+            ObjectConstructionEffect::DirectSet(effect)
+                if effect.has_implementation_body
+        ));
+        assert_ne!(
+            hash_of(&SemanticNodeData::ObjectSpreadProgram(program)),
+            hash_of(&SemanticNodeData::ObjectSpreadProgram(mapped)),
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "semantic_query/object_spread_projection_tests.rs"]
+mod object_spread_projection_tests;
+
+/// Per-root authority for authored conditional-`infer` identities.
+///
+/// Authored roots use the content-free body/macro locator as their declaration
+/// anchor. Each binder then appends the exact typed child path of the written
+/// `infer` occurrence. Transient roots (synthetic facts and tests without an
+/// authored locator) retain the exact, domain-tagged `TypeExpr::Hash` event
+/// stream as a separate identity class. Neither class uses traversal counters.
+#[derive(Debug)]
+pub(crate) struct InferBinderFactory {
+    scope: NodeScopeId,
+    root: InferBinderRoot,
+    paths:
+        std::cell::RefCell<std::collections::HashMap<usize, infer_binder_names::InferSyntaxPath>>,
+}
+
+#[derive(Debug)]
+enum InferBinderRoot {
+    Authored(verter_type_expr::locators::AuthoredBodyLocator),
+    Transient(std::sync::Arc<[u8]>),
+}
+
+impl InferBinderFactory {
+    #[must_use]
+    pub(crate) fn new(scope: &NodeScopeId, root: &verter_type_expr::TypeExpr) -> Self {
+        use std::hash::Hash;
+
+        let mut recorder = ExactHashEventRecorder::default();
+        root.hash(&mut recorder);
+        let exact_typed_root = std::sync::Arc::from(recorder.into_bytes().into_boxed_slice());
+        Self::from_root(scope, root, InferBinderRoot::Transient(exact_typed_root))
+    }
+
+    #[must_use]
+    pub(crate) fn for_authored_locator(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        locator: &verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Self {
+        Self::from_root(scope, root, InferBinderRoot::Authored(locator.clone()))
+    }
+
+    #[must_use]
+    pub(crate) fn for_authored_type_arg_locator(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        locator: &verter_type_expr::locators::TypeArgLocator,
+    ) -> Self {
+        let locator = Self::authored_body_locator_for_type_arg(locator);
+        Self::for_authored_locator(scope, root, &locator)
+    }
+
+    #[must_use]
+    pub(crate) fn authored_body_locator_for_type_arg(
+        locator: &verter_type_expr::locators::TypeArgLocator,
+    ) -> verter_type_expr::locators::AuthoredBodyLocator {
+        let mut path = Vec::with_capacity(locator.path.len() + 1);
+        path.extend_from_slice(&locator.path);
+        path.push(verter_type_expr::locators::TypeBodyPathStep::TypeArgument {
+            ordinal: locator.arg_index,
+        });
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: locator.anchor.clone(),
+                path: Arc::from(path.into_boxed_slice()),
+            },
+        )
+    }
+
+    fn from_root(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        identity: InferBinderRoot,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            root: identity,
+            paths: std::cell::RefCell::new(infer_binder_names::index_type_expr_paths(root)),
+        }
+    }
+
+    /// Register a syntax-preserving temporary wrapper at the original
+    /// subtree's exact authored path.
+    pub(crate) fn register_equivalent_subtree(
+        &self,
+        alias: &verter_type_expr::TypeExpr,
+        original: &verter_type_expr::TypeExpr,
+    ) {
+        let original_path = self.path_for_expr(original);
+        infer_binder_names::index_alias_subtree(
+            alias,
+            &original_path,
+            &mut self.paths.borrow_mut(),
+        );
+    }
+
+    #[must_use]
+    pub(crate) fn path_for_expr(
+        &self,
+        expr: &verter_type_expr::TypeExpr,
+    ) -> infer_binder_names::InferSyntaxPath {
+        self.paths
+            .borrow()
+            .get(&(expr as *const verter_type_expr::TypeExpr as usize))
+            .cloned()
+            .expect("infer-bearing subtree was not indexed under its lowering root")
+    }
+
+    #[must_use]
+    pub(crate) fn binder_at(
+        &self,
+        declaration_path: &infer_binder_names::InferSyntaxPath,
+    ) -> InferBinderId {
+        let identity = match &self.root {
+            InferBinderRoot::Authored(locator) => InferBinderIdentity::Authored {
+                scope: self.scope.clone(),
+                locator: locator.clone(),
+                declaration_path: declaration_path.clone(),
+            },
+            InferBinderRoot::Transient(exact_typed_root) => InferBinderIdentity::Transient {
+                scope: self.scope.clone(),
+                exact_typed_root: std::sync::Arc::clone(exact_typed_root),
+                declaration_path: declaration_path.clone(),
+            },
+        };
+        InferBinderId(std::sync::Arc::new(identity))
+    }
+
+    #[must_use]
+    pub(crate) fn binder_for_expr(
+        &self,
+        declaration: &verter_type_expr::TypeExpr,
+    ) -> InferBinderId {
+        self.binder_at(&self.path_for_expr(declaration))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(ordinal: u64) -> InferBinderId {
+        InferBinderId(std::sync::Arc::new(InferBinderIdentity::Synthetic(ordinal)))
+    }
+}
+
+impl InferBinderId {
+    /// Feed the complete opaque identity into a stable semantic fingerprint.
+    ///
+    /// Consumers never inspect or re-encode the private representation; the
+    /// same `Hash` implementation used by graph identity is the authority.
+    pub(crate) fn write_stable_fingerprint(&self, state: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.hash(state);
+    }
+
+    /// Exact domain-tagged hash-event bytes for audit payloads that need a
+    /// self-contained binder fingerprint rather than a caller-owned hasher.
+    #[must_use]
+    pub(crate) fn stable_fingerprint_bytes(&self) -> Vec<u8> {
+        let mut recorder = ExactHashEventRecorder::default();
+        self.write_stable_fingerprint(&mut recorder);
+        recorder.into_bytes()
+    }
+}
+
+/// Recording `Hasher` for an exact typed hash-event stream. Every method is
+/// domain-tagged, so (for example) `write_u16(1)` cannot alias two `write_u8`
+/// events. `finish` is irrelevant because the full stream, not a digest, is
+/// retained as identity.
+#[derive(Default)]
+struct ExactHashEventRecorder {
+    bytes: Vec<u8>,
+}
+
+impl ExactHashEventRecorder {
+    fn event(&mut self, tag: u8, bytes: &[u8]) {
+        self.bytes.push(tag);
+        self.bytes
+            .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::hash::Hasher for ExactHashEventRecorder {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.event(0, bytes);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.event(1, &[value]);
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.event(2, &value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.event(3, &value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.event(4, &value.to_le_bytes());
+    }
+
+    fn write_u128(&mut self, value: u128) {
+        self.event(5, &value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.event(6, &(value as u64).to_le_bytes());
+    }
+
+    fn write_i8(&mut self, value: i8) {
+        self.event(7, &[value as u8]);
+    }
+
+    fn write_i16(&mut self, value: i16) {
+        self.event(8, &value.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, value: i32) {
+        self.event(9, &value.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.event(10, &value.to_le_bytes());
+    }
+
+    fn write_i128(&mut self, value: i128) {
+        self.event(11, &value.to_le_bytes());
+    }
+
+    fn write_isize(&mut self, value: isize) {
+        self.event(12, &(value as i64).to_le_bytes());
+    }
+}
 
 /// Internal session hot handle wrapping a [`SemanticNodeId`] interned in
 /// the `semantic_query_memo` arena.
@@ -218,6 +682,17 @@ pub struct ScopeId {
     /// path (the binder's `EvalEnv.augmentation_scopes`), not through this key —
     /// a `ResolveDecl` always targets the file top-level surface.
     pub local_scope: Option<u32>,
+    /// The stable structural scope id — the query-identity projection of
+    /// the family-A scope tree ([`BinderScopeId`]). A content-free
+    /// resolution-context discriminator (the role generic type-args play
+    /// in `Instantiate`), NOT a content/version hash and NOT a positional
+    /// ordinal: it is cosmetic-edit invariant and does not renumber when a
+    /// sibling scope is inserted above. It NEVER enters
+    /// [`SlotEnvIdentity`](crate::locator_identity::SlotEnvIdentity) or the
+    /// [`DeclarationSlotSeed`]. A file top-level scope carries
+    /// [`BinderScopeId::file_scope`]; a real local scope's id comes from
+    /// the family-A artifact's scope records.
+    pub binder_scope_id: BinderScopeId,
 }
 
 impl ScopeId {
@@ -227,6 +702,119 @@ impl ScopeId {
             canonical_id,
             owner,
             local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        }
+    }
+}
+
+/// The KIND of lexical scope a [`BinderScopeId`] names. Content-free: it
+/// carries the scope's own header (its qualified namespace path / ambient
+/// module specifier), never a span, ordinal, or content/version hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BinderScopeKind {
+    /// A file top-level scope. The owning
+    /// [`TopLevelOwnerId`](verter_type_expr::TopLevelOwnerId) folds into the
+    /// id's structural hash (module vs instance script never alias).
+    File,
+    /// A TS namespace body scope (`namespace NS { … }`), identified by its
+    /// dotted qualified name (`"NS"` / `"NS.Inner"`). Two same-name blocks
+    /// in one owner are ONE scope (TS declaration merging), so they share
+    /// the id by construction.
+    Namespace { qualified_name: Arc<str> },
+    /// A `declare global { … }` augmentation block.
+    AugmentationGlobal,
+    /// A `declare module "<specifier>" { … }` augmentation block,
+    /// identified by the raw authored specifier.
+    AugmentationModule { specifier: Arc<str> },
+}
+
+/// Stable STRUCTURAL lexical-scope id — the query-identity projection of
+/// the family-A scope tree (`binder_identity_facts`). This is the
+/// `binder_scope_id` a context-sensitive query identity carries as a
+/// content-free resolution-context discriminator (the role generic
+/// type-args play in `Instantiate`), NOT a content/version hash and NOT a
+/// positional ordinal.
+///
+/// **Derivation (R6-clean, cosmetic-stable, insertion-non-aliasing).**
+/// `structural_hash` is xxh3-128 over `(scope-kind tag, owner kind +
+/// ordinal, the scope's own header — qualified namespace path / ambient
+/// module specifier / nothing for `File`)`. Positions, spans, and
+/// sibling ORDINALS never enter:
+///
+/// - a whitespace / comment / JSDoc edit leaves every id unchanged (no
+///   byte offset participates);
+/// - inserting a sibling scope ABOVE an existing scope does not renumber
+///   or alias it (no positional counter participates) — unlike the
+///   legacy [`ScopeId::local_scope`] `u32`, which is a positional index
+///   into the lowered local-scope table and is NOT a substitute for this
+///   id.
+///
+/// The id is deliberately JUST the 16-byte structural identity (opaque —
+/// consumers compare whole ids, never the bytes): query-identity keys
+/// stay lean, and the scope-kind payload lives on the family-A
+/// artifact's scope RECORDS, not on the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BinderScopeId {
+    /// Content-derived structural identity (see the type doc).
+    pub structural_hash: HashValue,
+}
+
+impl BinderScopeId {
+    /// Salt keeping binder-scope hashes domain-separated from every
+    /// other `HashValue` consumer (a scope id is never a content hash).
+    const SALT: &'static [u8] = b"verter-binder-scope-id:v1";
+
+    fn derive(tag: u8, owner: verter_type_expr::TopLevelOwnerId, name: &str) -> HashValue {
+        let mut buf: Vec<u8> = Vec::with_capacity(32 + name.len());
+        buf.extend_from_slice(Self::SALT);
+        buf.push(tag);
+        buf.push(match owner.kind() {
+            verter_type_expr::TopLevelOwnerKind::Module => b'M',
+            verter_type_expr::TopLevelOwnerKind::Instance => b'I',
+            verter_type_expr::TopLevelOwnerKind::Frontmatter => b'F',
+        });
+        buf.extend_from_slice(&owner.ordinal().to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        xxhash_rust::xxh3::xxh3_128(&buf).to_le_bytes()
+    }
+
+    /// The file top-level scope id for `owner`.
+    #[must_use]
+    pub fn file_scope(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            structural_hash: Self::derive(b'F', owner, ""),
+        }
+    }
+
+    /// The namespace body scope id for the dotted `qualified_name`
+    /// (`"NS"` / `"NS.Inner"`) declared in `owner`.
+    #[must_use]
+    pub fn namespace_scope(
+        owner: verter_type_expr::TopLevelOwnerId,
+        qualified_name: Arc<str>,
+    ) -> Self {
+        Self {
+            structural_hash: Self::derive(b'N', owner, qualified_name.as_ref()),
+        }
+    }
+
+    /// The `declare global { … }` augmentation scope id for `owner`.
+    #[must_use]
+    pub fn augmentation_global_scope(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            structural_hash: Self::derive(b'G', owner, ""),
+        }
+    }
+
+    /// The `declare module "<specifier>" { … }` augmentation scope id
+    /// for `owner`.
+    #[must_use]
+    pub fn augmentation_module_scope(
+        owner: verter_type_expr::TopLevelOwnerId,
+        specifier: Arc<str>,
+    ) -> Self {
+        Self {
+            structural_hash: Self::derive(b'M', owner, specifier.as_ref()),
         }
     }
 }
@@ -748,6 +1336,790 @@ impl ResolvedDeclSlotIdentity {
             env: self.env,
         }
     }
+
+    /// Project the env-free [`DeclarationSlotSeed`] this slot was
+    /// finalized from — the four content-free identity fields verbatim,
+    /// dropping the sealed env tail. The seed is what the family-A
+    /// `BinderIdentityFacts` artifact stores (an env-invariant,
+    /// parse-stable artifact never carries an env dimension).
+    #[must_use]
+    pub fn seed(&self) -> DeclarationSlotSeed {
+        DeclarationSlotSeed {
+            defining_canonical: Arc::clone(&self.defining_canonical),
+            owner: self.owner,
+            merged_symbol_name: Arc::clone(&self.merged_symbol_name),
+            symbol_space: self.symbol_space,
+        }
+    }
+}
+
+/// The full program identity of one served function position — the
+/// `FlowReturn` family's function axis. Content-free: the declaration
+/// slot is content-free (R7), the part identity is ordinal schema, and
+/// the overload ordinal is the source-order signature ordinal inside an
+/// overload group (explicit even where a locator also carries an
+/// ordinal). The whole-body content hash lives on the
+/// `ProgramAnalysisFactRef::FlowBody` fact rail, never in this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowFunctionSlotIdentity {
+    /// The owning declaration's slot.
+    pub declaration_slot: ResolvedDeclSlotIdentity,
+    /// Which authored position of the declaration this callable occupies.
+    pub function_part: verter_type_expr::facts::FunctionPartIdentity,
+    /// Source-order signature ordinal inside an overload group (the
+    /// trailing implementation is the last ordinal). Zero outside
+    /// overload groups.
+    pub overload_ordinal: u32,
+}
+
+impl FlowFunctionSlotIdentity {
+    /// The env-free program-analysis fact identity of this function —
+    /// the `ProgramAnalysisFactRef::FlowBody` rail is content-free and
+    /// env-free like every fact reference, so the slot's env tail is
+    /// dropped here (validation compares against the env-free live
+    /// `FunctionProgramIndex`).
+    #[must_use]
+    pub fn program_analysis_ref(&self) -> crate::resolver_core::ProgramAnalysisFunctionRef {
+        crate::resolver_core::ProgramAnalysisFunctionRef {
+            canonical_id: Arc::clone(&self.declaration_slot.defining_canonical),
+            owner: self.declaration_slot.owner,
+            merged_symbol_name: Arc::clone(&self.declaration_slot.merged_symbol_name),
+            symbol_space: match self.declaration_slot.symbol_space {
+                SemanticSymbolSpace::Type => verter_semantic::facts::SymbolSpace::Type,
+                SemanticSymbolSpace::Value => verter_semantic::facts::SymbolSpace::Value,
+                SemanticSymbolSpace::Namespace => verter_semantic::facts::SymbolSpace::Namespace,
+            },
+            function_part: self.function_part.clone(),
+            overload_ordinal: self.overload_ordinal,
+        }
+    }
+}
+
+/// A TYPE-ONLY canonical substitution for a `FlowReturn` context:
+/// type-parameter → node bindings, sorted and deduplicated by the bound
+/// parameter node. Locals, value bindings, `this`, and reaching
+/// definitions NEVER enter this map — only type parameters bound by the
+/// demanding instantiation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct CanonicalTypeSubstitution(Arc<[(SemanticNodeId, SemanticNodeId)]>);
+
+impl CanonicalTypeSubstitution {
+    /// The empty substitution.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(Arc::from(Vec::new().into_boxed_slice()))
+    }
+
+    /// Canonicalize `(type_parameter, bound)` pairs: sorted and
+    /// deduplicated by the parameter node (first binding wins).
+    #[must_use]
+    pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
+        bindings.sort_by_key(|(param, _)| param.0);
+        bindings.dedup_by_key(|(param, _)| param.0);
+        Self(Arc::from(bindings.into_boxed_slice()))
+    }
+
+    /// The canonical bindings.
+    #[must_use]
+    pub fn bindings(&self) -> &[(SemanticNodeId, SemanticNodeId)] {
+        &self.0
+    }
+}
+
+/// The behavioral policy axes of a `FlowReturn` query. EMPTY today — the
+/// whole-return producer has no policy fork; the struct exists so a later
+/// policy axis lands as key data, never as an implicit global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FlowReturnPolicy {}
+
+/// Env a [`SemanticQueryKey::FlowReturn`] value depends on: the full
+/// `P R T L J` set (whole-function program analysis is the widest-env
+/// operation in the key surface), the TYPE-ONLY substitution axis, and the
+/// (empty) policy axis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowReturnContext {
+    /// Parse-env dimension (`P`) — the value is a function of the parsed
+    /// body the flow IR lowers.
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`) — symbolic call carriers
+    /// resolve imported callees on this step.
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-identity dimension (`J`).
+    pub project_identity: HashValue,
+    /// The active TYPE-ONLY substitution environment (type-parameter →
+    /// node). Value bindings, locals, and `this` never enter it.
+    pub type_substitution: CanonicalTypeSubstitution,
+    /// The policy axis (no forks today).
+    pub policy: FlowReturnPolicy,
+}
+
+/// The demand axis of a [`FlowReturnKey`]: the flow-typed
+/// `(ProjectionDemand, EvalPolicy)` point over the shared demand lattice
+/// ([`demand::Demand`]). Content-free (R6). The canonical WHOLE-RETURN
+/// point ([`Self::whole_return`]) is the only point production
+/// constructs today; the axis is key data — not an implicit default —
+/// so a narrower projection demand hashes unequal and coexists as a
+/// distinct candidate, and satisfaction/backfill run through the shared
+/// demand-lattice dominance machinery, never a flow-private order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReturnProjectionDemand {
+    /// The demanded `(projection, eval-policy)` point.
+    pub point: demand::Demand,
+}
+
+impl ReturnProjectionDemand {
+    /// The canonical whole-return point: the regime-bottom identity
+    /// demand at the empty projection path (the same modeless point the
+    /// `Single` slot denotes).
+    #[must_use]
+    pub fn whole_return() -> Self {
+        Self {
+            point: demand::Demand::identity(),
+        }
+    }
+
+    /// Whether this is the canonical whole-return point.
+    #[must_use]
+    pub fn is_whole_return(&self) -> bool {
+        *self == Self::whole_return()
+    }
+}
+
+/// The input axis of a [`FlowReturnKey`]: the contextual callback input
+/// signature the demanding call pre-binds. Content-free (R6) — interned
+/// node identities only. The canonical EMPTY point ([`Self::empty`]) is
+/// the only point production constructs today; the axis is key data so
+/// two re-entries differing only in contextual input identity hash
+/// unequal and coexist as distinct candidates (a narrow key would mask
+/// one re-entry's result with the other's sentinel on the obligation
+/// runtime).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FlowInputContext {
+    /// Contextual parameter-type bindings pre-bound by the demanding
+    /// call, in parameter order (empty = no contextual input).
+    pub contextual_parameters: Arc<[SemanticNodeId]>,
+}
+
+impl FlowInputContext {
+    /// The canonical empty input point (no contextual input).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Whether this is the canonical empty input point.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.contextual_parameters.is_empty()
+    }
+}
+
+/// The full identity of one `FlowReturn` demand. Reentry identity on the
+/// obligation runtime IS this key exactly. Content-free: the function
+/// slot is content-free (R7), the whole-body content hash lives on the
+/// `ProgramAnalysisFactRef::FlowBody` fact rail, never in this key.
+/// There is NO content hash, generation, budget, or slice hash. The
+/// demand axis ([`ReturnProjectionDemand`]) and the input axis
+/// ([`FlowInputContext`]) ARE key fields — production passes the
+/// whole-return / empty-input point, and any other point is a distinct
+/// cache and re-entry identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowReturnKey {
+    /// The served function position.
+    pub function: FlowFunctionSlotIdentity,
+    /// Normalized type arguments of the demanding instantiation
+    /// (concatenation order matters).
+    pub normalized_type_args: Arc<[SemanticNodeId]>,
+    /// Env + substitution + policy.
+    pub context: FlowReturnContext,
+    /// The demanded return-projection point (whole-return is the
+    /// canonical production point).
+    pub demand: ReturnProjectionDemand,
+    /// The contextual input point (empty is the canonical production
+    /// point).
+    pub input: FlowInputContext,
+}
+
+/// A typed degradation reason riding a USABLE [`FlowReturnResult`] — the
+/// evaluation completed but substituted `any` for a value it could not
+/// model. NEVER a failure substitute: a no-value outcome is a
+/// [`FlowReturnFailure`], and a degraded success cannot be represented
+/// there (it has a value). First-observed reason wins (deterministic in
+/// source order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnDegradation {
+    /// A call on a binding whose value is neither callable nor `any`
+    /// evaluated to `any`.
+    NonCallableBinding,
+    /// A symbolic call carrier whose callee could not be represented or
+    /// resolved to a signature evaluated to `any`.
+    UnrepresentableCallee,
+    /// A binding whose initializer failed with a typed flow failure was
+    /// observed; the observation evaluated to `any`.
+    FailedBindingInitializer,
+    /// The lowered slice carries a whole-slot write effect targeting a
+    /// parameter or a value-selected slot that the evaluator did not
+    /// apply (write-effect retype application is not implemented): the
+    /// evaluated value may miss the assignment's narrowing, so the
+    /// result fails closed as a degraded success.
+    UnappliedWriteEffect,
+    /// A function-scoped (`var`) binding whose reaching definition was
+    /// recorded inside a conditional arm was OBSERVED after the arms
+    /// rejoin. The function-scoped layer survives the arm restore by
+    /// design (`var` hoists), but the substrate carries no branch-join
+    /// algebra over it, so the surviving value is the last-evaluated
+    /// arm's rather than the join of every arm (and of the
+    /// never-assigned path). The observation fails closed as a degraded
+    /// success; an unobserved conditional `var` degrades nothing.
+    ConditionalVarDefinition,
+    /// An annotated declarator whose DECLARED type is a union could not
+    /// be reduced to the constituents its initializer selects
+    /// (tsc's `getAssignmentReducedType`): the relation authority
+    /// returned no decision for some constituent, or no constituent
+    /// survived. The binding holds the whole declared union — an honest
+    /// SUPERSET of the assigned type, never a guess and never the
+    /// initializer's own (fresh or widened) type — and the result fails
+    /// closed as a degraded success.
+    UnreducedDeclaredUnion,
+    /// The evaluated value REACHES a semantic-miss carrier — a leaf whose
+    /// own resolution answered "not known" (a member read off a
+    /// frame-bound annotated binding, a genuinely unresolvable free name),
+    /// at the top level or nested inside the structure the evaluation
+    /// composed around it.
+    ///
+    /// The carrier is an honest LOCAL answer; it is not a complete
+    /// RESULT. Publishing it warm and clean hands an enclosing
+    /// composition an opaque interior with no partial marker, so the
+    /// value still returns (a consumer that can use a partially-opaque
+    /// answer keeps it) but admission is refused. Derived from the value
+    /// node by [`FlowReturnResult::new`], never recorded per-arm.
+    UnresolvedValue,
+    /// A SUB-EXPRESSION position whose resolver is a named DOWNSTREAM
+    /// block contributed the typed unresolved MARKER, and the enclosing
+    /// structure composed AROUND it.
+    ///
+    /// One reason for the whole class of "this position has no modelled
+    /// value": an unmodelled CALL form (`new f()`, `` tag`...` ``,
+    /// `f?.()`, `await f()`, `(0, f())`, `z = f()`, a leaf answer
+    /// embedding an unreduced `ReturnType<callee>` carrier), and a name
+    /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
+    /// the flow content does not model (a destructuring element, a local
+    /// `class` / `enum` / `namespace` / `import =`, a `catch` parameter, a
+    /// nested function declaration read as a value, a frame-shadowed leaf
+    /// answer the owner scope also answers).
+    ///
+    /// POSITIONAL, never frame-level: an object literal with ONE
+    /// unmodelled member still HAS a value, so every modelled sibling is
+    /// published and only the unmodelled slot carries the marker. The
+    /// result is a DEGRADED SUCCESS — usable, `ReturnOnly`, never warm.
+    /// A fabricated `any` is forbidden here: it is indistinguishable from
+    /// an authored one at every downstream gate.
+    UnmodeledPosition,
+}
+
+/// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
+/// (never admitted, never `never`, never a fabricated miss node).
+///
+/// SCOPED TO OUTCOMES WITH NO VALUE AT ALL. Undecidability of a
+/// SUB-EXPRESSION is POSITIONAL: it stays a typed unresolved marker
+/// inside a degraded success ([`FlowReturnDegradation::UnmodeledPosition`]),
+/// because an object literal with one unmodelled member still HAS a
+/// value. Only undecidability of the RETURN SET ITSELF — an unmodelled
+/// control surface, a missing body, a budget edge, a torn view, an empty
+/// recursive cycle, an unmodelled demand point — is a
+/// `FlowReturnFailure`.
+///
+/// The separation is held BY TYPE, not by vocabulary. Deleting the
+/// positional VARIANTS left the positional PATH: with
+/// `Result<_, FlowReturnFailure>` as the return type of the positional
+/// evaluators, whole-frame propagation is what `?` does by default and
+/// localisation is the thing each site must remember. So `eval_expr` /
+/// `eval_call` return a type with NO error variant instead
+/// (`Positional<T>` — value, hold, or unmodelled position), which makes
+/// this enum UNCONSTRUCTIBLE inside them: there is no variant to put one
+/// in, and `?` over a `Result<_, Self>` does not typecheck against a
+/// non-`Try` return type. Every producer below therefore lives OUTSIDE
+/// the positional evaluators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnFailure {
+    /// The function position has no served body (missing declaration,
+    /// bodiless overload, anonymous / computed-name position).
+    Missing,
+    /// The body's control surface is not modeled: a return-bearing loop,
+    /// `with`, an abrupt cross-function jump, or a module-level statement
+    /// in the body.
+    Unsupported(FlowReturnUnsupported),
+    /// An in-flight dependency could not be decided (a torn view, a
+    /// missing non-cycle edge, or a nonconverging recursive component).
+    Unresolved,
+    /// The recursive component has no concrete semantic seed (an empty
+    /// recursive cycle — holds only).
+    EmptyCycle,
+    /// The demanded `(demand, input)` point is beyond the whole-return /
+    /// empty-input point the evaluation models — fail closed, never a
+    /// silently widened whole-return result and never a sibling
+    /// materialisation the narrower demand did not ask for.
+    UnmodeledDemandPoint,
+    /// A call expression in the body did not resolve: the typed
+    /// [`ResolveCallFailure`] rides along so every consumer propagates it
+    /// as unsupported / partial and suppresses admission. NOTHING converts
+    /// it back to `any`.
+    CallResolution(ResolveCallFailure),
+    /// A budget edge stopped the evaluation (the shallow expression
+    /// lowering's depth / work budget, or the obligation runtime's
+    /// connected-demand cap — surfaced as the work budget).
+    Budget(verter_type_expr::facts::InferenceUnavailableReason),
+}
+
+/// The control surface a `FlowReturn` evaluation does not model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnUnsupported {
+    /// A loop whose statement subtree contains a `return`.
+    Loop,
+    /// A `break` / `continue` crossing the modeled region.
+    Jump,
+    /// A directly invoked closure statement whose captured flow effect is not
+    /// represented by the sequential statement evaluator.
+    InvokedClosureEffect,
+    /// A `with` statement.
+    With,
+    /// A module-level statement inside the body.
+    ModuleDeclaration,
+}
+
+/// The engine-internal step result of one `FlowReturn` obligation —
+/// the obligation runtime's caller-return shape, never a cache value.
+#[derive(Debug, Clone)]
+pub(crate) enum FlowReturnStep {
+    /// Complete evaluation: the admitted result.
+    #[allow(dead_code)] // the caller-return payload; consumed by the sealed helper
+    Complete(FlowReturnResult),
+    /// A recursive backedge hold: the target obligation is already in
+    /// flight on this transaction — neither a contributor nor a failure.
+    #[allow(dead_code)] // the hold identity is carried for the close's record
+    Hold(Box<FlowReturnKey>),
+    /// Typed NO-VALUE failure — `ReturnOnly`, never admitted. Named for
+    /// the CONTRACT it carries: "degraded" is what a USABLE
+    /// [`FlowReturnResult::degradation`] value is, and sharing that word
+    /// with the no-value arm is exactly how the two kept being
+    /// misapplied at the call sites that dispatch on them.
+    NoValue(FlowReturnFailure),
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// ResolveCall (call / construct applicability + overload selection)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Whether a [`SemanticQueryKey::ResolveCall`] demand is an ordinary call
+/// (`f(...)`) or a construct (`new f(...)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallKind {
+    /// An ordinary call expression.
+    Call,
+    /// A `new` expression.
+    Construct,
+}
+
+/// The authored literal shape of one call argument. This is NOT excess
+/// freshness: relation-time freshness is DERIVED from the argument node's
+/// canonical `ExcessPropertyOrigin` / `ExcessEligibility` facts and never
+/// enters key identity. This axis only records whether the argument was
+/// AUTHORED as a bare literal expression (so its literal content is
+/// subject to the inferring parameter's widening rule) or in a form that
+/// already pins its own type.
+///
+/// It governs the inference DEPOSIT only. Applicability always relates the
+/// argument's actual type — TypeScript widens inference results, never the
+/// assignability check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArgumentLiteralMode {
+    /// A bare literal argument expression: the inference candidate widens
+    /// under the inferring parameter's const policy (a plain type
+    /// parameter widens the literal to its primitive, a `const` type
+    /// parameter preserves it and marks the produced surface `readonly`).
+    Widened,
+    /// An argument whose authored form pins its type — a type assertion
+    /// (`as T` / `as const`), a `satisfies` narrowing, a non-null
+    /// assertion, a reference, a call, a function value. Its inference
+    /// candidate is deposited exactly as authored.
+    Literal,
+}
+
+/// One call argument's key identity. NO freshness field — freshness is
+/// derived at relation time from canonical excess-origin facts, never
+/// carried on the key.
+///
+/// `context_sensitive` is the same class of authored-form fact as
+/// `literal_mode`: a structural property of the argument SYNTAX that the
+/// lowered type cannot express, and that changes the call's result — so it
+/// belongs in the key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallArgKey {
+    /// An argument whose type is already an interned node (eager carrier).
+    Eager {
+        /// The argument's type node.
+        ty: SemanticNodeId,
+        /// Whether the argument is a spread element (`...xs`).
+        spread: bool,
+        /// The authored literal shape of the argument.
+        literal_mode: ArgumentLiteralMode,
+        /// Whether the argument is a function value at least one of whose
+        /// parameters carries no authored type annotation.
+        context_sensitive: bool,
+    },
+    /// An argument identified by its program expression (the identity of
+    /// the expression record the applicability executor evaluates).
+    ProgramExpression {
+        /// The argument expression's program point.
+        point: ProgramPointId,
+        /// Whether the argument is a spread element (`...xs`).
+        spread: bool,
+        /// The authored literal shape of the argument.
+        literal_mode: ArgumentLiteralMode,
+        /// Whether the argument is a function value at least one of whose
+        /// parameters carries no authored type annotation.
+        context_sensitive: bool,
+    },
+}
+
+impl CallArgKey {
+    /// Whether this argument is withheld from the call's first inference
+    /// pass (an untyped-parameter function value has no self-contained type
+    /// to deposit).
+    #[must_use]
+    pub fn is_context_sensitive(&self) -> bool {
+        match self {
+            Self::Eager {
+                context_sensitive, ..
+            }
+            | Self::ProgramExpression {
+                context_sensitive, ..
+            } => *context_sensitive,
+        }
+    }
+}
+
+/// Env a [`SemanticQueryKey::ResolveCall`] value depends on: the full
+/// `P R T L J` set (call resolution parses the call-site body, resolves
+/// the callee's imports, and is governed by the type / lib / project env)
+/// plus the full active [`CanonicalTypeSubstitution`]. There is NO
+/// contextual-result axis and NO candidate-target axis (excluded demands),
+/// and NO budget axis (budget is runtime state, never key identity).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolveCallContext {
+    /// Parse-env dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-identity dimension (`J`).
+    pub project_identity: HashValue,
+    /// The active TYPE-ONLY substitution environment (type-parameter →
+    /// node) the call resolves under.
+    pub substitution: CanonicalTypeSubstitution,
+}
+
+/// The full identity of one call / construct resolution demand. Reentry
+/// identity on the obligation runtime IS this key exactly. Content-free:
+/// `point` is the call site's content-free `(canonical, offset)`, `callee`
+/// / `receiver` / argument nodes are interned graph identities, and the
+/// `flow` axis is SEALED-EMPTY until non-empty narrowing lands (production
+/// cannot mint a non-empty value here). No freshness field, no
+/// contextual/candidate-target axis, no budget, no content hash —
+/// version-rooting lives on the cached value's read-set facts + self
+/// roots (R6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolveCallKey {
+    /// The call site's program point.
+    pub point: ProgramPointId,
+    /// The callee's interned type node.
+    pub callee: SemanticNodeId,
+    /// Call vs construct.
+    pub kind: CallKind,
+    /// The receiver's interned type node, when the call is a member call.
+    pub receiver: Option<SemanticNodeId>,
+    /// The ordered argument identities.
+    pub args: Arc<[CallArgKey]>,
+    /// The explicit type arguments (`f<A, B>(...)`), in authored order.
+    pub explicit_type_args: Arc<[SemanticNodeId]>,
+    /// The flow-narrowing demand axis — SEALED-EMPTY until the narrowing
+    /// block lands.
+    pub flow: FlowNarrowingKey,
+    /// Env + substitution.
+    pub context: ResolveCallContext,
+}
+
+/// The CONTENT-FREE authored origin of one call/construct signature
+/// candidate: the indexed callable position (declaration slot + function /
+/// member path + contributor / overload ordinal) plus the signature
+/// ordinal inside that position's bucket. It carries no node id, no
+/// content hash and no span, so instantiating a signature PRESERVES it —
+/// an instantiated candidate is the same occurrence as its raw form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignatureOccurrenceIdentity {
+    /// The callable position this signature belongs to.
+    pub function: FlowFunctionSlotIdentity,
+    /// The source-order signature ordinal within the callable position's
+    /// bucket (call or construct), zero-based.
+    pub signature_ordinal: u32,
+}
+
+/// Where one ordered call/construct candidate comes from.
+///
+/// A signature authored at a served declaration position carries the
+/// content-free [`Authored`](Self::Authored) origin. A callable type with
+/// NO authored position at all — an inline function value, a
+/// function-typed parameter / local annotation, an object-type call
+/// signature — is genuinely [`Rootless`](Self::Rootless): it has no stable
+/// identity to key on, so its results stay transaction-local and
+/// `ReturnOnly`, and it is never compared as if it had an occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureCandidateOrigin {
+    /// A content-free authored origin.
+    Authored(SignatureOccurrenceIdentity),
+    /// No authored origin at all.
+    Rootless,
+}
+
+impl SignatureCandidateOrigin {
+    /// The authored occurrence, when the candidate has one.
+    #[must_use]
+    pub fn authored(&self) -> Option<&SignatureOccurrenceIdentity> {
+        match self {
+            Self::Authored(occurrence) => Some(occurrence),
+            Self::Rootless => None,
+        }
+    }
+}
+
+/// The ENV-FREE occurrence identity carried on a signature NODE: the
+/// served function position the signature was authored at (the fact-side
+/// anchor + function/member part + contributor/overload ordinal) plus its
+/// bucket ordinal. Env-free so it can ride the node's interning identity
+/// without over-keying the graph; the env-bearing
+/// [`SignatureOccurrenceIdentity`] derives at demand through the ONE
+/// slot-finalization choke point
+/// ([`ProjectSemanticDispatch::flow_function_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch)).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignatureNodeOccurrence {
+    /// The env-free served function position.
+    pub function: verter_type_expr::facts::FlowFunctionReturnIdentity,
+    /// The source-order signature ordinal within the callable position's
+    /// bucket (call or construct), zero-based.
+    pub signature_ordinal: u32,
+}
+
+/// Where a signature's return type comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureReturnCarrier {
+    /// A declared return annotation, lowered to its interned node.
+    Declared(SemanticNodeId),
+    /// A body-derived return, served by the `FlowReturn` producer.
+    Function(verter_type_expr::facts::FunctionReturnSource),
+}
+
+/// The admitted value of a `ResolveCall` query. Only a COMPLETE evaluation
+/// produces this: exactly one FULLY-decided first-applicable candidate
+/// (declaration order) selected with its final substitution, or a genuine
+/// dynamic `any` callee. Every uncertainty, failure, budget trip, or
+/// incomplete SCC discharge is a typed failure through `ReturnOnly` and
+/// never enters the family memo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedCallResult {
+    /// A signature occurrence was selected.
+    Selected {
+        /// The winning candidate's origin.
+        selected: SignatureCandidateOrigin,
+        /// The winning signature's (instantiated) node.
+        selected_signature: SemanticNodeId,
+        /// The final type substitution the winner was selected under.
+        substitution: CanonicalTypeSubstitution,
+        /// The call's return type under that substitution.
+        return_type: SemanticNodeId,
+        /// Whether `return_type` is a FRESH primitive literal: the naked
+        /// declared return of an UNCONSTRAINED type parameter that fixed
+        /// to a bare-literal argument. Freshness is provenance consumed by
+        /// position — an enclosing unannotated function-return contributor
+        /// widens a fresh result to its base primitive, while a value
+        /// position (a `const` initializer) keeps the literal.
+        fresh_literal_return: bool,
+    },
+    /// A UNION callee selected one first-applicable signature in EVERY
+    /// callable arm; the call's return is the union of the selected arm
+    /// returns. Arm order carries no overload precedence.
+    UnionSelected {
+        /// The per-arm winners, in arm order.
+        selections: Arc<[ResolvedUnionArm]>,
+        /// The union of the selected arm returns.
+        return_type: SemanticNodeId,
+    },
+    /// The callee is genuine dynamic `any` — a COMPLETE result, not a
+    /// fallback.
+    DynamicAny {
+        /// The call's return type (`any`).
+        return_type: SemanticNodeId,
+    },
+}
+
+/// One union-callee arm's winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnionArm {
+    /// The arm winner's origin.
+    pub selected: SignatureCandidateOrigin,
+    /// The arm winner's (instantiated) signature node — the sealed
+    /// deferred carrier node when the winner deferred its return.
+    pub selected_signature: SemanticNodeId,
+    /// The substitution the arm's winner was selected under.
+    pub substitution: CanonicalTypeSubstitution,
+}
+
+/// A [`ResolvedCallResult`] that MAY be admitted to a shared cache.
+///
+/// Admission requires a stable identity across transactions, which only a
+/// content-free authored occurrence supplies. A winner with no authored
+/// origin is genuinely rootless: it cannot be constructed here, so a
+/// rootless result is structurally unable to reach a shared-cache write
+/// and stays transaction-local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissibleCallResult(ResolvedCallResult);
+
+impl AdmissibleCallResult {
+    /// `None` when the winner is rootless.
+    #[must_use]
+    pub fn new(result: ResolvedCallResult) -> Option<Self> {
+        Self::admits(&result).then_some(Self(result))
+    }
+
+    /// Whether `result` may be admitted to a shared cache. A union win is
+    /// admissible only when EVERY arm's winner is authored.
+    #[must_use]
+    pub fn admits(result: &ResolvedCallResult) -> bool {
+        match result {
+            ResolvedCallResult::Selected {
+                selected: SignatureCandidateOrigin::Rootless,
+                ..
+            } => false,
+            ResolvedCallResult::UnionSelected { selections, .. } => selections
+                .iter()
+                .all(|arm| arm.selected.authored().is_some()),
+            ResolvedCallResult::Selected { .. } | ResolvedCallResult::DynamicAny { .. } => true,
+        }
+    }
+
+    /// The admitted result.
+    #[must_use]
+    pub fn get(&self) -> &ResolvedCallResult {
+        &self.0
+    }
+
+    /// Consume the wrapper.
+    #[must_use]
+    pub fn into_inner(self) -> ResolvedCallResult {
+        self.0
+    }
+}
+
+/// A typed `ResolveCall` failure. These outcomes are transient/ReturnOnly:
+/// none is a successful call value and none may enter the family memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResolveCallFailure {
+    /// The callee has no signature in the requested call/construct bucket.
+    NotCallable,
+    /// Every visible candidate was definitely inapplicable.
+    NoApplicableOverload,
+    /// Applicability depended on unsupported or unresolved semantic work.
+    Undecidable,
+    /// The call-resolution work envelope tripped.
+    Budget,
+}
+
+/// The env-free declaration-slot SEED — exactly the four env-free
+/// identity fields of the landed five-field
+/// [`ResolvedDeclSlotIdentity`], with every env dimension deliberately
+/// omitted. This is the `BinderDeclSlotFact` payload the family-A
+/// `BinderIdentityFacts` artifact stores.
+///
+/// **Contract (R7 + family-A keying):**
+///
+/// - EXACTLY four fields: `defining_canonical`, `owner`,
+///   `merged_symbol_name`, `symbol_space`. `owner` is MANDATORY — the
+///   same canonical may contain same-name same-space declarations in
+///   distinct owners (a `.vue` SFC's module vs instance scripts).
+/// - NEVER stores a [`ResolvedDeclSlotIdentity`], a
+///   [`SlotEnvIdentity`], or a standalone `project_identity` /
+///   `type_env_hash` / `lib_env_hash` — storing an env dimension in the
+///   parse-stable artifact would over-key it (an env-invariant artifact
+///   carrying an env-bearing payload) and be unsound.
+/// - NEVER carries a content / version / fact-signature field
+///   (`whole_hash`, `parse_stable_hash`, `ReadSetSignature`) — the seed
+///   is identity only.
+/// - Stable and symbol-space-scoped: a value and a type sharing a name
+///   occupy DISTINCT seeds (`symbol_space` discriminates); same-name
+///   declarations in distinct owners occupy distinct seeds (`owner`
+///   discriminates).
+///
+/// The env-bearing slot is DERIVED at query-key construction (and only
+/// there): [`DeclarationSlotSeed::finalize`] re-attaches the sealed
+/// [`SlotEnvIdentity`] read from the defining canonical's LIVE
+/// per-canonical env — the single production derivation is the
+/// [`ProjectSemanticDispatch::finalize_slot_seed`](crate::project_semantic_dispatch::ProjectSemanticDispatch::finalize_slot_seed)
+/// choke point.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeclarationSlotSeed {
+    /// Canonical id of the declaring file.
+    pub defining_canonical: Arc<str>,
+    /// Exact authored top-level owner inside `defining_canonical`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    /// Stable merged-symbol name (invariant under declaration
+    /// reordering and TS declaration merging).
+    pub merged_symbol_name: Arc<str>,
+    /// Type-space vs value-space vs namespace discriminator.
+    pub symbol_space: SemanticSymbolSpace,
+}
+
+impl DeclarationSlotSeed {
+    /// Build a seed from its four identity fields.
+    #[must_use]
+    pub const fn new(
+        defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        merged_symbol_name: Arc<str>,
+        symbol_space: SemanticSymbolSpace,
+    ) -> Self {
+        Self {
+            defining_canonical,
+            owner,
+            merged_symbol_name,
+            symbol_space,
+        }
+    }
+
+    /// Finalize the seed into the env-bearing
+    /// [`ResolvedDeclSlotIdentity`]: the seed's four fields copy
+    /// verbatim and `env` is the sealed [`SlotEnvIdentity`] the caller
+    /// read from the defining canonical's live per-canonical env. This
+    /// is the ONLY seed→slot composition channel; production reaches it
+    /// exclusively through the
+    /// [`ProjectSemanticDispatch::finalize_slot_seed`](crate::project_semantic_dispatch::ProjectSemanticDispatch::finalize_slot_seed)
+    /// choke point (zero-env slots stay test/fixture-only via
+    /// [`ResolvedDeclSlotIdentity::type_slot_unscoped`]).
+    #[must_use]
+    pub fn finalize(self, env: SlotEnvIdentity) -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity {
+            defining_canonical: self.defining_canonical,
+            owner: self.owner,
+            merged_symbol_name: self.merged_symbol_name,
+            symbol_space: self.symbol_space,
+            env,
+        }
+    }
 }
 
 /// Project a value-space [`ResolvedDeclSlotIdentity`] onto the
@@ -969,7 +2341,7 @@ impl MapperKind {
             return MapperKind::Computed;
         }
         let mut index_id = match index {
-            IndexKey::TypeNode(id) => id,
+            IndexKey::Computed(id) => id,
             _ => return MapperKind::Computed,
         };
         if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
@@ -1011,19 +2383,9 @@ pub struct MapperKey {
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
 /// `T[K]` where `K` is a literal string, a literal number, or another type.
 ///
-/// The `Number` payload is the proof-carrying [`CanonicalIndexInt`]:
-/// construction routes through the [`index_key`] module's two blessed
-/// constructors (the f64-checked
-/// [`index_key::integer_convention_index_key`] fold or the
-/// `Display`-checked [`CanonicalIndexInt::from_canonical_i64`]), so an
-/// unbounded `IndexKey::Number(n as i64)` cannot compile. Numbers the
-/// convention rejects stay [`IndexKey::TypeNode`] (G4.5 recovery).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum IndexKey {
-    String(Arc<str>),
-    Number(CanonicalIndexInt),
-    TypeNode(SemanticNodeId),
-}
+/// Indexed-access key using the same authored property-key carrier as object
+/// members. Unresolved key expressions remain semantic children.
+pub type IndexKey = AuthoredPropertyKey;
 
 /// Projection mode for member projection and indexed access.
 ///
@@ -1037,8 +2399,9 @@ pub enum IndexKey {
 ///   / R10-2. `build_instantiate` synthesizes `TypeParam` shells for
 ///   unbound type parameters when invoked in this mode, preserving
 ///   project-rule "Navigate/Shallow over open generics preserves type
-///   parameters". Used by `ref_root_reaches_transitive_cycle_node`'s BFS
-///   step. Existing Navigate/Expanded callers see no change.
+///   parameters". Used by the materialization cycle gate's per-hop
+///   `Instantiate` (`ClassifyMaterializationCycleGate`).
+///   Existing Navigate/Expanded callers see no change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionMode {
     Identity,
@@ -2206,7 +3569,7 @@ pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
 /// and as the segment list in [`SemanticQueryKey::ProjectPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathSegment {
-    Member(Arc<str>),
+    Member(PropertyKey),
     Index(IndexKey),
 }
 
@@ -2234,11 +3597,14 @@ pub enum HopDecision {
 /// rooted at `value`; the family memo dedups across distinct entry paths.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SurfaceMember {
-    pub name: Arc<str>,
+    pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub readonly: bool,
-    pub is_method: bool,
+    pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// Whether an authored method contributor carries an implementation body.
+    /// Always `false` for properties and synthetic method signatures.
+    pub has_implementation_body: bool,
     /// Declared accessibility of the member, carried verbatim from the IR
     /// ([`verter_type_expr::MemberVisibility`]). `Public` for every non-class
     /// origin (interface / type-literal / object-literal / mapped); a class
@@ -2304,6 +3670,38 @@ pub struct SurfaceMember {
     /// non-neutral value exists only via the
     /// [`ProjectionReductionContext`] producers.
     pub merge_role: MergeRoleStamp,
+    /// Excess-property provenance, carried verbatim from the IR
+    /// ([`verter_type_expr::ExcessPropertyOrigin`]). Participates in node
+    /// interning / graph identity (eq + hash) — two surfaces differing only in
+    /// a member's origin intern to DISTINCT nodes. Semantically read ONLY by
+    /// excess-property candidate selection in the relation engine's fresh
+    /// prepass; ordinary property matching, value assignability, optionality,
+    /// index-signature checking, union relation, and signature relation ignore
+    /// it. `NonLiteral` for every annotation / declaration / synthesized
+    /// origin; only direct object-literal materialization mints `FreshOwn`,
+    /// and only the shared spread materializer mints `SpreadTainted`.
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+impl SurfaceMember {
+    /// Ordinary string key for publication surfaces whose external schema is
+    /// string-only. Other key classes remain on the semantic member and must
+    /// be rejected or handled by the caller.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
+    /// The member's PUBLISHED name, derived by the shared key authority
+    /// ([`verter_type_expr::AuthoredPropertyKey::published_name`]): an
+    /// ordinary string key verbatim, a numeric literal key by its
+    /// canonical ECMAScript spelling, `None` for symbol / computed keys.
+    /// The admission gate and the terminal sink both read this — never a
+    /// site-local derivation.
+    #[must_use]
+    pub fn published_name(&self) -> Option<Arc<str>> {
+        self.key.published_name()
+    }
 }
 
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)
@@ -2349,15 +3747,28 @@ pub enum SurfaceEntry {
 /// One-level surface view of a semantic node. The entry stream is ordered to
 /// keep declaration semantics and hashing stable.
 ///
-/// The single node-native surface carrier: consumers read the full member +
-/// signature metadata directly off these fields; the one registry publication
-/// materialisation happens at the query-engine terminal sink
-/// (`surface_view_to_registry_type_expr`).
+/// The single node-native surface carrier. Named members are exposed only as
+/// positive evidence; complete-domain, emptiness, and absence operations
+/// require either a [`ClosedSurfaceView`] witness or [`SurfaceKeyProjection`].
+/// The one registry publication materialisation happens at the query-engine
+/// terminal sink (`surface_view_to_registry_type_expr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
     /// Canonical resolver-produced declaration stream. This is the primary
     /// stored surface; all kind-specific collections below are derived indexes.
     pub entries: Arc<[SurfaceEntry]>,
+    members: Arc<[SurfaceMember]>,
+    pub call_signatures: Arc<[SemanticNodeId]>,
+    pub construct_signatures: Arc<[SemanticNodeId]>,
+    pub index_signatures: Arc<[IndexSignature]>,
+    pub keyspace: Option<SemanticNodeId>,
+    has_index_signature: bool,
+}
+
+/// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
+/// `SurfaceView`, whose completeness-sensitive fields are private.
+#[doc(hidden)]
+pub(crate) struct SurfaceViewInit {
     pub members: Arc<[SurfaceMember]>,
     pub call_signatures: Arc<[SemanticNodeId]>,
     pub construct_signatures: Arc<[SemanticNodeId]>,
@@ -2366,7 +3777,97 @@ pub struct SurfaceView {
     pub has_index_signature: bool,
 }
 
+macro_rules! surface_view {
+    ($($fields:tt)*) => {
+        $crate::semantic_query::SurfaceView::from_init(
+            $crate::semantic_query::SurfaceViewInit {
+                $($fields)*
+            }
+        )
+    };
+}
+pub(crate) use surface_view;
+
+/// A surface's named members are its complete domain: spread-bearing objects
+/// are construction programs, never surfaces, so every [`SurfaceView`] is
+/// closed by construction. `ClosedSurfaceView` is the total witness form kept
+/// for symmetry with the projection-formula witnesses.
+#[derive(Clone, Copy)]
+pub struct ClosedSurfaceView<'a> {
+    surface: &'a SurfaceView,
+}
+
+impl<'a> ClosedSurfaceView<'a> {
+    pub fn complete_members(self) -> &'a [SurfaceMember] {
+        &self.surface.members
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.surface.members.is_empty()
+            && self.surface.call_signatures.is_empty()
+            && self.surface.construct_signatures.is_empty()
+            && self.surface.index_signatures.is_empty()
+            && !self.surface.has_index_signature
+    }
+
+    pub fn has_index_signature(self) -> bool {
+        self.surface.has_index_signature
+    }
+}
+
+/// Key evidence available from the sole positive-member state.
+pub enum SurfaceKeyProjection<'a> {
+    Exact(&'a SurfaceMember),
+    AbsentProven,
+}
+
 impl SurfaceView {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        members: Arc<[SurfaceMember]>,
+        call_signatures: Arc<[SemanticNodeId]>,
+        construct_signatures: Arc<[SemanticNodeId]>,
+        index_signatures: Arc<[IndexSignature]>,
+        keyspace: Option<SemanticNodeId>,
+        has_index_signature: bool,
+    ) -> Self {
+        // Grouped construction names no canonical entry order; derive the
+        // stream in the fixture macro's fixed member → call → construct →
+        // index order so `entries`-keyed hashing agrees with `from_entries`.
+        let entries: Arc<[SurfaceEntry]> = members
+            .iter()
+            .cloned()
+            .map(SurfaceEntry::Member)
+            .chain(
+                call_signatures
+                    .iter()
+                    .copied()
+                    .map(SurfaceEntry::CallSignature),
+            )
+            .chain(
+                construct_signatures
+                    .iter()
+                    .copied()
+                    .map(SurfaceEntry::ConstructSignature),
+            )
+            .chain(
+                index_signatures
+                    .iter()
+                    .cloned()
+                    .map(SurfaceEntry::IndexSignature),
+            )
+            .collect();
+        Self {
+            entries,
+            members,
+            call_signatures,
+            construct_signatures,
+            index_signatures,
+            keyspace,
+            has_index_signature,
+        }
+    }
+
     /// Store one canonical ordered surface and derive its kind indexes.
     #[must_use]
     pub fn from_entries(
@@ -2399,6 +3900,17 @@ impl SurfaceView {
         }
     }
 
+    pub(crate) fn from_init(init: SurfaceViewInit) -> Self {
+        Self::new(
+            init.members,
+            init.call_signatures,
+            init.construct_signatures,
+            init.index_signatures,
+            init.keyspace,
+            init.has_index_signature,
+        )
+    }
+
     /// Store a member-only surface in its producer order.
     #[must_use]
     pub fn from_members(members: Vec<SurfaceMember>, keyspace: Option<SemanticNodeId>) -> Self {
@@ -2412,6 +3924,161 @@ impl SurfaceView {
     #[must_use]
     pub fn empty() -> Self {
         Self::from_entries(Vec::new(), None, false)
+    }
+
+    /// Known members are positive evidence only. Their omission never proves
+    /// absence unless [`Self::closed`] succeeds.
+    pub fn positive_members(&self) -> &[SurfaceMember] {
+        &self.members
+    }
+
+    /// The complete-domain witness. Total: every surface is closed by
+    /// construction, so the witness never fails.
+    pub fn closed(&self) -> ClosedSurfaceView<'_> {
+        ClosedSurfaceView { surface: self }
+    }
+
+    pub fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'_> {
+        // JS property identity: `{ 1: x }` and `{ "1": x }` are the same
+        // property — a numeric member answers the string-spelling needle
+        // (and vice versa), so element-access collision is the match rule.
+        if let Some(known) = self.members.iter().find(|member| {
+            member
+                .key
+                .as_known()
+                .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
+            return SurfaceKeyProjection::Exact(known);
+        }
+        SurfaceKeyProjection::AbsentProven
+    }
+
+    /// Every PUBLIC member colliding with `key` when they form a METHOD
+    /// OVERLOAD GROUP — two or more same-named method members.
+    ///
+    /// [`Self::project_known_key`] is first-wins by design (one key, one
+    /// member value), which is exactly right for a property and silently
+    /// truncating for a method overload set: `{ m(x: string): "PA";
+    /// m(x: number): "PB" }` retains BOTH members here, and projecting
+    /// `.m` handed back the first — so `objOv2.m(1)` answered `"PA"`
+    /// where the language answers `"PB"`, cleanly and warm, and the call
+    /// rail's overload-group SIZE gate saw one signature where there are
+    /// two.
+    ///
+    /// `None` for zero or one collision, and for a collision set that is
+    /// not wholly methods (a property colliding with a method is a merge
+    /// artifact, not an overload group — first-wins still rules there).
+    ///
+    /// The returned signatures are the group's VISIBLE overloads under
+    /// the one shared [`visible_overload_ordinals`] rule, so the carrier
+    /// this feeds is the same shape `build_typeof` mints for a top-level
+    /// function group of the same contributor list — implementation
+    /// signature hidden included.
+    pub fn project_known_key_overload_group(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let group: Vec<&SurfaceMember> = self
+            .members
+            .iter()
+            .filter(|member| {
+                member.visibility.is_public()
+                    && member
+                        .key
+                        .as_known()
+                        .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+            })
+            .collect();
+        if group.len() < 2
+            || !group.iter().all(|member| {
+                member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+            })
+        {
+            return None;
+        }
+        Some(
+            visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
+                .into_iter()
+                .map(|ordinal| group[ordinal].value)
+                .collect(),
+        )
+    }
+
+    /// Project an ordinary string key supplied by a string-only external
+    /// surface without coercing numeric, symbol, or computed members.
+    pub fn project_string_key(&self, name: &str) -> SurfaceKeyProjection<'_> {
+        if let Some(known) = self.members.iter().find(|member| {
+            matches!(&member.key, AuthoredPropertyKey::String(value) if value.as_ref() == name)
+        }) {
+            return SurfaceKeyProjection::Exact(known);
+        }
+        SurfaceKeyProjection::AbsentProven
+    }
+
+    /// Positive evidence that some index signature exists. A `false` result
+    /// is not proof that an open construction program has no additional
+    /// index facts.
+    pub fn has_known_index_signature(&self) -> bool {
+        self.has_index_signature
+    }
+
+    pub(crate) fn with_positive_members(mut self, members: Arc<[SurfaceMember]>) -> Self {
+        self.members = members;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_known_index_signature(mut self, has_index_signature: bool) -> Self {
+        self.has_index_signature = has_index_signature;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_call_signatures(mut self, call_signatures: Arc<[SemanticNodeId]>) -> Self {
+        self.call_signatures = call_signatures;
+        self
+    }
+}
+
+/// THE overload-VISIBILITY projection rule — the ordinals of `signatures`
+/// TypeScript surfaces, given each contributor's `has_implementation_body`
+/// in source order.
+///
+/// The rule is ONE sentence: surface every BODILESS contributor in source
+/// order, and if there is none, surface every contributor. That covers
+/// both of the shapes usually stated separately — a multi-signature
+/// overload group hides its trailing implementation, and a LONE bodied
+/// signature (`class C { m(x: string): "LA" { … } }`, an ill-formed
+/// all-bodied set) stays visible because there is nothing bodiless to
+/// prefer. Spelling the lone case as its own early-out was redundant
+/// with the fallback in both producers, and a redundant branch is a
+/// branch no mutation can discriminate.
+///
+/// Two producers apply it and they must not diverge: `build_typeof` over
+/// a prepared declaration's `ValueSignature`s, and
+/// [`SurfaceView::project_known_key_overload_group`] over an object
+/// surface's same-named method members. They agreed by CONVENTION, and
+/// the convention broke the moment the second one landed — the member
+/// carrier published all three contributors of a bodied group, so
+/// `select_signature_function` (which documents this filter as its
+/// PRECONDITION and reads the LAST overload) took the implementation:
+/// `ReturnType<C['m']>` became `any` and `Parameters<C['m']>` became
+/// `[x: any]`, cleanly and warm, where the checker answers `"MB"` and
+/// `[x: number]`.
+pub(crate) fn visible_overload_ordinals(
+    has_implementation_body: impl IntoIterator<Item = bool>,
+) -> Vec<usize> {
+    let bodied: Vec<bool> = has_implementation_body.into_iter().collect();
+    let bodiless: Vec<usize> = bodied
+        .iter()
+        .enumerate()
+        .filter(|(_, has_body)| !**has_body)
+        .map(|(ordinal, _)| ordinal)
+        .collect();
+    if bodiless.is_empty() {
+        (0..bodied.len()).collect()
+    } else {
+        bodiless
     }
 }
 
@@ -2498,7 +4165,7 @@ pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub struct PartialReasonSet(u16);
+pub struct PartialReasonSet(u32);
 
 impl PartialReasonSet {
     /// An armed runaway fuse tripped mid-compute (`QueryError::BudgetExceeded`).
@@ -2551,6 +4218,96 @@ impl PartialReasonSet {
     /// preserved for fail-closed consumers and is never warm-admitted as a
     /// complete result.
     pub const MISSING_DEPENDENCY: Self = Self(1 << 13);
+    /// A body-derived (`FlowReturn`) return produced a USABLE value in
+    /// which one interior POSITION has no modelled type and says so.
+    ///
+    /// Scoped to a DEGRADED SUCCESS whose published surface is FAITHFUL:
+    /// every modelled sibling is present and exact, and the one position
+    /// the substrate could not type carries the typed unresolved marker
+    /// rather than a fabricated `any`. A NO-VALUE outcome is NOT this
+    /// class — there is no surface to be faithful about, so it keeps a
+    /// faulting class and every consumer sees it.
+    ///
+    /// A NAMED class rather than the boolean-bridge
+    /// [`PROPAGATED`](Self::PROPAGATED), because two consumers must treat
+    /// it differently and neither may be forced to guess. A consumer that
+    /// PUBLISHES the inferred type (`get_component_meta`) is genuinely
+    /// incomplete and must not warm. Both Vue macro codegen lanes are
+    /// complete regardless: the TSC projection splices the AUTHORED
+    /// declaration for an external checker, and the runtime projection
+    /// emits every member the faithful surface carries — faulting there
+    /// deleted the WHOLE props projection over one member's return type,
+    /// for a component whose props the same tree resolves correctly.
+    ///
+    /// The class is per-POSITION evidence, so a consumer reading it must
+    /// stay per-position too: the member holding the marker degrades and
+    /// its exact siblings do not. Collapsing the whole surface on the
+    /// class is the same defect as faulting on it, one step quieter.
+    pub const FLOW_RETURN_UNINFERRED: Self = Self(1 << 14);
+    /// A body-derived (`FlowReturn`) return produced a USABLE value the
+    /// substrate could not fully VERIFY: an unapplied write effect, a
+    /// conditional `var` join it has no algebra for, a declared union it
+    /// could not reduce, a call on a non-callable binding. Every member is
+    /// present; one of them may be silently WRONG.
+    ///
+    /// Distinct from [`FLOW_RETURN_UNINFERRED`](Self::FLOW_RETURN_UNINFERRED)
+    /// because the evidence has a different SHAPE and consumers must read
+    /// it differently, and ONE bit cannot carry that. The uninferred class
+    /// is positional — the marker names the member that degrades. This one
+    /// is not: it is seeded from the lowered slice's effect list before any
+    /// member evaluates, so it says every member may be wrong and names
+    /// none of them. A consumer that derives per-member data from the value
+    /// (the runtime `props: {...}` option object) therefore degrades EVERY
+    /// member — it publishes the complete member set with validation off,
+    /// and never a constructor derived from a value that may be wrong.
+    ///
+    /// It is not a reason to delete the consumer's output: the member set
+    /// is complete by definition, and refusing over it deleted every byte
+    /// of the module for parameter reassignment and conditional `var`.
+    pub const FLOW_RETURN_UNVERIFIED: Self = Self(1 << 15);
+    /// A body-derived (`FlowReturn`) demand produced NO VALUE AT ALL: a
+    /// typed `FlowReturnFailure` (an unmodelled control construct, a
+    /// missing body, a raise that missed) through `ReturnOnly`.
+    ///
+    /// Distinct from the two DEGRADED-SUCCESS classes above because the
+    /// difference is not a matter of degree: those two describe a surface
+    /// the substrate DID produce, and this one says there is no surface.
+    /// One bit cannot carry both, and sharing one is not an economy — it
+    /// is the bug. A consumer that contains the unverified class because
+    /// "the member set is complete by definition" contains this one too,
+    /// and then publishes a surface assembled WITHOUT the members this
+    /// producer was asked for. When such a producer is the macro's only
+    /// one the assembled surface is empty and a structural emptiness
+    /// check catches it; compose it with ONE authored arm and the check
+    /// is defeated while the missing members stay missing.
+    ///
+    /// So the containment axis is the CONSUMER, and this class sits on
+    /// the other side of it from the degraded-success pair: a consumer
+    /// that splices the AUTHORED declaration for an external checker (the
+    /// Vue macro TSC projection) is unaffected — the declaration rides
+    /// verbatim whatever the substrate could not compute — and every
+    /// consumer that derives its output FROM the value (the runtime
+    /// `props: {…}` / `emits: […]` option objects, `get_component_meta`)
+    /// is missing members it cannot name and must fail closed.
+    pub const FLOW_RETURN_NO_SURFACE: Self = Self(1 << 16);
+
+    /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
+    /// the resolved SHAPE intact.
+    ///
+    /// Every other class is a statement about the DEMAND (a budget, a
+    /// cancellation, a superseded generation, a torn view, a recursion, a
+    /// missing node) and leaves nothing about the resolved structure
+    /// trustworthy. These two are statements about a VALUE inside a
+    /// structure the substrate did produce, so a consumer addressing one
+    /// MEMBER of that structure may still select it and judge it on its
+    /// own node.
+    ///
+    /// [`FLOW_RETURN_NO_SURFACE`](Self::FLOW_RETURN_NO_SURFACE) is
+    /// deliberately NOT a member: there is no structure to address a
+    /// member of, so a consumer reading this set to decide "may I still
+    /// select a member" must get `false` for it.
+    pub const FLOW_RETURN_DEGRADED: Self =
+        Self::FLOW_RETURN_UNINFERRED.union(Self::FLOW_RETURN_UNVERIFIED);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]
@@ -2574,6 +4331,12 @@ impl PartialReasonSet {
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
+    }
+
+    /// `self` with every reason in `other` removed.
+    #[must_use]
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 
@@ -2701,6 +4464,26 @@ pub struct CacheRead<T> {
     /// (see [`crate::request_context`] and
     /// [`crate::cache_runtime::refuse_result_cache_admission_if_partial`]).
     pub result_is_partial: bool,
+    /// **The classes behind [`Self::result_is_partial`]**, carried ACROSS
+    /// the query/build boundary.
+    ///
+    /// The boolean alone forces every consumer to re-lift a partial child
+    /// under the unclassified bridge
+    /// [`PartialReasonSet::PROPAGATED`]. That is not merely lossy: a
+    /// consumer that treats ONE class as CONTAINED (the Vue macro
+    /// projection and
+    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) sees the bridge bit
+    /// arrive ALONGSIDE the named class the producer already recorded, so
+    /// the containment subtracts the name and the anonymous duplicate of
+    /// the SAME cause still faults it. Carrying the classes here removes
+    /// the duplicate at its source.
+    ///
+    /// Invariant: empty whenever `result_is_partial` is `false`. When
+    /// `result_is_partial` is `true` this is the union of the classes the
+    /// producing build observed; read it through
+    /// [`Self::partial_reason_classes`], which substitutes the bridge for
+    /// a producer that genuinely could not name one.
+    pub partial_reasons: PartialReasonSet,
 }
 
 impl<T> CacheRead<T> {
@@ -2717,6 +4500,25 @@ impl<T> CacheRead<T> {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: PartialReasonSet::empty(),
+        }
+    }
+
+    /// The partial classes this read carries — the ONE read accessor.
+    ///
+    /// Empty for a complete read. For a partial read it is the producer's
+    /// own classes, or [`PartialReasonSet::PROPAGATED`] when the producer
+    /// set the boolean without naming one (the residual bridge, which no
+    /// longer duplicates a class the producer DID name).
+    #[inline]
+    #[must_use]
+    pub fn partial_reason_classes(&self) -> PartialReasonSet {
+        if !self.result_is_partial {
+            PartialReasonSet::empty()
+        } else if self.partial_reasons.is_empty() {
+            PartialReasonSet::PROPAGATED
+        } else {
+            self.partial_reasons
         }
     }
 }
@@ -2792,8 +4594,8 @@ pub enum OriginMeta {
     /// every production emit site and consumed by the audit-validator's
     /// Rule-5 compliance check.
     ProjectedMember {
-        /// Projected member name.
-        name: Arc<str>,
+        /// Exact projected member key.
+        key: PropertyKey,
         /// Structural provenance for this single-hop ProjectMember edge.
         provenance: verter_audit::MemberEdgeProvenance,
     },
@@ -2997,9 +4799,56 @@ pub enum QueryError {
     /// A surface member the projection boundary cannot represent. Maps to
     /// the `SEMANTIC_SURFACE_MEMBER` sentinel.
     UnrepresentableSurfaceMember,
+    /// A genuinely OPEN surface placeholder (an open index signature whose
+    /// value domain is deferred). Maps to the `"projectedOpenSurface"`
+    /// sentinel — an unmaterialised degradation, but NEITHER the
+    /// object-surface sentinel (intersection arm-drop) NOR the miss sentinel.
+    OpenSurface,
+    /// A POSITION the flow substrate has no model for — the typed marker one
+    /// unmodelled sub-expression contributes while every modelled sibling of
+    /// the enclosing structure survives.
+    ///
+    /// DISTINCT from [`Miss`](Self::Miss) on purpose. `Miss` means "no
+    /// result yet"; this means "there is a value here and this substrate
+    /// cannot name it". The distinction is load-bearing at exactly one
+    /// place — the callee rail's signature reader, which treats a `Miss` in
+    /// a callee's RETURN position as a degraded nested demand
+    /// (`SignatureCall::ReturnMiss`) and must NOT do that to a marker it
+    /// minted itself one frame down: doing so fed the marker straight back
+    /// into the frame-level failure it exists to avoid.
+    UnmodeledPosition,
 }
 
 impl QueryError {
+    /// Whether this opaque payload says the represented type is unavailable.
+    ///
+    /// Recursive references and declaration placeholders are publishable type
+    /// carriers: the former is a settled recursion leaf, while the latter is
+    /// an addressable declaration shell. Every other variant represents a
+    /// failure, unresolved control state, or unrepresentable/open value and
+    /// therefore cannot contribute a recovered inference value.
+    #[must_use]
+    pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
+        match self {
+            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. } => false,
+            QueryError::Miss
+            | QueryError::UnsupportedIntrinsic { .. }
+            | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
+            | QueryError::UnstableState { .. }
+            | QueryError::AliasCycle { .. }
+            | QueryError::Other(_)
+            | QueryError::ValueDomainMismatch { .. }
+            | QueryError::RaiseAliasCycle
+            | QueryError::TypeParamCycle
+            | QueryError::RaiseMiss
+            | QueryError::UnrepresentableSurface
+            | QueryError::UnrepresentableSurfaceMember
+            | QueryError::UnmodeledPosition
+            | QueryError::OpenSurface => true,
+        }
+    }
+
     /// Whether this `Opaque(QueryError)` carrier is the §22 ERROR TYPE — a
     /// genuine "this type IS an error" result — as opposed to a transient
     /// CONTROL / recursion sentinel.
@@ -3091,6 +4940,8 @@ impl PartialEq for QueryError {
             (Self::RaiseMiss, Self::RaiseMiss) => true,
             (Self::UnrepresentableSurface, Self::UnrepresentableSurface) => true,
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
+            (Self::OpenSurface, Self::OpenSurface) => true,
+            (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
             _ => false,
         }
     }
@@ -3098,38 +4949,52 @@ impl PartialEq for QueryError {
 
 impl Eq for QueryError {}
 
+impl QueryError {
+    /// The interning discriminant tag (hand-assigned, UNIQUE per variant —
+    /// pinned by `query_error_hash_tags_are_unique_per_variant`). The tags
+    /// are stable (never renumbered): a new variant takes the next free tag.
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Miss => 0,
+            Self::UnsupportedIntrinsic { .. } => 1,
+            Self::BudgetExceeded(_) => 2,
+            Self::UnstableState { .. } => 3,
+            Self::AliasCycle { .. } => 4,
+            Self::RecursiveRef { .. } => 5,
+            Self::Other(_) => 6,
+            Self::DeclPlaceholder { .. } => 7,
+            Self::ValueDomainMismatch { .. } => 8,
+            Self::RaiseAliasCycle => 9,
+            Self::TypeParamCycle => 10,
+            Self::RaiseMiss => 11,
+            Self::UnrepresentableSurface => 12,
+            Self::UnrepresentableSurfaceMember => 13,
+            Self::Cancelled => 14,
+            Self::OpenSurface => 15,
+            Self::UnmodeledPosition => 16,
+        }
+    }
+}
+
 impl std::hash::Hash for QueryError {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Discriminant tag, then per-variant field hashing. BudgetExceeded
         // hashes tag-only because its payload is an opaque carrier.
+        self.tag().hash(state);
         match self {
-            Self::Miss => {
-                0u8.hash(state);
-            }
             Self::UnsupportedIntrinsic { name } => {
-                1u8.hash(state);
                 name.hash(state);
             }
-            Self::BudgetExceeded(_) => {
-                2u8.hash(state);
-            }
-            Self::Cancelled => {
-                14u8.hash(state);
-            }
             Self::UnstableState { attempts } => {
-                3u8.hash(state);
                 attempts.hash(state);
             }
             Self::AliasCycle { chain } => {
-                4u8.hash(state);
                 chain.hash(state);
             }
             Self::RecursiveRef { name } => {
-                5u8.hash(state);
                 name.hash(state);
             }
             Self::Other(msg) => {
-                6u8.hash(state);
                 msg.hash(state);
             }
             Self::DeclPlaceholder {
@@ -3138,32 +5003,25 @@ impl std::hash::Hash for QueryError {
                 name,
                 whole_hash,
             } => {
-                7u8.hash(state);
                 canonical_id.hash(state);
                 owner.hash(state);
                 name.hash(state);
                 whole_hash.hash(state);
             }
             Self::ValueDomainMismatch { expected, actual } => {
-                8u8.hash(state);
                 expected.hash(state);
                 actual.hash(state);
             }
-            Self::RaiseAliasCycle => {
-                9u8.hash(state);
-            }
-            Self::TypeParamCycle => {
-                10u8.hash(state);
-            }
-            Self::RaiseMiss => {
-                11u8.hash(state);
-            }
-            Self::UnrepresentableSurface => {
-                12u8.hash(state);
-            }
-            Self::UnrepresentableSurfaceMember => {
-                13u8.hash(state);
-            }
+            Self::Miss
+            | Self::BudgetExceeded(_)
+            | Self::Cancelled
+            | Self::RaiseAliasCycle
+            | Self::TypeParamCycle
+            | Self::RaiseMiss
+            | Self::UnrepresentableSurface
+            | Self::UnrepresentableSurfaceMember
+            | Self::UnmodeledPosition
+            | Self::OpenSurface => {}
         }
     }
 }
@@ -3212,12 +5070,19 @@ pub enum QueryResult<T> {
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
-/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`] and
-/// [`SemanticQueryKey::ClassifyBroadRuntime`], whose live producers fill
-/// [`OverloadSet`](Self::OverloadSet) and
-/// [`BroadRuntime`](Self::BroadRuntime), respectively. The
+/// resolved type — EXCEPT [`SemanticQueryKey::ProjectObjectSpread`],
+/// [`SemanticQueryKey::ResolveOverloadSet`],
+/// [`SemanticQueryKey::ClassifyBroadRuntime`], and
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`]. The projection
+/// family has the
+/// dedicated [`ObjectProjection`](Self::ObjectProjection) domain and remains
+/// non-producing until its ordered-effect evaluator lands; the next two live
+/// producers fill [`OverloadSet`](Self::OverloadSet) and
+/// [`BroadRuntime`](Self::BroadRuntime), respectively, and the
+/// materialization cycle gate fills
+/// [`MaterializationCycleGate`](Self::MaterializationCycleGate). The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
-/// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
+/// variants `ResolveAmbientNamespace`, `ResolveEnum`,
 /// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
 /// the `Relation` / `ProgramAnalysis` domains they will produce once their
 /// reducers land. The remaining arms are shells with no live producer —
@@ -3226,9 +5091,14 @@ pub enum QueryResult<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
-    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`]
-    /// and [`SemanticQueryKey::ClassifyBroadRuntime`].
+    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
+    /// [`SemanticQueryKey::ClassifyBroadRuntime`], and
+    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
     TypeNode(SemanticNodeId),
+    /// Selector-aware correlated projection facts for one authored object
+    /// construction program. This is intentionally not disguised as a graph
+    /// type node: closed-domain operations remain witness-gated on the formula.
+    ObjectProjection(ObjectProjectionFormula),
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
     ProgramAnalysis(ProgramAnalysisValue),
@@ -3247,13 +5117,38 @@ pub enum SemanticQueryValue {
     /// trailing implementation signatures). The last element is the last
     /// visible overload.
     OverloadSet(Arc<[SignatureRef]>),
-    /// The tri-state outcome of a relation query. No live producer; the
-    /// live relation path is the separate relation memo.
+    /// The public outcome of a relation query — the LIVE value domain of
+    /// [`SemanticQueryKey::Relate`]. `execute(Relate)` produces and admits
+    /// decided binary judgements (`Assignable` / `NotAssignable`); a
+    /// `BudgetExceeded` outcome is expressible and rendered but
+    /// `ReturnOnly` at the admission gate (never warm). There is NO public
+    /// `Unknown`: an undecided relation has no value-domain form and
+    /// surfaces as `Error(Miss)` from the cold compute.
     Relation(RelationPayload),
     /// Ordered, terminal broad runtime classification used by Vue macro
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
     BroadRuntime(BroadRuntimeClassification),
+    /// The whole-function return produced by a `FlowReturn` query — the
+    /// SUCCESS carrier, degraded successes included: a usable degraded
+    /// value returns here with its typed `FlowReturnDegradation` and
+    /// defaults to `ReturnOnly` (only a non-degraded COMPLETE evaluation
+    /// admits warm); every NO-VALUE outcome is a typed
+    /// `FlowReturnFailure` through `ReturnOnly` and never admits.
+    FlowReturn(Arc<FlowReturnResult>),
+    /// The call / construct resolution produced by a `ResolveCall` query —
+    /// only a COMPLETE evaluation reaches this domain (one fully-decided
+    /// first-applicable candidate, or a genuine dynamic `any`); every
+    /// uncertainty, failure, or budget trip is a typed failure through
+    /// `ReturnOnly` and never admits.
+    ResolveCall(Arc<ResolvedCallResult>),
+    /// The sealed materialization cycle-gate outcome — the LIVE value domain
+    /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
+    /// authority for "does this declaration transitively reach a cycle
+    /// through a complex helper surface". Only
+    /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
+    /// memo; a `LegacyFallback` flows to the caller suppressed.
+    MaterializationCycleGate(MaterializationCycleGateOutcome),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -3266,11 +5161,15 @@ pub enum SemanticQueryValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SemanticQueryValueTag {
     TypeNode,
+    ObjectProjection,
     ProgramAnalysis,
     DeclarationAnalysis,
     OverloadSet,
     Relation,
     BroadRuntime,
+    MaterializationCycleGate,
+    FlowReturn,
+    ResolveCall,
     DiagnosticAnalysis,
 }
 
@@ -3280,11 +5179,15 @@ impl SemanticQueryValue {
     pub fn tag(&self) -> SemanticQueryValueTag {
         match self {
             Self::TypeNode(_) => SemanticQueryValueTag::TypeNode,
+            Self::ObjectProjection(_) => SemanticQueryValueTag::ObjectProjection,
             Self::ProgramAnalysis(_) => SemanticQueryValueTag::ProgramAnalysis,
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
+            Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
+            Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
+            Self::ResolveCall(_) => SemanticQueryValueTag::ResolveCall,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -3352,11 +5255,236 @@ impl BroadRuntimeClassification {
     }
 }
 
-/// A single call/construct signature, identified by its graph node
-/// (a `SemanticNodeData::Function`). Carried by the overload-set domain.
+// ──────────────────────────────────────────────────────────────────────────
+// Materialization cycle gate (ClassifyMaterializationCycleGate)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// The verdict the materialization cycle gate carries. `Stop` halts
+/// materialisation (the root declaration transitively reaches a cycle
+/// through a complex helper surface); `Continue` lets it proceed.
+///
+/// Consumers branch on THIS verdict from BOTH outcome arms — never on
+/// the arm kind. A `LegacyFallback` carries the same verdict vocabulary
+/// as a `Decided`; treating "fallback" itself as a stop condition would
+/// false-seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaterializationCycleGateVerdict {
+    Stop,
+    Continue,
+}
+
+/// Why a gate walk could not produce a complete [`MaterializationCycleGateOutcome::Decided`]
+/// outcome. Recoverable incomplete observations do not stop the walk;
+/// the reason set records that the walk was incomplete, so the outcome
+/// demotes to `LegacyFallback`.
+///
+/// Partiality contract (binding): every reason EXCEPT
+/// [`HopLimit`](Self::HopLimit) marks the producer's `result_is_partial`.
+/// The hop-limit fallback returns the carried path signal — a complete
+/// observation of a bounded walk — so it is `ReturnOnly` (cache-suppressed)
+/// but NOT partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MaterializationCycleGateFallbackReason {
+    /// The 64-dequeue hop bound was exhausted; the verdict is the carried
+    /// path signal. NOT partial.
+    HopLimit,
+    /// A nested per-hop `Instantiate` read returned `Recursive` or `Error`
+    /// (including a missing root body); the walk continued past it.
+    /// Partial.
+    NestedIncompleteObservation,
+    /// A graph node the walk or a scanner needed had no node data (a
+    /// torn graph). Partial. A body that LOWERS to `Opaque(Miss)` (a
+    /// missing prepared decl, a type parameter, a builtin, an external
+    /// decl) is NOT this reason — it is an ordinary empty body the walk
+    /// traverses and decides on.
+    MissingGraphData,
+    /// A body scanner's depth fuse tripped; observations beyond the fuse
+    /// are ignored (the walk continues). Partial.
+    ScannerLimit,
+    /// The multi-root aggregator's root-surface collection hit its bound;
+    /// the aggregate ORs only the collected roots. Partial.
+    RootCollectorLimit,
+    /// The read was cancelled. Partial.
+    Cancelled,
+    /// The project generation moved under the walk. Partial.
+    UnstableGeneration,
+}
+
+impl MaterializationCycleGateFallbackReason {
+    /// Whether this reason marks the producer's `result_is_partial`
+    /// (everything except the hop-limit polarity fallback).
+    #[must_use]
+    pub const fn is_partial(self) -> bool {
+        !matches!(self, Self::HopLimit)
+    }
+}
+
+/// A non-empty, deduplicated, order-stable set of
+/// [`MaterializationCycleGateFallbackReason`]s. Non-emptiness is sealed:
+/// the only constructor collects into `Some` first element or returns
+/// `None`, so an empty `LegacyFallback` reason set is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializationCycleGateFallbackReasons(Arc<[MaterializationCycleGateFallbackReason]>);
+
+impl MaterializationCycleGateFallbackReasons {
+    /// Collect `reasons` into a deduplicated set, or `None` when empty.
+    #[must_use]
+    pub fn new(
+        reasons: impl IntoIterator<Item = MaterializationCycleGateFallbackReason>,
+    ) -> Option<Self> {
+        let mut ordered: Vec<MaterializationCycleGateFallbackReason> = Vec::new();
+        for reason in reasons {
+            if !ordered.contains(&reason) {
+                ordered.push(reason);
+            }
+        }
+        if ordered.is_empty() {
+            return None;
+        }
+        Some(Self(Arc::from(ordered.into_boxed_slice())))
+    }
+
+    #[must_use]
+    pub fn contains(&self, reason: MaterializationCycleGateFallbackReason) -> bool {
+        self.0.contains(&reason)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = MaterializationCycleGateFallbackReason> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Union of two reason sets (multi-root aggregation: reasons ∪).
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        Self::new(self.iter().chain(other.iter()))
+            .expect("union of two non-empty reason sets is non-empty")
+    }
+
+    /// Whether any reason in the set marks the result partial.
+    #[must_use]
+    pub fn any_partial(&self) -> bool {
+        self.iter()
+            .any(MaterializationCycleGateFallbackReason::is_partial)
+    }
+}
+
+/// The sealed outcome of [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+///
+/// `Decided` is a complete walk — the ONLY arm admitted into the family
+/// memo. `LegacyFallback` carries the walk's computed verdict plus the
+/// non-empty reason set explaining why the walk was incomplete; it
+/// always suppresses family admission
+/// (`cache_suppress`) and marks `result_is_partial` iff any reason
+/// [`is_partial`](MaterializationCycleGateFallbackReason::is_partial).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationCycleGateOutcome {
+    Decided(MaterializationCycleGateVerdict),
+    LegacyFallback {
+        verdict: MaterializationCycleGateVerdict,
+        reasons: MaterializationCycleGateFallbackReasons,
+    },
+}
+
+impl MaterializationCycleGateOutcome {
+    /// The carried verdict from EITHER arm — the only value consumers
+    /// may branch on.
+    #[must_use]
+    pub fn verdict(&self) -> MaterializationCycleGateVerdict {
+        match self {
+            Self::Decided(verdict) => *verdict,
+            Self::LegacyFallback { verdict, .. } => *verdict,
+        }
+    }
+
+    #[must_use]
+    pub fn is_decided(&self) -> bool {
+        matches!(self, Self::Decided(_))
+    }
+
+    /// The fallback reason set, or `None` for a `Decided` outcome.
+    #[must_use]
+    pub fn fallback_reasons(&self) -> Option<&MaterializationCycleGateFallbackReasons> {
+        match self {
+            Self::Decided(_) => None,
+            Self::LegacyFallback { reasons, .. } => Some(reasons),
+        }
+    }
+
+    /// The multi-root OR lattice (the node-root aggregator's
+    /// composition rule): Stop dominates Continue; ANY
+    /// `LegacyFallback` in the inputs infects the aggregate — a
+    /// `Decided(Continue)` beside a `LegacyFallback(...)` is NOT a
+    /// complete `Decided`; reasons union across all fallback inputs.
+    /// An empty input decides `Continue` (no roots, no cycle, no
+    /// incompleteness).
+    #[must_use]
+    pub fn aggregate(outcomes: impl IntoIterator<Item = Self>) -> Self {
+        let mut stop = false;
+        let mut reasons: Vec<MaterializationCycleGateFallbackReason> = Vec::new();
+        for outcome in outcomes {
+            stop |= matches!(outcome.verdict(), MaterializationCycleGateVerdict::Stop);
+            if let Some(fallback) = outcome.fallback_reasons() {
+                reasons.extend(fallback.iter());
+            }
+        }
+        let verdict = if stop {
+            MaterializationCycleGateVerdict::Stop
+        } else {
+            MaterializationCycleGateVerdict::Continue
+        };
+        match MaterializationCycleGateFallbackReasons::new(reasons) {
+            None => Self::Decided(verdict),
+            Some(union) => Self::LegacyFallback {
+                verdict,
+                reasons: union,
+            },
+        }
+    }
+}
+
+/// The sealed, content-free key of
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+///
+/// `root` is the env-bearing [`ResolvedDeclSlotIdentity`] of the gate
+/// root declaration (it carries the `T` / `L` / `J` env dims);
+/// `parse_env_hash` (`P`) and `resolve_env_hash` (`R`) complete the
+/// env identity — the per-hop `Instantiate` reads the producer issues
+/// are file-backed (`P`) and resolve imports (`R`). The remaining axes
+/// are FIXED, not key fields: empty args, `StructuralTransit` demand,
+/// `Skeleton` mode, neutral policy / provenance. No content hash,
+/// generation, `DeclIdentity`, or algorithm version enters the key —
+/// version-rooting lives on the cached value's read-set facts +
+/// observed self-roots (R6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MaterializationCycleGateKey {
+    pub root: ResolvedDeclSlotIdentity,
+    /// Parse dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+}
+
+/// A single call/construct signature: its graph node (a
+/// `SemanticNodeData::Signature`) plus the occurrence identity and return
+/// carrier that make the ordered candidate list occurrence-aware. Carried
+/// by the overload-set domain — an ORDERED occurrence list (never a
+/// node→source map: structurally identical signatures can intern to one
+/// node while originating from different bodies).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureRef {
     pub node: SemanticNodeId,
+    /// The candidate's origin — a content-free authored occurrence, or
+    /// rootless.
+    pub occurrence: SignatureCandidateOrigin,
+    /// Where the candidate's return comes from (a declared node — a
+    /// concrete seed — or a body-derived `FlowReturn` position).
+    pub return_carrier: SignatureReturnCarrier,
+    /// The UNION-callee arm this candidate belongs to (`0` for a
+    /// non-union callee). Declaration order applies independently WITHIN
+    /// an arm; arm order is never overload precedence — a call selects a
+    /// first-applicable signature in EVERY callable arm and unions the
+    /// selected returns.
+    pub arm_ordinal: u32,
 }
 
 /// A type produced by flow / contextual program analysis (the narrowed or
@@ -3398,12 +5526,13 @@ pub struct DeclarationAnalysisValue {
 /// `SemanticQueryValue::Relation` form and routes through `ReturnOnly` in the
 /// cold compute.
 ///
-/// SHAPE only: no live `execute` producer fills it yet —
-/// `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`, and the
-/// production authority `relate_nodes` emits the engine's transient
-/// [`RelationResult`] into the dedicated relation memo. The relation-inference
-/// reducer (not yet implemented) populates this payload and its proof table
-/// once it lands.
+/// LIVE: the relation authority (`ProjectSemanticDispatch::execute_relate`
+/// → `execute(SemanticQueryKey::Relate)` → `build_relate`) populates this
+/// payload and interns its proof into the store's payload-side
+/// [`RelationProofTable`]-backing interner. Only a binary
+/// `Assignable`/`NotAssignable` outcome is warm-admitted; a
+/// `BudgetExceeded` payload is returned to the caller with admission
+/// suppressed (ReturnOnly-but-public).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
     /// The public relation outcome — `Assignable`, `NotAssignable`, or
@@ -3521,10 +5650,9 @@ pub struct RelationProofId(pub u32);
 pub struct RelateKeyId(pub u32);
 
 /// One entry of a payload-side [`RelationProofTable`], addressed by an opaque
-/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). SHAPE only: the
-/// proof-search substrate is the relation-inference reducer (not yet
-/// implemented).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). Populated LIVE by
+/// the relation authority at admission time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelationProof {
     /// Positive structural derivation: which sub-relations held, member by
     /// member and across variance arms.
@@ -3557,9 +5685,8 @@ pub struct RelationProofTable {
 }
 
 /// Positive-derivation witness: the structural sub-relations that held to
-/// discharge a relation, in structural order. SHAPE only: the
-/// relation-inference reducer (not yet implemented) fills it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// discharge a relation, in structural order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DerivationTree {
     pub sub_derivations: Arc<[SubRelationRef]>,
 }
@@ -3941,7 +6068,14 @@ pub struct BroadRuntimeContext {
 /// skeleton, so keying on those would be a dead axis (R21). The
 /// substitution axis is NOT carried here — the `base` node is already
 /// substituted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `demand_scope` is the scope witness for a base with no authored anchor:
+/// an anchored base derives its scoping canonical from its own occurrence
+/// (`Anchored` carries nothing), while a ROOTLESS base carries the lexical
+/// demand canonical the lookup is scoped by. The witness is content-free
+/// canonical identity (R6) and makes two projects' demands over the same
+/// interned rootless node DISTINCT keys, so they can never cross-serve.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApparentTypeContext {
     /// Type-env dimension (`T`).
     pub type_env_hash: HashValue,
@@ -3949,6 +6083,36 @@ pub struct ApparentTypeContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`).
     pub project_identity: u32,
+    /// The scope witness for the ambient lookup (see the struct docs).
+    pub demand_scope: ApparentDemandScope,
+}
+
+/// Which canonical scopes a [`SemanticQueryKey::ApparentType`] ambient
+/// lookup.
+///
+/// The producer distinguishes three base classifications: a NON-callable
+/// base produces no surface at all; an AUTHORED callable retains its
+/// declaring-canonical scope (derivable from the base node's occurrence, so
+/// `Anchored` carries nothing); a ROOTLESS callable (a parameter
+/// annotation, a local arrow, an object-type call signature — no authored
+/// occurrence) is scoped by the canonical containing the member-access /
+/// call site that demanded it. Only the canonical's content-free identity
+/// enters the key (R6 — no content or version hash).
+///
+/// A `Rootless` apparent value resolves semantically but NEVER enters a
+/// shared cache: the producer marks its build `cache_suppress`, and that
+/// taint folds through every enclosing member/path/call query.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ApparentDemandScope {
+    /// The base callable carries an authored occurrence; its declaring
+    /// canonical scopes the lookup.
+    Anchored,
+    /// The base callable is rootless; the lexical demand canonical scopes
+    /// the lookup.
+    Rootless {
+        /// The canonical containing the member-access/call site.
+        canonical: Arc<str>,
+    },
 }
 
 /// Env a [`SemanticQueryKey::TemplateLiteralReduce`] value depends on (env
@@ -4278,7 +6442,7 @@ impl Default for FreshnessKey {
 /// A binding-producing relation runs inside the enclosing transaction's active
 /// `InferenceSession`; a judgement discharged under one session's setup must NOT
 /// warm-hit a judgement discharged under a different setup, so this projection
-/// is part of relation identity. The six axes are exactly the fields the active
+/// is part of relation identity. The seven axes are exactly the fields the active
 /// session carries (§4.2), projected content-free onto the cache key.
 ///
 /// **Content-free (R6).** Every axis is a node-set interning identity, a closed
@@ -4294,6 +6458,8 @@ pub struct InferenceContextKey {
     /// relation runs under (§4.0). Names the pass; does not settle measured
     /// variance.
     pub variance_phase: VariancePhase,
+    /// The inference algorithm enabled when the session opened.
+    pub pass_kind: InferencePassKind,
     /// Candidate priority — return-type vs argument vs naked-type-parameter
     /// inference position (§4.2).
     pub candidate_priority: InferenceCandidatePriority,
@@ -4304,6 +6470,20 @@ pub struct InferenceContextKey {
     /// Whether / how a contextual target drives inference in this session
     /// (§4.2).
     pub contextual_inference_mode: ContextualInferenceMode,
+}
+
+/// Inference algorithm selected from the relation pattern before a session
+/// opens. The pass is part of relation identity because reverse-projection
+/// targets change how indexed-access sub-relations deposit candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InferencePassKind {
+    /// Ordinary direct conditional-`infer` inference.
+    #[default]
+    Ordinary,
+    /// Candidate-local inference while deciding call applicability.
+    CallApplicability,
+    /// Exact `{ [P in keyof infer T]: X }` reverse projection.
+    ReverseHomomorphicMapped,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an
@@ -4367,14 +6547,34 @@ pub enum VariancePhase {
 /// only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum InferenceCandidatePriority {
-    /// Ordinary argument-position inference — the baseline priority.
-    #[default]
-    Argument,
-    /// Return-type-position inference (lower priority than naked-type-parameter
-    /// inference, higher precedence semantics handled by the engine).
-    ReturnType,
     /// Naked-type-parameter inference (a bare `T` in the source position).
     NakedTypeParameter,
+    /// Return-type-position inference.
+    ReturnType,
+    /// Ordinary argument-position inference.
+    #[default]
+    Argument,
+    /// A complete reverse-homomorphic mapped candidate.
+    HomomorphicMapped,
+    /// A reverse-homomorphic candidate with one or more unrecovered
+    /// projections represented by `unknown`.
+    PartialHomomorphicMapped,
+}
+
+/// Closed candidate precedence ladder. A larger rank wins.
+///
+/// Every inference setup projection and candidate selection routes through
+/// this function so direct candidates always outrank reverse-mapped
+/// candidates, and complete reverse recovery always outranks partial recovery.
+#[must_use]
+pub const fn inference_candidate_precedence(priority: InferenceCandidatePriority) -> u8 {
+    match priority {
+        InferenceCandidatePriority::NakedTypeParameter => 4,
+        InferenceCandidatePriority::ReturnType => 3,
+        InferenceCandidatePriority::Argument => 2,
+        InferenceCandidatePriority::HomomorphicMapped => 1,
+        InferenceCandidatePriority::PartialHomomorphicMapped => 0,
+    }
 }
 
 /// The occurrence-local `NoInfer<T>` suppression mask in effect for a relation
@@ -4531,8 +6731,8 @@ impl SubstitutionCanonicalHash {
 /// The relation memo's query-identity key — the full `Relate` identity.
 ///
 /// Mirrors the [`SemanticQueryKey::Relate`] identity fields exactly: the
-/// relation memo
-/// ([`BudgetedRelationMemo`](crate::semantic_query_memo::SemanticGraphStore))
+/// relation memo (the `Relate` family of the family memo inside
+/// [`crate::semantic_query_memo::SemanticGraphStore`])
 /// is keyed by THIS, never by the bare `(source, target)` pair. Two relation
 /// judgements over the same nodes but a different relation kind / policy /
 /// source freshness / inference context / env are DISTINCT and occupy distinct
@@ -4565,10 +6765,9 @@ impl RelateMemoKey {
     /// [`RelationKind::Assignable`], default [`RelationPolicy`], regular
     /// (widened) [`FreshnessKey`], NO inference context, under `context`.
     ///
-    /// This is the identity `relate_nodes` keys the memo under today — the
-    /// relation engine computes assignability; the kind / policy / freshness /
-    /// inference axes become live discriminators with the relation-inference
-    /// reducer (not yet implemented).
+    /// This is the identity the relation authority's ergonomic
+    /// pair-constructor (`execute_relate_pair`) keys the memo under for a
+    /// plain assignability judgement.
     #[must_use]
     pub fn assignable(
         source: SemanticNodeId,
@@ -4583,6 +6782,51 @@ impl RelateMemoKey {
             source_freshness: FreshnessKey::default(),
             inference_context: None,
             context,
+        }
+    }
+
+    /// Project the key onto its canonical [`SemanticQueryKey::Relate`]
+    /// form (the family-dispatch identity). Field-for-field: the two
+    /// surfaces mirror each other exactly.
+    #[must_use]
+    pub fn to_query_key(&self) -> SemanticQueryKey {
+        SemanticQueryKey::Relate {
+            source: self.source,
+            target: self.target,
+            relation: self.relation,
+            policy: self.policy,
+            source_freshness: self.source_freshness,
+            inference_context: self.inference_context.clone(),
+            context: self.context,
+        }
+    }
+
+    /// The inverse of [`Self::to_query_key`]: lift a
+    /// [`SemanticQueryKey::Relate`] into the memo-key surface. Panics on
+    /// any other variant — callers match first.
+    #[must_use]
+    pub fn from_query_key(key: &SemanticQueryKey) -> Self {
+        match key {
+            SemanticQueryKey::Relate {
+                source,
+                target,
+                relation,
+                policy,
+                source_freshness,
+                inference_context,
+                context,
+            } => Self {
+                source: *source,
+                target: *target,
+                relation: *relation,
+                policy: *policy,
+                source_freshness: *source_freshness,
+                inference_context: inference_context.clone(),
+                context: *context,
+            },
+            other => panic!(
+                "RelateMemoKey::from_query_key expects SemanticQueryKey::Relate, got {other:?}"
+            ),
         }
     }
 }
@@ -4696,6 +6940,17 @@ pub enum SemanticQueryKey {
     NormalizeIntersection {
         members: Arc<[SemanticNodeId]>,
     },
+    /// Selector-aware projection of one authored object-construction program.
+    ///
+    /// The complete identity is exactly `(program, selector, context)`.
+    /// `context` retains `R/T/L/J`, substitution/prepared-family identity,
+    /// exact-optional policy, and the reduction context. Version facts stay on
+    /// the cached value's read set, never on this content-free key.
+    ProjectObjectSpread {
+        program: SemanticNodeId,
+        selector: ObjectProjectionSelector,
+        context: ObjectSpreadProjectionContext,
+    },
     /// Path-precise projection rooted at `base` and walking each
     /// [`PathSegment`] in `path`. The empty-path form (`path: Arc::from([])`)
     /// is the canonical shape of "expand the whole surface" — the retired
@@ -4726,22 +6981,18 @@ pub enum SemanticQueryKey {
     /// `policy`, the `source_freshness` discriminator, an optional
     /// `inference_context` (the inference session the relation runs within), and
     /// the `R T L J` env `context`. Two judgements over the same nodes that
-    /// differ in any of these are DISTINCT and occupy distinct memo slots —
-    /// `relate_nodes` keys the dedicated
-    /// [`relation_memo`](crate::semantic_query_memo::SemanticGraphStore) by the
-    /// full [`RelateMemoKey`], dep-signature fenced.
+    /// differ in any of these are DISTINCT and occupy distinct memo slots.
     ///
-    /// **Forward-declared value domain.** The spec row records value domain
-    /// [`SemanticQueryValueTag::Relation`]
-    /// (`SemanticQueryValue::Relation(RelationPayload)`). The `execute` arm is
-    /// non-producing (returns `Miss`): the current production authority is
-    /// `relate_nodes`, which emits the engine's [`RelationResult`] into the
-    /// relation memo. The per-kind / per-policy / inference-aware relation
-    /// algorithm — and the reducer that fills the `RelationPayload` outcome /
-    /// proof / budget carrier — is the relation-inference reducer (not yet
-    /// implemented). Until then the engine
-    /// computes [`RelationKind::Assignable`] and the kind / policy / freshness /
-    /// inference axes are identity discriminators with a fixed default value.
+    /// **LIVE producer** — the SOLE relation authority. The `execute` arm
+    /// (`build_relate`) runs the relation reducer on the cold-compute frame
+    /// of the one resolver, producing
+    /// [`SemanticQueryValue::Relation(RelationPayload)`] for determinate
+    /// judgements: decided binary outcomes (`Assignable` / `NotAssignable`)
+    /// are admitted into the `Relate` family slot (singleflight);
+    /// `BudgetExceeded` is returned to the caller but never admitted; an
+    /// undecided judgement (deferred / opaque / undischargeable SCC) has no
+    /// value-domain form and surfaces `Error(Miss)`, never admitted. Every
+    /// recursive sub-relation re-enters this same full-key authority.
     ///
     /// All identity fields are content-free (R6): node ids, content-free kind /
     /// policy / freshness enums, content-free inference targets, and env hashes
@@ -4940,19 +7191,33 @@ pub enum SemanticQueryKey {
     /// `base` is the already-substituted [`SemanticNodeId`] (the
     /// substitution axis rides on `base`, so there is NO separate `args`
     /// field and NO `mode` field); `context` carries the `{T, L, J}` env
-    /// the apparent surface depends on (NO `R`, NO `P` — see
-    /// [`ApparentTypeContext`]).
+    /// the apparent surface depends on (NO `R`, NO `P`) plus the
+    /// demand-scope witness (see [`ApparentTypeContext`] /
+    /// [`ApparentDemandScope`]).
     ///
-    /// **Non-producing.** This variant has no `execute`-side producer: the
-    /// lib-member / primitive→wrapper member index it would read does not
-    /// exist yet. The `execute` build arm returns
-    /// [`QueryError::Miss`] (`Opaque(Miss)`) verbatim and never admits or
-    /// caches a value (admission
-    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
-    /// [`SemanticQueryValueTag::TypeNode`]. The producer lands with the
-    /// lib-member-index block.
+    /// **LIVE producer for the CALLABLE arm** (admission
+    /// [`AdmissionSpec::Singleflight`]). A base that carries call
+    /// signatures widens to the ambient callable-function interface
+    /// (`CallableFunction` / `Function`) registered for the scoping
+    /// project, so `.call` / `.apply` / `.bind` resolve as ordinary
+    /// members of that ambient declaration. An AUTHORED callable is scoped
+    /// by the project that owns its declaring canonical; a ROOTLESS
+    /// callable is scoped by the lexical demand canonical carried in the
+    /// key's [`ApparentDemandScope::Rootless`] witness, and its value is
+    /// built `cache_suppress` — it flows to the caller but never enters a
+    /// shared cache, and the taint folds through every enclosing
+    /// member/path/call query. The widening is registry-proved, never
+    /// name-matched: an unregistered corpus, a rootless callable with no
+    /// demand-scope witness, and a canonical with no owning project all
+    /// return [`QueryError::Miss`].
     ///
-    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    /// The primitive→wrapper widening (`string` → `String`, `number` →
+    /// `Number`, …) reads a lib-member index that does not exist: those
+    /// bases also return `Miss`. An `Error` result is never warm-published,
+    /// so nothing is admitted or cached for them. Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ApparentType {
         base: SemanticNodeId,
         context: ApparentTypeContext,
@@ -5080,6 +7345,71 @@ pub enum SemanticQueryKey {
     LowerLocator {
         key: crate::locator_identity::LocatorLoweringKey,
     },
+    /// Classify whether the `root` declaration transitively reaches a
+    /// cycle through a complex helper surface — the materialization
+    /// cycle gate.
+    ///
+    /// The payload is the sealed [`MaterializationCycleGateKey`]: the
+    /// env-bearing root slot (`T`/`L`/`J`) plus `P` and `R`. All other
+    /// axes are FIXED inside the producer (empty args, `StructuralTransit`
+    /// demand, `Skeleton` mode, neutral policy / provenance), so they
+    /// cannot fork the family identity. The value domain is
+    /// [`SemanticQueryValue::MaterializationCycleGate`]; only
+    /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
+    /// memo. Version-rooting lives on the cached value's read-set facts +
+    /// observed self-roots (R6), never in the key.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    ClassifyMaterializationCycleGate(MaterializationCycleGateKey),
+    /// Resolve the WHOLE-function return type of one authored function
+    /// position — the demanded function's complete body evaluated through
+    /// the flow IR: return sites, `if` reachability, bare return,
+    /// fallthrough, primitive widening, unions, parameters and simple
+    /// local reaching definitions, object returns (spread delegated to
+    /// [`ProjectObjectSpread`](Self::ProjectObjectSpread)), call returns
+    /// resolved through the shared [`ResolveCall`](Self::ResolveCall)
+    /// authority, return-free loop transparency, and direct same-slot
+    /// recursion through the shared obligation runtime's coinductive holds.
+    ///
+    /// The payload is the full [`FlowReturnKey`] identity: the function
+    /// slot (declaration slot + function part + overload ordinal),
+    /// normalized type args, and the env/substitution/policy context.
+    /// Reentry identity on the obligation runtime IS this key exactly.
+    /// There is NO demand path, projection mode, budget, or content hash
+    /// in the key — the whole-body identity rides the
+    /// `ProgramAnalysisFactRef::FlowBody` fact rail. Value domain:
+    /// [`SemanticQueryValueTag::FlowReturn`]; only a COMPLETE evaluation
+    /// admits — every degraded shape (`Unsupported` / `Missing` /
+    /// `Budget` / `EmptyCycle` / `Unresolved`) is `ReturnOnly` and never
+    /// enters the family memo.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    FlowReturn(Box<FlowReturnKey>),
+    /// Resolve one call / construct demand: callee applicability, argument
+    /// / receiver / rest / constraint relations, per-parameter inference,
+    /// overload ordering (declaration-order first-applicable), and call
+    /// return selection — ONE typed query owning the whole applicability
+    /// story for the call site.
+    ///
+    /// The payload is the full [`ResolveCallKey`] identity: the call-site
+    /// [`ProgramPointId`], the callee / receiver / argument nodes, call vs
+    /// construct, explicit type args, the SEALED-EMPTY [`FlowNarrowingKey`]
+    /// flow axis, and the env + substitution context. There is NO
+    /// freshness field (derived at relation time from canonical
+    /// excess-origin facts), NO contextual-result or candidate-target axis
+    /// (excluded demands), NO budget (runtime state), and NO content hash
+    /// — version-rooting lives on the cached value's read-set facts +
+    /// self roots (R6). Value domain: [`SemanticQueryValueTag::ResolveCall`].
+    ///
+    /// **Live, staged ReturnOnly.** The applicability executor produces the
+    /// typed caller-return value while its winning inference snapshot remains
+    /// `StagedDeterministic`. Until the return-equation publication
+    /// boundary commits that snapshot, admission remains
+    /// [`AdmissionSpec::NonProducingPendingReducer`] and the value is never a
+    /// warm memo entry.
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ResolveCall(Box<ResolveCallKey>),
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -5107,6 +7437,7 @@ pub enum SemanticQueryKeyTag {
     TypeOf,
     NormalizeUnion,
     NormalizeIntersection,
+    ProjectObjectSpread,
     ProjectPath,
     Relate,
     ResolveMacroPayload,
@@ -5120,6 +7451,9 @@ pub enum SemanticQueryKeyTag {
     FlowNarrowingAt,
     ContextualTypeAt,
     LowerLocator,
+    ClassifyMaterializationCycleGate,
+    FlowReturn,
+    ResolveCall,
 }
 
 impl SemanticQueryKeyTag {
@@ -5137,6 +7471,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::TypeOf,
         SemanticQueryKeyTag::NormalizeUnion,
         SemanticQueryKeyTag::NormalizeIntersection,
+        SemanticQueryKeyTag::ProjectObjectSpread,
         SemanticQueryKeyTag::ProjectPath,
         SemanticQueryKeyTag::Relate,
         SemanticQueryKeyTag::ResolveMacroPayload,
@@ -5150,6 +7485,9 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::FlowNarrowingAt,
         SemanticQueryKeyTag::ContextualTypeAt,
         SemanticQueryKeyTag::LowerLocator,
+        SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
+        SemanticQueryKeyTag::FlowReturn,
+        SemanticQueryKeyTag::ResolveCall,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -5169,6 +7507,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::TypeOf => "TypeOf",
             SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
             SemanticQueryKeyTag::NormalizeIntersection => "NormalizeIntersection",
+            SemanticQueryKeyTag::ProjectObjectSpread => "ProjectObjectSpread",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
             SemanticQueryKeyTag::Relate => "Relate",
             SemanticQueryKeyTag::ResolveMacroPayload => "ResolveMacroPayload",
@@ -5182,6 +7521,11 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
             SemanticQueryKeyTag::ContextualTypeAt => "ContextualTypeAt",
             SemanticQueryKeyTag::LowerLocator => "LowerLocator",
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => {
+                "ClassifyMaterializationCycleGate"
+            }
+            SemanticQueryKeyTag::FlowReturn => "FlowReturn",
+            SemanticQueryKeyTag::ResolveCall => "ResolveCall",
         }
     }
 
@@ -5193,7 +7537,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 26 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -5242,6 +7586,9 @@ impl SemanticQueryKey {
             SemanticQueryKey::NormalizeIntersection { .. } => {
                 SemanticQueryKeyTag::NormalizeIntersection
             }
+            SemanticQueryKey::ProjectObjectSpread { .. } => {
+                SemanticQueryKeyTag::ProjectObjectSpread
+            }
             SemanticQueryKey::ProjectPath { .. } => SemanticQueryKeyTag::ProjectPath,
             SemanticQueryKey::Relate { .. } => SemanticQueryKeyTag::Relate,
             SemanticQueryKey::ResolveMacroPayload { .. } => {
@@ -5265,6 +7612,11 @@ impl SemanticQueryKey {
             SemanticQueryKey::FlowNarrowingAt { .. } => SemanticQueryKeyTag::FlowNarrowingAt,
             SemanticQueryKey::ContextualTypeAt { .. } => SemanticQueryKeyTag::ContextualTypeAt,
             SemanticQueryKey::LowerLocator { .. } => SemanticQueryKeyTag::LowerLocator,
+            SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
+                SemanticQueryKeyTag::ClassifyMaterializationCycleGate
+            }
+            SemanticQueryKey::FlowReturn(_) => SemanticQueryKeyTag::FlowReturn,
+            SemanticQueryKey::ResolveCall(_) => SemanticQueryKeyTag::ResolveCall,
         }
     }
 }
@@ -5373,20 +7725,75 @@ mod query_key_tag_tests {
 /// substituted type; those bindings flow into the true branch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InferBinding {
+    /// Exact declaration node whose binder was fixed. This is deliberately
+    /// carried alongside the display name: nested conditional scopes may
+    /// declare the same name, and substitution must never guess identity
+    /// from that spelling.
+    pub param: SemanticNodeId,
     pub name: Arc<str>,
     pub bound: SemanticNodeId,
 }
 
-/// Tri-state result of a `Relate` judgement.
-///
-/// All three variants memoise with dep-signature fencing — `Unknown` is
-/// included so repeated cyclic re-entry short-circuits without recomputing
-/// the undecidable judgement.
+/// Tri-state lattice of the relation REDUCER — the engine-internal
+/// combination type the structural worklist (`decide_relation` /
+/// `expand_pair` / the object-function predicates) folds sub-judgements
+/// with. NEVER admitted, NEVER stored: the relation authority maps it onto
+/// the transient [`RelationComputeResult`] at the cold-compute boundary,
+/// and only a decided binary verdict reaches a public
+/// [`RelationPayload`]. `Unknown` covers genuinely undecidable judgements
+/// — deferred shells (`KeyOf`, `IndexedAccess`, `Mapped`, `Conditional`,
+/// `TypeOf`, `TemplateLiteral`), undischargeable SCC edges, and opaque
+/// carriers — and is `ReturnOnly`-only (never warm-admitted).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelationResult {
     Assignable { bindings: Arc<[InferBinding]> },
     NotAssignable,
     Unknown,
+}
+
+/// Compute-side relation result — the TRANSIENT return of the relation
+/// cold compute (design "Decision 4"). NEVER cached as-is: the dispatch
+/// boundary maps it onto the public [`SemanticQueryValue::Relation`] and
+/// the admission table. Only the [`RelationComputeResult::Decided`] arm
+/// carries a value-domain [`RelationPayload`]; the
+/// [`RelationComputeResult::Undecided`] arm carries exactly the states
+/// that have NO public value-domain form (a deferred shell / opaque
+/// carrier, or a verdict decided under a coinductive assumption that has
+/// not yet discharged) and routes through `ReturnOnly` by construction.
+///
+/// The warm-admission gate — not this type — decides warmth: only a
+/// `Decided` payload with a binary `Assignable`/`NotAssignable` outcome
+/// admits; a `BudgetExceeded` outcome is `ReturnOnly`-but-public (never
+/// warm). `Unknown` has no public form at all and is never admitted
+/// anywhere (memo / fact / reverse index).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationComputeResult {
+    /// A decided judgement — the publicly-representable payload
+    /// (`Assignable` | `NotAssignable` | `BudgetExceeded`).
+    Decided(RelationPayload),
+    /// An undecidable judgement — no public value-domain form.
+    Undecided(UndecidedReason),
+}
+
+/// Why a relation judgement could not be decided — the compute-side states
+/// with no `SemanticQueryValue::Relation` surfacing (design "Decision 4").
+///
+/// Both arms are `ReturnOnly`-ONLY: never admitted, never published, never
+/// a fact signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UndecidedReason {
+    /// The judgement could not be decided — a deferred shell (`KeyOf` /
+    /// `IndexedAccess` / `Mapped` / `Conditional` / `TypeOf` /
+    /// `TemplateLiteral`), an opaque carrier, or an unresolvable identity
+    /// carrier. No public value-domain form; NEVER warm-admitted (the
+    /// deleted memoized-`Unknown` arm must not re-enter).
+    Unknown,
+    /// The judgement was decided under an open coinductive assumption
+    /// whose SCC has not yet discharged — the scoped-assumption sentinel
+    /// state. NEVER warm-admitted, NEVER the published proof: admission
+    /// happens only at SCC-close (pure non-binding SCC / closure-clean
+    /// negative) or at the relevant session-close (deferred members).
+    OpenAssumption(RelateKeyId),
 }
 
 /// One element of a [`SemanticNodeData::Tuple`] shell.
@@ -5421,10 +7828,203 @@ pub struct TupleElement {
 /// text as a typed node so the structural graph can be lowered without any
 /// name/import/type reduction. They are resolved at demand time through the
 /// shared dispatch; until a producer emits them they carry no behaviour.
+/// Canonical semantic identity of a property key.
+pub type PropertyKey =
+    verter_type_expr::PropertyKey<verter_type_expr::facts::ValueDeclIdentityPart>;
+
+/// An authored property key, retaining unresolved computed expressions as
+/// semantic children.
+pub type AuthoredPropertyKey = verter_type_expr::AuthoredPropertyKey<
+    SemanticNodeId,
+    verter_type_expr::facts::ValueDeclIdentityPart,
+>;
+
+pub(crate) fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<SemanticNodeId> {
+    match key {
+        AuthoredPropertyKey::String(_)
+        | AuthoredPropertyKey::Number(_)
+        | AuthoredPropertyKey::UniqueSymbol(_) => None,
+        AuthoredPropertyKey::Computed(node) => Some(*node),
+    }
+}
+
+/// Lossless authored property write in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredPropertyEffect {
+    pub key: AuthoredPropertyKey,
+    pub value: SemanticNodeId,
+    pub optional: bool,
+    pub readonly: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored method write in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredMethodEffect {
+    pub key: AuthoredPropertyKey,
+    pub signature: SemanticNodeId,
+    pub optional: bool,
+    pub has_implementation_body: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored getter or setter write in an object construction. The
+/// enclosing effect variant carries the accessor kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredAccessorEffect {
+    pub key: AuthoredPropertyKey,
+    pub signature: SemanticNodeId,
+    pub optional: bool,
+    pub has_implementation_body: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored index signature in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredIndexEffect {
+    pub key_type: SemanticNodeId,
+    pub value_type: SemanticNodeId,
+    pub readonly: bool,
+    pub spans: verter_type_expr::IndexSignatureSpans,
+    pub declaration_origin: Option<Arc<str>>,
+}
+
+/// One source-ordered effect in a spread-bearing object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectConstructionEffect {
+    DirectProperty(AuthoredPropertyEffect),
+    DirectMethod(AuthoredMethodEffect),
+    DirectGet(AuthoredAccessorEffect),
+    DirectSet(AuthoredAccessorEffect),
+    DirectIndex(AuthoredIndexEffect),
+    DirectCall(SemanticNodeId),
+    DirectConstruct(SemanticNodeId),
+    Spread(SemanticNodeId),
+}
+
+impl ObjectConstructionEffect {
+    fn push_child_nodes(&self, children: &mut Vec<SemanticNodeId>) {
+        match self {
+            Self::DirectProperty(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.value);
+            }
+            Self::DirectMethod(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.signature);
+            }
+            Self::DirectGet(effect) | Self::DirectSet(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.signature);
+            }
+            Self::DirectIndex(effect) => {
+                children.push(effect.key_type);
+                children.push(effect.value_type);
+            }
+            Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node) => {
+                children.push(*node);
+            }
+        }
+    }
+}
+
+/// Immutable source-ordered authority for a spread-bearing object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectSpreadProgram {
+    pub effects: Arc<[ObjectConstructionEffect]>,
+}
+
+impl ObjectSpreadProgram {
+    /// Iterate every semantic child in effect order.
+    pub fn child_nodes(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
+        let mut children = Vec::new();
+        for effect in self.effects.iter() {
+            effect.push_child_nodes(&mut children);
+        }
+        children.into_iter()
+    }
+
+    /// Rebuild the program after applying `map` to every semantic child.
+    pub fn map_child_nodes(&self, mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId) -> Self {
+        let effects = self
+            .effects
+            .iter()
+            .map(|effect| match effect {
+                ObjectConstructionEffect::DirectProperty(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.value = map(effect.value);
+                    ObjectConstructionEffect::DirectProperty(effect)
+                }
+                ObjectConstructionEffect::DirectMethod(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectMethod(effect)
+                }
+                ObjectConstructionEffect::DirectGet(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectGet(effect)
+                }
+                ObjectConstructionEffect::DirectSet(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectSet(effect)
+                }
+                ObjectConstructionEffect::DirectIndex(effect) => {
+                    let mut effect = effect.clone();
+                    effect.key_type = map(effect.key_type);
+                    effect.value_type = map(effect.value_type);
+                    ObjectConstructionEffect::DirectIndex(effect)
+                }
+                ObjectConstructionEffect::DirectCall(node) => {
+                    ObjectConstructionEffect::DirectCall(map(*node))
+                }
+                ObjectConstructionEffect::DirectConstruct(node) => {
+                    ObjectConstructionEffect::DirectConstruct(map(*node))
+                }
+                ObjectConstructionEffect::Spread(node) => {
+                    ObjectConstructionEffect::Spread(map(*node))
+                }
+            })
+            .collect::<Vec<_>>();
+        Self {
+            effects: Arc::from(effects.into_boxed_slice()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
     Alias(SemanticNodeId),
     Object(SurfaceView),
+    ObjectSpreadProgram(ObjectSpreadProgram),
     Union(Arc<[SemanticNodeId]>),
     Intersection(Arc<[SemanticNodeId]>),
     Primitive(PrimitiveKind),
@@ -5545,6 +8145,22 @@ pub enum SemanticNodeData {
     /// `true` branch will substitute the bound type into.
     Infer {
         name: Arc<str>,
+        binder: InferBinderId,
+    },
+    /// A true-branch REFERENCE to an in-scope `infer` binder — the node
+    /// a `Ref { name }` occurrence resolves to through the conditional's
+    /// true-branch env. DISTINCT from [`Self::Infer`] (the declaration
+    /// at the extends pattern) so reference-vs-declaration survives
+    /// interning: the substitution name-bridge rewrites `InferRef`
+    /// occurrences exactly like `Infer` occurrences, but a nested
+    /// conditional whose extends holds only `InferRef`s does NOT
+    /// re-declare the name (no shadow), and an `InferRef` is never an
+    /// inference-pattern site (never a deposit target). Raises to the
+    /// same `TypeExpr::Infer { name }` as a declaration, so
+    /// TypeExpr-level consumers are unaffected.
+    InferRef {
+        name: Arc<str>,
+        binder: InferBinderId,
     },
     // Declaration identity is carried as the env-bearing, content-free
     // `ResolvedDeclSlotIdentity` slot in `SemanticQueryKey::Instantiate.base`
@@ -5579,16 +8195,41 @@ pub enum SemanticNodeData {
         false_branch_ref: SemanticNodeId,
         distributive: bool,
     },
-    // §5.6 Function shape.
+    // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
-    /// merged; only function signatures have distinct semantics (call
-    /// signatures, parameter variance, return covariance) that Object cannot
-    /// represent.
-    Function {
+    /// merged; only signatures have distinct semantics (call/construct
+    /// signature kinds, parameter variance, return covariance) that Object
+    /// cannot represent. The call/construct distinction is carried by
+    /// [`SignatureKind`] — a single variant so every consumer's `Signature`
+    /// handling covers both kinds by construction, and kind-sensitive sites
+    /// match `kind` EXHAUSTIVELY (the compiler carries the obligation).
+    ///
+    /// A bare `new (…) => R` is a root `Signature` with
+    /// `kind: SignatureKind::Construct`; `{ new(): R }` is an [`Object`]
+    /// whose `construct_signatures` reference `Signature(Construct)` nodes —
+    /// the two spellings stay distinguishable. `Call` raises to
+    /// [`TypeExpr::Function`](verter_type_expr::TypeExpr::Function),
+    /// `Construct` to
+    /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType).
+    Signature {
+        kind: SignatureKind,
         params: Arc<[FunctionParam]>,
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
+        /// The authored position this signature was lowered from, when the
+        /// lowering carried occurrence-grade provenance (the locator-driven
+        /// rails). `None` for a signature without recoverable occurrence
+        /// provenance — the overload-set producer treats an occurrence-less
+        /// candidate as an honest `Miss`, never a fabricated occurrence.
+        /// Participates in node interning (occurrence-aware identity: two
+        /// structurally identical signatures from different authored
+        /// positions never alias).
+        occurrence: Option<SignatureNodeOccurrence>,
+        /// Where the return type comes from: a declared node (a concrete
+        /// seed) or a body-derived `FlowReturn` position the call resolver
+        /// holds as a return obligation. Participates in node interning.
+        return_carrier: SignatureReturnCarrier,
         /// OXC span of the WHOLE signature, stamped from the IR
         /// [`verter_type_expr::FunctionExpr`]'s signature span (NOT recovered
         /// from child node ids). Coordinates are in the signature's origin
@@ -5600,6 +8241,13 @@ pub enum SemanticNodeData {
         /// `FunctionExpr`'s return span. `None` when absent.
         return_type_span: Option<verter_span::Span>,
     },
+    /// An index-composed callable whose body-derived return is deferred to
+    /// its return carrier. It has NO return-type slot, so a deferred
+    /// return is structurally distinct from a failed one; only the
+    /// `ResolveOverloadSet` value boundary and the `ResolveCall`
+    /// applicability executor may read its parts, and it becomes a general
+    /// [`Self::Signature`] only once its return is resolved.
+    DeferredCallable(deferred_callable::DeferredCallable),
     /// Lazy declaration-reference carrier.
     ///
     /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
@@ -5690,31 +8338,16 @@ pub enum SemanticNodeData {
     /// Raw-fallback carrier — the typed-IR home for a type the lowering
     /// could not represent structurally.
     ///
-    /// Preserves the raw source text verbatim so the reverse boundary can
-    /// round-trip it back to [`TypeExpr::Unknown`](verter_type_expr::TypeExpr::Unknown).
+    /// Preserves the opaque [`UnknownValue`] payload (raw source text +
+    /// diagnostic provenance) so the reverse boundary can round-trip it back
+    /// to [`TypeExpr::Unknown`](verter_type_expr::TypeExpr::Unknown).
     /// This is the ONLY carrier that holds raw type text, and it is
     /// display-only: it is never interpreted as a semantic control signal
     /// (those ride the typed [`QueryError`] carriers on
-    /// [`SemanticNodeData::Opaque`]). `raw` is `Arc<str>` for a cheap,
-    /// `Send + Sync` clone on the host cache path.
+    /// [`SemanticNodeData::Opaque`]).
     RawFallback {
-        /// The raw source text of the unrepresentable type.
-        raw: Arc<str>,
-    },
-
-    /// Constructor-type carrier — `new (…) => R` (TS `TSConstructorType`).
-    ///
-    /// Preserves the distinction
-    /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType)
-    /// draws between a bare constructor *type* and a type-literal carrying
-    /// a construct signature (which lowers to [`Object`](Self::Object)).
-    /// `signature` interns a [`Function`](Self::Function) node carrying the
-    /// same parameters / return / type-parameters / spans as the construct
-    /// signature; the reverse boundary rewraps the raised function as
-    /// `TypeExpr::ConstructorType`.
-    ConstructorType {
-        /// The constructor signature — a [`Function`](Self::Function) node.
-        signature: SemanticNodeId,
+        /// The opaque unrepresentable-type payload.
+        value: verter_type_expr::UnknownValue,
     },
 
     /// Synthetic slot-binding / `defineSlots` binding carrier.
@@ -5722,15 +8355,17 @@ pub enum SemanticNodeData {
     /// The typed-IR mirror of
     /// [`TypeExpr::SyntheticSlotBinding`](verter_type_expr::TypeExpr::SyntheticSlotBinding).
     /// Identity is the content-free [`SyntheticBindingId`]; the `value_node`
-    /// arena ordinal is value-side provenance carried alongside so the
-    /// reverse boundary can re-hydrate the full
+    /// arena ordinal is value-side provenance carried alongside and a genuine
+    /// graph child that traversals must descend as `SemanticNodeId(value_node)`.
+    /// The reverse boundary uses the same ordinal to re-hydrate the full
     /// [`verter_type_expr::SyntheticCarrierKey`] for compat output, NOT part
     /// of the binding identity. Raises to `TypeExpr::SyntheticSlotBinding`.
     SyntheticBinding {
         /// The content-free binding identity.
         id: SyntheticBindingId,
-        /// Value-side provenance: the original `value_node` arena ordinal,
-        /// re-attached only for compat materialisation.
+        /// Raw arena ordinal of the original value node. This remains a graph
+        /// child for traversal and is also re-attached for compat
+        /// materialisation; it is not part of [`SyntheticBindingId`].
         value_node: u64,
     },
 }
@@ -5749,6 +8384,7 @@ impl SemanticNodeData {
         match self {
             Self::Alias(_) => 0,
             Self::Object(_) => 1,
+            Self::ObjectSpreadProgram(_) => 30,
             Self::Union(_) => 2,
             Self::Intersection(_) => 3,
             Self::Primitive(_) => 4,
@@ -5763,11 +8399,14 @@ impl SemanticNodeData {
             Self::TypeOf(_) => 13,
             Self::TypeParam { .. } => 14,
             Self::Infer { .. } => 15,
+            Self::InferRef { .. } => 28,
             Self::MergedDecl { .. } => 16,
             Self::Conditional { .. } => 17,
-            // Index 18 is intentionally unused so the surviving variants
-            // keep stable bucket indices independent of declaration order.
-            Self::Function { .. } => 19,
+            // Indices 18, 19, and 26 are intentionally unused so the
+            // surviving variants keep stable bucket indices independent of
+            // declaration order.
+            Self::Signature { .. } => 29,
+            Self::DeferredCallable(_) => 31,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
             Self::BareRef(_) => 22,
@@ -5775,8 +8414,49 @@ impl SemanticNodeData {
             Self::RawFallback { .. } => 24,
             // Index 25 is intentionally unused so the surviving variants
             // keep stable bucket indices independent of declaration order.
-            Self::ConstructorType { .. } => 26,
             Self::SyntheticBinding { .. } => 27,
+        }
+    }
+
+    /// Whether this node says its type meaning is not yet known.
+    ///
+    /// This is a semantic-state classification, not a traversal-state check:
+    /// `DeclRef` and `InstantiationRef` identify resolvable declarations and
+    /// therefore return `false` even when a caller has not walked them yet.
+    /// The match is exhaustive so every new node variant must explicitly
+    /// decide whether it represents an unknown type meaning.
+    #[must_use]
+    pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
+        match self {
+            Self::Opaque(error) => error.means_type_is_not_yet_known(),
+            Self::TypeOf(_) | Self::BareRef(_) | Self::ImportType(_) | Self::RawFallback { .. } => {
+                true
+            }
+            Self::Alias(_)
+            | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
+            | Self::Union(_)
+            | Self::Intersection(_)
+            | Self::Primitive(_)
+            | Self::Literal(_)
+            | Self::Array { .. }
+            | Self::Tuple { .. }
+            | Self::TemplateLiteral { .. }
+            | Self::KeyOf { .. }
+            | Self::IndexedAccess { .. }
+            | Self::Mapped { .. }
+            | Self::TypeParam { .. }
+            | Self::Infer { .. }
+            | Self::InferRef { .. }
+            | Self::MergedDecl { .. }
+            | Self::Conditional { .. }
+            | Self::Signature { .. }
+            // The callable position IS known; only its RETURN is deferred
+            // to the shared return equation.
+            | Self::DeferredCallable(_)
+            | Self::DeclRef { .. }
+            | Self::InstantiationRef { .. }
+            | Self::SyntheticBinding { .. } => false,
         }
     }
 }
@@ -5804,6 +8484,7 @@ impl PartialEq for SemanticNodeData {
         match (self, other) {
             (Self::Alias(a), Self::Alias(b)) => a == b,
             (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::ObjectSpreadProgram(a), Self::ObjectSpreadProgram(b)) => a == b,
             (Self::Union(a), Self::Union(b)) => a == b,
             (Self::Intersection(a), Self::Intersection(b)) => a == b,
             (Self::Primitive(a), Self::Primitive(b)) => a == b,
@@ -5881,7 +8562,26 @@ impl PartialEq for SemanticNodeData {
                     display_name: _,
                 },
             ) => ad == bd && ai == bi && ac == bc && adf == bdf,
-            (Self::Infer { name: a }, Self::Infer { name: b }) => a == b,
+            (
+                Self::Infer {
+                    name: a,
+                    binder: ab,
+                },
+                Self::Infer {
+                    name: b,
+                    binder: bb,
+                },
+            ) => a == b && ab == bb,
+            (
+                Self::InferRef {
+                    name: a,
+                    binder: ab,
+                },
+                Self::InferRef {
+                    name: b,
+                    binder: bb,
+                },
+            ) => a == b && ab == bb,
             (
                 Self::Conditional {
                     check: ack,
@@ -5899,24 +8599,42 @@ impl PartialEq for SemanticNodeData {
                 },
             ) => ack == bck && aex == bex && atr == btr && afr == bfr && ad == bd,
             (
-                Self::Function {
+                Self::Signature {
+                    kind: ak,
                     params: ap,
                     return_type: ar,
                     type_parameters: atp,
+                    occurrence: ao,
+                    return_carrier: arc,
                     signature_span: asig,
                     return_type_span: aret,
                 },
-                Self::Function {
+                Self::Signature {
+                    kind: bk,
                     params: bp,
                     return_type: br,
                     type_parameters: btp,
+                    occurrence: bo,
+                    return_carrier: brc,
                     signature_span: bsig,
                     return_type_span: bret,
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
-                // location does not alias another node's spans.
-            ) => ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
+                // location does not alias another node's spans. Occurrence and
+                // the return carrier participate for the same reason: two
+                // structurally identical signatures from different authored
+                // positions never alias.
+            ) => {
+                ak == bk
+                    && ap == bp
+                    && ar == br
+                    && atp == btp
+                    && ao == bo
+                    && arc == brc
+                    && asig == bsig
+                    && aret == bret
+            }
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
                 Self::InstantiationRef { base: ab, args: aa },
@@ -5925,10 +8643,7 @@ impl PartialEq for SemanticNodeData {
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
             (Self::BareRef(a), Self::BareRef(b)) => a == b,
             (Self::ImportType(a), Self::ImportType(b)) => a == b,
-            (Self::RawFallback { raw: a }, Self::RawFallback { raw: b }) => a == b,
-            (Self::ConstructorType { signature: a }, Self::ConstructorType { signature: b }) => {
-                a == b
-            }
+            (Self::RawFallback { value: a }, Self::RawFallback { value: b }) => a == b,
             (
                 Self::SyntheticBinding {
                     id: aid,
@@ -5957,6 +8672,9 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::Object(surface) => {
                 surface.hash(state);
+            }
+            Self::ObjectSpreadProgram(program) => {
+                program.hash(state);
             }
             Self::Union(members) => {
                 members.hash(state);
@@ -6017,8 +8735,13 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name } => {
+            Self::Infer { name, binder } => {
                 name.hash(state);
+                binder.hash(state);
+            }
+            Self::InferRef { name, binder } => {
+                name.hash(state);
+                binder.hash(state);
             }
             Self::Conditional {
                 check,
@@ -6033,19 +8756,30 @@ impl std::hash::Hash for SemanticNodeData {
                 false_branch_ref.hash(state);
                 distributive.hash(state);
             }
-            Self::Function {
+            Self::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
+                kind.hash(state);
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
+                // Occurrence + return carrier participate in identity
+                // (occurrence-aware interning).
+                occurrence.hash(state);
+                return_carrier.hash(state);
                 // Spans participate in identity (provenance-aware interning).
                 signature_span.hash(state);
                 return_type_span.hash(state);
+            }
+            Self::DeferredCallable(callable) => {
+                callable.hash(state);
             }
             Self::DeclRef { identity } => {
                 identity.hash(state);
@@ -6059,11 +8793,8 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::BareRef(c) => c.hash(state),
             Self::ImportType(c) => c.hash(state),
-            Self::RawFallback { raw } => {
-                raw.hash(state);
-            }
-            Self::ConstructorType { signature } => {
-                signature.hash(state);
+            Self::RawFallback { value } => {
+                value.hash(state);
             }
             Self::SyntheticBinding { id, value_node } => {
                 id.hash(state);
@@ -6073,7 +8804,18 @@ impl std::hash::Hash for SemanticNodeData {
     }
 }
 
-/// Parameter of a [`SemanticNodeData::Function`].
+/// The kind of a [`SemanticNodeData::Signature`] — a CALL signature
+/// (`(…) => R`) or a CONSTRUCT signature (`new (…) => R`). Closed enum;
+/// kind-sensitive consumers match it EXHAUSTIVELY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignatureKind {
+    /// `(…) => R` — callable.
+    Call,
+    /// `new (…) => R` — constructable.
+    Construct,
+}
+
+/// Parameter of a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: Option<Arc<str>>,
@@ -6108,12 +8850,83 @@ impl FunctionParam {
     }
 }
 
-/// Type-parameter declaration on a [`SemanticNodeData::Function`].
+/// Which SPELLINGS of one type-parameter name a clause instantiation
+/// claims.
+///
+/// One clause parameter can reach a consumer under three resolution
+/// states, and which of them are legitimately "the parameter" depends on
+/// where the node being instantiated was LOWERED:
+///
+/// - the BOUND `TypeParam` binder — always the parameter;
+/// - a DEFERRED `BareRef` head — the same parameter one resolution state
+///   earlier, which a declaration's own DECLARED return produces because
+///   its clause is not in scope in file owner scope;
+/// - a RESOLVED `DeclRef` — the same misresolution, in a file that ALSO
+///   declares a type of that name. Legitimate to claim ONLY for a node
+///   lowered where the clause was out of scope; in a node evaluated
+///   where the clause was BOUND, a resolved same-named declaration is a
+///   different symbol entirely, and claiming it by name destroys a
+///   correct answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseSpelling {
+    /// Bound `TypeParam` binders only.
+    Bound,
+    /// …plus a DEFERRED `BareRef` head spelling the parameter.
+    WithDeferredHeads,
+    /// …plus a RESOLVED `DeclRef` the owner-scope lowering misresolved.
+    WithOwnerScopeResolution,
+}
+
+impl ClauseSpelling {
+    /// Whether a DEFERRED (unresolved) head spelling the parameter is
+    /// claimed.
+    #[must_use]
+    pub fn claims_deferred_heads(self) -> bool {
+        matches!(
+            self,
+            Self::WithDeferredHeads | Self::WithOwnerScopeResolution
+        )
+    }
+
+    /// Whether a RESOLVED same-named declaration is claimed.
+    #[must_use]
+    pub fn claims_owner_scope_resolution(self) -> bool {
+        matches!(self, Self::WithOwnerScopeResolution)
+    }
+}
+
+/// Split the authored `this` receiver off a lowered parameter list.
+///
+/// A function's authored `this` annotation is preserved as the LEADING
+/// parameter named `this`; it is a receiver, not a positional argument, so it
+/// takes no ordinary arity slot and never appears in `Parameters<F>`. Only the
+/// first parameter can be named `this` in valid TypeScript, so a later
+/// same-named parameter is an ordinary binding.
+///
+/// This is the single authority every consumer that must distinguish the two
+/// reads — applicability, the parameter-tuple utilities, and the
+/// `this`-parameter utilities.
+#[must_use]
+pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>, &[FunctionParam]) {
+    match params.split_first() {
+        Some((first, rest)) if first.name.as_deref() == Some("this") => (Some(first), rest),
+        _ => (None, params),
+    }
+}
+
+/// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
+    /// The exact interned [`SemanticNodeData::TypeParam`] node for this
+    /// parameter — the identity inference binds. Per-parameter policy
+    /// (const-ness, binding) keys off THIS node, never the display name.
+    pub param: SemanticNodeId,
     pub constraint: Option<SemanticNodeId>,
     pub default: Option<SemanticNodeId>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
+    /// is valid) — never a session-wide flag.
+    pub is_const: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -6160,8 +8973,9 @@ pub trait SemanticQueryApi {
     /// Canonical entry point. Returns the domain-agnostic
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
     /// work. Every live key that produces a value resolves to
-    /// [`SemanticQueryValue::TypeNode`] except `ResolveOverloadSet`
-    /// ([`SemanticQueryValue::OverloadSet`]) and `ClassifyBroadRuntime`
+    /// [`SemanticQueryValue::TypeNode`] except `ProjectObjectSpread`
+    /// ([`SemanticQueryValue::ObjectProjection`]), `ResolveOverloadSet`
+    /// ([`SemanticQueryValue::OverloadSet`]), and `ClassifyBroadRuntime`
     /// ([`SemanticQueryValue::BroadRuntime`]); the non-producing keys
     /// (e.g. `Relate`) return `Miss`. Callers that want the node narrow
     /// with [`execute_type_node`].
@@ -6235,6 +9049,70 @@ mod tests {
     use super::*;
     use verter_type_expr::TopLevelOwnerId;
 
+    /// Every `QueryError` variant must own a UNIQUE `u8` discriminant tag:
+    /// the tags are hand-assigned, and while the arena resolves hash collisions
+    /// by full equality, a REUSED tag silently shares the fast-path identity
+    /// for two DIFFERENT error carriers (the 14/14 `Cancelled`/`OpenSurface`
+    /// collision this caught). Exhaustive by construction: [`QueryError::tag`]
+    /// is an exhaustive match, so a variant added without a tag is a compile
+    /// error; this test pins the tag VALUES are pairwise-distinct.
+    #[test]
+    fn query_error_hash_tags_are_unique_per_variant() {
+        use std::collections::HashSet;
+        // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
+        // classification fixture in `raise_sentinel.rs` carries the same nudge).
+        let variants: Vec<QueryError> = vec![
+            QueryError::Miss,
+            QueryError::UnsupportedIntrinsic {
+                name: Arc::from("I"),
+            },
+            QueryError::BudgetExceeded(
+                crate::resolver_core::shallow_file_state::BudgetExceededFailure {
+                    domain:
+                        crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
+                    limit: 1,
+                    actual: 2,
+                    context: "hash-fixture".to_string(),
+                },
+            ),
+            QueryError::Cancelled,
+            QueryError::UnstableState { attempts: 1 },
+            QueryError::AliasCycle {
+                chain: Arc::from(vec![Arc::from("A")].into_boxed_slice()),
+            },
+            QueryError::RecursiveRef {
+                name: Arc::from("R"),
+            },
+            QueryError::Other(Arc::from("x")),
+            QueryError::DeclPlaceholder {
+                canonical_id: Arc::from("/w/p.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
+                name: Arc::from("P"),
+                whole_hash: [0u8; 16],
+            },
+            QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::TypeNode,
+                actual: SemanticQueryValueTag::Relation,
+            },
+            QueryError::RaiseAliasCycle,
+            QueryError::TypeParamCycle,
+            QueryError::RaiseMiss,
+            QueryError::UnrepresentableSurface,
+            QueryError::UnrepresentableSurfaceMember,
+            QueryError::OpenSurface,
+            QueryError::UnmodeledPosition,
+        ];
+        let mut tags = HashSet::new();
+        for variant in &variants {
+            assert!(
+                tags.insert(variant.tag()),
+                "tag collision: {variant:?} reuses tag {} — assign the next free tag",
+                variant.tag()
+            );
+        }
+        assert_eq!(tags.len(), variants.len());
+    }
+
     /// The shared structural carrier-arg accessor returns the `type_args`
     /// slice for each of the three carriers that apply type arguments
     /// (`BareRef` / `TypeOf` / `ImportType`) and the EMPTY slice for a
@@ -6263,6 +9141,7 @@ mod tests {
                     canonical_id: Arc::from("/m.ts"),
                     owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
+                    binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
                 },
                 name: Arc::from("factory"),
             },
@@ -6305,6 +9184,7 @@ mod tests {
             canonical_id: Arc::from("/w/src/types.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
@@ -6326,6 +9206,7 @@ mod tests {
                 canonical_id: Arc::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
             name: Arc::from("Foo"),
         });
@@ -6334,6 +9215,7 @@ mod tests {
                 canonical_id: Arc::from("/w/b.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
             name: Arc::from("Foo"),
         });
@@ -6610,6 +9492,14 @@ mod tests {
                 SemanticQueryValueTag::TypeNode,
             ),
             (
+                SemanticQueryValue::ObjectProjection(
+                    object_spread_projection::test_support::closed_formula([
+                        object_spread_projection::test_support::closed_alternative([]),
+                    ]),
+                ),
+                SemanticQueryValueTag::ObjectProjection,
+            ),
+            (
                 SemanticQueryValue::ProgramAnalysis(ProgramAnalysisValue { node }),
                 SemanticQueryValueTag::ProgramAnalysis,
             ),
@@ -6621,7 +9511,29 @@ mod tests {
             ),
             (
                 SemanticQueryValue::OverloadSet(Arc::from(
-                    vec![SignatureRef { node }].into_boxed_slice(),
+                    vec![SignatureRef {
+                        node,
+                        occurrence: SignatureCandidateOrigin::Authored(
+                            SignatureOccurrenceIdentity {
+                            function: FlowFunctionSlotIdentity {
+                                declaration_slot: ResolvedDeclSlotIdentity::value_slot(
+                                    Arc::from("/synthetic/callee.ts"),
+                                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                                    Arc::from("callee"),
+                                    0,
+                                    HashValue::default(),
+                                    HashValue::default(),
+                                ),
+                                function_part:
+                                    verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                                overload_ordinal: 0,
+                            },
+                            signature_ordinal: 0,
+                        }),
+                        return_carrier: SignatureReturnCarrier::Declared(node),
+                        arm_ordinal: 0,
+                    }]
+                    .into_boxed_slice(),
                 )),
                 SemanticQueryValueTag::OverloadSet,
             ),
@@ -6640,6 +9552,29 @@ mod tests {
                 SemanticQueryValueTag::BroadRuntime,
             ),
             (
+                SemanticQueryValue::MaterializationCycleGate(
+                    MaterializationCycleGateOutcome::Decided(
+                        MaterializationCycleGateVerdict::Continue,
+                    ),
+                ),
+                SemanticQueryValueTag::MaterializationCycleGate,
+            ),
+            (
+                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                    &crate::semantic_query_memo::SemanticGraphStore::new(),
+                    node,
+                    false,
+                    None,
+                ))),
+                SemanticQueryValueTag::FlowReturn,
+            ),
+            (
+                SemanticQueryValue::ResolveCall(Arc::new(ResolvedCallResult::DynamicAny {
+                    return_type: node,
+                })),
+                SemanticQueryValueTag::ResolveCall,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -6647,13 +9582,17 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: seven cases, seven unique tags. Sort before dedup so
+        // Distinctness: eleven cases, eleven unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
+        assert_eq!(
+            tags.len(),
+            11,
+            "every value domain must have a distinct tag"
+        );
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

@@ -95,14 +95,14 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 fn literal_keyed_slots_with_concrete_plan() -> TypeExpr {
     let plan_object = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "id".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "id".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "tier".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "tier".to_string().into(),
                 TypeExpr::Literal(LiteralValue::String("pro".to_string())),
                 false,
                 false,
@@ -254,16 +254,16 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
 
     // Locate the `badge` member on the synthesised surface.
     let badge_member = view
-        .members
+        .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "badge")
+        .find(|m| m.string_name() == Some("badge"))
         .unwrap_or_else(|| {
             panic!(
                 "synthesised surface MUST publish `badge` member after Mapped enumeration; \
                  got member names: {:?}",
-                view.members
+                view.positive_members()
                     .iter()
-                    .map(|m| m.name.as_ref())
+                    .filter_map(|m| m.string_name())
                     .collect::<Vec<_>>()
             )
         });
@@ -303,7 +303,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let badge_in_args = instantiation_ref_args_contain_string_literal(graph, value_node, "badge");
     let badge_in_conditional = matches!(
         value_data.as_ref(),
-        SemanticNodeData::Conditional { .. } | SemanticNodeData::Function { .. }
+        SemanticNodeData::Conditional { .. } | SemanticNodeData::Signature { .. }
     );
     assert!(
         badge_in_args || badge_in_conditional,
@@ -320,9 +320,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     // discriminate identically — proves the substitution loop fires
     // for EVERY enumerated key, not just the first one.
     let title_member = view
-        .members
+        .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "title")
+        .find(|m| m.string_name() == Some("title"))
         .expect("synthesised surface MUST publish `title` member alongside `badge`");
     let title_value = title_member.value;
     let title_data = graph
@@ -338,7 +338,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let title_in_args = instantiation_ref_args_contain_string_literal(graph, title_value, "title");
     let title_in_conditional = matches!(
         title_data.as_ref(),
-        SemanticNodeData::Conditional { .. } | SemanticNodeData::Function { .. }
+        SemanticNodeData::Conditional { .. } | SemanticNodeData::Signature { .. }
     );
     assert!(
         title_in_args || title_in_conditional,

@@ -264,25 +264,29 @@ fn func_node(
         .iter()
         .map(|(n, t)| FunctionParam::synthetic(Some(Arc::from(*n)), *t, false, false))
         .collect();
-    store.intern_node(SemanticNodeData::Function {
+    store.intern_node(SemanticNodeData::Signature {
+        kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
     })
 }
 
-/// A public, non-method object member `name: value` (or `name(): …` when
-/// `is_method`).
+/// A public object member `name: value` (or `name(): …` when `is_method`).
 fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
     SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: verter_session::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method,
+        method_kind: is_method.then_some(verter_type_expr::ObjectMethodKind::Method),
+        has_implementation_body: false,
         declared_in_macro_type_arg: verter_session::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: verter_session::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -312,22 +316,23 @@ fn object(
     call_signatures: Vec<SemanticNodeId>,
     construct_signatures: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    let entries = members
-        .into_iter()
-        .map(verter_session::semantic_query::SurfaceEntry::Member)
-        .chain(
-            call_signatures
-                .into_iter()
-                .map(verter_session::semantic_query::SurfaceEntry::CallSignature),
-        )
-        .chain(
-            construct_signatures
-                .into_iter()
-                .map(verter_session::semantic_query::SurfaceEntry::ConstructSignature),
-        )
-        .collect();
     store.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
-        entries, None, false,
+        members
+            .into_iter()
+            .map(verter_session::semantic_query::SurfaceEntry::Member)
+            .chain(
+                call_signatures
+                    .into_iter()
+                    .map(verter_session::semantic_query::SurfaceEntry::CallSignature),
+            )
+            .chain(
+                construct_signatures
+                    .into_iter()
+                    .map(verter_session::semantic_query::SurfaceEntry::ConstructSignature),
+            )
+            .collect(),
+        None,
+        false,
     )))
 }
 
@@ -618,14 +623,26 @@ fn function_type_parameters_render_constraint_and_default() {
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+    let t_decl_param = store.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: Some(string_id),
+        default: Some(number_id),
+        display_name: Arc::from("T"),
+    });
 
-    let func = store.intern_node(SemanticNodeData::Function {
+    let func = store.intern_node(SemanticNodeData::Signature {
+        kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: void_id,
+        occurrence: None,
+        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(void_id),
         type_parameters: Arc::from([TypeParamDecl {
             name: Arc::from("T"),
+            param: t_decl_param,
             constraint: Some(string_id),
             default: Some(number_id),
+            is_const: false,
         }]),
         signature_span: None,
         return_type_span: None,
@@ -755,7 +772,7 @@ fn bigint_literal_renders_with_n_suffix() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn non_identifier_member_names_are_quoted() {
+fn non_identifier_member_keys_are_quoted() {
     let store = SemanticGraphStore::new();
     let t = declref(&store, "T");
 
@@ -1095,6 +1112,9 @@ fn typeof_carrier_renders_type_args() {
             canonical_id: Arc::from("/m.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("factory"),
     };

@@ -32,6 +32,8 @@ pub enum BuiltinUtility {
     Parameters,
     ConstructorParameters,
     InstanceType,
+    ThisParameterType,
+    OmitThisParameter,
 
     // -- Promise utilities --
     Awaited,
@@ -63,6 +65,8 @@ impl BuiltinUtility {
             "Parameters" => Some(Self::Parameters),
             "ConstructorParameters" => Some(Self::ConstructorParameters),
             "InstanceType" => Some(Self::InstanceType),
+            "ThisParameterType" => Some(Self::ThisParameterType),
+            "OmitThisParameter" => Some(Self::OmitThisParameter),
             "Awaited" => Some(Self::Awaited),
             "Uppercase" => Some(Self::Uppercase),
             "Lowercase" => Some(Self::Lowercase),
@@ -109,6 +113,8 @@ impl BuiltinUtility {
             | Self::Parameters
             | Self::ConstructorParameters
             | Self::InstanceType
+            | Self::ThisParameterType
+            | Self::OmitThisParameter
             | Self::Awaited
             | Self::Uppercase
             | Self::Lowercase
@@ -137,6 +143,8 @@ impl BuiltinUtility {
             | Self::Parameters
             | Self::ConstructorParameters
             | Self::InstanceType
+            | Self::ThisParameterType
+            | Self::OmitThisParameter
             | Self::Awaited
             | Self::Uppercase
             | Self::Lowercase
@@ -163,6 +171,8 @@ impl BuiltinUtility {
             Self::Parameters => "Parameters",
             Self::ConstructorParameters => "ConstructorParameters",
             Self::InstanceType => "InstanceType",
+            Self::ThisParameterType => "ThisParameterType",
+            Self::OmitThisParameter => "OmitThisParameter",
             Self::Awaited => "Awaited",
             Self::Uppercase => "Uppercase",
             Self::Lowercase => "Lowercase",
@@ -197,6 +207,8 @@ mod tests {
             "Parameters",
             "ConstructorParameters",
             "InstanceType",
+            "ThisParameterType",
+            "OmitThisParameter",
             "Awaited",
             "Uppercase",
             "Lowercase",

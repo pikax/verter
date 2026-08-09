@@ -77,8 +77,8 @@ the gate; row/lift STATUS still derives from the §1.1 authorities.
 | `docs/arch/ts-compat-two-mode-model.md` | Oracle SEMANTICS authority — single-spec resolver (correct-by-default, no compat mode, no spec dimension on any cache key); TS-compat divergence = classified, review-gated DATA (tsgo snapshot + correction overlay + divergence registry) | U0; §3.4 |
 | `docs/arch/u7-scheduler-submit-dag-decision.md` | U7 rescope-gate decision (LOCKED: DEFER — the multi-node `submit_dag` envelope held un-built; re-gate terms at U9) | U7, U9 |
 | `docs/arch/u9-session-bridge-design.md` | U9 locked design — NO session bridge; single-node cache-node lowering into `SchedulerDag::submit`; the B7a leaf-primitive deletions | U9 |
-| `docs/arch/parselower-design.md` | PARSELOWER staged migration design (LOCKED; 3/3 design-review validated; breaking-phase re-sequenced per the Stage-5 decider architecture ruling, then re-sequenced AGAIN per the Stage-5A tie-breaker architecture ruling (both recorded in the orchestration ledger) — Stage 5A DEFERRED behind a new non-breaking `5A-prep` prerequisite) — delete `TypeExpr` from the HOT parse/shallow/macro/lazy-body/prepared caches; lower demanded OXC bodies + macro type-args to interned `HotTypeRef` handles in the `SemanticNodeData` arena (OXC AST stays worker-local `!Send`); `materialize_type_expr` is the SOLE reverse boundary (compat/JSON/test/diagnostic/output only). Stages 1-4 NON-BREAKING (additive / dormant dual-read; LANDED), then the breaking phase: **5A-prep** (LANDED) non-breaking mapped-key-domain consumer-side carrier resolution (teach the openness walker + closed-key mapped enumerator to resolve an unresolved `BareRef`/`KeyOf` carrier source through the ONE dispatch before the mapped key-domain gate, so a structural `BareRef` mapped-source's domain is CLOSED — the prerequisite that unblocks the `defineSlots<mapped>` / structural-`BareRef` mapped-source path; producer stays eager; per the Stage-5A tie-breaker architecture ruling recorded in the orchestration ledger), then **5A** (LANDED) macro hot-mirror structural producer cutover (session-owned mirror keyed owner+macro index/kind storing `HotTypeRef`, produced ONLY via `lower_type_expr_structural`; the single-entry producer the Stage-4 macro consumers read — NOT a dual path; replaces the dormant zero-caller guard with a production-caller allowlist) — DEFERRED behind `5A-prep`, landed ATOMICALLY (all four macro-arg sites read the mirror; the partial interim is the forbidden dual path / silent slot loss), **6-prep** (LANDED) non-breaking graph-native `whole_env()` consumer replacements, **6** (LANDED — Option B) DeclBodyMemo/prepared-decl declaration-body handle-payload / hot-read flip (🔴 CORRECTED 2026-06-21 — **Option B**: mint `HotTypeRef` at the dispatch boundary (`decl_body_hot_ref`) over the `Instantiate` query result (`build_instantiate`'s post-processed node; `lower_decl_body_with_provenance` produces the resolving-lowered body-SHAPE that `build_instantiate` post-processes into it); the LANDED hot-read surface is the thin `decl_body_hot_ref` accessor (over the `Instantiate` memo) read by the ONE migrated graph-backed reader anchor (`lower_decl_body_to_node`, 1 of ~40 residual readers); the session hot prepared layer (`HotPrepared*`, `NoTypeExpr`-guarded) is dead-code-correct SCAFFOLDING with DEFERRED populate/read wiring (no production caller yet — the production `PreparedDeclBundle` still stores the lower-crate `Prepared*` `TypeExpr` DTOs), NOT a live storage path; `DeclBodyMemo` + the lower-crate `Prepared*` STAY `TypeExpr`, together with three deferred SEMANTIC reader classes — `docs/arch/authored-shape-graph-native-migration-deferral.md`. This is **NOT** a "global structural producer flip" — declaration bodies are **NOT** routed through the query-free structural lowerer, so there is **no structural-lowerer allowlist removal/widening**; that is a separate, deferred, future query-free design with its own guarded surface, NOT landed. The enum-wide anti-tail guard + the footprint fingerprint fix are orthogonal and PRE-EXISTING (pre-Stage-6), NOT landed with this flip; the eager clone-path delete is DEFERRED-within-Stage-6, landed dead-code-correct but un-wired. See `docs/arch/parselower-design.md` Stage-6 stanza). Stages **7** (cache/artifact cutover), **8** (compat materialization fence), and **9** (delete transitional bridges + final hot-path bans) are LANDED — the hot-materialize fence `hot_path_never_calls_materialize_type_expr` is enabled and green at ZERO offenders. There was no "Stage 10" in the ORIGINAL parselower sequence; a Stage-10 EXTENSION (the FN5.2 Unknown-fence typed-degradation end-state, alongside the named debt rows) is tracked in `docs/arch/hot-materialize-tripwire-residual-deferral.md`. The former monolithic "Stage 3C / Stage 5 atomic macro-producer+consumer" framing is SUPERSEDED; the prepared-wrapper handle arm stays OPEN/DEFERRED (no session consumer — NOT closed at Stage 5A). | PARSELOWER |
-| `docs/arch/stage10-typeexpr-terminal-removal-design.md` | STAGE-10 terminal `TypeExpr`-removal design (RATIFIED — BINDING; codex-reviewed; §6.4/§6.5 memo identity settled by a two-leg codex fork + code-verifying decider: first-class `SemanticQueryKey::LowerLocator` carrying `LocatorLoweringKey` through `SemanticGraphStore` (strictly unsubstituted, fixed authored-shape lowering via the sealed `LocatorShapeCtx` carrier-only entry into ROLE-FREE shape nodes — the B1 substitution + caller-projection axes + standalone T/L/J dims delete at B2; `Instantiate` owns args-substitution + projection-time reduction and applies the `ProjectionStamp` post-substitution; substituted demands route through `Instantiate { args }`) PLUS the sealed `body_source: InstantiateBodySource::FileBacked(ParseEnvHash)|NonFile` axis on `InstantiateContext`/`FamilyKey::Instantiate` (conditional `EnvDimSpec`: `FileBacked` ⇒ `P R T L J`, `NonFile` ⇒ `R T L J`); cross-file contributor bodies (augmentation stitch) demand their own per-contributor `LowerLocator` AND record per-contributor `FactVersionRef::FileSourceEnv` observations on the parent read-set (a reviewed-schema-event fact arm; warm parents reject on contributor source-env drift); the key is `slot + locator + P + R` — T/L/J are slot-carried (mixed-env keys unconstructible); no locator-prefix backfill; sealed-construction builder-time fail-closed slot/locator gate; the B2 `lower_decl_body_with_provenance` reroute builds as a WIP slice with a byte-identical published-surface parity oracle and NO `prepared.body` fallback, per the design's §10 producer-re-point rule). Terminal block: ZERO residual semantic `TypeExpr`, ZERO deferral to Stage 11/12. Imports the shelved A/B/C kernel (`A=REMOVE`/`B=NARROW`/`C=NARROW`, `verter_type_expr` locator+fact home, `DeclBodyMemo` `SnapshotLease` retained-parse source, `NoTypeExpr`+sealed `OutputProjector` rails, crate topology `verter_semantic ⊥ verter_session`, R6/R21); REPLACES the shelved §4.5 scope (absorbs the orphaned carriers — imported registry / `OwnerCollectionDb` / `Projected*` / `FastShallowFieldExpr` / `NamedTypeMember` / Svelte facts), §6 guards (STRUCTURAL-ONLY per the landed-scanner bar — `NoTypeExpr`+`NoStoredSpan` markers, field deletion, privacy/E0603, sealed traits, compile-fail fixtures, exhaustive-destructuring witness; no new name-keyed scanner), §7 sequencing (B1–B8 = WIP slices of ONE atomic squashed landing). Decided end-state: dual representation deleted; `Prepared*`/`Analyzed*` narrow to facts+locators in place (never `HotTypeRef`); `HotPrepared*` production-wired; all 35 migratable residual rows → 0 + the OutputCompat hash-input trio converted; FN5.2 typed degradation; the two identity gates closed — [P1] span-recovery-before-identity (origin locators, `NoStoredSpan` absolute), [P2] closed fact-schema enumeration. Deferral docs + residual inventory delete at landing. | STAGE-10 |
+| `docs/arch/parselower-design.md` | PARSELOWER staged migration design (LOCKED; 3/3 design-review validated; breaking-phase re-sequenced per the Stage-5 decider architecture ruling, then re-sequenced AGAIN per the Stage-5A tie-breaker architecture ruling (both recorded in the orchestration ledger) — Stage 5A DEFERRED behind a new non-breaking `5A-prep` prerequisite) — delete `TypeExpr` from the HOT parse/shallow/macro/lazy-body/prepared caches; lower demanded OXC bodies + macro type-args to interned `HotTypeRef` handles in the `SemanticNodeData` arena (OXC AST stays worker-local `!Send`); the sealed `OutputProjector` is the production reverse boundary (compat/JSON/diagnostic/output only; `materialize_type_expr` is `#[cfg(test)]`-only). Stages 1-4 NON-BREAKING (additive / dormant dual-read; LANDED), then the breaking phase: **5A-prep** (LANDED) non-breaking mapped-key-domain consumer-side carrier resolution (teach the openness walker + closed-key mapped enumerator to resolve an unresolved `BareRef`/`KeyOf` carrier source through the ONE dispatch before the mapped key-domain gate, so a structural `BareRef` mapped-source's domain is CLOSED — the prerequisite that unblocks the `defineSlots<mapped>` / structural-`BareRef` mapped-source path; producer stays eager; per the Stage-5A tie-breaker architecture ruling recorded in the orchestration ledger), then **5A** (LANDED) macro hot-mirror structural producer cutover (session-owned mirror keyed owner+macro index/kind storing `HotTypeRef`, produced ONLY via `lower_type_expr_structural`; the single-entry producer the Stage-4 macro consumers read — NOT a dual path; replaces the dormant zero-caller guard with a production-caller allowlist) — DEFERRED behind `5A-prep`, landed ATOMICALLY (all four macro-arg sites read the mirror; the partial interim is the forbidden dual path / silent slot loss), **6-prep** (LANDED) non-breaking graph-native `whole_env()` consumer replacements, **6** (LANDED — Option B) DeclBodyMemo/prepared-decl declaration-body handle-payload / hot-read flip (🔴 CORRECTED 2026-06-21 — **Option B**: mint `HotTypeRef` at the dispatch boundary (`decl_body_hot_ref`) over the `Instantiate` query result (`build_instantiate`'s post-processed node; `lower_decl_body_with_provenance` produces the resolving-lowered body-SHAPE that `build_instantiate` post-processes into it); the LANDED hot-read surface is the thin `decl_body_hot_ref` accessor (over the `Instantiate` memo) read by the ONE migrated graph-backed reader anchor (`lower_decl_body_to_node`, the ONE migrated graph-backed anchor — the terminal partition is 1 migrated + 6 `ProducerLowering` + 0 `AuthoredShape` + 5 `GraphFreeDto` + 0 `GraphBackedPending`); the session hot prepared layer (`HotPrepared*`) is DELETED — the production `PreparedDeclBundle` stores the lower-crate `Prepared*` fact+locator `NoTypeExpr` DTOs (`PreparedTypeDecl.body_facts` / `member_index` / `wrapper_shape`; `PreparedValueDecl.type_annotation: ValueTypeAnnotationFact`), and `DeclBodyMemo` records are fact+locator content-free (`LoweredTypeDecl.body` is the content-free `TypeDeclBody` slot carrier; `LoweredValueDecl` is fully narrowed) — two memoized pockets remain: `LoweredTypeDecl.type_parameters: Vec<TypeParam>` retains constraint/default `TypeExpr`, and `TypeParamBinding.constraint/default` keeps `Arc<TypeExpr>` bounds in cached prepared decl bundles (read by query-time lowering) — both owned by the type-parameter-bound confinement block. The residual-reader ledger is a PERMANENT curated ratchet, not a terminal-zero mechanism (`ProducerLowering` is permanent transient ingress) — `docs/arch/authored-shape-graph-native-migration-deferral.md`. This is **NOT** a "global structural producer flip" — declaration bodies are **NOT** routed through the query-free structural lowerer, so there is **no structural-lowerer allowlist removal/widening**; that is a separate, deferred, future query-free design with its own guarded surface, NOT landed. The enum-wide anti-tail guard + the footprint fingerprint fix are orthogonal and PRE-EXISTING (pre-Stage-6), NOT landed with this flip; the eager-clone-path debt is CLOSED — `prepare_type_decl_from_lowered` is the live wired prepare path (`resolver_core/prepared_decl.rs:364` / `:480`; its former body read moved to the extracted shared assembly tail `finish_prepared_type_decl`). See `docs/arch/parselower-design.md` Stage-6 stanza). Stages **7** (cache/artifact cutover), **8** (compat materialization fence), and **9** (delete transitional bridges + final hot-path bans) are LANDED — the hot-materialize fence `hot_path_never_calls_materialize_type_expr` is enabled and green at ZERO offenders. The ORIGINAL parselower sequence ended at Stage 9; the typed-degradation end-state has since LANDED — typed `QueryError` + per-leaf sidecar degradation replaced the sentinel-`Unknown` control flow, and the global Unknown fence plus the hot-materialize residual-deferral doc are deleted; the named debt row is now the final-state note `docs/arch/authored-shape-graph-native-migration-deferral.md`. The former monolithic "Stage 3C / Stage 5 atomic macro-producer+consumer" framing is SUPERSEDED; the prepared-wrapper handle arm is CLOSED by narrowing — the payloads are locator-based `*Fact` forms (`Opaque(TypeExpr)` → `TypeBodySlot` locator; nothing `TypeExpr`-carrying remains open/deferred; no session consumer). | PARSELOWER |
+| terminal `TypeExpr`-removal design (design-gate output of the program lineage; the design doc is not carried on this branch) | Terminal `TypeExpr`-removal design (RATIFIED — BINDING; codex-reviewed; §6.4/§6.5 memo identity settled by a two-leg codex fork + code-verifying decider: first-class `SemanticQueryKey::LowerLocator` carrying `LocatorLoweringKey` through `SemanticGraphStore` (strictly unsubstituted, fixed authored-shape lowering via the sealed `LocatorShapeCtx` carrier-only entry into ROLE-FREE shape nodes — the B1 substitution + caller-projection axes + standalone T/L/J dims delete at B2; `Instantiate` owns args-substitution + projection-time reduction and applies the `ProjectionStamp` post-substitution; substituted demands route through `Instantiate { args }`) PLUS the sealed `body_source: InstantiateBodySource::FileBacked(ParseEnvHash)|NonFile` axis on `InstantiateContext`/`FamilyKey::Instantiate` (conditional `EnvDimSpec`: `FileBacked` ⇒ `P R T L J`, `NonFile` ⇒ `R T L J`); cross-file contributor bodies (augmentation stitch) demand their own per-contributor `LowerLocator` AND record per-contributor `FactVersionRef::FileSourceEnv` observations on the parent read-set (a reviewed-schema-event fact arm; warm parents reject on contributor source-env drift); the key is `slot + locator + P + R` — T/L/J are slot-carried (mixed-env keys unconstructible); no locator-prefix backfill; sealed-construction builder-time fail-closed slot/locator gate; the B2 `lower_decl_body_with_provenance` reroute builds as a WIP slice with a byte-identical published-surface parity oracle and NO `prepared.body` fallback, per the design's §10 producer-re-point rule). Terminal block (corrected to the landed permanent-ingress ruling): zero STORED/hot `TypeExpr` and zero post-lowering semantic decisions over `TypeExpr` — producer boundaries PERMANENTLY consume authored `TypeExpr` lease-only at the graph-lowering boundary (sanctioned authored-syntax ingress, not residual debt). Imports the shelved A/B/C kernel (`A=REMOVE`/`B=NARROW`/`C=NARROW`, `verter_type_expr` locator+fact home, `DeclBodyMemo` `SnapshotLease` retained-parse source, `NoTypeExpr`+sealed `OutputProjector` rails, crate topology `verter_semantic ⊥ verter_session`, R6/R21); REPLACES the shelved §4.5 scope (absorbs the orphaned carriers — imported registry / `OwnerCollectionDb` / `Projected*` / `FastShallowFieldExpr` / `NamedTypeMember` / Svelte facts), §6 guards (STRUCTURAL-ONLY per the landed-scanner bar — `NoTypeExpr`+`NoStoredSpan` markers, field deletion, privacy/E0603, sealed traits, compile-fail fixtures, exhaustive-destructuring witness; no new name-keyed scanner), §7 sequencing (B1–B8 = WIP slices of ONE atomic squashed landing). Decided end-state: dual representation deleted; `Prepared*`/`Analyzed*` narrow to facts+locators in place (never `HotTypeRef`); `HotPrepared*` DELETED (zero production matches — the bundle stores fact+locator `NoTypeExpr` DTOs); all 35 migratable residual rows → 0 + the OutputCompat hash-input trio converted; typed degradation; the two identity gates closed — [P1] span-recovery-before-identity (origin locators, `NoStoredSpan` absolute), [P2] closed fact-schema enumeration. Deferral-doc disposition at the landed end-state: the hot-materialize residual-deferral doc DELETED at the typed-degradation landing (its closure condition met); the authored-shape deferral doc is rewritten as a final-state note; the residual body-reader inventory does NOT delete — it stays as the permanent curated ratchet/census over the permanent `ProducerLowering` ingress plus the below-graph `GraphFreeDto` residual. The terminal `TypeExpr`-removal design doc's "inventory→0 / all producer `TypeExpr` removed" terminal bar is SUPERSEDED by the permanent-ingress ruling; its mechanism kernel stands as landed. | terminal-removal |
 | `docs/arch/b3-carry-forwards.md` | B3-review P3 carry-forward items (tracked follow-ups; detail reference, NOT a status or sequencing authority) | — |
 
 ### Stage5 cutover doc set (indexed here)
@@ -1314,7 +1314,7 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   `join_intersection` (`project_semantic_dispatch/walk.rs:2506`) DROPS `Opaque(_)`
   arms ("opaque arms drop, surviving contributors intersect; zero contributors →
   `Opaque(Miss)`"), and decl-body lowering maps EVERY unrepresentable
-  `TypeExpr::Unknown { raw }` arm to `Opaque(QueryError::Miss)`
+  `TypeExpr::Unknown(UnknownValue)` arm to `Opaque(QueryError::Miss)`
   (`project_semantic_dispatch/lower.rs:1739`, catch-all
   `_ => self.opaque(QueryError::Miss)`). So an intersection arm that failed to
   resolve for a NON-miss reason (budget exhaustion, a `QueryError::Other`
@@ -1592,31 +1592,39 @@ not relitigate them block-by-block, and do not silently treat them as defects:
    — session/review capacity follows it; carving U8 forward around the sidecar is
    rejected.
 
-### 2.4 Post-Stage-10 roadmap extension (PARSELOWER Stages 11 candidate + 12 adopted)
+### 2.4 Post-terminal-removal roadmap extension (PARSELOWER Stages 11 candidate + 12 adopted)
 
 These extend the LOCKED `TypeExpr`-removal design lineage — `parselower-design.md`
-Stages 1–9 plus the RATIFIED `stage10-typeexpr-terminal-removal-design.md`
-(the STAGE-10 locked-designs row above; the original parselower sequence had no
-Stage 10) — at the **roadmap level only**; the 2026-06-22 Stage-11/12 roadmap
+Stages 1–9 plus the RATIFIED terminal `TypeExpr`-removal design (a design-gate
+output of the program lineage — the design doc is not carried on this branch;
+the locked-designs row above; the original parselower sequence ended at
+Stage 9) — at the **roadmap level only**; the 2026-06-22 Stage-11/12 roadmap
 record did not itself modify those design docs; Stages 11–12 are master-plan
 roadmap extensions beyond that locked
 lineage. Owner-directed, recorded 2026-06-22.
 
 1. **Stage 11 — CANDIDATE (deferred question, NOT yet adopted).** The `TypeExpr`
-   end-state question: stop at Stage 10, or add a QUARANTINE stage that renames
+   end-state question: stop at the landed terminal-removal state, or add a
+   QUARANTINE stage that renames
    the surviving syntactic-only `TypeExpr` surfaces (those that legitimately
-   survive Stage 10 — syntactic / output / diagnostic only) to an explicitly
+   survive the terminal-removal cutover — syntactic / output / diagnostic only) to an explicitly
    syntactic type (e.g. `TypeSyntax`) plus hard guards: no syntax-walk for
    semantic decisions, no hot-path materialization, no cache-owned broad syntax
    bodies. Goal = ZERO `TypeExpr` as semantic AUTHORITY, not zero syntax
-   representation. This end-state question is DEFERRED and is codex-architect-ruled
-   ONLY AFTER STAGE 10 LANDS — the surviving-`TypeExpr` census is only real once
-   Stage 10 has actually landed. Owner-pinned sequence: Stage 9 lands cleanly
-   (DONE) → Stage 10 DESIGN finalised (DONE — the design is RATIFIED — BINDING
+   representation. This end-state question was DEFERRED until the
+   terminal-removal work landed — it HAS LANDED (the tree is post-cutover:
+   typed degradation replaced sentinel-`Unknown` control flow, the
+   prepared-wrapper payloads are narrowed locator-based `*Fact` forms, and the residual-reader
+   ledger stands at its terminal partition with two stored type-param pockets
+   owned by the type-parameter-bound confinement block), so the
+   surviving-`TypeExpr` census is now real and the question is OPEN for the
+   codex-architect ruling. Owner-pinned sequence (historical, recorded
+   2026-06-22): Stage 9 landed cleanly
+   (DONE) → the terminal-removal DESIGN finalised (DONE — the design is RATIFIED — BINDING
    with [P1]/[P2] closed and the §6.4/§6.5 memo identity settled; see the
-   STAGE-10 locked-designs row; implementation/landing PENDING) → Stage 10
-   IMPLEMENTED + LANDS → THEN the Stage-11 end-state question is looked at +
-   finalised. When opened, the codex-architect ruling
+   terminal-removal locked-designs row) → terminal-removal IMPLEMENTED +
+   LANDED (DONE) → THEN the Stage-11 end-state question is looked at +
+   finalised (NOW OPEN). When opened, the codex-architect ruling
    tests as HYPOTHESES (neutral / best-on-merits) that the GOOD Stage 11 is the
    structural quarantine/rename/guard, and the BAD Stage 11 is total `TypeExpr`
    eradication / "`HotTypeRef` everywhere" forced into lower graph-free crates /
@@ -1628,7 +1636,8 @@ lineage. Owner-directed, recorded 2026-06-22.
    be EMPTY (no proven hotspot ⇒ no-op = success). Sequenced STRICTLY AFTER Stage
    11 — both SCOPED and DONE only after Stage 11 (owner-directed): even Stage 12's
    detailed scoping/design waits until Stage 11 is in, so it optimizes the
-   quarantined, final architecture and never a moving target. (No post-Stage-10
+   quarantined, final architecture and never a moving target. (No
+   post-terminal-removal
    fallback.) Binding conditions carried to the codex ruling: (a) strictly POST
    architecture-final (optimize a stable architecture, never a moving target);
    (b) consumes the end-to-end benchmark / interim post-Stage-11 profiling as its
@@ -2778,9 +2787,11 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
   (`crossorigin?: object`, …) — is a cross-file member value-collapse on the SAME
   routed resolution surface as XP.1 and is carried under XP.1's umbrella with its own
   acceptance test; it is NOT this row.
-- **Owner files:** `meta_resolve::projectors::output_sink` (`reduce_field_type_expr_with_mode` —
-  the sink-private per-field reducer; why a directly-declared imported alias materialises
-  instead of staying a `Ref`; contrast the heritage path that stays shallow).
+- **Owner files:** `meta_resolve::projectors::output_sink` (`reduce_published_field_types` +
+  sink-private `reduce_field_value_node` — the live node-domain finalize path; the deleted
+  TypeExpr helper `reduce_field_type_expr_with_mode` is gone; why a directly-declared
+  imported alias materialises instead of staying a `Ref`; contrast the heritage path that
+  stays shallow).
 - **Acceptance (discriminating):** `Alert.avatar` publishes `AvatarProps` shallow
   (matching `Button.avatar` and vcm), with a negative assertion against expansion; a
   hermetic fixture (a component directly declaring `x?: ImportedAlias`) FAILS pre-fix
@@ -3627,7 +3638,12 @@ U-block's scope bullet for the contract.
   apparent-type member-demand), each routing through `ReturnOnly`; the multi-candidate
   `FamilySlots` admission substrate with **per-family adaptive `candidate_cap()` +
   invalid-first/LRU-by-valid-hit eviction + a global memory ceiling** (replacing the
-  uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO); the five-dimension env-hash split
+  uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO — the FAMILY-LOCAL half of this piece:
+  the exhaustive per-family `candidate_cap()` + invalid-first/LRU-by-valid-hit
+  eviction + always-admit-after-local-eviction, is **LANDED** at the bridge block
+  `U3.ADAPTIVE_FAMILY_RETENTION` below; what remains at full U3 is the process-wide
+  candidate-memory ceiling + the typed `ReturnOnly` non-admission for it); the
+  five-dimension env-hash split
   (R21) with `lib_env_hash` entering only the layers whose value depends on lib data —
   AND, on the per-file artifact-identity side, the already-merged
   `FileArtifactKey.file_language_id` column (the `FileLanguage` row) is carried as an
@@ -3655,14 +3671,37 @@ U-block's scope bullet for the contract.
 - **Deps:** **`U8.WIRE_SURFACE_CLOSURE`** (the typed admission this block enforces
   produces values whose wire shape U8 closes — it lands AFTER the wire closure) +
   U2 (parent, the reducers it bounds/admits) + U6 (parent, the flow solver it
-  bounds/admits). NOT parallel-to-U8.
+  bounds/admits) + **`U3.ADAPTIVE_FAMILY_RETENTION`** (the landed retention bridge,
+  below). NOT parallel-to-U8.
+- **Landed bridge block — `U3.ADAPTIVE_FAMILY_RETENTION` (LANDED ✅).** The
+  family-local half of this block's retention work landed early as its own
+  zero-row bridge block on the ownership edge `U2.QUERY_VALUE_DOMAIN →
+  U3.ADAPTIVE_FAMILY_RETENTION → U3.CACHE_FACT_MODEL` (mechanism
+  `AdaptiveFamilyRetention`, organ `CacheFactModel`, U-block U3): each
+  `FamilyKey` declares an exhaustive, wildcard-free `candidate_cap()` (floor 4;
+  the inference/substitution-heavy live families `Instantiate` / `TypeOf` /
+  `Conditional` / `MappedType` hold 8); eviction at the family slot cap is
+  invalid-against-the-publishing-view FIRST (snapshot/validate/reacquire OUTSIDE
+  the `entries` mutex, `admission_seq` identity recheck under it), then
+  LRU-by-valid-hit (front of the slot order); a new cacheable candidate is
+  ALWAYS admitted after local eviction; same-discriminant re-publish replaces
+  in place and becomes freshest. Guards:
+  `cache_candidate_cap_is_per_family_not_uniform`,
+  `family_eviction_prefers_invalid_then_lru_valid_hit` (both moved here from
+  this block's named set; the remaining names stay full-U3). Explicitly NOT in
+  the bridge (still THIS block's scope): the process-wide candidate-memory
+  ceiling, its typed `ReturnOnly`/`ComputeAdmission` non-admission, and the
+  adaptive grow/shrink of caps under hit pressure — admission semantics are
+  unchanged and memory-pressure-independent at the bridge.
 - **Parallelism:** Semantic-graph lane, after U8 (the cache/fact rail the result DB
   + exporter + session ride on); runs beside the cache-runtime lane (U4/U5/U7/U9).
 - **Risk:** medium-large — correctness-sensitive (typed-admission + invalidation-
   authority change).
 - **Required deletions:** the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` constant +
   FIFO candidate eviction (→ per-family `candidate_cap()` + invalid-first/LRU-by-
-  valid-hit eviction + global ceiling); any boolean/sentinel/side-channel cache
+  valid-hit eviction + global ceiling — the constant + FIFO are DELETED at the
+  `U3.ADAPTIVE_FAMILY_RETENTION` bridge; the global ceiling deletion-side stays
+  full-U3); any boolean/sentinel/side-channel cache
   admission (→ the typed `ComputeAdmission` enum); any bundled `project_config_hash`
   (→ the R21 five-dimension split); any content/version hash or `fact_dep_signature`
   on a query-identity KEY (→ version rooting on the value, R6); `component_meta_caches.rs`
@@ -3671,8 +3710,10 @@ U-block's scope bullet for the contract.
 - **Guards (per the child's named set):** `relation_budget_exceeded_admits_nothing`,
   `keyspace_budget_exceeded_admits_nothing`, `call_resolution_budget_exceeded_admits_nothing`,
   `apparent_type_budget_exceeded_admits_nothing`; `program_analysis_fact_domain_validates_flow_slice`
-  (the fourth closed `FactDomain::ProgramAnalysis` dispatch home); `cache_candidate_cap_is_per_family_not_uniform`;
-  `family_eviction_prefers_invalid_then_lru_valid_hit`; `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`;
+  (the fourth closed `FactDomain::ProgramAnalysis` dispatch home); `cache_candidate_cap_is_per_family_not_uniform`
+  + `family_eviction_prefers_invalid_then_lru_valid_hit` (**LANDED — moved to the
+  `U3.ADAPTIVE_FAMILY_RETENTION` bridge block's contract row**);
+  `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`;
   `instantiation_depth_policy_in_identity_and_facts`; `persistent_caches_never_admit_overlay_only_results`;
   `architecture_minimizes_fallback_entry_not_fallback_cost`. A guard that no
   `SemanticQueryKey` variant contains `DeclIdentity`; a guard that reverse-dependency
@@ -4713,7 +4754,7 @@ NEW failing name on a block tip is a real regression.
   the scope alongside the expr, mirroring the props pair.
 - Literal-overlap expose members (`defineExpose<T>({ a })`): the object-literal
   field's binding/eval type takes precedence and ignores the available raised
-  `resolved_field.type_expr` even when binding/eval yields `Unknown { raw }` —
+  `resolved_field.type_expr` even when binding/eval yields `Unknown(UnknownValue)` —
   the surface-raised type should backstop an unknown literal-side type.
 
 **Framework-adapters merge debt (merged ahead of order, 2026-06-17).** The
@@ -4743,16 +4784,17 @@ if skill routing changes; `docs/` for API/guide pages; inline rustdoc/JSDoc on
 changed signatures). Every new CRITICAL rule lands with a static guard or a
 discriminating regression test in the same change (R6 meta-guard).
 
-**Intentional current-state-authority divergence (NOT pre-edited).** `CLAUDE.md`
+**Intentional current-state-authority divergence (PARTIALLY CLOSED).** `CLAUDE.md`
 (the Cache Architecture (CRITICAL) rule) and the `/type-cache-architecture` skill
-currently describe the LIVE uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` + FIFO eviction
-model. That is the one live intentional divergence from this plan's end-state: it
-describes the code as it exists TODAY and is deliberately NOT pre-edited — making the
-current-state authority docs describe unbuilt state would make them lie about the live
-code. It is updated to the per-family-adaptive `candidate_cap()` +
-invalid-first/LRU-by-valid-hit eviction + global memory ceiling by U3's `Docs updated`
-step WHEN U3 lands. The divergence is therefore an intentional, tracked deliverable,
-not an oversight. (The query-mode / satisfaction model is NOT a divergence: `CLAUDE.md`
+described the LIVE uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` + FIFO eviction model
+until the `U3.ADAPTIVE_FAMILY_RETENTION` bridge landed: they now describe the
+landed family-local policy (per-family `candidate_cap()` + invalid-first/LRU-by-
+valid-hit eviction + always-admit). The ONE remaining live intentional divergence
+from this plan's end-state is the process-wide candidate-memory **global ceiling +
+its typed `ReturnOnly` non-admission** (plus adaptive grow/shrink of the per-family
+caps under hit pressure): unbuilt full-U3 state, deliberately NOT pre-described as
+live anywhere — it lands with U3's `Docs updated` step WHEN U3 lands. (The
+query-mode / satisfaction model is NOT a divergence: `CLAUDE.md`
 and the `/type-resolution` skill already document the landed materialized-point
 satisfaction — recorded `(path, point)` dominance via `cached_satisfies`, with the
 demand lattice as the algebra and the five modes as presets. The
@@ -4764,7 +4806,7 @@ demand lattice as the algebra and the five modes as presets. The
 | **U0** | `/type-resolution` (typeinfo contract surface); the reconciled A0a-landed `tests/typeinfo_ignored_test_manifest.rs` manifest (schema notes); `/audit-infrastructure` (`AuditedResult`). |
 | **U1** | `/scheduler` SKILL (TaskKind split, `execute_cache_node`); `/host-session` if dispatch surface changes. |
 | **U2** | `/type-resolution` + `/type-cache-architecture` (final `SemanticQueryKey` surface, slot identity, B4 node enumeration, R21 key composition); `CLAUDE.md` project-global-cache + macro-traversal summaries; `docs/arch/fact-based-cache.md` per-cache key tables. |
-| **U3** | `/type-cache-architecture` (invalidation authority, no reverse-dep eviction; **the per-family adaptive `candidate_cap()` + invalid-first/LRU-by-valid-hit eviction + global memory ceiling, replacing the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO**); **`CLAUDE.md`** (the Cache Architecture (CRITICAL) `FAMILY_SLOT_CANDIDATE_CAP` / FIFO-eviction text → the per-family-adaptive cap model); `/component-meta` (cache contracts); `docs/arch/fact-based-cache.md` (multi-candidate `FamilySlots` section — already current). |
+| **U3** | `/type-cache-architecture` (invalidation authority, no reverse-dep eviction; **the per-family adaptive `candidate_cap()` + invalid-first/LRU-by-valid-hit eviction + global memory ceiling, replacing the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO** — the family-local half LANDED at `U3.ADAPTIVE_FAMILY_RETENTION` with its docs updated; full U3 adds the global ceiling + typed non-admission); **`CLAUDE.md`** (the Cache Architecture (CRITICAL) `FAMILY_SLOT_CANDIDATE_CAP` / FIFO-eviction text → the per-family cap model — LANDED at the bridge); `/component-meta` (cache contracts); `docs/arch/fact-based-cache.md` (multi-candidate `FamilySlots` section — already current). |
 | **U4** | `/type-cache-architecture` (persistent pure-artifact rules, sealed `PersistentArtifactNode`); `docs/arch/fact-based-cache.md`. |
 | **U5** | `/type-cache-architecture` (memory policy, metrics); `/audit-infrastructure` (`StructuredAuditEvent::CacheNode*`). |
 | **U6** | `docs/arch/native-flow-return.md` (moved here in U6); `/type-resolution` (`FlowReturn` query node); `/compiler-codegen` if flow lowering surfaces. |

@@ -44,8 +44,8 @@ fn obj(members: Vec<ObjectMember>) -> TypeExpr {
     }))
 }
 fn prop(name: &str, ty: TypeExpr, optional: bool, readonly: bool) -> ObjectMember {
-    ObjectMember::Property(ObjectProperty::synthetic_public(
-        name.to_string(),
+    ObjectMember::Property(ObjectProperty::synthetic_public_key(
+        name.to_string().into(),
         ty,
         optional,
         readonly,
@@ -266,8 +266,8 @@ fn oracle_normalization_discriminates() {
     // overload ORDER is semantic — must NOT be sorted away (the two orders
     // diverge, proving order is preserved).
     let sig = |ret: PrimitiveName| {
-        ObjectMember::Method(MethodSignature::synthetic_public(
-            "f".to_string(),
+        ObjectMember::Method(MethodSignature::synthetic_public_key(
+            "f".to_string().into(),
             FunctionExpr::synthetic(vec![], Some(Arc::new(prim(ret))), vec![]),
             false,
         ))
@@ -421,6 +421,7 @@ fn oracle_normalization_canonicalizes_cosmetic_names() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     )));
     let fn_u = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
@@ -435,6 +436,7 @@ fn oracle_normalization_canonicalizes_cosmetic_names() {
             name: "U".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     )));
     assert_eq!(
@@ -489,11 +491,13 @@ fn binder_order_is_cross_side_stable() {
                     name: first.to_string(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 },
                 TypeParam {
                     name: second.to_string(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 },
             ],
         )))
@@ -525,9 +529,9 @@ fn binder_order_is_cross_side_stable() {
 
 #[test]
 fn unknown_and_synthetic_nodes_reject() {
-    let unknown = TypeExpr::Unknown {
-        raw: "garbage".to_string(),
-    };
+    let unknown = TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
+        "garbage",
+    ));
     assert_eq!(
         normalized_canonical_json(&unknown, M),
         Err(NormalizeReject::UnknownNode),

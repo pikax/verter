@@ -21,35 +21,61 @@ use crate::analysis::top_level_owners::{TopLevelOwnerTable, TopLevelStatementOwn
 use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinitionKind,
-    ObjectExpression, ObjectPropertyKind, Program, Statement, TSAccessibility, TSEnumDeclaration,
-    TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration, TSModuleDeclarationBody,
-    TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
-    UnaryOperator, VariableDeclarationKind, VariableDeclarator,
+    ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinition,
+    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+    Statement, TSAccessibility, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock,
+    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
+    TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeOperatorOperator,
+    TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind, VariableDeclarator,
 };
+use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
 use verter_type_expr::facts::{
     AuthoredReferenceHeadFact, ClosedTypeFact, EnumMemberEntry, EnumMemberFact,
-    EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar, FunctionParamFact, FunctionSignatureFact,
+    EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar, FlowFunctionReturnIdentity,
+    FunctionParamFact, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
     IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
-    MemberReturnInferenceFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
-    ObjectPropertyFact, ObjectShapeFact, ReturnInferenceCompleteness, ReturnInferenceUnsupported,
-    SemanticTypeSource, TypeParamDeclFact,
+    NarrowTypeParam, ObjectMemberFact, ObjectMethodFact, ObjectPropertyFact, ObjectShapeFact,
+    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
 };
 use verter_type_expr::locators::{
-    AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
-    TypeParamBoundPosition,
+    AuthoredAnchor, AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace,
+    TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
 use verter_type_expr::span_origins::{
     DeclContributorAnchor, FunctionParamSelector, FunctionParamSpanOrigin, FunctionSpansOrigin,
     IndexSignatureSpansOrigin, MemberSpansOrigin, SourceSynthetic,
 };
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
-    MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, PrimitiveName,
-    TopLevelOwnerId, TypeExpr, TypeParam, ValueRef,
+    AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
+    IndexSignatureSpans, IndexedValueLiteralMode, LiteralValue, MemberSpans, MemberVisibility,
+    MethodSignature, ObjectExpr, ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
 };
-use verter_type_expr_oxc::{lower_ts_type, property_key_name};
+use verter_type_expr_oxc::{lower_property_key, lower_ts_type};
+
+pub use verter_type_expr::{
+    IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
+};
+
+/// Rebase substring-relative program points to their containing source file.
+pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
+    match expression {
+        IndexedValueExpression::Value(_) => {}
+        IndexedValueExpression::UnsupportedCall { point } => *point = point.saturating_add(base),
+        IndexedValueExpression::Call(call) => {
+            call.point = call.point.saturating_add(base);
+            offset_indexed_value_expression(&mut call.callee, base);
+            if let Some(receiver) = call.receiver.as_mut() {
+                offset_indexed_value_expression(receiver, base);
+            }
+            for argument in Arc::make_mut(&mut call.args) {
+                argument.point = argument.point.saturating_add(base);
+                offset_indexed_value_expression(&mut argument.expression, base);
+            }
+        }
+    }
+}
 
 fn type_expand_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -209,15 +235,6 @@ pub struct LoweredTypeDeclParts {
     pub type_parameters: Vec<TypeParam>,
     /// The fully-lowered declaration body.
     pub body: TypeExpr,
-    /// Exact produced-shape paths and verdicts for authored methods. The
-    /// declaration contributor is attached when the stored fact is minted.
-    pub direct_member_return_inference: Vec<LoweredMemberReturnInference>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoweredMemberReturnInference {
-    pub member_path: Arc<[u32]>,
-    pub return_inference: ReturnInferenceCompleteness,
 }
 
 /// Where a transient signature's authored function node lives, relative to its
@@ -241,10 +258,10 @@ pub enum LoweredSignatureOrigin {
 #[derive(Debug, Clone)]
 pub struct LoweredSignatureParts {
     pub parameters: Vec<FunctionParam>,
+    /// The AUTHORED return carrier (a TS annotation or a JSDoc `@returns`
+    /// recovery). An unannotated function's return is body-derived and names
+    /// its served function position instead — never a body scan.
     pub return_type: Option<TypeExpr>,
-    /// Completeness of body-derived return inference. Authored/JSDoc returns,
-    /// bodiless declarations, and synthesized signatures are `NotInferred`.
-    pub return_inference: ReturnInferenceCompleteness,
     pub type_parameters: Vec<TypeParam>,
     /// Whether this signature is backed by an implementation body (vs. a
     /// bodiless overload / ambient declaration). Projection-time overload
@@ -255,6 +272,10 @@ pub struct LoweredSignatureParts {
     /// body locator — an inferred / JSDoc-filled return has no authored
     /// `TSType` node to address and is recovered whole-signature on demand.
     pub has_authored_return: bool,
+    /// Whether the return carrier was recovered from a JSDoc `@returns`
+    /// payload (no authored TS annotation present). Set only by the shared
+    /// JSDoc enrichment; distinguishes the declared-recovery provenance.
+    pub jsdoc_return: bool,
     /// Span-recovery origin of the authored function node.
     pub origin: LoweredSignatureOrigin,
 }
@@ -264,6 +285,9 @@ pub struct LoweredSignatureParts {
 pub struct LoweredValueDeclParts {
     pub name: String,
     pub kind: ValueDeclKind,
+    /// Exact declaration-site nominality for an authored `unique symbol`
+    /// annotation.
+    pub is_unique_symbol: bool,
     /// The lowered annotation typed IR: the authored TS annotation, the JSDoc
     /// `@type` payload, or the initializer-inferred type (in that precedence).
     pub type_annotation: Option<TypeExpr>,
@@ -276,15 +300,14 @@ pub struct LoweredValueDeclParts {
     /// Typed refusal when initializer inference could not safely produce an
     /// exact annotation. Mutually exclusive with `type_annotation`.
     pub inference_unavailable: Option<InferenceUnavailableReason>,
+    /// Root offset of the indexed parsed expression that supplies an inferred
+    /// value when no `TypeExpr` annotation is stored.
+    pub expression_source_offset: Option<u32>,
     /// Lowered function signatures (source order within this declaration).
     pub signatures: Vec<LoweredSignatureParts>,
     /// Lowered object shape (const object initializer / class constructor
     /// shape).
     pub object_shape: Option<ObjectExpr>,
-    /// Exact produced-shape paths and return-inference verdicts for authored
-    /// value-side methods (currently class statics). The declaration
-    /// contributor is attached when the stored method fact is minted.
-    pub object_member_return_inference: Vec<LoweredMemberReturnInference>,
     /// Ordered enum member inventory (`Some` exactly for an enum decl).
     pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
     /// Enum member-NAME inventory fact (`Some` exactly for an enum decl).
@@ -442,11 +465,6 @@ pub fn register_statement_parts(
             &parts,
             &ctx.build.canonical_id,
             ctx.statement_owner.owner,
-            Some(DeclContributorAnchor {
-                contributor_index: ctx.contributor_index,
-                owner: ctx.statement_owner.owner,
-                owner_local_ordinal: ctx.statement_owner.owner_local_ordinal,
-            }),
         ));
     }
     for parts in value_decls {
@@ -455,16 +473,7 @@ pub fn register_statement_parts(
     for (scope, parts) in aug_type_decls {
         env.add_augmentation_type(
             scope,
-            mint_type_decl(
-                &parts,
-                &ctx.build.canonical_id,
-                ctx.statement_owner.owner,
-                Some(DeclContributorAnchor {
-                    contributor_index: ctx.contributor_index,
-                    owner: ctx.statement_owner.owner,
-                    owner_local_ordinal: ctx.statement_owner.owner_local_ordinal,
-                }),
-            ),
+            mint_type_decl(&parts, &ctx.build.canonical_id, ctx.statement_owner.owner),
         );
     }
     for (scope, parts) in aug_value_decls {
@@ -625,9 +634,8 @@ fn lower_jsdoc_typedef_named_matching(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body.clone(),
-            direct_member_return_inference: Vec::new(),
         };
-        env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner, None));
+        env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner));
         return Some(typedef);
     }
     None
@@ -664,13 +672,11 @@ fn register_jsdoc_typedefs(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
-            direct_member_return_inference: Vec::new(),
         };
         env.add_type(mint_type_decl(
             &parts,
             &ctx.canonical_id,
             attached_owner.owner,
-            None,
         ));
     }
 }
@@ -778,6 +784,7 @@ fn narrow_decl_header_type_params(
                         .default
                         .is_some()
                         .then(|| bound_slot(TypeParamBoundPosition::Default)),
+                    is_const: param.is_const,
                 })
             })
             .collect(),
@@ -807,6 +814,7 @@ pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowT
                 // slot.
                 constraint: None,
                 default: None,
+                is_const: param.is_const,
             })
         })
         .collect()
@@ -819,26 +827,8 @@ fn mint_type_decl(
     parts: &LoweredTypeDeclParts,
     canonical_id: &Arc<str>,
     owner: TopLevelOwnerId,
-    contributor: Option<DeclContributorAnchor>,
 ) -> TypeDeclInfo {
     let anchor = decl_anchor(canonical_id, owner, &parts.name, LocatorSymbolSpace::Type);
-    let direct_member_return_inference = match contributor {
-        Some(contributor) => parts
-            .direct_member_return_inference
-            .iter()
-            .map(|fact| MemberReturnInferenceFact {
-                origin: FunctionSpansOrigin::Member {
-                    anchor: contributor,
-                    member_path: Arc::clone(&fact.member_path),
-                },
-                return_inference: fact.return_inference,
-            })
-            .collect(),
-        None => {
-            debug_assert!(parts.direct_member_return_inference.is_empty());
-            Arc::from(Vec::<MemberReturnInferenceFact>::new().into_boxed_slice())
-        }
-    };
     TypeDeclInfo {
         name: parts.name.clone(),
         owner,
@@ -846,7 +836,6 @@ fn mint_type_decl(
         kind: parts.kind,
         type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
         direct_member_headers: member_header_facts_from_body(&parts.body),
-        direct_member_return_inference,
         body: anchored_slot(&anchor, Vec::new()),
     }
 }
@@ -930,6 +919,7 @@ fn signature_fact(
     anchor: &AuthoredAnchor,
     first_step: TypeBodyPathStep,
     contributor: DeclContributorAnchor,
+    flow_identity: Option<(FunctionPartIdentity, u32)>,
 ) -> FunctionSignatureFact {
     let spans_origin = signature_spans_origin(sig.origin, contributor);
     FunctionSignatureFact {
@@ -962,22 +952,52 @@ fn signature_fact(
                 })
             })
             .collect(),
-        // Return inference is a semantic body product even when no authored
-        // `TSType` node exists. Keep the content-free replay path whenever the
-        // lowering produced a return carrier; `spans_origin` remains the
-        // independent source-span authority and therefore never fabricates an
-        // authored return span for this inferred slot.
-        return_ty: sig
-            .return_type
-            .as_ref()
-            .map(|_| anchored_slot(anchor, vec![first_step, TypeBodyPathStep::FunctionReturn])),
-        return_inference: sig.return_inference,
-        // The AUTHORSHIP GATE. `return_ty` above mints a replay locator for an
-        // INFERRED return too, so minting the head from that same carrier
-        // without the gate would publish authored route evidence for a return
-        // the author never wrote (an inferred `return x as Ref<number>` lowers
-        // to literally `Ref<number>`). Every non-authored return position —
-        // inferred returns, object-shape member signatures
+        // The return SOURCE: an authored TS annotation or a JSDoc `@returns`
+        // recovery is a DECLARED carrier replayed through its content-free
+        // slot; a body-derived return names the served function position the
+        // whole-function producer answers; a bodiless / synthesized position
+        // has no recoverable carrier. A member's authored return (the
+        // transient IR does not record `has_authored_return` at member
+        // positions) is the `NotInferred` + present-carrier case; a
+        // synthesized constructor's self-type backfill is the same declared
+        // replay. `spans_origin` remains the independent source-span
+        // authority and therefore never fabricates an authored return span
+        // for a body-derived position.
+        return_source: if sig.has_authored_return {
+            FunctionReturnSource::Declared(FunctionReturnLocator::Authored(anchored_slot(
+                anchor,
+                vec![first_step, TypeBodyPathStep::FunctionReturn],
+            )))
+        } else if let Some((function_part, overload_ordinal)) = flow_identity {
+            FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
+                anchor: anchor.clone(),
+                function_part,
+                overload_ordinal,
+            })
+        } else if sig.jsdoc_return {
+            FunctionReturnSource::Declared(FunctionReturnLocator::Jsdoc(anchored_slot(
+                anchor,
+                vec![first_step, TypeBodyPathStep::FunctionReturn],
+            )))
+        } else if sig.return_type.is_some() {
+            // A declared-recovery carrier without an authored span (a
+            // member's authored return — the transient IR does not record
+            // `has_authored_return` at member positions — or a synthesized
+            // constructor's self-type backfill) replays through the same
+            // declared slot.
+            FunctionReturnSource::Declared(FunctionReturnLocator::Authored(anchored_slot(
+                anchor,
+                vec![first_step, TypeBodyPathStep::FunctionReturn],
+            )))
+        } else {
+            FunctionReturnSource::Absent
+        },
+        // The AUTHORSHIP GATE. The `return_source` above names a body-derived
+        // return through `Flow(...)` too, so minting the head from that same
+        // carrier without the gate would publish authored route evidence for a
+        // return the author never wrote (an inferred `return x as Ref<number>`
+        // lowers to literally `Ref<number>`). Every non-authored return
+        // position — body-derived returns, object-shape member signatures
         // ([`member_signature_fact`] passes `has_authored_return: false`),
         // synthesized constructors — publishes the typed `Unavailable`.
         return_reference_head: match (sig.has_authored_return, sig.return_type.as_ref()) {
@@ -1002,12 +1022,10 @@ fn member_signature_fact(
     member_ordinal: u32,
     contributor: DeclContributorAnchor,
     has_implementation_body: bool,
-    return_inference: ReturnInferenceCompleteness,
 ) -> FunctionSignatureFact {
     let sig = LoweredSignatureParts {
         parameters: function.parameters.clone(),
         return_type: function.return_type.as_deref().cloned(),
-        return_inference,
         type_parameters: function.type_parameters.clone(),
         has_implementation_body,
         // A member signature's authored return position is part of the member
@@ -1015,10 +1033,19 @@ fn member_signature_fact(
         // authored, so no independent return locator is minted (recovered
         // whole-member on demand).
         has_authored_return: false,
+        jsdoc_return: false,
         origin: LoweredSignatureOrigin::ShapeMember {
             ordinal: member_ordinal,
         },
     };
+    // A body-derived member carries its exact served position on the
+    // transient IR (the raw authored member path and the per-(name, static)
+    // overload ordinal) — the extractor's mark is the body-derived
+    // authority.
+    let flow_identity = function
+        .flow_return
+        .as_ref()
+        .map(|identity| (identity.function_part.clone(), identity.overload_ordinal));
     signature_fact(
         &sig,
         anchor,
@@ -1026,6 +1053,7 @@ fn member_signature_fact(
             ordinal: member_ordinal,
         },
         contributor,
+        flow_identity,
     )
 }
 
@@ -1037,7 +1065,6 @@ fn object_shape_fact(
     anchor: &AuthoredAnchor,
     contributor: DeclContributorAnchor,
     declared_ctor: Option<bool>,
-    member_return_inference: &[LoweredMemberReturnInference],
 ) -> ObjectShapeFact {
     let members = shape
         .properties
@@ -1047,7 +1074,7 @@ fn object_shape_fact(
             let ordinal = u32::try_from(index).ok()?;
             Some(match member {
                 ObjectMember::Property(prop) => ObjectMemberFact::Property(ObjectPropertyFact {
-                    name: prop.name.clone(),
+                    key: fact_property_key(&prop.key, anchor, ordinal),
                     optional: prop.optional,
                     readonly: prop.readonly,
                     visibility: prop.visibility,
@@ -1061,41 +1088,22 @@ fn object_shape_fact(
                     span_origin: shape_member_span_origin(contributor, ordinal),
                 }),
                 ObjectMember::Method(method) => ObjectMemberFact::Method(ObjectMethodFact {
-                    name: method.name.clone(),
+                    key: fact_property_key(&method.key, anchor, ordinal),
                     optional: method.optional,
+                    method_kind: method.method_kind,
                     visibility: method.visibility,
                     function: member_signature_fact(
                         &method.function,
                         anchor,
                         ordinal,
                         contributor,
-                        false,
-                        if declared_ctor.is_some() {
-                            member_return_inference
-                                .iter()
-                                .find(|fact| fact.member_path.as_ref() == [ordinal])
-                                .map(|fact| fact.return_inference)
-                                .expect("class static method has an exact producer verdict")
-                        } else {
-                            member_return_inference
-                                .iter()
-                                .find(|fact| fact.member_path.as_ref() == [ordinal])
-                                .map(|fact| fact.return_inference)
-                                .unwrap_or(ReturnInferenceCompleteness::NotInferred)
-                        },
+                        method.has_implementation_body,
                     ),
                     span_origin: shape_member_span_origin(contributor, ordinal),
                 }),
-                ObjectMember::CallSignature(function) => {
-                    ObjectMemberFact::CallSignature(member_signature_fact(
-                        function,
-                        anchor,
-                        ordinal,
-                        contributor,
-                        false,
-                        ReturnInferenceCompleteness::NotInferred,
-                    ))
-                }
+                ObjectMember::CallSignature(function) => ObjectMemberFact::CallSignature(
+                    member_signature_fact(function, anchor, ordinal, contributor, false),
+                ),
                 ObjectMember::ConstructSignature(function) => {
                     // A class's construct signature is authored exactly when a
                     // constructor was declared; a synthesized default carries
@@ -1105,10 +1113,10 @@ fn object_shape_fact(
                         let sig = LoweredSignatureParts {
                             parameters: function.parameters.clone(),
                             return_type: function.return_type.as_deref().cloned(),
-                            return_inference: ReturnInferenceCompleteness::NotInferred,
                             type_parameters: function.type_parameters.clone(),
                             has_implementation_body: true,
                             has_authored_return: false,
+                            jsdoc_return: false,
                             origin: LoweredSignatureOrigin::Synthetic,
                         };
                         signature_fact(
@@ -1116,16 +1124,10 @@ fn object_shape_fact(
                             anchor,
                             TypeBodyPathStep::Member { ordinal },
                             contributor,
+                            None,
                         )
                     } else {
-                        member_signature_fact(
-                            function,
-                            anchor,
-                            ordinal,
-                            contributor,
-                            true,
-                            ReturnInferenceCompleteness::NotInferred,
-                        )
+                        member_signature_fact(function, anchor, ordinal, contributor, true)
                     };
                     ObjectMemberFact::ConstructSignature(fact)
                 }
@@ -1158,10 +1160,43 @@ fn object_shape_fact(
                         },
                     })
                 }
+                ObjectMember::Spread(_) => ObjectMemberFact::Spread(SpreadMemberFact {
+                    // The spread OPERAND is the member's value slot: the deref
+                    // of `Member { ordinal } / MemberValue` over the re-lowered
+                    // shape yields the operand's type.
+                    ty: anchored_slot(
+                        anchor,
+                        vec![
+                            TypeBodyPathStep::Member { ordinal },
+                            TypeBodyPathStep::MemberValue,
+                        ],
+                    ),
+                }),
             })
         })
         .collect();
     ObjectShapeFact { members }
+}
+
+fn fact_property_key(
+    key: &TypeAuthoredPropertyKey,
+    anchor: &AuthoredAnchor,
+    ordinal: u32,
+) -> verter_type_expr::facts::FactAuthoredPropertyKey {
+    match key {
+        AuthoredPropertyKey::String(value) => AuthoredPropertyKey::String(value.clone()),
+        AuthoredPropertyKey::Number(value) => AuthoredPropertyKey::Number(*value),
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            AuthoredPropertyKey::UniqueSymbol(identity.clone())
+        }
+        AuthoredPropertyKey::Computed(_) => AuthoredPropertyKey::Computed(anchored_slot(
+            anchor,
+            vec![
+                TypeBodyPathStep::Member { ordinal },
+                TypeBodyPathStep::MemberKey,
+            ],
+        )),
+    }
 }
 
 /// Mint the stored [`ValueDeclInfo`] from transient value-decl parts. Signature
@@ -1181,6 +1216,7 @@ fn mint_value_decl(
     };
     let type_annotation = value_type_annotation_fact(
         parts.type_annotation.as_ref(),
+        parts.is_unique_symbol,
         &parts.name,
         canonical_id,
         owner,
@@ -1189,6 +1225,14 @@ fn mint_value_decl(
             parts.annotation_is_authored,
             &anchor,
         ),
+        parts.expression_source_offset.map(|offset| {
+            verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(
+                verter_type_expr::facts::ProgramExpressionIdentity {
+                    canonical_id: Arc::clone(canonical_id),
+                    offset,
+                },
+            )
+        }),
         parts.inference_unavailable,
     );
     let signatures = parts
@@ -1197,11 +1241,39 @@ fn mint_value_decl(
         .enumerate()
         .filter_map(|(index, sig)| {
             let ordinal = u32::try_from(index).ok()?;
+            // A body-derived value signature is served by the whole-function
+            // producer at its declaration-body / initializer position; the
+            // ordinal is the LOCAL group index (rebased to the merged group
+            // at registration). Declared (authored / JSDoc) and
+            // non-body-derived positions carry no flow identity.
+            let flow_identity = if sig.has_implementation_body
+                && !sig.has_authored_return
+                && !sig.jsdoc_return
+                // A class's value signature is the CONSTRUCTOR — never a
+                // served function position (the index skips constructors);
+                // its return is the declared instance backfill.
+                && !matches!(parts.kind, ValueDeclKind::Class)
+            {
+                Some((
+                    if matches!(
+                        parts.kind,
+                        ValueDeclKind::Function | ValueDeclKind::AsyncFunction
+                    ) {
+                        FunctionPartIdentity::DeclarationBody
+                    } else {
+                        FunctionPartIdentity::Initializer
+                    },
+                    ordinal,
+                ))
+            } else {
+                None
+            };
             Some(signature_fact(
                 sig,
                 &anchor,
                 TypeBodyPathStep::ValueSignature { ordinal },
                 contributor,
+                flow_identity,
             ))
         })
         .collect();
@@ -1214,15 +1286,10 @@ fn mint_value_decl(
             .first()
             .is_some_and(|sig| sig.origin != LoweredSignatureOrigin::Synthetic)
     });
-    let object_shape = parts.object_shape.as_ref().map(|shape| {
-        object_shape_fact(
-            shape,
-            &anchor,
-            contributor,
-            declared_ctor,
-            &parts.object_member_return_inference,
-        )
-    });
+    let object_shape = parts
+        .object_shape
+        .as_ref()
+        .map(|shape| object_shape_fact(shape, &anchor, contributor, declared_ctor));
     let enum_members = parts.enum_members.as_ref().map(|members| EnumMemberFact {
         members: members
             .iter()
@@ -1268,25 +1335,37 @@ fn member_header_facts_from_body(body: &TypeExpr) -> Arc<[MemberHeaderFact]> {
             TypeExpr::Object(object) => {
                 for member in &object.properties {
                     let fact = match member {
-                        ObjectMember::Property(prop) => MemberHeaderFact {
-                            name: prop.name.clone(),
-                            is_method: false,
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                            visibility: prop.visibility,
-                        },
-                        ObjectMember::Method(method) => MemberHeaderFact {
-                            name: method.name.clone(),
-                            is_method: true,
-                            optional: method.optional,
-                            readonly: false,
-                            visibility: method.visibility,
-                        },
+                        ObjectMember::Property(prop) => {
+                            let Some(key) = prop.key.cloned_known() else {
+                                continue;
+                            };
+                            MemberHeaderFact {
+                                key,
+                                method_kind: None,
+                                has_implementation_body: false,
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                                visibility: prop.visibility,
+                            }
+                        }
+                        ObjectMember::Method(method) => {
+                            let Some(key) = method.key.cloned_known() else {
+                                continue;
+                            };
+                            MemberHeaderFact {
+                                key,
+                                method_kind: Some(method.method_kind),
+                                has_implementation_body: method.has_implementation_body,
+                                optional: method.optional,
+                                readonly: false,
+                                visibility: method.visibility,
+                            }
+                        }
                         // Call / construct / index signatures are nameless —
                         // they are not member HEADERS.
                         _ => continue,
                     };
-                    if !out.iter().any(|existing| existing.name == fact.name) {
+                    if !out.iter().any(|existing| existing.key == fact.key) {
                         out.push(fact);
                     }
                 }
@@ -1323,7 +1402,6 @@ fn lower_named_type_alias_parts(
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
-        direct_member_return_inference: Vec::new(),
     }
 }
 
@@ -1392,7 +1470,6 @@ fn lower_named_interface_parts(
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
-        direct_member_return_inference: Vec::new(),
     }
 }
 
@@ -1886,7 +1963,6 @@ fn alias_default_export_type_symbol(
         type_parameters: decl.type_parameters.clone(),
         body: decl.body.clone(),
         direct_member_headers: decl.direct_member_headers.clone(),
-        direct_member_return_inference: decl.direct_member_return_inference.clone(),
     };
     env.add_type(aliased);
 }
@@ -1922,6 +1998,96 @@ fn collect_class(decl: &Class<'_>, source: &str, out: &mut LoweredStatementParts
     collect_named_class(decl, source, out, name);
 }
 
+/// The served function position of a body-derived class method's return:
+/// the raw `ClassBody.body` member path and the per-(name, static) overload
+/// ordinal (counted for every named method in source order, exactly the
+/// index's discovery accounting; constructors and computed-name methods are
+/// never served positions). The anchor is producer-local — the class NAME
+/// is authored here; canonical / owner fill at the lowering scope.
+fn class_method_flow_identity(
+    method: &MethodDefinition<'_>,
+    class_name: &str,
+    raw_member_ordinal: u32,
+    overload_ordinals: &mut rustc_hash::FxHashMap<(String, bool), u32>,
+) -> Option<FlowFunctionReturnIdentity> {
+    let member_name = static_property_key_name(&method.key)?;
+    let overload_ordinal = {
+        let count = overload_ordinals
+            .entry((member_name, method.r#static))
+            .or_insert(0);
+        let ordinal = *count;
+        *count += 1;
+        ordinal
+    };
+    if method.value.body.is_none() || method.value.return_type.is_some() {
+        return None;
+    }
+    Some(FlowFunctionReturnIdentity {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(""),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(class_name),
+            space: LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![raw_member_ordinal].into_boxed_slice()),
+        },
+        overload_ordinal,
+    })
+}
+
+/// Mark the body-derived methods of a VARIABLE-DECLARATOR object literal
+/// with their served function positions: the produced-shape ordinal IS the
+/// raw property index (the extractor pushes exactly one member per authored
+/// property, spreads included), and the declaration name is the merged
+/// symbol the index discovers them under. Only the literal's DIRECT method
+/// members are served positions — nested literals and `export default`
+/// objects are never marked (their returns stay unrecovered once the
+/// body-return producer answers only served positions). The anchor is
+/// producer-local: canonical / owner fill at the lowering scope.
+fn mark_variable_object_flow_returns(shape: &mut ObjectExpr, name: &str) {
+    for (ordinal, member) in shape.properties.iter_mut().enumerate() {
+        let ObjectMember::Method(method) = member else {
+            continue;
+        };
+        if !method.has_implementation_body || method.function.spans.return_type.is_some() {
+            continue;
+        }
+        // The index discovers string-keyed members only (a static identifier
+        // or string literal); numeric / unique-symbol / computed keys are not
+        // served positions.
+        if !matches!(method.key, AuthoredPropertyKey::String(_)) {
+            continue;
+        }
+        let Ok(ordinal) = u32::try_from(ordinal) else {
+            continue;
+        };
+        method.function.flow_return = Some(Box::new(FlowFunctionReturnIdentity {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from(""),
+                owner: TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from(name),
+                space: LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::Member {
+                member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+            },
+            overload_ordinal: 0,
+        }));
+    }
+}
+
+/// Mark the body-derived methods of an object-typed ANNOTATION (the
+/// inferred `const o = { … }` / `export default { … }` type): the same
+/// served member positions the object-shape marker covers — the annotation
+/// rail precedes the shape rail at `typeof`, so both surfaces of the same
+/// declaration carry the identity.
+fn mark_object_annotation_flow_returns(annotation: &mut TypeExpr, name: &str) {
+    if let TypeExpr::Object(shape) = annotation {
+        mark_variable_object_flow_returns(Arc::make_mut(shape), name);
+    }
+}
+
 fn collect_named_class(
     decl: &Class<'_>,
     source: &str,
@@ -1935,25 +2101,104 @@ fn collect_named_class(
     // `ConstructSignature` — never a separate field.
     let mut members = Vec::new();
     let mut static_members = Vec::new();
-    let mut direct_member_return_inference = Vec::new();
-    let mut static_member_return_inference = Vec::new();
     let mut ctor_sig = None;
     let mut ctor_fn_spans = FunctionSpans::default();
     let mut inference_unavailable = None;
+    // The served function position of a body-derived member return is keyed
+    // by the RAW `ClassBody.body` index (the produced-shape ordinal skips
+    // `#private` members and interleaves fields) and the per-(name, static)
+    // overload ordinal.
+    let mut member_overload_ordinals: rustc_hash::FxHashMap<(String, bool), u32> =
+        rustc_hash::FxHashMap::default();
 
-    for element in &decl.body.body {
+    for (raw_member_ordinal, element) in decl.body.body.iter().enumerate() {
+        let raw_member_ordinal = u32::try_from(raw_member_ordinal).unwrap_or(u32::MAX);
         match element {
             ClassElement::PropertyDefinition(prop) => {
                 // Record every class field WITH its declared accessibility
                 // (a `private` / `protected` member is RECORDED; the
                 // published-prop projection re-applies a Public-only filter
                 // at the publication boundary). `static` selects the surface:
-                // instance body vs constructor shape. A `#private` key has no
-                // public name (`property_key_name` → `None`) and never lands
-                // on either surface.
-                if let Some(prop_name) = property_key_name(&prop.key) {
-                    let ty = prop
-                        .type_annotation
+                // instance body vs constructor shape. A `#private` brand is
+                // not a type-level member and never lands on either surface.
+                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let prop_key = lower_property_key(&prop.key, source);
+                // A function-valued field initializer with NO authored
+                // annotation is a served class-member position (the index
+                // discovers it as `Member{[raw ordinal]}`): its body-derived
+                // return is demanded through the whole-function producer
+                // exactly like a method's. An authored TS annotation — on
+                // the field or on the function itself — stays the declared
+                // carrier.
+                let function_value = match prop.value.as_ref() {
+                    Some(Expression::ArrowFunctionExpression(arrow))
+                        if prop.type_annotation.is_none() && arrow.return_type.is_none() =>
+                    {
+                        let sig = extract_arrow_signature(arrow, source);
+                        let mut function_expr = FunctionExpr::with_spans(
+                            sig.parameters,
+                            sig.return_type.map(Arc::new),
+                            sig.type_parameters,
+                            FunctionSpans {
+                                signature: Some(arrow.span.into()),
+                                return_type: None,
+                            },
+                        );
+                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
+                            Box::new(FlowFunctionReturnIdentity {
+                                anchor: AuthoredAnchor {
+                                    canonical_id: Arc::from(""),
+                                    owner: TopLevelOwnerId::ordinary_file(),
+                                    symbol: Arc::from(name.as_str()),
+                                    space: LocatorSymbolSpace::Value,
+                                },
+                                function_part: FunctionPartIdentity::Member {
+                                    member_path: Arc::from(
+                                        vec![raw_member_ordinal].into_boxed_slice(),
+                                    ),
+                                },
+                                overload_ordinal: 0,
+                            })
+                        });
+                        Some(TypeExpr::Function(Arc::new(function_expr)))
+                    }
+                    Some(Expression::FunctionExpression(func))
+                        if prop.type_annotation.is_none() && func.return_type.is_none() =>
+                    {
+                        let sig = extract_function_signature(func, source);
+                        let mut function_expr = FunctionExpr::with_spans(
+                            sig.parameters,
+                            sig.return_type.map(Arc::new),
+                            sig.type_parameters,
+                            FunctionSpans {
+                                signature: Some(func.span.into()),
+                                return_type: None,
+                            },
+                        );
+                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
+                            Box::new(FlowFunctionReturnIdentity {
+                                anchor: AuthoredAnchor {
+                                    canonical_id: Arc::from(""),
+                                    owner: TopLevelOwnerId::ordinary_file(),
+                                    symbol: Arc::from(name.as_str()),
+                                    space: LocatorSymbolSpace::Value,
+                                },
+                                function_part: FunctionPartIdentity::Member {
+                                    member_path: Arc::from(
+                                        vec![raw_member_ordinal].into_boxed_slice(),
+                                    ),
+                                },
+                                overload_ordinal: 0,
+                            })
+                        });
+                        Some(TypeExpr::Function(Arc::new(function_expr)))
+                    }
+                    _ => None,
+                };
+                let ty = function_value.unwrap_or_else(|| {
+                    prop.type_annotation
                         .as_ref()
                         .map(|ta| lower_ts_type(&ta.type_annotation, source))
                         .or_else(|| {
@@ -1961,83 +2206,87 @@ fn collect_named_class(
                                 infer_declaration_or_unknown(
                                     value,
                                     source,
-                                    prop.readonly,
+                                    if prop.readonly {
+                                        TopLevelLiteralPolicy::Preserve
+                                    } else {
+                                        TopLevelLiteralPolicy::Widen
+                                    },
                                     &mut inference_unavailable,
                                 )
                             })
                         })
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
-                    let spans = MemberSpans {
-                        declaration: Some(prop.span.into()),
-                        name: Some(prop.key.span().into()),
-                        type_annotation: prop
-                            .type_annotation
-                            .as_ref()
-                            .map(|ta| ta.type_annotation.span().into()),
-                    };
-                    let member =
-                        ObjectMember::Property(verter_type_expr::ObjectProperty::with_visibility(
-                            prop_name,
-                            ty,
-                            prop.optional,
-                            prop.readonly,
-                            visibility_from_ts_accessibility(prop.accessibility),
-                            spans,
-                        ));
-                    if prop.r#static {
-                        static_members.push(member);
-                    } else {
-                        members.push(member);
-                    }
+                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown))
+                });
+                let spans = MemberSpans {
+                    declaration: Some(prop.span.into()),
+                    name: Some(prop.key.span().into()),
+                    type_annotation: prop
+                        .type_annotation
+                        .as_ref()
+                        .map(|ta| ta.type_annotation.span().into()),
+                };
+                let member =
+                    ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
+                        prop_key,
+                        ty,
+                        prop.optional,
+                        prop.readonly,
+                        visibility_from_ts_accessibility(prop.accessibility),
+                        spans,
+                    ));
+                if prop.r#static {
+                    static_members.push(member);
+                } else {
+                    members.push(member);
                 }
             }
             ClassElement::MethodDefinition(method) => {
+                if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    // A `#private` method/accessor is not a type-level member.
+                    continue;
+                }
                 if method.r#static {
                     // Static method → constructor-shape member with its
                     // declared accessibility (a static can never be the
                     // constructor — `static constructor` is invalid TS).
-                    if let Some(method_name) = property_key_name(&method.key) {
-                        let func = extract_function_signature(&method.value, source);
-                        let return_inference = func.return_inference;
-                        let Some(member_ordinal) = u32::try_from(static_members.len())
-                            .ok()
-                            .and_then(|ordinal| ordinal.checked_add(1))
-                        else {
-                            continue;
-                        };
-                        let fn_spans = FunctionSpans {
-                            signature: Some(method.value.span.into()),
-                            return_type: method
-                                .value
-                                .return_type
-                                .as_ref()
-                                .map(|rt| rt.type_annotation.span().into()),
-                        };
-                        let member_spans = MemberSpans {
-                            declaration: Some(method.span.into()),
-                            name: Some(method.key.span().into()),
-                            type_annotation: None,
-                        };
-                        let mut signature = MethodSignature::with_visibility(
-                            method_name,
-                            FunctionExpr::with_spans(
-                                func.parameters,
-                                func.return_type.map(Arc::new),
-                                func.type_parameters,
-                                fn_spans,
-                            ),
-                            method.optional,
-                            visibility_from_ts_accessibility(method.accessibility),
-                            member_spans,
-                        );
-                        signature.method_kind = object_method_kind(method.kind);
-                        signature.has_implementation_body = method.value.body.is_some();
-                        static_member_return_inference.push(LoweredMemberReturnInference {
-                            member_path: Arc::from(vec![member_ordinal]),
-                            return_inference,
-                        });
-                        static_members.push(ObjectMember::Method(signature));
-                    }
+                    let method_key = lower_property_key(&method.key, source);
+                    let func = extract_function_signature(&method.value, source);
+                    let flow_identity = class_method_flow_identity(
+                        method,
+                        &name,
+                        raw_member_ordinal,
+                        &mut member_overload_ordinals,
+                    );
+                    let fn_spans = FunctionSpans {
+                        signature: Some(method.value.span.into()),
+                        return_type: method
+                            .value
+                            .return_type
+                            .as_ref()
+                            .map(|rt| rt.type_annotation.span().into()),
+                    };
+                    let member_spans = MemberSpans {
+                        declaration: Some(method.span.into()),
+                        name: Some(method.key.span().into()),
+                        type_annotation: None,
+                    };
+                    let mut function_expr = FunctionExpr::with_spans(
+                        func.parameters,
+                        func.return_type.map(Arc::new),
+                        func.type_parameters,
+                        fn_spans,
+                    );
+                    function_expr.flow_return = flow_identity.map(Box::new);
+                    let mut signature = MethodSignature::with_key_visibility(
+                        method_key,
+                        function_expr,
+                        method.optional,
+                        visibility_from_ts_accessibility(method.accessibility),
+                        member_spans,
+                    );
+                    signature.method_kind = object_method_kind(method.kind);
+                    signature.has_implementation_body = method.value.body.is_some();
+                    static_members.push(ObjectMember::Method(signature));
                 } else if method.kind == MethodDefinitionKind::Constructor {
                     for parameter in &method.value.params.items {
                         if parameter.accessibility.is_none()
@@ -2059,15 +2308,15 @@ fn collect_named_class(
                                     infer_declaration_or_unknown(
                                         initializer,
                                         source,
-                                        false,
+                                        TopLevelLiteralPolicy::Widen,
                                         &mut inference_unavailable,
                                     )
                                 })
                             })
                             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
                         members.push(ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::with_visibility(
-                                identifier.name.to_string(),
+                            verter_type_expr::ObjectProperty::with_key_visibility(
+                                AuthoredPropertyKey::string(identifier.name.as_str()),
                                 ty,
                                 parameter.optional,
                                 parameter.readonly,
@@ -2100,14 +2349,16 @@ fn collect_named_class(
                                 .map(|rt| rt.type_annotation.span().into()),
                         };
                     }
-                } else if let Some(method_name) = property_key_name(&method.key) {
+                } else {
                     // Record every NON-static instance method with its
                     // declared accessibility (no longer an exclusion).
                     let func = extract_function_signature(&method.value, source);
-                    let return_inference = func.return_inference;
-                    let Some(member_ordinal) = u32::try_from(members.len()).ok() else {
-                        continue;
-                    };
+                    let flow_identity = class_method_flow_identity(
+                        method,
+                        &name,
+                        raw_member_ordinal,
+                        &mut member_overload_ordinals,
+                    );
                     let fn_spans = FunctionSpans {
                         signature: Some(method.value.span.into()),
                         return_type: method
@@ -2121,24 +2372,22 @@ fn collect_named_class(
                         name: Some(method.key.span().into()),
                         type_annotation: None,
                     };
-                    let mut signature = MethodSignature::with_visibility(
-                        method_name,
-                        FunctionExpr::with_spans(
-                            func.parameters,
-                            func.return_type.map(Arc::new),
-                            func.type_parameters,
-                            fn_spans,
-                        ),
+                    let mut function_expr = FunctionExpr::with_spans(
+                        func.parameters,
+                        func.return_type.map(Arc::new),
+                        func.type_parameters,
+                        fn_spans,
+                    );
+                    function_expr.flow_return = flow_identity.map(Box::new);
+                    let mut signature = MethodSignature::with_key_visibility(
+                        lower_property_key(&method.key, source),
+                        function_expr,
                         method.optional,
                         visibility_from_ts_accessibility(method.accessibility),
                         member_spans,
                     );
                     signature.method_kind = object_method_kind(method.kind);
                     signature.has_implementation_body = method.value.body.is_some();
-                    direct_member_return_inference.push(LoweredMemberReturnInference {
-                        member_path: Arc::from(vec![member_ordinal]),
-                        return_inference,
-                    });
                     members.push(ObjectMember::Method(signature));
                 }
             }
@@ -2199,7 +2448,6 @@ fn collect_named_class(
         kind: TypeDeclKind::Class,
         type_parameters,
         body,
-        direct_member_return_inference,
     });
 
     // Also register as a value (for typeof ClassName / InstanceType)
@@ -2207,10 +2455,10 @@ fn collect_named_class(
     let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
-        return_inference: ReturnInferenceCompleteness::NotInferred,
         type_parameters: Vec::new(),
         has_implementation_body: true,
         has_authored_return: false,
+        jsdoc_return: false,
         origin: LoweredSignatureOrigin::Synthetic,
     });
     // A DECLARED constructor carries no return annotation — its construct
@@ -2222,6 +2470,7 @@ fn collect_named_class(
     if constructor_signature.return_type.is_none() {
         constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
     }
+
     // The declared constructor's authored function node is the construct
     // signature at shape ordinal 0 of the produced `typeof C` constructor
     // shape (a class with no declared constructor keeps the honest Synthetic
@@ -2249,12 +2498,13 @@ fn collect_named_class(
     out.value_decls.push(LoweredValueDeclParts {
         name,
         kind: ValueDeclKind::Class,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable,
+        expression_source_offset: None,
         signatures: vec![constructor_signature],
         object_shape: Some(constructor_shape),
-        object_member_return_inference: static_member_return_inference,
         enum_members: None,
         enum_member_names: None,
     });
@@ -2263,10 +2513,10 @@ fn collect_named_class(
 fn infer_declaration_or_unknown(
     expression: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
+    policy: TopLevelLiteralPolicy,
     unavailable: &mut Option<InferenceUnavailableReason>,
 ) -> TypeExpr {
-    match infer_declaration_expression_type(expression, source, preserve_literal) {
+    match infer_declaration_expression_type(expression, source, policy) {
         Ok(inferred) => inferred,
         Err(reason) => {
             unavailable.get_or_insert(reason);
@@ -2516,12 +2766,13 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
     out.value_decls.push(LoweredValueDeclParts {
         name: name.clone(),
         kind: ValueDeclKind::Enum,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable: None,
+        expression_source_offset: None,
         signatures: Vec::new(),
         object_shape: None,
-        object_member_return_inference: Vec::new(),
         enum_members: Some(members),
         enum_member_names: Some(enum_member_names),
     });
@@ -2546,7 +2797,6 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
-        direct_member_return_inference: Vec::new(),
     });
 }
 
@@ -2573,12 +2823,13 @@ fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValu
     Some(LoweredValueDeclParts {
         name,
         kind,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable: None,
+        expression_source_offset: None,
         signatures: vec![sig],
         object_shape: None,
-        object_member_return_inference: Vec::new(),
         enum_members: None,
         enum_member_names: None,
     })
@@ -2606,7 +2857,7 @@ fn enrich_function_signature_with_jsdoc(
         has_ts_return,
     ) {
         // An explicit JSDoc return is authored intent, not body inference.
-        sig.return_inference = ReturnInferenceCompleteness::NotInferred;
+        sig.jsdoc_return = true;
     }
 }
 
@@ -2665,8 +2916,8 @@ fn enrich_params_and_return_with_jsdoc(
     false
 }
 
-/// Enrich an inferred [`FunctionExpr`] `type_annotation` (built by
-/// `infer_expression_type` from a function-expression initializer) with the
+/// Enrich an inferred [`FunctionExpr`] `type_annotation` (built by the
+/// shared per-expression lowering from a function-expression initializer) with the
 /// declaration's JSDoc `@param`/`@returns`, bridging the `Arc<TypeExpr>` return
 /// carrier to the shared [`enrich_params_and_return_with_jsdoc`] core.
 fn enrich_function_expr_with_jsdoc(
@@ -2674,10 +2925,10 @@ fn enrich_function_expr_with_jsdoc(
     source: &str,
     name_offset: u32,
     has_ts_return: bool,
-) {
+) -> bool {
     let function = Arc::make_mut(function);
     let mut return_type = function.return_type.as_ref().map(|rt| (**rt).clone());
-    let _ = enrich_params_and_return_with_jsdoc(
+    let filled = enrich_params_and_return_with_jsdoc(
         &mut function.parameters,
         &mut return_type,
         source,
@@ -2685,6 +2936,7 @@ fn enrich_function_expr_with_jsdoc(
         has_ts_return,
     );
     function.return_type = return_type.map(Arc::new);
+    filled
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2729,6 +2981,23 @@ fn apply_svelte_rune_initializer_inference(
         else {
             continue;
         };
+        if !parts.annotation_is_authored {
+            if has_authoritative_value_assertion(initializer, source) {
+                continue;
+            }
+            if let Some(callback_point) = inline_svelte_derived_by_callback_point(initializer) {
+                parts.type_annotation = None;
+                parts.expression_source_offset = Some(callback_point);
+                parts.inference_unavailable = None;
+                continue;
+            }
+            if svelte_rune_value_argument_contains_call(initializer) {
+                // Preserve the declaration initializer's indexed call source;
+                // rune inference never re-derives its nested call as a value
+                // type of its own.
+                continue;
+            }
+        }
         let inferred = match infer_svelte_rune_initializer(initializer, source) {
             Ok(Some(inferred)) => inferred,
             Ok(None) => continue,
@@ -2759,9 +3028,46 @@ fn apply_svelte_rune_initializer_inference(
         };
         if !parts.annotation_is_authored {
             parts.type_annotation = Some(inferred);
+            parts.expression_source_offset = None;
             parts.inference_unavailable = None;
         }
     }
+}
+
+fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>) -> bool {
+    let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
+        return false;
+    };
+    let mut budget = InferenceBudget::default();
+    if !matches!(
+        classify_svelte_rune_initializer(&call.callee, &mut budget, 0),
+        Ok(Some(_))
+    ) {
+        return false;
+    }
+    call.arguments
+        .first()
+        .and_then(|argument| argument.as_expression())
+        .is_some_and(value_type_derives_from_a_call)
+}
+
+fn inline_svelte_derived_by_callback_point(expr: &Expression<'_>) -> Option<u32> {
+    let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
+        return None;
+    };
+    let mut budget = InferenceBudget::default();
+    if !matches!(
+        classify_svelte_rune_initializer(&call.callee, &mut budget, 0),
+        Ok(Some(SvelteRuneInitializer::DerivedBy))
+    ) {
+        return None;
+    }
+    let callback = call.arguments.first()?.as_expression()?;
+    matches!(
+        unwrap_expression_wrappers(callback),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    )
+    .then(|| callback.span().start)
 }
 
 fn infer_svelte_rune_initializer(
@@ -2827,26 +3133,10 @@ fn infer_svelte_rune_initializer_with_budget(
             })
             .transpose(),
         SvelteRuneInitializer::DerivedBy => {
-            let Some(callback) = first_argument else {
-                return Ok(None);
-            };
-            let callback_type = infer_expression_type_ctx(
-                callback,
-                source,
-                MemberLiteralPolicy::Widen,
-                budget,
-                depth + 1,
-            )?;
-            if let TypeExpr::Function(function) = &callback_type {
-                Ok(function.return_type.as_deref().cloned())
-            } else if !matches!(callback_type, TypeExpr::Primitive(PrimitiveName::Any)) {
-                Ok(Some(TypeExpr::Ref {
-                    name: Arc::from("ReturnType"),
-                    type_arguments: Arc::from(vec![callback_type]),
-                }))
-            } else {
-                Ok(None)
-            }
+            // Inline callbacks are consumed by `apply_svelte_rune_initializer_inference`
+            // through their indexed FunctionReturnSource. A non-inline callback
+            // remains the initializer's indexed semantic call source.
+            Ok(None)
         }
     }
 }
@@ -2915,6 +3205,24 @@ fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expressio
     }
 }
 
+fn has_authoritative_value_assertion(mut expr: &Expression<'_>, source: &str) -> bool {
+    loop {
+        match expr {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                expr = &parenthesized.expression;
+            }
+            Expression::TSNonNullExpression(non_null) => expr = &non_null.expression,
+            Expression::TSAsExpression(assertion) => {
+                return !is_const_assertion_type_expr(&lower_ts_type(
+                    &assertion.type_annotation,
+                    source,
+                ));
+            }
+            _ => return false,
+        }
+    }
+}
+
 fn lower_variable_parts(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
@@ -2944,6 +3252,15 @@ fn lower_variable_parts(
         VariableDeclarationKind::Var => ValueDeclKind::Var,
     };
 
+    let is_unique_symbol = decl.type_annotation.as_ref().is_some_and(|annotation| {
+        matches!(
+            &annotation.type_annotation,
+            TSType::TSTypeOperatorType(operator)
+                if operator.operator == TSTypeOperatorOperator::Unique
+                    && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
+        )
+    });
+
     // Extract type annotation from the variable declarator
     let mut type_annotation = decl
         .type_annotation
@@ -2968,11 +3285,17 @@ fn lower_variable_parts(
     let mut function_signature = None;
     let mut object_shape = None;
     let mut inference_unavailable = None;
+    let mut expression_source_offset = None;
 
     if let Some(ref init) = decl.init {
         function_signature = extract_initializer_function_signature(init, source);
         match extract_initializer_object_shape(init, source, MemberLiteralPolicy::Widen) {
-            Ok(shape) => object_shape = shape,
+            Ok(shape) => {
+                object_shape = shape;
+                if let Some(shape) = object_shape.as_mut() {
+                    mark_variable_object_flow_returns(shape, &name);
+                }
+            }
             Err(reason) => inference_unavailable = Some(reason),
         }
 
@@ -2989,14 +3312,22 @@ fn lower_variable_parts(
             enrich_function_signature_with_jsdoc(sig, source, name_offset, has_ts_return);
         }
 
-        if type_annotation.is_none() {
-            let inferred = infer_expression_type(init, source).and_then(|inferred| {
-                if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                    widen_literal_type(inferred)
-                } else {
-                    Ok(inferred)
-                }
-            });
+        if type_annotation.is_none()
+            && value_type_derives_from_a_call(init)
+            && !has_authoritative_value_assertion(init, source)
+        {
+            expression_source_offset = Some(init.span().start);
+            inference_unavailable = None;
+        } else if type_annotation.is_none() {
+            let inferred =
+                infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
+                    .and_then(|inferred| {
+                        if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
+                            widen_literal_type(inferred)
+                        } else {
+                            Ok(inferred)
+                        }
+                    });
             let mut inferred = match inferred {
                 Ok(inferred) => inferred,
                 Err(reason) => {
@@ -3010,11 +3341,30 @@ fn lower_variable_parts(
             // enrich THAT function's params/return from the same JSDoc so the
             // projected signature is JSDoc-typed (not the un-enriched inference).
             if let TypeExpr::Function(function) = &mut inferred {
-                enrich_function_expr_with_jsdoc(function, source, name_offset, has_ts_return);
+                let jsdoc_return =
+                    enrich_function_expr_with_jsdoc(function, source, name_offset, has_ts_return);
+                // A body-derived initializer arrow / function expression is
+                // served by the whole-function producer at its Initializer
+                // position; an authored TS annotation or a JSDoc `@returns`
+                // recovery is a DECLARED carrier and never marks.
+                if !has_ts_return && !jsdoc_return {
+                    Arc::make_mut(function).flow_return =
+                        Some(Box::new(FlowFunctionReturnIdentity {
+                            anchor: AuthoredAnchor {
+                                canonical_id: Arc::from(""),
+                                owner: TopLevelOwnerId::ordinary_file(),
+                                symbol: Arc::from(name.as_str()),
+                                space: LocatorSymbolSpace::Value,
+                            },
+                            function_part: FunctionPartIdentity::Initializer,
+                            overload_ordinal: 0,
+                        }));
+                }
             }
             if inference_unavailable.is_none()
                 && !matches!(inferred, TypeExpr::Primitive(PrimitiveName::Any))
             {
+                mark_object_annotation_flow_returns(&mut inferred, &name);
                 type_annotation = Some(inferred);
             }
         }
@@ -3023,6 +3373,7 @@ fn lower_variable_parts(
     Some(LoweredValueDeclParts {
         name,
         kind: var_kind,
+        is_unique_symbol,
         type_annotation,
         annotation_is_authored,
         inference_unavailable: if annotation_is_authored {
@@ -3030,9 +3381,13 @@ fn lower_variable_parts(
         } else {
             inference_unavailable
         },
+        expression_source_offset: if annotation_is_authored {
+            None
+        } else {
+            expression_source_offset
+        },
         signatures: function_signature.into_iter().collect(),
         object_shape,
-        object_member_return_inference: Vec::new(),
         enum_members: None,
         enum_member_names: None,
     })
@@ -3041,7 +3396,7 @@ fn lower_variable_parts(
 fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> LoweredValueDeclParts {
     let function_signature = extract_initializer_function_signature(expr, source);
     let mut inference_unavailable = None;
-    let object_shape =
+    let mut object_shape =
         match extract_initializer_object_shape(expr, source, MemberLiteralPolicy::Widen) {
             Ok(shape) => shape,
             Err(reason) => {
@@ -3049,26 +3404,37 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
                 None
             }
         };
-    let type_annotation = match lower_value_expression(expr, source) {
+    // `export default { … }` object methods are served member positions of
+    // the `default` declaration — mark their body-derived returns exactly
+    // like a variable-declarator object literal's.
+    if let Some(shape) = object_shape.as_mut() {
+        mark_variable_object_flow_returns(shape, "default");
+    }
+    let mut type_annotation = match lower_value_expression(expr, source, MemberLiteralPolicy::Widen)
+    {
         Ok(annotation) => Some(annotation),
         Err(reason) => {
             inference_unavailable = Some(reason);
             None
         }
     };
+    if let Some(annotation) = type_annotation.as_mut() {
+        mark_object_annotation_flow_returns(annotation, "default");
+    }
 
     LoweredValueDeclParts {
         name: "default".to_string(),
         kind: ValueDeclKind::Const,
+        is_unique_symbol: false,
         type_annotation,
         // The default-export expression's type is INFERRED from the exported
         // value (there is no authored annotation position on an
         // `export default <expr>`).
         annotation_is_authored: false,
         inference_unavailable,
+        expression_source_offset: None,
         signatures: function_signature.into_iter().collect(),
         object_shape,
-        object_member_return_inference: Vec::new(),
         enum_members: None,
         enum_member_names: None,
     }
@@ -3180,8 +3546,9 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSigna
     let mut budget = InferenceBudget::default();
     match extract_function_signature_with_budget(func, source, &mut budget, 0) {
         Ok(signature) => signature,
-        Err(reason) => unavailable_function_signature(
+        Err(_reason) => unavailable_function_signature(
             &func.params,
+            func.this_param.as_deref(),
             source,
             func.return_type.is_some(),
             func.body.is_some(),
@@ -3189,7 +3556,6 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSigna
                 .as_ref()
                 .map(|parameters| lower_type_param_decls(parameters, source))
                 .unwrap_or_default(),
-            reason,
         ),
     }
 }
@@ -3202,20 +3568,20 @@ fn extract_function_signature_with_budget(
 ) -> InferenceResult<LoweredSignatureParts> {
     budget.visit(depth)?;
     let has_authored_return = func.return_type.is_some();
-    let parameters = lower_function_params_with_budget(&func.params, source, budget, depth + 1)?;
-    let inferred_return = if let Some(return_type) = &func.return_type {
-        InferredReturn {
-            return_type: Some(lower_ts_type(&return_type.type_annotation, source)),
-            completeness: ReturnInferenceCompleteness::NotInferred,
-        }
-    } else if let Some(body) = &func.body {
-        infer_return_type_with_budget(body, source, &parameters, budget, depth + 1)
-    } else {
-        InferredReturn {
-            return_type: None,
-            completeness: ReturnInferenceCompleteness::NotInferred,
-        }
-    };
+    let parameters = lower_function_params_with_budget(
+        &func.params,
+        func.this_param.as_deref(),
+        source,
+        budget,
+        depth + 1,
+    )?;
+    // The return carrier is AUTHORED-only: an unannotated function's return
+    // is body-derived and names its served function position (the
+    // whole-function producer answers it), never a body scan.
+    let return_type = func
+        .return_type
+        .as_ref()
+        .map(|return_type| lower_ts_type(&return_type.type_annotation, source));
     let type_parameters = func
         .type_parameters
         .as_ref()
@@ -3224,11 +3590,11 @@ fn extract_function_signature_with_budget(
 
     Ok(LoweredSignatureParts {
         parameters,
-        return_type: inferred_return.return_type,
-        return_inference: inferred_return.completeness,
+        return_type,
         type_parameters,
         has_implementation_body: func.body.is_some(),
         has_authored_return,
+        jsdoc_return: false,
         origin: LoweredSignatureOrigin::DeclBody,
     })
 }
@@ -3240,8 +3606,9 @@ fn extract_arrow_signature(
     let mut budget = InferenceBudget::default();
     match extract_arrow_signature_with_budget(arrow, source, &mut budget, 0) {
         Ok(signature) => signature,
-        Err(reason) => unavailable_function_signature(
+        Err(_reason) => unavailable_function_signature(
             &arrow.params,
+            None,
             source,
             arrow.return_type.is_some(),
             true,
@@ -3250,7 +3617,6 @@ fn extract_arrow_signature(
                 .as_ref()
                 .map(|parameters| lower_type_param_decls(parameters, source))
                 .unwrap_or_default(),
-            reason,
         ),
     }
 }
@@ -3263,14 +3629,17 @@ fn extract_arrow_signature_with_budget(
 ) -> InferenceResult<LoweredSignatureParts> {
     budget.visit(depth)?;
     let has_authored_return = arrow.return_type.is_some();
-    let parameters = lower_function_params_with_budget(&arrow.params, source, budget, depth + 1)?;
-    let inferred_return = if let Some(return_type) = &arrow.return_type {
-        InferredReturn {
-            return_type: Some(lower_ts_type(&return_type.type_annotation, source)),
-            completeness: ReturnInferenceCompleteness::NotInferred,
-        }
+    let parameters =
+        lower_function_params_with_budget(&arrow.params, None, source, budget, depth + 1)?;
+    // An AUTHORED annotation is the declared carrier. An expression-bodied
+    // arrow's body IS one expression — the generic declaration-expression
+    // lowering answers it directly (there is no statement scan). A
+    // block-bodied arrow's return is body-derived and names its served
+    // function position instead.
+    let return_type = if let Some(return_type) = &arrow.return_type {
+        Some(lower_ts_type(&return_type.type_annotation, source))
     } else if arrow.expression {
-        let return_type = arrow
+        arrow
             .body
             .statements
             .first()
@@ -3284,15 +3653,9 @@ fn extract_arrow_signature_with_budget(
                 )),
                 _ => None,
             })
-            .transpose()?;
-        InferredReturn {
-            return_type,
-            completeness: ReturnInferenceCompleteness::Complete {
-                can_fall_through: false,
-            },
-        }
+            .transpose()?
     } else {
-        infer_return_type_with_budget(&arrow.body, source, &parameters, budget, depth + 1)
+        None
     };
     let type_parameters = arrow
         .type_parameters
@@ -3304,34 +3667,39 @@ fn extract_arrow_signature_with_budget(
     // block form).
     Ok(LoweredSignatureParts {
         parameters,
-        return_type: inferred_return.return_type,
-        return_inference: inferred_return.completeness,
+        return_type,
         type_parameters,
         has_implementation_body: true,
         has_authored_return,
+        jsdoc_return: false,
         origin: LoweredSignatureOrigin::DeclBody,
     })
 }
 
 fn unavailable_function_signature(
     params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
     source: &str,
     has_authored_return: bool,
     has_implementation_body: bool,
     type_parameters: Vec<TypeParam>,
-    reason: InferenceUnavailableReason,
 ) -> LoweredSignatureParts {
     LoweredSignatureParts {
-        parameters: lower_function_params_without_initializer_inference(params, source),
+        parameters: lower_function_params_without_initializer_inference(params, this_param, source),
         return_type: None,
-        return_inference: ReturnInferenceCompleteness::Unavailable(reason),
         type_parameters,
         has_implementation_body,
         has_authored_return,
+        jsdoc_return: false,
         origin: LoweredSignatureOrigin::DeclBody,
     }
 }
 
+/// Extract an object literal EXPRESSION into the ordered pre-fold IR: every
+/// direct member is minted `FreshOwn` and every spread rides an
+/// [`ObjectMember::Spread`] entry holding the operand's inferred type — all in
+/// source order. The producer NEVER folds: taint/overlap semantics are the
+/// shared spread materializer's decision at graph-lowering time.
 fn extract_object_literal(
     obj: &ObjectExpression<'_>,
     source: &str,
@@ -3344,27 +3712,74 @@ fn extract_object_literal(
     for prop in &obj.properties {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
-                if let Some(name) = property_key_name(&p.key) {
-                    let (ty, readonly) =
-                        object_member_value(&p.value, source, policy, budget, depth + 1)?;
+                let key = lower_property_key(&p.key, source);
+                if p.method || !matches!(p.kind, PropertyKind::Init) {
+                    let Expression::FunctionExpression(function) = &p.value else {
+                        continue;
+                    };
+                    let signature = extract_function_signature_with_budget(
+                        function,
+                        source,
+                        budget,
+                        depth + 1,
+                    )?;
                     let spans = MemberSpans {
                         declaration: Some(p.span.into()),
                         name: Some(p.key.span().into()),
-                        // Value-inferred property: there is no source type
-                        // annotation to anchor.
                         type_annotation: None,
                     };
-                    push_object_property_with_override(
-                        &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, readonly, spans,
+                    let mut method = MethodSignature::with_key_spans_public(
+                        key,
+                        FunctionExpr::with_spans(
+                            signature.parameters,
+                            signature.return_type.map(Arc::new),
+                            signature.type_parameters,
+                            FunctionSpans {
+                                signature: Some(function.span.into()),
+                                return_type: function
+                                    .return_type
+                                    .as_ref()
+                                    .map(|return_type| return_type.type_annotation.span().into()),
+                            },
                         ),
-                    );
+                        false,
+                        spans,
+                    )
+                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn);
+                    method.method_kind = match p.kind {
+                        PropertyKind::Get => ObjectMethodKind::Get,
+                        PropertyKind::Set => ObjectMethodKind::Set,
+                        PropertyKind::Init => ObjectMethodKind::Method,
+                    };
+                    method.has_implementation_body = signature.has_implementation_body;
+                    members.push(ObjectMember::Method(method));
+                    continue;
                 }
+                let (ty, readonly) =
+                    object_member_value(&p.value, source, policy, budget, depth + 1)?;
+                let spans = MemberSpans {
+                    declaration: Some(p.span.into()),
+                    name: Some(p.key.span().into()),
+                    // Value-inferred property: there is no source type
+                    // annotation to anchor.
+                    type_annotation: None,
+                };
+                members.push(ObjectMember::Property(
+                    verter_type_expr::ObjectProperty::with_key_spans_public(
+                        key, ty, false, readonly, spans,
+                    )
+                    // A member written directly in the literal is a fresh
+                    // excess-property candidate until a later spread
+                    // overlaps it (the fold's decision).
+                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn),
+                ));
             }
-            ObjectPropertyKind::SpreadProperty(_) => {
-                // This function returns ObjectExpr only — can't represent intersections.
-                // Use extract_object_literal_as_type() for spread-aware inference.
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                let spread_ty =
+                    infer_expression_type_ctx(&spread.argument, source, policy, budget, depth + 1)?;
+                members.push(ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    spread_ty,
+                )));
             }
         }
     }
@@ -3373,381 +3788,28 @@ fn extract_object_literal(
     })
 }
 
-/// Like `extract_object_literal`, but returns a `TypeExpr` directly so it can
-/// represent intersections when the object contains spread of non-literal sources.
-///
-/// `policy` carries the enclosing object-literal context (see
-/// [`MemberLiteralPolicy`]): a property widens / preserves / preserves+readonly
-/// per the policy, with a per-property `as const` overriding to `ConstAssert`.
-fn extract_object_literal_as_type(
-    obj: &ObjectExpression<'_>,
-    source: &str,
-    policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<TypeExpr> {
-    budget.visit(depth)?;
-    let mut members = Vec::new();
-    let mut spread_types: Vec<TypeExpr> = Vec::new();
-    for prop in &obj.properties {
-        match prop {
-            ObjectPropertyKind::ObjectProperty(p) => {
-                if let Some(name) = property_key_name(&p.key) {
-                    let (ty, readonly) =
-                        object_member_value(&p.value, source, policy, budget, depth + 1)?;
-                    let spans = MemberSpans {
-                        declaration: Some(p.span.into()),
-                        name: Some(p.key.span().into()),
-                        // Value-inferred property: there is no source type
-                        // annotation to anchor.
-                        type_annotation: None,
-                    };
-                    push_object_property_with_override(
-                        &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, readonly, spans,
-                        ),
-                    );
-                }
-            }
-            ObjectPropertyKind::SpreadProperty(spread) => {
-                let spread_ty =
-                    infer_expression_type_ctx(&spread.argument, source, policy, budget, depth + 1)?;
-                match spread_ty {
-                    TypeExpr::Object(ref obj_expr) => {
-                        for member in &obj_expr.properties {
-                            push_object_member_with_override(&mut members, member.clone());
-                        }
-                    }
-                    ty if !matches!(ty, TypeExpr::Primitive(PrimitiveName::Any)) => {
-                        spread_types.push(ty);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let own_obj = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: members,
-    }));
-
-    if spread_types.is_empty() {
-        Ok(own_obj)
-    } else if matches!(&own_obj, TypeExpr::Object(obj) if obj.properties.is_empty()) {
-        Ok(TypeExpr::intersection(spread_types))
-    } else {
-        spread_types.push(own_obj);
-        Ok(TypeExpr::Intersection(spread_types.into()))
-    }
-}
-
-fn push_object_property_with_override(
-    members: &mut Vec<ObjectMember>,
-    property: verter_type_expr::ObjectProperty,
-) {
-    if let Some(existing_index) = members.iter().position(|member| match member {
-        ObjectMember::Property(existing) => existing.name == property.name,
-        _ => false,
-    }) {
-        members.remove(existing_index);
-    }
-    members.push(ObjectMember::Property(property));
-}
-
-fn push_object_member_with_override(members: &mut Vec<ObjectMember>, member: ObjectMember) {
-    match member {
-        ObjectMember::Property(property) => push_object_property_with_override(members, property),
-        other => members.push(other),
-    }
-}
-
-#[derive(Debug)]
-struct InferredReturn {
-    return_type: Option<TypeExpr>,
-    completeness: ReturnInferenceCompleteness,
-}
-
-#[derive(Debug)]
-enum ReturnInferenceFailure {
-    Unsupported(ReturnInferenceUnsupported),
-    Unavailable(InferenceUnavailableReason),
-}
-
-impl From<ReturnInferenceUnsupported> for ReturnInferenceFailure {
-    fn from(reason: ReturnInferenceUnsupported) -> Self {
-        Self::Unsupported(reason)
-    }
-}
-
-impl From<InferenceUnavailableReason> for ReturnInferenceFailure {
-    fn from(reason: InferenceUnavailableReason) -> Self {
-        Self::Unavailable(reason)
-    }
-}
-
-/// Infer the return type of a function body only when its reachable
-/// control-flow surface is completely modeled.
-fn infer_return_type_with_budget(
-    body: &oxc_ast::ast::FunctionBody<'_>,
-    source: &str,
-    parameters: &[FunctionParam],
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferredReturn {
-    if let Err(reason) = budget.visit(depth) {
-        return InferredReturn {
-            return_type: None,
-            completeness: ReturnInferenceCompleteness::Unavailable(reason),
-        };
-    }
-    let mut return_types: Vec<TypeExpr> = Vec::new();
-    let can_fall_through = match collect_return_types_in_sequence(
-        &body.statements,
-        source,
-        parameters,
-        &mut return_types,
-        budget,
-        depth + 1,
-    ) {
-        Ok(can_fall_through) => can_fall_through,
-        Err(ReturnInferenceFailure::Unsupported(reason)) => {
-            return InferredReturn {
-                return_type: None,
-                completeness: ReturnInferenceCompleteness::Unsupported(reason),
-            };
-        }
-        Err(ReturnInferenceFailure::Unavailable(reason)) => {
-            return InferredReturn {
-                return_type: None,
-                completeness: ReturnInferenceCompleteness::Unavailable(reason),
-            };
-        }
-    };
-
-    if can_fall_through && !return_types.is_empty() {
-        return_types.push(TypeExpr::Primitive(PrimitiveName::Undefined));
-    }
-
-    let return_type = match return_types.len() {
-        0 if can_fall_through => TypeExpr::Primitive(PrimitiveName::Void),
-        0 => TypeExpr::Primitive(PrimitiveName::Never),
-        1 => return_types.pop().expect("one inferred return type"),
-        _ => TypeExpr::union(return_types),
-    };
-    InferredReturn {
-        return_type: Some(return_type),
-        completeness: ReturnInferenceCompleteness::Complete { can_fall_through },
-    }
-}
-
-/// Analyze a sequential statement list. Statements after a terminal path are
-/// unreachable and therefore do not affect either inference or support.
-fn collect_return_types_in_sequence(
-    statements: &[Statement<'_>],
-    source: &str,
-    parameters: &[FunctionParam],
-    results: &mut Vec<TypeExpr>,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> Result<bool, ReturnInferenceFailure> {
-    budget.visit(depth)?;
-    let mut can_fall_through = true;
-    for statement in statements {
-        if !can_fall_through {
-            break;
-        }
-        can_fall_through =
-            collect_return_types(statement, source, parameters, results, budget, depth + 1)?;
-    }
-    Ok(can_fall_through)
-}
-
-fn collect_return_types(
-    stmt: &Statement<'_>,
-    source: &str,
-    parameters: &[FunctionParam],
-    results: &mut Vec<TypeExpr>,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> Result<bool, ReturnInferenceFailure> {
-    budget.visit(depth)?;
-    match stmt {
-        Statement::ReturnStatement(ret) => {
-            if let Some(ref arg) = ret.argument {
-                let inferred = match arg {
-                    Expression::Identifier(identifier) => parameters
-                        .iter()
-                        .find(|parameter| {
-                            parameter.name.as_deref() == Some(identifier.name.as_str())
-                        })
-                        .map(|parameter| Ok(parameter.ty.clone()))
-                        .unwrap_or_else(|| {
-                            infer_declaration_expression_type_with_budget(
-                                arg,
-                                source,
-                                false,
-                                budget,
-                                depth + 1,
-                            )
-                        })?,
-                    _ => infer_declaration_expression_type_with_budget(
-                        arg,
-                        source,
-                        false,
-                        budget,
-                        depth + 1,
-                    )?,
-                };
-                results.push(inferred);
-            } else {
-                results.push(TypeExpr::Primitive(PrimitiveName::Undefined));
-            }
-            Ok(false)
-        }
-        Statement::BlockStatement(block) => collect_return_types_in_sequence(
-            &block.body,
-            source,
-            parameters,
-            results,
-            budget,
-            depth + 1,
-        ),
-        Statement::IfStatement(if_stmt) => {
-            let consequent = collect_return_types(
-                &if_stmt.consequent,
-                source,
-                parameters,
-                results,
-                budget,
-                depth + 1,
-            )?;
-            let alternate = match &if_stmt.alternate {
-                Some(alternate) => {
-                    collect_return_types(alternate, source, parameters, results, budget, depth + 1)?
-                }
-                None => true,
-            };
-            Ok(consequent || alternate)
-        }
-        Statement::ThrowStatement(_) => Ok(false),
-
-        Statement::DebuggerStatement(_)
-        | Statement::EmptyStatement(_)
-        | Statement::ExpressionStatement(_)
-        | Statement::VariableDeclaration(_)
-        | Statement::FunctionDeclaration(_)
-        | Statement::ClassDeclaration(_)
-        | Statement::TSTypeAliasDeclaration(_)
-        | Statement::TSInterfaceDeclaration(_)
-        | Statement::TSEnumDeclaration(_)
-        | Statement::TSModuleDeclaration(_)
-        | Statement::TSGlobalDeclaration(_)
-        | Statement::TSImportEqualsDeclaration(_) => Ok(true),
-
-        // Loop / labeled statements: a subtree with NO `return` anywhere in
-        // its STATEMENT tree is RETURN-TRANSPARENT — it contributes no
-        // return arm and never prevents fall-through past it (a `break` /
-        // `continue` inside only exits the construct), so collection of the
-        // CURRENT function-level returns continues exactly (the CF13
-        // labeled-break contract: `outer: for … { break outer } return
-        // "done" as const` infers `"done"`). A loop/labeled subtree that
-        // DOES contain a `return` stays honestly Unsupported: the union's
-        // arms depend on loop reachability/endpoint analysis this collector
-        // does not model, and narrowing there is the exact hazard
-        // `return_inference_flow_rejects_unsupported_instead_of_narrowing`
-        // pins.
-        Statement::DoWhileStatement(_)
-        | Statement::ForInStatement(_)
-        | Statement::ForOfStatement(_)
-        | Statement::ForStatement(_)
-        | Statement::WhileStatement(_) => {
-            if statement_subtree_has_return(stmt) {
-                Err(ReturnInferenceUnsupported::Loop.into())
-            } else {
-                Ok(true)
-            }
-        }
-        Statement::SwitchStatement(_) => Err(ReturnInferenceUnsupported::Switch.into()),
-        Statement::TryStatement(_) => Err(ReturnInferenceUnsupported::Try.into()),
-        Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
-            Err(ReturnInferenceUnsupported::Jump.into())
-        }
-        Statement::LabeledStatement(_) => {
-            if statement_subtree_has_return(stmt) {
-                Err(ReturnInferenceUnsupported::Labeled.into())
-            } else {
-                Ok(true)
-            }
-        }
-        Statement::WithStatement(_) => Err(ReturnInferenceUnsupported::With.into()),
-        Statement::ImportDeclaration(_)
-        | Statement::ExportAllDeclaration(_)
-        | Statement::ExportDefaultDeclaration(_)
-        | Statement::ExportNamedDeclaration(_)
-        | Statement::TSExportAssignment(_)
-        | Statement::TSNamespaceExportDeclaration(_) => {
-            Err(ReturnInferenceUnsupported::ModuleDeclaration.into())
-        }
-    }
-}
-
-/// Whether a STATEMENT subtree contains a `return` statement of the CURRENT
-/// function. Walks statement structure only — nested function/arrow/class
-/// bodies live in EXPRESSION position and are never entered, so their
-/// `return`s (which belong to the nested function) never count. Drives the
-/// return-transparency rule for loop / labeled statements in
-/// [`collect_return_types`]: a return-free construct is skipped exactly; a
-/// return-bearing one stays typed-Unsupported.
-fn statement_subtree_has_return(stmt: &Statement<'_>) -> bool {
-    use oxc_ast::ast::Statement;
-    match stmt {
-        Statement::ReturnStatement(_) => true,
-        Statement::BlockStatement(block) => block.body.iter().any(statement_subtree_has_return),
-        Statement::IfStatement(if_stmt) => {
-            statement_subtree_has_return(&if_stmt.consequent)
-                || if_stmt
-                    .alternate
-                    .as_ref()
-                    .is_some_and(statement_subtree_has_return)
-        }
-        Statement::LabeledStatement(labeled) => statement_subtree_has_return(&labeled.body),
-        Statement::WhileStatement(w) => statement_subtree_has_return(&w.body),
-        Statement::DoWhileStatement(d) => statement_subtree_has_return(&d.body),
-        Statement::ForStatement(f) => statement_subtree_has_return(&f.body),
-        Statement::ForInStatement(f) => statement_subtree_has_return(&f.body),
-        Statement::ForOfStatement(f) => statement_subtree_has_return(&f.body),
-        Statement::SwitchStatement(s) => s
-            .cases
-            .iter()
-            .flat_map(|case| case.consequent.iter())
-            .any(statement_subtree_has_return),
-        Statement::TryStatement(t) => {
-            t.block.body.iter().any(statement_subtree_has_return)
-                || t.handler
-                    .as_ref()
-                    .is_some_and(|h| h.body.body.iter().any(statement_subtree_has_return))
-                || t.finalizer
-                    .as_ref()
-                    .is_some_and(|f| f.body.iter().any(statement_subtree_has_return))
-        }
-        Statement::WithStatement(w) => statement_subtree_has_return(&w.body),
-        _ => false,
-    }
-}
+use crate::analysis::function_program::static_property_key_name;
 
 /// Infer a simple type from an expression literal.
-/// How fresh object-literal MEMBER values are treated during value inference.
-/// The three states are the only object-literal widening contexts:
+/// How fresh literal content inside an expression is treated during value
+/// inference. The four states are the only literal-widening contexts:
 ///
 /// - [`Widen`](MemberLiteralPolicy::Widen): a plain object literal — a fresh
-///   literal member widens to its primitive (`{ count: 0 }` → `{ count: number }`).
+///   literal member widens to its primitive (`{ count: 0 }` → `{ count: number }`);
+///   an array literal is its element-union array.
 /// - [`Preserve`](MemberLiteralPolicy::Preserve): a `satisfies`-constrained
 ///   object — members keep their literal types (the engine performs no
 ///   contextual typing; the deeper contextual-widening behaviour is a separate
-///   deferred contract) and are NOT `readonly`.
+///   deferred contract) and are NOT `readonly`; an array literal is its
+///   element-union array.
 /// - [`ConstAssert`](MemberLiteralPolicy::ConstAssert): an `as const` object —
-///   members keep their literals AND are `readonly`.
+///   members keep their literals AND are `readonly`; an array literal is a
+///   `readonly` tuple of its element types.
+/// - [`Argument`](MemberLiteralPolicy::Argument): a call-argument position —
+///   the fresh AUTHORED form. Members keep their literals and are NOT
+///   `readonly`; an array literal is a mutable tuple of its element types.
+///   Widening happens later, at the inference deposit, under the inferring
+///   parameter's own const policy.
 ///
 /// A per-property `as const` (`{ tag: "x" as const }`) overrides the enclosing
 /// policy to `ConstAssert` for that one member.
@@ -3756,6 +3818,19 @@ enum MemberLiteralPolicy {
     Widen,
     Preserve,
     ConstAssert,
+    Argument,
+}
+
+impl MemberLiteralPolicy {
+    /// Whether an array literal lowered under this policy keeps its
+    /// element-wise TUPLE structure (and, for `as const`, its `readonly`).
+    fn array_literal_is_tuple(self) -> Option<bool> {
+        match self {
+            MemberLiteralPolicy::ConstAssert => Some(true),
+            MemberLiteralPolicy::Argument => Some(false),
+            MemberLiteralPolicy::Widen | MemberLiteralPolicy::Preserve => None,
+        }
+    }
 }
 
 pub(crate) const MAX_SEMANTIC_INFERENCE_DEPTH: usize = 64;
@@ -3789,29 +3864,113 @@ impl InferenceBudget {
     }
 }
 
-fn infer_expression_type(expr: &Expression<'_>, source: &str) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, &mut budget, 0)
+/// How the TOP-LEVEL fresh literal of a declaration-position expression is
+/// treated. This axis governs ONLY the standalone literal at the
+/// expression's own top level.
+///
+/// STRUCTURAL widening — an array literal's element type, an object
+/// literal's member types — is a PRODUCER rule and is deliberately NOT on
+/// this axis: it applies unconditionally, in every position. It has to.
+/// The decision is not aggregate-dependent (`if (c) return [1]; return
+/// [0]` is `number[]` with TWO arms, exactly as `return [1]` is with one),
+/// and the interned structural node carries no freshness bit, so no later
+/// consumer could reconstruct whether an element came from `[1]`
+/// (widening) or `[1 as const]` (pinned).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TopLevelLiteralPolicy {
+    /// Keep a standalone top-level literal PINNED. Used by `const`
+    /// initializers, arrow expression bodies, and RETURN arguments — the
+    /// return JOIN owns the aggregate widening decision, because it is a
+    /// property of the deduplicated contributor set (`if (c) return 1;
+    /// return 0` is `0 | 1`; `if (c) return 1; return 1` is `number`)
+    /// that no per-expression producer can compute.
+    Preserve,
+    /// Widen a fresh standalone top-level literal to its primitive. Used
+    /// by unannotated `let` / `var` initializers.
+    Widen,
 }
 
-fn infer_declaration_expression_type(
+/// The shallow pass's carrier for a CALL's VALUE — `ReturnType<callee>`.
+///
+/// Minted here and nowhere else, so the shape has ONE producer and one
+/// name; [`embeds_call_return_carrier`] is the matching reader.
+fn call_return_carrier(callee: TypeExpr) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from(CALL_RETURN_CARRIER),
+        type_arguments: Arc::from(vec![callee]),
+    }
+}
+
+/// The name [`call_return_carrier`] mints. Private: the identity of this
+/// pass's own carrier is not a string other modules may spell.
+const CALL_RETURN_CARRIER: &str = "ReturnType";
+
+/// Whether `ty` EMBEDS a call-return carrier this pass minted.
+///
+/// The shallow pass has no frame and no resolver: when it meets a CALL it
+/// answers with an UNREDUCED `ReturnType<callee>` carrier. That carrier is
+/// an honest answer for a declaration initializer, which is re-resolved
+/// through the shared engine later — and a WRONG one for any consumer that
+/// publishes the leaf answer as a value, because nothing has instantiated
+/// the callee's own type-parameter clause and nothing has consulted the
+/// callee's overload group. The demand-sliced flow content asks here so a
+/// call reached through a COMPOSITE expression (a ternary arm, an array
+/// element, a member base) fails closed instead of publishing the callee's
+/// binders warm.
+///
+/// The read is the shared exhaustive `referenced_names` walk, not a
+/// hand-rolled traversal: a partial walk is exactly how one carrier
+/// position gets missed. A userland `ReturnType` alias reads as a hit; the
+/// consequence is a conservative fail-close, never a wrong answer.
+#[must_use]
+pub fn embeds_call_return_carrier(ty: &TypeExpr) -> bool {
+    verter_type_expr::referenced_names(ty)
+        .type_names
+        .iter()
+        .any(|reference| !reference.qualified && reference.head == CALL_RETURN_CARRIER)
+}
+
+/// Infer the type of a CALL-ARGUMENT expression with a FRESH inference
+/// budget: the authored form, preserved. Standalone and member literals keep
+/// their literal types and an array literal keeps its positional tuple
+/// structure, without the `readonly` an `as const` adds. Widening is not a
+/// property of the argument position — it happens at the inference deposit,
+/// under the inferring parameter's own const policy — so applicability can
+/// relate the argument's actual type.
+pub fn infer_call_argument_expression_type(
     expr: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_declaration_expression_type_with_budget(expr, source, preserve_literal, &mut budget, 0)
+    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Argument, &mut budget, 0)
+}
+
+/// Infer the type of a declaration-position expression with a FRESH
+/// inference budget — the ONE shared shallow-pass per-expression lowering
+/// entry. Also the expression lowering the demand-sliced flow content
+/// reuses for its selected leaf positions. See
+/// [`TopLevelLiteralPolicy`] for the one axis this entry takes, and for
+/// why structural widening is not on it.
+pub fn infer_declaration_expression_type(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: TopLevelLiteralPolicy,
+) -> InferenceResult<TypeExpr> {
+    let mut budget = InferenceBudget::default();
+    infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)
 }
 
 fn infer_declaration_expression_type_with_budget(
     expr: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
+    policy: TopLevelLiteralPolicy,
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
-    if preserve_literal || expr_is_const_asserted(expr, source) {
+    // A const assertion pins its whole operand and carries its own
+    // readonly/tuple semantics — it is never re-decided by either axis.
+    if expr_is_const_asserted(expr, source) {
         return infer_expression_type_ctx(
             expr,
             source,
@@ -3821,31 +3980,41 @@ fn infer_declaration_expression_type_with_budget(
         );
     }
     match expr {
+        // Structurally transparent: the wrapper is not a top level of its
+        // own, so the caller's policy passes straight through.
         Expression::ParenthesizedExpression(parenthesized) => {
             infer_declaration_expression_type_with_budget(
                 &parenthesized.expression,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )
         }
+        // A conditional's branches are each a top level under the SAME
+        // policy: `const v = c ? 1 : 2` is `1 | 2`, `let v = c ? 1 : 2` is
+        // `number`.
         Expression::ConditionalExpression(conditional) => Ok(TypeExpr::union(vec![
             infer_declaration_expression_type_with_budget(
                 &conditional.consequent,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )?,
             infer_declaration_expression_type_with_budget(
                 &conditional.alternate,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )?,
         ])),
+        // An array literal's elements ALWAYS widen — structural widening
+        // is a producer rule, independent of the caller's top-level
+        // policy. `const d = [1]` and `return [1]` are both `number[]`;
+        // only an element's OWN const assertion pins it (`[1 as const]` is
+        // `1[]`), and that is decided by the recursion's const-assert gate.
         Expression::ArrayExpression(array) => {
             let mut element_types = Vec::new();
             for element in &array.elements {
@@ -3854,7 +4023,7 @@ fn infer_declaration_expression_type_with_budget(
                         let spread_type = infer_declaration_expression_type_with_budget(
                             &spread.argument,
                             source,
-                            false,
+                            TopLevelLiteralPolicy::Widen,
                             budget,
                             depth + 1,
                         )?;
@@ -3873,7 +4042,7 @@ fn infer_declaration_expression_type_with_budget(
                                 infer_declaration_expression_type_with_budget(
                                     expression,
                                     source,
-                                    false,
+                                    TopLevelLiteralPolicy::Widen,
                                     budget,
                                     depth + 1,
                                 )?,
@@ -3891,8 +4060,19 @@ fn infer_declaration_expression_type_with_budget(
                 readonly: false,
             })
         }
-        _ => infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth + 1)
-            .map(widen_shallow_literal),
+        _ => {
+            let inferred = infer_expression_type_ctx(
+                expr,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(match policy {
+                TopLevelLiteralPolicy::Widen => widen_shallow_literal(inferred),
+                TopLevelLiteralPolicy::Preserve => inferred,
+            })
+        }
     }
 }
 
@@ -3900,7 +4080,7 @@ fn infer_declaration_expression_type_with_budget(
 /// parenthesised wrapper). Drives object-literal property widening: an
 /// `as const`-asserted property keeps its literal type and is `readonly`; a
 /// bare-literal property widens to its primitive.
-fn expr_is_const_asserted(expr: &Expression<'_>, source: &str) -> bool {
+pub fn expr_is_const_asserted(expr: &Expression<'_>, source: &str) -> bool {
     let mut expr = expr;
     loop {
         match expr {
@@ -3922,7 +4102,7 @@ fn expr_is_const_asserted(expr: &Expression<'_>, source: &str) -> bool {
 /// (their own members were already widened recursively at their own
 /// inference level), so an `as const` member nested inside a widened object
 /// is never re-widened.
-fn widen_shallow_literal(ty: TypeExpr) -> TypeExpr {
+pub fn widen_shallow_literal(ty: TypeExpr) -> TypeExpr {
     match ty {
         TypeExpr::Literal(verter_type_expr::LiteralValue::String(_)) => {
             TypeExpr::Primitive(PrimitiveName::String)
@@ -3971,7 +4151,13 @@ fn object_member_value(
     // Widen a fresh TOP-LEVEL literal only under a plain `Widen` context (no
     // per-property `as const`); `Preserve` (satisfies) and `ConstAssert` keep it.
     let ty = if value_policy == MemberLiteralPolicy::Widen {
-        infer_declaration_expression_type_with_budget(value, source, false, budget, depth)?
+        infer_declaration_expression_type_with_budget(
+            value,
+            source,
+            TopLevelLiteralPolicy::Widen,
+            budget,
+            depth,
+        )?
     } else {
         infer_expression_type_ctx(value, source, value_policy, budget, depth)?
     };
@@ -3993,6 +4179,12 @@ fn infer_expression_type_ctx(
 ) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
     match expr {
+        // `undefined` is an IDENTIFIER in the grammar (unlike the `null`
+        // literal) but its value position IS the `undefined` type — never a
+        // resolvable file-scope value path.
+        Expression::Identifier(ident) if ident.name == "undefined" => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
+        }
         Expression::Identifier(ident) => Ok(TypeExpr::TypeOf(ValueRef {
             path: vec![ident.name.as_str().to_string()],
             type_args: Vec::new(),
@@ -4009,17 +4201,57 @@ fn infer_expression_type_ctx(
             infer_expression_type_ctx(&paren.expression, source, policy, budget, depth + 1)
         }
         Expression::ArrayExpression(arr) => {
+            // A literal-preserving position keeps the array literal's
+            // POSITIONAL structure as a tuple. A spread or an elision makes
+            // the positions non-recoverable, so the element-union array is
+            // the sound form there.
+            let positional = !arr.elements.iter().any(|element| {
+                matches!(
+                    element,
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                        | oxc_ast::ast::ArrayExpressionElement::Elision(_)
+                )
+            });
+            if let (Some(readonly), true) = (policy.array_literal_is_tuple(), positional) {
+                let mut elements = Vec::with_capacity(arr.elements.len());
+                for element in &arr.elements {
+                    let Some(expr) = element.as_expression() else {
+                        continue;
+                    };
+                    elements.push(TupleElement {
+                        label: None,
+                        ty: infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?,
+                        optional: false,
+                        rest: false,
+                    });
+                }
+                return Ok(TypeExpr::Tuple {
+                    elements: Arc::from(elements.into_boxed_slice()),
+                    readonly,
+                });
+            }
             let mut element_types = Vec::new();
             for element in &arr.elements {
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
-                        append_spread_array_element_types(
+                        // A spread element contributes its source's element
+                        // types (array / tuple / union-of-those), else `any`.
+                        // The spread source always infers under the plain
+                        // widen context.
+                        let spread_ty = infer_expression_type_ctx(
                             &spread.argument,
                             source,
-                            &mut element_types,
+                            MemberLiteralPolicy::Widen,
                             budget,
                             depth + 1,
                         )?;
+                        if let Some(spread_elements) =
+                            collect_array_element_types_from_type(&spread_ty)
+                        {
+                            element_types.extend(spread_elements);
+                        } else {
+                            element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
+                        }
                     }
                     oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
                     _ => {
@@ -4043,9 +4275,9 @@ fn infer_expression_type_ctx(
                 readonly: false,
             })
         }
-        Expression::ObjectExpression(obj) => {
-            extract_object_literal_as_type(obj, source, policy, budget, depth + 1)
-        }
+        Expression::ObjectExpression(obj) => Ok(TypeExpr::Object(Arc::new(
+            extract_object_literal(obj, source, policy, budget, depth + 1)?,
+        ))),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
@@ -4121,10 +4353,7 @@ fn infer_expression_type_ctx(
             if matches!(callee_type, TypeExpr::Primitive(PrimitiveName::Any)) {
                 Ok(TypeExpr::Primitive(PrimitiveName::Any))
             } else {
-                Ok(TypeExpr::Ref {
-                    name: Arc::from("ReturnType"),
-                    type_arguments: Arc::from(vec![callee_type]),
-                })
+                Ok(call_return_carrier(callee_type))
             }
         }
         _ => Ok(TypeExpr::Primitive(PrimitiveName::Any)),
@@ -4186,23 +4415,6 @@ fn collect_static_member_path_with_budget(
     }
     properties.reverse();
     path.extend(properties);
-    Ok(())
-}
-
-fn append_spread_array_element_types(
-    expr: &Expression<'_>,
-    source: &str,
-    element_types: &mut Vec<TypeExpr>,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<()> {
-    let spread_ty =
-        infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth)?;
-    if let Some(spread_elements) = collect_array_element_types_from_type(&spread_ty) {
-        element_types.extend(spread_elements);
-    } else {
-        element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
-    }
     Ok(())
 }
 
@@ -4332,7 +4544,8 @@ fn widen_literal_type_with_budget(
         // widen identically. Reconstruct as a `ConstructorType` so the
         // constructor-ness survives — never flatten it to a plain `Function`.
         // This runs on analyzer-side lowered IR (e.g. `value as new () => T`),
-        // BEFORE the dispatch lower collapses `Function`/`ConstructorType`.
+        // BEFORE the dispatch lower interns the kind-preserving
+        // `SemanticNodeData::Signature` carrier.
         TypeExpr::ConstructorType(function) => Ok(TypeExpr::ConstructorType(Arc::new(
             FunctionExpr::with_spans(
                 function.parameters.clone(),
@@ -4366,6 +4579,13 @@ fn widen_object_member_with_budget(
         ObjectMember::Property(mut property) => {
             property.ty = widen_literal_type_with_budget(property.ty, budget, depth + 1)?;
             Ok(ObjectMember::Property(property))
+        }
+        ObjectMember::Spread(mut spread) => {
+            // Widening the pre-fold operand is the fold-equivalent of widening
+            // the spread-produced members: an inline literal operand's members
+            // widen recursively; a reference operand passes through unchanged.
+            spread.ty = widen_literal_type_with_budget(spread.ty, budget, depth + 1)?;
+            Ok(ObjectMember::Spread(spread))
         }
         ObjectMember::IndexSignature(mut signature) => {
             signature.value_type =
@@ -4445,19 +4665,17 @@ fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
 }
 
 fn is_const_assertion_type_expr(expr: &TypeExpr) -> bool {
-    matches!(
-        expr,
-        TypeExpr::Unknown { raw } if raw == "const"
-    ) || matches!(
-        expr,
-        TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
-    )
+    matches!(expr, TypeExpr::Unknown(value) if value.is_const_assertion_syntax())
+        || matches!(
+            expr,
+            TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
+        )
 }
 
 fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {
     match sig {
         TSSignature::TSPropertySignature(prop) => {
-            let name = property_key_name(&prop.key)?;
+            let key = lower_property_key(&prop.key, source);
             let ty = prop
                 .type_annotation
                 .as_ref()
@@ -4472,8 +4690,8 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                     .map(|ta| ta.type_annotation.span().into()),
             };
             Some(ObjectMember::Property(
-                verter_type_expr::ObjectProperty::with_spans_public(
-                    name,
+                verter_type_expr::ObjectProperty::with_key_spans_public(
+                    key,
                     ty,
                     prop.optional,
                     prop.readonly,
@@ -4482,8 +4700,9 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             ))
         }
         TSSignature::TSMethodSignature(method) => {
-            let name = property_key_name(&method.key)?;
-            let params = lower_function_params(&method.params, source);
+            let key = lower_property_key(&method.key, source);
+            let params =
+                lower_function_params(&method.params, method.this_param.as_deref(), source);
             let return_type = method
                 .return_type
                 .as_ref()
@@ -4505,20 +4724,22 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 name: Some(method.key.span().into()),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(MethodSignature::with_spans_public(
-                name,
-                FunctionExpr::with_spans(
-                    params,
-                    return_type.map(Arc::new),
-                    type_parameters,
-                    fn_spans,
+            Some(ObjectMember::Method(
+                MethodSignature::with_key_spans_public(
+                    key,
+                    FunctionExpr::with_spans(
+                        params,
+                        return_type.map(Arc::new),
+                        type_parameters,
+                        fn_spans,
+                    ),
+                    method.optional,
+                    member_spans,
                 ),
-                method.optional,
-                member_spans,
-            )))
+            ))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
-            let params = lower_function_params(&call.params, source);
+            let params = lower_function_params(&call.params, call.this_param.as_deref(), source);
             let return_type = call
                 .return_type
                 .as_ref()
@@ -4571,7 +4792,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             )))
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
-            let params = lower_function_params(&ctor.params, source);
+            let params = lower_function_params(&ctor.params, None, source);
             let return_type = ctor
                 .return_type
                 .as_ref()
@@ -4598,21 +4819,50 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
     }
 }
 
-fn lower_function_params(params: &FormalParameters<'_>, source: &str) -> Vec<FunctionParam> {
+/// Lower an authored `this` receiver into the LEADING parameter named `this`
+/// — the representation applicability splits off before ordinary arity, and
+/// the one `ThisParameterType` / `OmitThisParameter` read. OXC carries it
+/// outside `FormalParameters`, so callers pass it explicitly; a node that
+/// cannot author one (an arrow, a constructor) passes `None`.
+fn lower_this_param(this: &TSThisParameter<'_>, source: &str) -> FunctionParam {
+    FunctionParam::with_span(
+        Some("this".to_string()),
+        this.type_annotation
+            .as_ref()
+            .map(|annotation| lower_ts_type(&annotation.type_annotation, source))
+            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
+        false,
+        false,
+        Some(this.span.into()),
+        this.type_annotation.is_some(),
+    )
+}
+
+fn lower_function_params(
+    params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
+    source: &str,
+) -> Vec<FunctionParam> {
     let mut budget = InferenceBudget::default();
-    lower_function_params_with_budget(params, source, &mut budget, 0)
-        .unwrap_or_else(|_| lower_function_params_without_initializer_inference(params, source))
+    lower_function_params_with_budget(params, this_param, source, &mut budget, 0).unwrap_or_else(
+        |_| lower_function_params_without_initializer_inference(params, this_param, source),
+    )
 }
 
 fn lower_function_params_with_budget(
     params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
     source: &str,
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<Vec<FunctionParam>> {
     budget.visit(depth)?;
-    let mut lowered_params =
-        Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
+    let mut lowered_params = Vec::with_capacity(
+        params.items.len() + usize::from(params.rest.is_some()) + usize::from(this_param.is_some()),
+    );
+    if let Some(this) = this_param {
+        lowered_params.push(lower_this_param(this, source));
+    }
     for param in &params.items {
         budget.visit(depth + 1)?;
         let name = match &param.pattern {
@@ -4631,7 +4881,7 @@ fn lower_function_params_with_budget(
             infer_declaration_expression_type_with_budget(
                 initializer,
                 source,
-                false,
+                TopLevelLiteralPolicy::Widen,
                 budget,
                 depth + 2,
             )?
@@ -4676,9 +4926,15 @@ fn lower_function_params_with_budget(
 
 fn lower_function_params_without_initializer_inference(
     params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
     source: &str,
 ) -> Vec<FunctionParam> {
-    let mut lowered = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
+    let mut lowered = Vec::with_capacity(
+        params.items.len() + usize::from(params.rest.is_some()) + usize::from(this_param.is_some()),
+    );
+    if let Some(this) = this_param {
+        lowered.push(lower_this_param(this, source));
+    }
     for param in &params.items {
         let name = match &param.pattern {
             BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.to_string()),
@@ -4742,6 +4998,7 @@ fn lower_type_param_decls(
                 .default
                 .as_ref()
                 .map(|d| Arc::new(lower_ts_type(d, source))),
+            is_const: p.r#const,
         })
         .collect()
 }
@@ -4954,10 +5211,11 @@ where
     for (macro_index, m) in macros.iter().enumerate() {
         // Expand prop field type annotations.
         //
-        // The analyzer producer (`extract_fields_from_interface_body_like`)
-        // lowers each prop's TS annotation directly from the OXC `TSType<'_>`
-        // AST node and stores the result on `AnalyzedPropField.type_expr`.
-        // Consumers read the typed form authoritatively — no string parsing.
+        // The analyzer stamps a content-free `MacroPayloadLocator` on
+        // `AnalyzedPropField.payload: Option<MacroPayloadLocator>` when the
+        // field has an authored annotation (scope pairing present); consumers
+        // demand the typed body through the shared dispatch from that locator
+        // — display `type_annotation` is never re-parsed.
         for field in &m.prop_fields {
             if let Some(ref payload) = field.payload {
                 {
@@ -5015,7 +5273,10 @@ where
         // production is owned by the query-engine phase in meta_resolve.rs.
         // This function handles field-level work only.
 
-        // Expand emit payload types via the analyzer-populated typed form.
+        // Expand emit payload types from the content-free `MacroPayloadLocator`
+        // stamped on `AnalyzedEmitField.payload` (when scope pairing is present);
+        // consumers demand the typed body through the shared dispatch — display
+        // `payload_type` is never re-parsed.
         for field in &m.emit_fields {
             if let Some(ref payload) = field.payload {
                 {
@@ -5065,13 +5326,13 @@ where
                         diagnostics: expanded.diagnostics,
                         // `AnalyzedEmitField` is the upstream type at this
                         // layer. It carries `name`, `payload_type`, and
-                        // `payload_expr` — not own-body-vs-heritage
-                        // provenance. The published-surface policies
-                        // (`Refined` etc.) consult the bit only on the
-                        // `props` axis; the emit surface does not gate on
-                        // it. `false` is the structural truth at the emit
-                        // ExpandedField layer because the producer type
-                        // does not encode the distinction.
+                        // `payload: Option<MacroPayloadLocator>` — not
+                        // own-body-vs-heritage provenance. The published-
+                        // surface policies (`Refined` etc.) consult the bit
+                        // only on the `props` axis; the emit surface does
+                        // not gate on it. `false` is the structural truth
+                        // at the emit ExpandedField layer because the
+                        // producer type does not encode the distinction.
                         declared_in_macro_type_arg: false,
                     });
                 }
@@ -5079,8 +5340,11 @@ where
         }
 
         // Slot binding expansion is not needed for fallthrough-only meta.
-        // Read the authored payload position emitted by the analyzer producer
-        // in `extract_slot_bindings_from_oxc_type`.
+        // Analyzer assembly leaves `AnalyzedSlotFieldBinding.payload` as `None`
+        // — `stamp_macro_payload_locators` only addresses flat field-index
+        // positions, and the flat vocabulary cannot address nested
+        // `(slot, binding)` positions. Typed binding demand is host-raised;
+        // this branch is defensive only if a locator is ever present.
         if scope == MacroExpansionScope::Full {
             for slot in &m.slot_fields {
                 for binding in &slot.bindings {
@@ -5380,34 +5644,343 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
-            direct_member_return_inference: Vec::new(),
         });
     }
     out
 }
 
-/// Parse a JavaScript/TypeScript value expression into a lightweight [`TypeExpr`].
-///
-/// This preserves finite string literals, object-literal top-level shapes, identifier
-/// references via `typeof`, and conditional unions needed by the shared host-side
-/// fallthrough resolver.
-pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
-    use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
-    use oxc_span::SourceType;
-
-    let wrapped = format!("const __verter_expr__ = {expression};");
-    let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
-    let stmt = ret.program.body.first()?;
-    let Statement::VariableDeclaration(decl) = stmt else {
-        return None;
-    };
-    let declarator = decl.declarations.first()?;
-    let init = declarator.init.as_ref()?;
-    lower_value_expression(init, &wrapped).ok()
+fn lower_value_expression(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> InferenceResult<TypeExpr> {
+    let mut budget = InferenceBudget::default();
+    infer_expression_type_ctx(expr, source, policy, &mut budget, 0)
 }
 
-fn lower_value_expression(expr: &Expression<'_>, source: &str) -> InferenceResult<TypeExpr> {
-    infer_expression_type(expr, source)
+/// Lower an already-parsed value expression into indexed typed IR.
+///
+/// Direct calls and constructs are explicit records. A call-free expression
+/// keeps the established value-inference result. A compound that contains a
+/// call but is not itself a direct call fails typed — value-expression
+/// inference carries no call authority at all.
+pub fn lower_indexed_value_expression(
+    expr: &Expression<'_>,
+    source: &str,
+) -> IndexedValueExpression {
+    lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Widen)
+}
+
+/// Lower one indexed CALL-ARGUMENT expression: the same indexed lowering in
+/// the call-argument position, so the authored literal form reaches
+/// applicability exactly as the flow IR's own call arguments do.
+fn lower_indexed_call_argument_expression(
+    expr: &Expression<'_>,
+    source: &str,
+) -> IndexedValueExpression {
+    lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Argument)
+}
+
+fn lower_indexed_value_expression_with_policy(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+) -> IndexedValueExpression {
+    if has_authoritative_value_assertion(expr, source) {
+        return lower_value_expression(expr, source, policy)
+            .map(IndexedValueExpression::Value)
+            .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                PrimitiveName::Any,
+            )));
+    }
+    match unwrap_expression_wrappers(expr) {
+        Expression::CallExpression(call) => {
+            IndexedValueExpression::Call(lower_indexed_call_expression(call, source))
+        }
+        Expression::NewExpression(call) => {
+            IndexedValueExpression::Call(lower_indexed_new_expression(call, source))
+        }
+        Expression::FunctionExpression(function) => {
+            let signature = extract_function_signature(function, source);
+            IndexedValueExpression::Value(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
+                signature.parameters,
+                signature.return_type.map(Arc::new),
+                signature.type_parameters,
+                FunctionSpans {
+                    signature: Some(function.span.into()),
+                    return_type: function
+                        .return_type
+                        .as_ref()
+                        .map(|annotation| annotation.type_annotation.span().into()),
+                },
+            ))))
+        }
+        unwrapped if value_type_derives_from_a_call(unwrapped) => {
+            IndexedValueExpression::UnsupportedCall {
+                point: unwrapped.span().start,
+            }
+        }
+        unwrapped => lower_value_expression(unwrapped, source, policy)
+            .map(IndexedValueExpression::Value)
+            .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                PrimitiveName::Any,
+            ))),
+    }
+}
+
+/// The authored literal shape of one argument position — the ONE
+/// classification every indexed call record and the flow IR's call
+/// arguments share.
+///
+/// An argument written as a bare literal expression (a scalar literal, a
+/// template with no substitutions, an object literal, an array literal) is
+/// a FRESH literal: its literal content is subject to the parameter's
+/// widening rule, so it reports [`IndexedValueLiteralMode::Widened`]. Every
+/// other authored form already pins its own type — a type assertion (`as
+/// T` / `as const`), a `satisfies` narrowing, a non-null assertion, a
+/// reference, a call, a function value — and reports
+/// [`IndexedValueLiteralMode::Literal`]: its literal content is preserved
+/// exactly as authored. Only a parenthesised wrapper is transparent.
+pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLiteralMode {
+    let mut expr = expr;
+    while let Some(Expression::ParenthesizedExpression(parenthesized)) = expr {
+        expr = Some(&parenthesized.expression);
+    }
+    match expr {
+        Some(
+            Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_),
+        ) => IndexedValueLiteralMode::Widened,
+        _ => IndexedValueLiteralMode::Literal,
+    }
+}
+
+/// Whether one argument position is CONTEXT-SENSITIVE — the ONE
+/// classification every indexed call record and the flow IR's call arguments
+/// share.
+///
+/// A function-valued argument (arrow or function expression) at least one of
+/// whose parameters carries no authored type annotation has no self-contained
+/// type: TypeScript withholds such an argument from the first inference pass
+/// so the eager arguments fix the call's type arguments first. The
+/// classification is purely structural over the authored parameter list — the
+/// lowered parameter type cannot express it, because an explicit `: any`
+/// lowers exactly like a missing annotation. Only a parenthesised wrapper is
+/// transparent.
+pub fn indexed_context_sensitive(expr: Option<&Expression<'_>>) -> bool {
+    let mut expr = expr;
+    while let Some(Expression::ParenthesizedExpression(parenthesized)) = expr {
+        expr = Some(&parenthesized.expression);
+    }
+    let params = match expr {
+        Some(Expression::ArrowFunctionExpression(arrow)) => &arrow.params,
+        Some(Expression::FunctionExpression(function)) => &function.params,
+        _ => return false,
+    };
+    params
+        .items
+        .iter()
+        .any(|param| param.type_annotation.is_none())
+        || params
+            .rest
+            .as_ref()
+            .is_some_and(|rest| rest.type_annotation.is_none())
+}
+
+fn indexed_callee_and_receiver(
+    callee: &Expression<'_>,
+    source: &str,
+) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
+    let receiver = match unwrap_expression_wrappers(callee) {
+        Expression::StaticMemberExpression(member) => Some(Box::new(
+            lower_indexed_value_expression(&member.object, source),
+        )),
+        Expression::ComputedMemberExpression(member) => Some(Box::new(
+            lower_indexed_value_expression(&member.object, source),
+        )),
+        _ => None,
+    };
+    (lower_indexed_value_expression(callee, source), receiver)
+}
+
+pub fn lower_indexed_call_expression(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+) -> IndexedValueCall {
+    let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source);
+    let args = call
+        .arguments
+        .iter()
+        .map(|argument| {
+            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => (
+                    lower_indexed_call_argument_expression(&spread.argument, source),
+                    spread.argument.span().start,
+                    true,
+                    indexed_literal_mode(Some(&spread.argument)),
+                    indexed_context_sensitive(Some(&spread.argument)),
+                ),
+                argument => {
+                    let expression = argument.to_expression();
+                    (
+                        lower_indexed_call_argument_expression(expression, source),
+                        expression.span().start,
+                        false,
+                        indexed_literal_mode(Some(expression)),
+                        indexed_context_sensitive(Some(expression)),
+                    )
+                }
+            };
+            IndexedValueCallArg {
+                expression,
+                point,
+                spread,
+                literal_mode,
+                context_sensitive,
+                function_return_source: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let explicit_type_args = call
+        .type_arguments
+        .as_ref()
+        .map(|arguments| {
+            arguments
+                .params
+                .iter()
+                .map(|argument| lower_ts_type(argument, source))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    IndexedValueCall {
+        point: call.span.start,
+        kind: IndexedValueCallKind::Call,
+        callee: Box::new(callee),
+        receiver,
+        args: Arc::from(args.into_boxed_slice()),
+        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+    }
+}
+
+fn lower_indexed_new_expression(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+) -> IndexedValueCall {
+    let args = call
+        .arguments
+        .iter()
+        .map(|argument| {
+            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => (
+                    lower_indexed_call_argument_expression(&spread.argument, source),
+                    spread.argument.span().start,
+                    true,
+                    indexed_literal_mode(Some(&spread.argument)),
+                    indexed_context_sensitive(Some(&spread.argument)),
+                ),
+                argument => {
+                    let expression = argument.to_expression();
+                    (
+                        lower_indexed_call_argument_expression(expression, source),
+                        expression.span().start,
+                        false,
+                        indexed_literal_mode(Some(expression)),
+                        indexed_context_sensitive(Some(expression)),
+                    )
+                }
+            };
+            IndexedValueCallArg {
+                expression,
+                point,
+                spread,
+                literal_mode,
+                context_sensitive,
+                function_return_source: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let explicit_type_args = call
+        .type_arguments
+        .as_ref()
+        .map(|arguments| {
+            arguments
+                .params
+                .iter()
+                .map(|argument| lower_ts_type(argument, source))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    IndexedValueCall {
+        point: call.span.start,
+        kind: IndexedValueCallKind::Construct,
+        callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
+        receiver: None,
+        args: Arc::from(args.into_boxed_slice()),
+        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+    }
+}
+
+/// Whether lowering `expr` as a VALUE would fabricate a type for a call it
+/// has no authority over.
+///
+/// Value-expression inference carries no call authority: a call position
+/// lowers to `any`. At the top level that `any` is the honest
+/// "unrepresentable" answer, but NESTED inside an otherwise typed shape
+/// (`{ v: f() }` folded through a spread, `[f(), ...xs]`) it publishes as a
+/// real member/element type the engine never resolved. An authoritative
+/// `as T` assertion pins the whole expression's type, so a call underneath
+/// one is not fabricated.
+///
+/// The question is whether the expression's own type DERIVES from a call,
+/// not whether a call appears anywhere inside it: a form whose type this
+/// lowering fixes syntactically answers the same thing however its
+/// sub-expressions evaluate, so a call underneath one is not fabricated
+/// either.
+pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
+    !has_authoritative_value_assertion(expr, source) && value_type_derives_from_a_call(expr)
+}
+
+fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
+    #[derive(Default)]
+    struct CallProbe(bool);
+
+    impl<'a> Visit<'a> for CallProbe {
+        fn visit_call_expression(&mut self, _call: &oxc_ast::ast::CallExpression<'a>) {
+            self.0 = true;
+        }
+
+        fn visit_new_expression(&mut self, _call: &oxc_ast::ast::NewExpression<'a>) {
+            self.0 = true;
+        }
+
+        fn visit_function(
+            &mut self,
+            _function: &oxc_ast::ast::Function<'a>,
+            _flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+
+        fn visit_arrow_function_expression(
+            &mut self,
+            _arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+        }
+
+        // A template literal is `string` whatever its interpolations
+        // evaluate to (an EMPTY one is its own string literal), so an
+        // interpolated call contributes nothing to the answer. A TAGGED
+        // template's type comes from the tag's signature instead, and this
+        // lowering carries no arm for it at all — it answers `any`, the
+        // unrepresentable carrier, before this probe is consulted.
+        fn visit_template_literal(&mut self, _template: &oxc_ast::ast::TemplateLiteral<'a>) {}
+    }
+
+    let mut probe = CallProbe::default();
+    probe.visit_expression(expr);
+    probe.0
 }

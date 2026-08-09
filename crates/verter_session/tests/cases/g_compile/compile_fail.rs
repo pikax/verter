@@ -461,6 +461,20 @@ fn instantiate_key_shape_is_sealed_against_forgery_and_extraction() {
     t.compile_fail("tests/cases/compile-fail/instantiate_key_context_not_extractable.rs");
 }
 
+/// Ordinary object-projection evidence is positive-only by type. It cannot
+/// call exact-domain operations, and downstream code cannot mint either
+/// closed witness by struct literal.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn object_projection_complete_domain_is_witness_only() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/object_projection_witness_only.rs");
+    t.compile_fail("tests/cases/compile-fail/object_projection_witness_not_forgeable.rs");
+}
+
 /// T-A7 Rail 2 witness (review-B P2-1): `MemberListAnchor` is analyzer-minted
 /// only — the ctor is `pub(crate)` to `verter_semantic` and the fields are
 /// private, so an external unit can neither call `new` nor build the struct
@@ -475,4 +489,23 @@ fn member_list_anchor_is_sealed_against_forgery() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/member_list_anchor_forge.rs");
     t.compile_fail("tests/cases/compile-fail/member_list_anchor_struct_literal.rs");
+}
+
+/// The index-composed `DeferredCallable` carrier is sealed to its two
+/// consumers. From outside the crate: the composed parts are private
+/// fields, `compose` is `pub(crate)`, `DeferredCallableConsumer` carries a
+/// PRIVATE sealed supertrait (so no third consumer kind can be added), and
+/// neither consumer witness can be minted or struct-literalled — so
+/// `parts` is uncallable. The carrier has NO return-type slot at all, so a
+/// deferred return is unrepresentable as a failed one rather than merely
+/// unreachable. If any barrier regressed, a line in the fixture would
+/// compile and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn deferred_callable_is_sealed_to_its_two_consumers() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs");
 }

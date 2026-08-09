@@ -400,9 +400,9 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
         panic!("A must materialise to Node's Object body through the barrel");
     };
     let label = surface
-        .members
+        .positive_members()
         .iter()
-        .find(|member| member.name.as_ref() == "label")
+        .find(|member| member.string_name().expect("string-key fixture") == "label")
         .expect("Node's `label` member must materialise");
     assert_eq!(
         label.declaration_origin.as_deref(),
@@ -442,7 +442,7 @@ fn namespace_sibling_type_reference_resolves_through_dispatch() {
             assert!(
                 shape.properties.iter().any(|member| matches!(
                     member,
-                    verter_type_expr::ObjectMember::Property(prop) if prop.name == "a"
+                    verter_type_expr::ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "a"
                 )),
                 "the namespace sibling M.Outer must materialise Inner's member `a`, got {:?}",
                 shape.properties
@@ -568,7 +568,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         matches!(&annotation, verter_type_expr::TypeExpr::Object(shape)
         if shape.properties.iter().any(|member| matches!(
             member,
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "mine"
+            verter_type_expr::ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "mine"
         ))),
         "the user `$derived` declaration must WIN over the rune prelude through \
          the graph-native reader (keep the user's `{{ mine: 1 }}` annotation), \
@@ -595,52 +595,135 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     }
 }
 
-/// In a `<script setup generic="T">` SFC, an ORDINARY type-alias decl body
-/// `type A = T` resolves `T` to a first-class `TypeParameter` (carrying the
-/// script-setup `<script-setup>` declaration identity + display name `T`),
-/// NOT an unbound `Ref { name: "T" }` bare-name carrier. This pins the
+/// In a `<script setup generic="T extends Item = Item">` SFC, an ORDINARY
+/// type-alias decl body `type A = T` resolves `T` to a first-class
+/// `TypeParameter` — carrying the script-setup `<script-setup>` declaration
+/// identity, the clause ordinal, the display name `T`, AND BOTH projected
+/// declaration-site bounds — NOT an unbound `Ref { name: "T" }` bare-name
+/// carrier and never a bound-free fabricated binder. This pins the
 /// observable contract the binder re-home for ordinary decl bodies must
 /// preserve (today the macro hot mirror already seeds the script-setup
 /// generic into the ordinary path).
 ///
 /// Discriminating: if `T` were lowered as a bare `Ref`/`DeclRef` (an
 /// unbound name) instead of a bound `TypeParameter`, the projected type
-/// would be `Ref { name: "T" }` and the `TypeParameter` match fails. Holds
-/// under Navigate and Expanded (an open type parameter has no body to
-/// expand, so it stays a `TypeParam` shell).
+/// would be `Ref { name: "T" }` and the `TypeParameter` match fails; if the
+/// binder were fabricated WITHOUT its authored bounds (a stale re-borrow
+/// silently degraded to a bound-free node), the `constraint` / `default`
+/// presence assertions fail. Holds under Navigate and Expanded (an open
+/// type parameter has no body to expand, so it stays a `TypeParam` shell),
+/// and identically on a WARM prepared-bundle re-read (the bound content is
+/// re-borrowed lease-only from the pinned artifact each time, so cold and
+/// warm reads cannot drift).
 #[test]
 fn script_setup_generic_resolves_as_type_parameter_in_an_ordinary_decl_body() {
     let host = make_host();
     upsert_vue(
         &host,
         "/G.vue",
-        "<script setup lang=\"ts\" generic=\"T\">\n\
+        "<script setup lang=\"ts\" generic=\"T extends Item = Item\">\n\
+         interface Item { id: string }\n\
          type A = T\n\
          defineProps<{ x: A }>()\n\
          </script>\n\
          <template><div /></template>",
     );
 
+    let graph = host.project_type_store().semantic_graph();
+
     for mode in [ProjectionMode::Navigate, ProjectionMode::Expanded] {
-        let node = host
-            .resolve_named_symbol("/G.vue", "A", Some(mode))
-            .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
-        let projected = host
-            .project_node_to_type_expr_for_test(node)
-            .unwrap_or_else(|| panic!("A must project in {mode:?}"));
-        match &projected {
-            verter_type_expr::TypeExpr::TypeParameter(param) => {
-                assert_eq!(
-                    &*param.name, "T",
-                    "the open generic must resolve as TypeParameter T in {mode:?}, got {:?}",
-                    param.name
-                );
+        for read in ["cold", "warm"] {
+            let node = host
+                .resolve_named_symbol("/G.vue", "A", Some(mode))
+                .unwrap_or_else(|| panic!("A must resolve in {mode:?} ({read} read)"));
+            // Identity + ordinal at the NODE level: the `<script-setup>`
+            // sentinel decl and the 0-based clause position, with BOTH
+            // declaration-site bound edges interned.
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::TypeParam {
+                    decl,
+                    param_index,
+                    constraint,
+                    default,
+                    display_name,
+                }) => {
+                    assert_eq!(
+                        display_name.as_ref(),
+                        "T",
+                        "the open generic's display name must be T in {mode:?} ({read} read)"
+                    );
+                    assert_eq!(
+                        decl.decl_name.as_ref(),
+                        "<script-setup>",
+                        "the binder identity must carry the `<script-setup>` declaration \
+                         sentinel in {mode:?} ({read} read), got {:?}",
+                        decl.decl_name
+                    );
+                    assert_eq!(
+                        *param_index, 0,
+                        "the binder identity must carry the 0-based clause ordinal in \
+                         {mode:?} ({read} read)"
+                    );
+                    assert!(
+                        constraint.is_some(),
+                        "the declaration-site `extends Item` constraint must survive \
+                         lowering in {mode:?} ({read} read) — never a bound-free \
+                         fabricated binder"
+                    );
+                    assert!(
+                        default.is_some(),
+                        "the declaration-site `= Item` default must survive lowering in \
+                         {mode:?} ({read} read) — never a bound-free fabricated binder"
+                    );
+                }
+                other => panic!(
+                    "A must resolve to the script-setup TypeParam binder NODE in {mode:?} \
+                     ({read} read), got {other:?}"
+                ),
             }
-            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "T" => panic!(
-                "`type A = T` in a `generic=\"T\"` SFC must resolve T as a bound TypeParameter \
-                 in {mode:?}, NOT an unbound `Ref {{ name: \"T\" }}` bare-name carrier"
-            ),
-            other => panic!("A must resolve T as a TypeParameter in {mode:?}, got {other:?}"),
+            let projected = host
+                .project_node_to_type_expr_for_test(node)
+                .unwrap_or_else(|| panic!("A must project in {mode:?} ({read} read)"));
+            match &projected {
+                verter_type_expr::TypeExpr::TypeParameter(param) => {
+                    assert_eq!(
+                        &*param.name, "T",
+                        "the open generic must resolve as TypeParameter T in {mode:?} \
+                         ({read} read), got {:?}",
+                        param.name
+                    );
+                    fn ref_name(bound: Option<&verter_type_expr::TypeExpr>) -> Option<&str> {
+                        match bound {
+                            Some(verter_type_expr::TypeExpr::Ref { name, .. }) => {
+                                Some(name.as_ref())
+                            }
+                            _ => None,
+                        }
+                    }
+                    assert_eq!(
+                        ref_name(param.constraint.as_deref()),
+                        Some("Item"),
+                        "the projected constraint must be the authored `Item` reference in \
+                         {mode:?} ({read} read), got {:?}",
+                        param.constraint
+                    );
+                    assert_eq!(
+                        ref_name(param.default.as_deref()),
+                        Some("Item"),
+                        "the projected default must be the authored `Item` reference in \
+                         {mode:?} ({read} read), got {:?}",
+                        param.default
+                    );
+                }
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "T" => panic!(
+                    "`type A = T` in a `generic=\"T extends Item = Item\"` SFC must resolve T \
+                     as a bound TypeParameter in {mode:?} ({read} read), NOT an unbound \
+                     `Ref {{ name: \"T\" }}` bare-name carrier"
+                ),
+                other => panic!(
+                    "A must resolve T as a TypeParameter in {mode:?} ({read} read), got {other:?}"
+                ),
+            }
         }
     }
 }

@@ -74,6 +74,9 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
             canonical_id: Arc::from("/Probe.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::instance(0),
+            ),
         },
         name: Arc::from("Outer"),
     });

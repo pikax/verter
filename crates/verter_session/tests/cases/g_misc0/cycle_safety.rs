@@ -66,14 +66,14 @@ fn shallow_object_does_not_trip_budget() {
     // baseline behavior.
     let body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "a".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "b".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "b".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,

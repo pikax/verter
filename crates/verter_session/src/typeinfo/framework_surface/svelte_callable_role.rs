@@ -57,7 +57,6 @@ pub(super) fn classify_svelte_callable_role(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use verter_type_expr::PropCallableRoleUnresolvedReason;
 
@@ -82,7 +81,7 @@ mod tests {
         );
 
         let unsupported = dispatch.graph().intern_node(SemanticNodeData::RawFallback {
-            raw: Arc::from("unsupported"),
+            value: verter_type_expr::UnknownValue::wire_opaque("unsupported"),
         });
         assert_eq!(
             classify_svelte_callable_role(&dispatch, unsupported, &[]),

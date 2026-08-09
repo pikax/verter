@@ -172,6 +172,42 @@ pub enum ResolvedDemand {
     SvelteSurface(ResolvedMacroPayload),
 }
 
+impl ResolvedDemand {
+    /// Downgrade EVERY arm's outcome for a resolution the shared engine
+    /// reported degraded — see [`ResolvedOutcome::degraded_by`].
+    ///
+    /// EXHAUSTIVE over the closed vocabulary, so a new demand arm cannot be
+    /// added without saying how a degraded resolution of it encodes. Vue and
+    /// Svelte are co-equal here: both ride the macro-payload arms, and both
+    /// were encoding `SUPPORTED` / `EXACT_RESOLVED` for surfaces the
+    /// substrate had failed to compute.
+    #[must_use]
+    pub fn degraded_by(self, diagnostic: &str) -> Self {
+        match self {
+            Self::MacroPayload(outcome) => {
+                Self::MacroPayload(outcome.degraded_by(diagnostic, || {
+                    std::sync::Arc::new(
+                        crate::typeinfo::framework_surface::results::MacroSurfaceDtos::default(),
+                    )
+                }))
+            }
+            Self::PathProjection(outcome) => {
+                Self::PathProjection(outcome.degraded_by(diagnostic, TypeInfoSurface::empty))
+            }
+            Self::ShallowSurface(outcome) => {
+                Self::ShallowSurface(outcome.degraded_by(diagnostic, TypeInfoSurface::empty))
+            }
+            Self::SvelteSurface(outcome) => {
+                Self::SvelteSurface(outcome.degraded_by(diagnostic, || {
+                    std::sync::Arc::new(
+                        crate::typeinfo::framework_surface::results::MacroSurfaceDtos::default(),
+                    )
+                }))
+            }
+        }
+    }
+}
+
 /// One resolved surface: the wire kind plus its resolved demand.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedItem {

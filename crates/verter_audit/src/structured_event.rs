@@ -51,7 +51,7 @@ use crate::origin_graph::{
 use crate::payloads::cache_outcomes::CacheOutcomeKind;
 use crate::payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, CompileCacheModeTag, DowngradeReasonTag,
-    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction,
+    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, FlowSliceBudgetAxisTag,
 };
 use crate::payloads::typeinfo_graph::{
     GraphClosurePolicyTag, GraphOperationTag, TypeInfoDegradationReasonTag,
@@ -637,6 +637,39 @@ pub enum StructuredAuditEvent {
         /// Which graph operation the hit attributed to.
         operation: GraphOperationTag,
     },
+    /// A cold whole-function flow-return evaluation started.
+    ///
+    /// COLD-PATH ONLY — the cold-vs-warm audit contract: a warm
+    /// family hit emits NO `FlowReturnStarted` (only the standard
+    /// dispatch envelope), and the producer's emission helper
+    /// constructs no event payload when no accumulator is installed.
+    FlowReturnStarted {
+        /// Canonical id of the file owning the demanded function.
+        canonical_id: Arc<str>,
+        /// Demanded function's symbol name.
+        function_symbol: Arc<str>,
+    },
+    /// The flow-slice demand planner refused a slice on a typed
+    /// budget axis. Cold-path only — the refusal is a typed `Budget`
+    /// failure routed through `ReturnOnly` (never warm-admitted).
+    FlowSliceBudgetExceeded {
+        /// Which budget axis tripped.
+        axis: FlowSliceBudgetAxisTag,
+        /// The configured limit of the tripped axis.
+        limit: u32,
+        /// The observed count when the limit tripped.
+        observed: u32,
+    },
+    /// A flow-return demand re-entered its own in-flight component on
+    /// the shared obligation runtime (the flow-cycle sentinel — the
+    /// in-file/recursive-return coinductive hold). Cold-path only.
+    FlowCycleSentinelHit {
+        /// Request-scoped identifier of the in-flight obligation
+        /// frame the re-entry targeted.
+        cycle_id: u32,
+        /// The re-entered function's symbol name.
+        function_symbol: Arc<str>,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -909,6 +942,25 @@ impl std::fmt::Display for StructuredAuditEvent {
             Self::TypeInfoGraphCacheHit { layer, operation } => {
                 write!(f, "TypeInfoGraphCacheHit({layer}, {operation:?})")
             }
+            Self::FlowReturnStarted {
+                canonical_id,
+                function_symbol,
+            } => write!(f, "FlowReturnStarted({canonical_id}::{function_symbol})"),
+            Self::FlowSliceBudgetExceeded {
+                axis,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "FlowSliceBudgetExceeded({axis:?}, limit={limit}, observed={observed})"
+            ),
+            Self::FlowCycleSentinelHit {
+                cycle_id,
+                function_symbol,
+            } => write!(
+                f,
+                "FlowCycleSentinelHit(cycle=#{cycle_id}, {function_symbol})"
+            ),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }

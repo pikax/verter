@@ -22,6 +22,44 @@ use super::SemanticGraphStore;
 
 #[cfg(any(test, feature = "test-support"))]
 impl SemanticGraphStore {
+    /// Park a relation root after its own family candidate publishes and
+    /// before its completed SCC members drain. The two waits let a test
+    /// reorder sibling candidates inside that exact publication window.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_relation_root_pre_member_drain_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.relation_root_pre_member_drain_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.relation_root_pre_member_drain_gate,
+        }
+    }
+
+    pub(crate) fn wait_relation_root_pre_member_drain_gate(&self) {
+        let gate = self.relation_root_pre_member_drain_gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.wait();
+            gate.wait();
+        }
+    }
+
+    /// Park the next inline relation-member publisher immediately before it
+    /// takes the entries lock. The two waits let a test invalidate the SCC
+    /// root deterministically inside that publication window.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_relation_member_pre_entries_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.relation_member_pre_entries_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.relation_member_pre_entries_gate,
+        }
+    }
+
     /// Test-only driver: arm the [`Self::invalidate_all`] post-`entries`-
     /// clear injection point with `barrier`. The next `invalidate_all` on
     /// **this store** calls `barrier.wait()` right after releasing the
@@ -102,6 +140,21 @@ impl SemanticGraphStore {
         *self.cold_winner_pre_backfill_gate.lock() = Some(barrier);
         TestInvalidateAllGateGuard {
             gate: &self.cold_winner_pre_backfill_gate,
+        }
+    }
+
+    /// Park the next cold winner immediately after its parent admission
+    /// linearizes and before prefix backfill begins. The two waits let a test
+    /// cancel the owning request after successful admission.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_cold_winner_post_admission_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.cold_winner_post_admission_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.cold_winner_post_admission_gate,
         }
     }
 

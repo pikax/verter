@@ -29,8 +29,9 @@ pub use hashing::{
     TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput, MAX_HASH_DEPTH,
 };
 pub use registry::{
-    AugmentationTargetKindTag, Fact, FactDomain, FactHash, FactKey, FactLane, FactRegistry,
-    MacroKind as FactMacroKind, MacroTargetKey, MemberKind, ObservedFact, SymbolSpace,
+    AugmentationScopeKindTag, AugmentationTargetKindTag, Fact, FactDomain, FactHash, FactKey,
+    FactLane, FactRegistry, MacroKind as FactMacroKind, MacroTargetKey, MemberKind, ObservedFact,
+    SymbolSpace,
 };
 pub use route_closure::{
     local_closure_over_facts, route_closure_over_facts, ClassifiedRouteDeps, FactClosureResult,

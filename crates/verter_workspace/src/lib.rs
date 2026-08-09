@@ -127,8 +127,9 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 
 pub use ambient_lib::{
     ambient_virtual_canonical_id, compute_ambient_hash16,
-    normalize_canonical_id as normalize_ambient_canonical_id, AmbientLibEntry, AmbientLibError,
-    AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit, ProjectAmbientLibs,
+    normalize_canonical_id as normalize_ambient_canonical_id, parse_ambient_virtual_canonical_id,
+    AmbientLibEntry, AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit,
+    ProjectAmbientLibs,
 };
 pub use canonical_path::{canonicalize_path, CanonicalPath};
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,10 +148,11 @@ pub use fact_cache::{
     compaction_domain, AggregateBasisSeed, AggregateGenerations, AggregatePopulation,
     AggregateStamp, CompactionDomain, CompletionOverlayState, DerivedFactKind,
     DomainGenerationFact, FactAttribution, FactHash16, FactVersionRef, FactVersionValidator,
-    LiveAggregateCounters, OverlayId, ParseEnvHash, ParseFactRef, ReadSetSignature,
-    RequestCompletion, ResolutionRootsStamp, ResolveImportsFactRef, RouteSurfaceFactRef,
-    RouteSurfaceStamp, SemanticImportsStamp, SessionOverlayFingerprint, SignatureAdmission,
-    StrictSelfRootWorld, ViewAggregateDomains, ViewPopulation, ViewPopulationParent, CANDIDATE_CAP,
+    LiveAggregateCounters, OverlayId, ParseEnvHash, ParseFactRef, ProgramAnalysisFactRef,
+    ProgramAnalysisFunctionRef, ReadSetSignature, RequestCompletion, ResolutionRootsStamp,
+    ResolveImportsFactRef, RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp,
+    SessionOverlayFingerprint, SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains,
+    ViewPopulation, ViewPopulationParent, CANDIDATE_CAP,
 };
 pub use fact_read_set::{
     FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation,

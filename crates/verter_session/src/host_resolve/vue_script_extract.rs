@@ -81,6 +81,24 @@ pub(crate) fn sfc_script_setup_type_params(
     verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
 }
 
+/// The ONE artifact-local transient producer of the full
+/// `<script setup generic="…">` parameter clause over a PINNED
+/// [`crate::project_type_store::IndexedReady`]: raw source + framework
+/// parse → OWNED transient `Vec<TypeParam>` (typed IR — a lease-time
+/// re-borrow product, never stored). Every query-time clause re-borrow
+/// routes through this one ingress — the dispatch's script-setup
+/// `TypeParam` node construction (which selects + validates one parameter
+/// by the stored binding's `(ordinal, name)`) and the macro hot-mirror
+/// seed-frame builder — so the two can never diverge.
+pub(crate) fn indexed_script_setup_type_params(
+    indexed: &crate::project_type_store::IndexedReady,
+) -> Vec<verter_type_expr::TypeParam> {
+    sfc_script_setup_type_params(
+        indexed.raw_source.as_ref(),
+        indexed.framework_parse.as_deref(),
+    )
+}
+
 /// Extract a **position-preserving** script-only source from a Vue SFC string.
 ///
 /// The result is byte-for-byte the SAME LENGTH as `source`: every `<script>` /

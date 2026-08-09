@@ -12,12 +12,13 @@ use crate::analysis::types::{
 use std::sync::Arc;
 use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, ClosedTypeFact, EnumPrimitiveDomain,
-    EnumScalar, FunctionSignatureFact, InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact,
-    ObjectShapeFact, ReturnInferenceCompleteness, ReturnInferenceUnsupported, SemanticTypeSource,
-    ValueAnnotationClass,
+    EnumScalar, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
+    InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact, ObjectShapeFact,
+    SemanticExpressionSource, SemanticTypeSource, ValueAnnotationClass,
 };
 use verter_type_expr::locators::{
-    AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeParamBoundPosition,
+    AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace, TypeBodyPathStep,
+    TypeParamBoundPosition,
 };
 use verter_type_expr::*;
 
@@ -358,10 +359,10 @@ fn extracts_interface() {
     assert_eq!(headers.len(), 3);
     let email = headers
         .iter()
-        .find(|h| h.name == "email")
+        .find(|h| h.string_name().expect("string-key fixture") == "email")
         .expect("email header fact");
     assert!(email.optional);
-    assert!(!email.is_method);
+    assert!(email.method_kind.is_none());
 
     // TRANSIENT lowering: the object body the header facts derive from.
     let parts = lowered(source);
@@ -370,7 +371,11 @@ fn extracts_interface() {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 3);
             let email = obj.properties.iter().find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "email" => Some(p),
+                ObjectMember::Property(p)
+                    if p.string_name().expect("string-key fixture") == "email" =>
+                {
+                    Some(p)
+                }
                 _ => None,
             });
             assert!(email.is_some());
@@ -421,7 +426,7 @@ fn extracts_interface_with_methods() {
     let env = parse_and_build_env(source);
     let headers = &env.type_symbols["Logger"].primary().direct_member_headers;
     assert_eq!(headers.len(), 2);
-    assert!(headers.iter().all(|h| h.is_method));
+    assert!(headers.iter().all(|h| h.method_kind.is_some()));
 }
 
 // =============================================================================
@@ -511,7 +516,9 @@ fn class_property<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a ObjectProper
         return None;
     };
     obj.properties.iter().find_map(|m| match m {
-        ObjectMember::Property(p) if p.name == name => Some(p),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == name => {
+            Some(p)
+        }
         _ => None,
     })
 }
@@ -522,7 +529,9 @@ fn class_method<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a MethodSignatur
         return None;
     };
     obj.properties.iter().find_map(|m| match m {
-        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        ObjectMember::Method(mm) if mm.string_name().expect("string-key fixture") == name => {
+            Some(mm)
+        }
         _ => None,
     })
 }
@@ -572,13 +581,15 @@ fn extract_class_records_non_public_members_with_visibility() {
     let header = |name: &str| {
         headers
             .iter()
-            .find(|h| h.name == name)
+            .find(|h| h.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("{name} header"))
     };
     assert_eq!(header("a").visibility, MemberVisibility::Public);
     assert_eq!(header("b").visibility, MemberVisibility::Protected);
     assert_eq!(header("c").visibility, MemberVisibility::Private);
-    assert!(!headers.iter().any(|h| h.name == "s"));
+    assert!(!headers
+        .iter()
+        .any(|h| h.string_name().expect("string-key fixture") == "s"));
 }
 
 #[test]
@@ -693,7 +704,9 @@ fn extract_class_with_heritage_records_non_public_own_members() {
 /// Find a property member by name in an `ObjectExpr`.
 fn shape_property<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a ObjectProperty> {
     shape.properties.iter().find_map(|m| match m {
-        ObjectMember::Property(p) if p.name == name => Some(p),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == name => {
+            Some(p)
+        }
         _ => None,
     })
 }
@@ -701,7 +714,9 @@ fn shape_property<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a ObjectPro
 /// Find a method member by name in an `ObjectExpr`.
 fn shape_method<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a MethodSignature> {
     shape.properties.iter().find_map(|m| match m {
-        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        ObjectMember::Method(mm) if mm.string_name().expect("string-key fixture") == name => {
+            Some(mm)
+        }
         _ => None,
     })
 }
@@ -799,7 +814,9 @@ fn extract_class_folds_static_members_into_constructor_shape() {
         .members
         .iter()
         .find_map(|m| match m {
-            verter_type_expr::facts::ObjectMemberFact::Property(p) if p.name == "initial" => {
+            verter_type_expr::facts::ObjectMemberFact::Property(p)
+                if p.string_name().expect("string-key fixture") == "initial" =>
+            {
                 Some(p)
             }
             _ => None,
@@ -1033,7 +1050,7 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
         .primary()
         .direct_member_headers
         .iter()
-        .map(|h| h.name.as_str())
+        .map(|h| h.string_name().expect("string-key fixture"))
         .collect();
     assert!(
         header_names.contains(&"div"),
@@ -1055,7 +1072,7 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();
@@ -1120,7 +1137,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
         .flat_map(|decl| {
             decl.direct_member_headers
                 .iter()
-                .map(|h| h.name.as_str())
+                .map(|h| h.string_name().expect("string-key fixture"))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -1147,7 +1164,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
@@ -1329,7 +1346,11 @@ fn extracts_function_declaration() {
             TypeBodyPathStep::FunctionParam { ordinal: 0 },
         ],
     );
-    let return_ty = fact.return_ty.as_ref().expect("authored return slot");
+    let FunctionReturnSource::Declared(FunctionReturnLocator::Authored(return_ty)) =
+        &fact.return_source
+    else {
+        panic!("authored return slot, got {:?}", fact.return_source);
+    };
     assert_eq!(
         &*return_ty.path,
         &[
@@ -1342,265 +1363,106 @@ fn extracts_function_declaration() {
 }
 
 #[test]
-fn inferred_return_mints_semantic_replay_without_an_authored_span() {
+fn inferred_return_names_its_served_position_without_an_authored_span() {
     // `function inferred() { return "" }` has NO authored return annotation:
     // the transient lowering still INFERS the return type and the stored fact
-    // keeps a content-free replay locator. Span recovery remains independent,
-    // so no authored return-type source site is fabricated.
+    // names the served function position the whole-function producer answers.
+    // Span recovery remains independent, so no authored return-type source
+    // site is fabricated.
     let source = r#"function inferred(name: string) { return name }"#;
     let parts = lowered(source);
     let sig = &parts.value_decl("inferred").expect("lowered").signatures[0];
-    assert!(
-        sig.return_type.is_some(),
-        "the transient lowering still infers the return type"
+    assert_eq!(
+        sig.return_type, None,
+        "a block-bodied return carries no authored carrier"
     );
     assert!(!sig.has_authored_return);
 
     let env = parse_and_build_env(source);
     let fact = &env.value_symbols["inferred"].primary().signatures[0];
-    let inferred = fact
-        .return_ty
-        .as_ref()
-        .expect("an inferred return keeps its semantic replay slot");
-    assert_eq!(
-        &*inferred.path,
-        &[
-            TypeBodyPathStep::ValueSignature { ordinal: 0 },
-            TypeBodyPathStep::FunctionReturn,
-        ]
-    );
+    let FunctionReturnSource::Flow(identity) = &fact.return_source else {
+        panic!(
+            "a body-derived return names its served function position, got {:?}",
+            fact.return_source
+        );
+    };
+    assert!(matches!(
+        identity.function_part,
+        FunctionPartIdentity::DeclarationBody
+    ));
+    assert_eq!(identity.overload_ordinal, 0);
+    assert_eq!(&*identity.anchor.symbol, "inferred");
     // The authored parameter still mints its slot.
     assert_eq!(fact.parameters.len(), 1);
     assert!(fact.parameters[0].has_ts_annotation);
 }
 
 #[test]
-fn empty_implementation_infers_void_without_fabricating_an_authored_slot() {
+fn empty_implementation_carries_no_authored_return_slot() {
+    // An unannotated empty body has no authored return carrier; the
+    // whole-function producer supplies the `void` fallthrough seed.
     let source = "export function focus() {}";
     let parts = lowered(source);
     let signature = &parts.value_decl("focus").expect("lowered focus").signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::Primitive(PrimitiveName::Void))
-    );
+    assert_eq!(signature.return_type, None);
     assert!(!signature.has_authored_return);
 
     let env = parse_and_build_env(source);
     let stored = &env.value_symbols["focus"].primary().signatures[0];
     assert!(
-        stored.return_ty.is_some(),
-        "the inferred void result remains replayable through the semantic body locator"
+        matches!(stored.return_source, FunctionReturnSource::Flow(_)),
+        "the inferred void result is served by the whole-function producer"
     );
 }
 
 #[test]
-fn return_inference_flow_if_without_else_includes_fallthrough_undefined() {
+fn body_derived_function_carries_no_authored_return_carrier() {
+    // An unannotated function's return is body-derived: the transient
+    // signature carries NO return carrier and the stored fact names the
+    // served function position the whole-function producer answers.
     let source = "function choose(flag: boolean, value: string) { if (flag) return value; }";
     let parts = lowered(source);
     let signature = &parts
         .value_decl("choose")
         .expect("lowered choose")
         .signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::Primitive(PrimitiveName::Undefined),
-        ]))
-    );
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        }
-    );
+    assert_eq!(signature.return_type, None, "no authored return carrier");
+    assert!(!signature.has_authored_return);
+    assert!(signature.has_implementation_body);
 
     let env = parse_and_build_env(source);
     let fact = &env.value_symbols["choose"].primary().signatures[0];
-    assert_eq!(fact.return_inference, signature.return_inference);
     assert!(
-        fact.return_ty.is_some(),
-        "complete inference stays replayable"
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "a body-derived return names its served position"
     );
 }
 
 #[test]
-fn return_inference_flow_if_else_and_following_return_close_every_path() {
-    let if_else = lowered(
-        "function choose(flag: boolean, yes: string, no: number) { \
-         if (flag) return yes; else return no; }",
-    );
-    let if_else = &if_else
-        .value_decl("choose")
-        .expect("lowered if/else")
-        .signatures[0];
-    assert_eq!(
-        if_else.return_type,
-        Some(TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::Primitive(PrimitiveName::Number),
-        ]))
-    );
-    assert_eq!(
-        if_else.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-
-    let following = lowered(
-        "function choose(flag: boolean, yes: string, no: number) { \
-         if (flag) return yes; return no; }",
-    );
-    let following = &following
-        .value_decl("choose")
-        .expect("lowered following return")
-        .signatures[0];
-    assert_eq!(following.return_type, if_else.return_type);
-    assert_eq!(following.return_inference, if_else.return_inference);
-}
-
-#[test]
-fn return_inference_flow_bare_return_is_complete_undefined() {
-    let source = "function stop() { return; }";
-    let parts = lowered(source);
-    let signature = &parts.value_decl("stop").expect("lowered stop").signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::Primitive(PrimitiveName::Undefined))
-    );
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-}
-
-#[test]
-fn return_inference_flow_rejects_unsupported_instead_of_narrowing() {
-    let cases = [
-        (
-            "function choose(value: number) { switch (value) { case 1: return 'a'; default: return 'b'; } }",
-            ReturnInferenceUnsupported::Switch,
-        ),
-        (
-            "function choose() { while (true) { return 'a'; } }",
-            ReturnInferenceUnsupported::Loop,
-        ),
-        (
-            "function choose() { try { return 'a'; } finally {} }",
-            ReturnInferenceUnsupported::Try,
-        ),
-    ];
-
-    for (source, unsupported) in cases {
+fn control_flow_heavy_bodies_still_name_their_served_position() {
+    // A switch / return-bearing loop / try body is not modeled by the
+    // whole-function producer — but the transient signature and the stored
+    // fact still name the exact served position; the producer degrades it,
+    // never narrows.
+    for source in [
+        "function choose(value: number) { switch (value) { case 1: return 'a'; default: return 'b'; } }",
+        "function choose() { while (true) { return 'a'; } }",
+        "function choose() { try { return 'a'; } finally {} }",
+    ] {
         let parts = lowered(source);
         let signature = &parts
             .value_decl("choose")
-            .expect("lowered unsupported function")
+            .expect("lowered function")
             .signatures[0];
-        assert_eq!(
-            signature.return_type, None,
-            "unsupported flow must not narrow"
-        );
-        assert_eq!(
-            signature.return_inference,
-            ReturnInferenceCompleteness::Unsupported(unsupported)
-        );
+        assert_eq!(signature.return_type, None, "no authored return carrier");
 
         let env = parse_and_build_env(source);
         let fact = &env.value_symbols["choose"].primary().signatures[0];
-        assert_eq!(
-            fact.return_ty, None,
-            "unsupported inference has no replay slot"
+        assert!(
+            matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+            "the body names its served position"
         );
-        assert_eq!(fact.return_inference, signature.return_inference);
     }
-}
-
-#[test]
-fn return_inference_flow_keeps_nested_unsafe_shape_visible_to_typeinfo() {
-    let source = "function nested() { return { values: [] }; }";
-    let parts = lowered(source);
-    let signature = &parts
-        .value_decl("nested")
-        .expect("lowered nested")
-        .signatures[0];
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-    let TypeExpr::Object(object) = signature.return_type.as_ref().expect("inferred object") else {
-        panic!("expected inferred object return")
-    };
-    let ObjectMember::Property(values) = &object.properties[0] else {
-        panic!("expected values property")
-    };
-    assert!(matches!(
-        &values.ty,
-        TypeExpr::Array {
-            element,
-            readonly: false,
-        } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::Any))
-    ));
-}
-
-#[test]
-fn return_inference_flow_class_method_fact_uses_exact_member_address() {
-    let source = "class Service { choose(flag: boolean, value: string) { if (flag) return value; } unsupported() { while (true) { return 1; } } }";
-    let env = parse_and_build_env(source);
-    let declaration = env.type_symbols["Service"].primary();
-    let member_origin = |owner, contributor_index, ordinal| {
-        verter_type_expr::span_origins::FunctionSpansOrigin::Member {
-            anchor: verter_type_expr::span_origins::DeclContributorAnchor {
-                contributor_index,
-                owner,
-                owner_local_ordinal: 0,
-            },
-            member_path: Arc::from(vec![ordinal]),
-        }
-    };
-    let ordinary = TopLevelOwnerId::ordinary_file();
-
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 0)),
-        Some(ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        })
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 1)),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        ))
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 2)),
-        None,
-        "member lookup is path-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 1, 0)),
-        None,
-        "member lookup is contributor-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(TopLevelOwnerId::module(1), 0, 0)),
-        None,
-        "member lookup is owner-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(
-            &verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
-                verter_type_expr::span_origins::SourceSynthetic,
-            )
-        ),
-        None,
-        "a missing member origin cannot fall back to shape matching"
-    );
 }
 
 fn static_class_method_fact<'a>(
@@ -1617,7 +1479,9 @@ fn static_class_method_fact<'a>(
         .members
         .iter()
         .find_map(|member| match member {
-            ObjectMemberFact::Method(method) if method.name == method_name => {
+            ObjectMemberFact::Method(method)
+                if method.string_name().expect("string-key fixture") == method_name =>
+            {
                 Some(&method.function)
             }
             _ => None,
@@ -1632,13 +1496,21 @@ fn static_class_method_return_inference_normal_control_is_exact() {
     );
     let fact = static_class_method_fact(&env, "Service", "choose");
 
+    let FunctionReturnSource::Flow(identity) = &fact.return_source else {
+        panic!(
+            "a body-derived static method names its served position, got {:?}",
+            fact.return_source
+        );
+    };
     assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        }
+        identity.function_part,
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0].into_boxed_slice()),
+        },
+        "the served member path is the raw ClassBody ordinal"
     );
-    assert!(fact.return_ty.is_some());
+    assert_eq!(identity.overload_ordinal, 0);
+    assert_eq!(&*identity.anchor.symbol, "Service");
     assert_eq!(
         fact.spans_origin,
         verter_type_expr::span_origins::FunctionSpansOrigin::Member {
@@ -1660,10 +1532,9 @@ fn static_class_method_return_inference_budget_unavailable_is_exact() {
     ));
     let fact = static_class_method_fact(&env, "Service", "deep");
 
-    assert_eq!(fact.return_ty, None);
-    assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
+    assert!(
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "a budget-stopped body still names its served position"
     );
 }
 
@@ -1674,10 +1545,9 @@ fn static_class_method_return_inference_unsupported_is_exact() {
     );
     let fact = static_class_method_fact(&env, "Service", "unsupported");
 
-    assert_eq!(fact.return_ty, None);
-    assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Loop)
+    assert!(
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "an unsupported body still names its served position"
     );
 }
 
@@ -1688,7 +1558,6 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     let env = parse_and_build_env(
         "class Collision { pad = 0; collide() { while (true) { return 1; } } static collide() { return 1; } }",
     );
-    let instance = env.type_symbols["Collision"].primary();
     let shared_origin = verter_type_expr::span_origins::FunctionSpansOrigin::Member {
         anchor: verter_type_expr::span_origins::DeclContributorAnchor {
             contributor_index: 0,
@@ -1697,29 +1566,25 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
         },
         member_path: Arc::from(vec![1]),
     };
-    assert_eq!(
-        instance.return_inference_for_member(&shared_origin),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        ))
-    );
-    assert_eq!(
-        instance.return_inference_for_member_path(&[1]),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        )),
-        "path lookup is valid only after selecting the exact type contributor"
-    );
 
     let static_fact = static_class_method_fact(&env, "Collision", "collide");
     assert_eq!(static_fact.spans_origin, shared_origin);
+    let FunctionReturnSource::Flow(identity) = &static_fact.return_source else {
+        panic!(
+            "the value-side static served position must not name-rematch, got {:?}",
+            static_fact.return_source
+        );
+    };
+    // The instance `collide` (raw ClassBody ordinal 1) and the static
+    // `collide` (raw ClassBody ordinal 2) are DISTINCT served positions
+    // even though they share a name.
     assert_eq!(
-        static_fact.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        },
-        "the value-side static verdict must not name-rematch the type-side instance verdict"
+        identity.function_part,
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![2].into_boxed_slice()),
+        }
     );
+    assert_eq!(identity.overload_ordinal, 0);
 
     let shape = env.value_symbols["Collision"]
         .primary()
@@ -1735,14 +1600,13 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     let ObjectMemberFact::Method(method) = Arc::make_mut(&mut changed.members)
         .iter_mut()
         .find(
-            |member| matches!(member, ObjectMemberFact::Method(method) if method.name == "collide"),
+            |member| matches!(member, ObjectMemberFact::Method(method) if method.string_name().expect("string-key fixture") == "collide"),
         )
         .expect("static collision method")
     else {
         unreachable!("matched method")
     };
-    method.function.return_inference =
-        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Switch);
+    method.function.return_source = FunctionReturnSource::Absent;
     assert_ne!(serde_json::to_vec(&changed).unwrap(), encoded);
 
     let fingerprint = |shape: &ObjectShapeFact| {
@@ -1823,7 +1687,10 @@ fn semantic_inference_budget_rejects_deep_function_initializer() {
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_return_expression() {
+fn semantic_inference_budget_deep_return_expression_stays_a_served_position() {
+    // The extraction carries no return carrier for an unannotated body —
+    // the budget edge of a deeply nested return expression surfaces at the
+    // whole-function producer's evaluation, not at signature extraction.
     let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
     let source = format!("function deep() {{ return {expression}; }}");
     let parts = lowered(&source);
@@ -1832,10 +1699,6 @@ fn semantic_inference_budget_rejects_deep_return_expression() {
         .expect("lowered function")
         .signatures[0];
     assert_eq!(signature.return_type, None);
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
-    );
 }
 
 #[test]
@@ -1994,10 +1857,11 @@ fn overload_group_signature_locators_take_group_ordinals() {
             ],
             "signature {expected_ordinal} must carry its group ordinal"
         );
-        let return_ty = fact
-            .return_ty
-            .as_ref()
-            .expect("authored return annotation mints a slot");
+        let FunctionReturnSource::Declared(FunctionReturnLocator::Authored(return_ty)) =
+            &fact.return_source
+        else {
+            panic!("authored return annotation mints a slot");
+        };
         assert_eq!(
             &*return_ty.path,
             &[
@@ -2051,7 +1915,7 @@ fn inferred_return_mints_unavailable_not_a_fabricated_head() {
     let inferred = parse_and_build_env("function getRef() { return maybe as Ref<number>; }");
     let inferred_fact = &inferred.value_symbols["getRef"].merged_signatures()[0];
     assert!(
-        inferred_fact.return_ty.is_some(),
+        !matches!(inferred_fact.return_source, FunctionReturnSource::Absent),
         "the inferred return still mints its replay locator — the trap this gate closes"
     );
     assert_eq!(
@@ -2178,7 +2042,7 @@ fn extracts_const_object_literal() {
         verter_type_expr::facts::ObjectMemberFact::Property(p) => p,
         other => panic!("expected property fact, got {other:?}"),
     };
-    assert_eq!(theme.name, "theme");
+    assert_eq!(theme.string_name().expect("string-key fixture"), "theme");
     assert_eq!(&*theme.ty.anchor.symbol, "defaults");
     assert_eq!(
         &*theme.ty.path,
@@ -2455,9 +2319,11 @@ fn var_widens_string_literal_initializer() {
 ///
 /// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
 /// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
-/// collapses `Function`/`ConstructorType` to `SemanticNodeData::Function`.
-/// A catch-all `_ => expr` arm would forward the whole `ConstructorType`
-/// untouched, so the inner `kind: "x"` literal would silently NOT widen.
+/// interns the kind-preserving `SemanticNodeData::Signature` carrier
+/// (`TypeExpr::Function` ⇒ `Call`, `TypeExpr::ConstructorType` ⇒
+/// `Construct`). A catch-all `_ => expr` arm would forward the whole
+/// `ConstructorType` untouched, so the inner `kind: "x"` literal would
+/// silently NOT widen.
 /// Discriminator: the inner `kind` member must be `string`, never the `"x"`
 /// literal — and the outer node must remain a `ConstructorType`.
 #[test]
@@ -2481,7 +2347,11 @@ fn let_widens_constructor_type_return_literal_members() {
         );
     };
     let kind_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "kind" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(
@@ -2518,7 +2388,11 @@ fn let_widens_function_type_return_literal_members_parity() {
         panic!("function return type must remain an object, got {return_type:?}");
     };
     let kind_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "kind" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(
@@ -2540,20 +2414,32 @@ fn let_widens_nested_object_literal_properties() {
     };
 
     let mode_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "mode" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "mode" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(mode_ty, Some(&TypeExpr::Primitive(PrimitiveName::String)));
 
     let nested_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "nested" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "nested" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     let Some(TypeExpr::Object(nested)) = nested_ty else {
         panic!("expected nested object property, got {nested_ty:?}");
     };
     let count_ty = nested.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "count" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "count" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(count_ty, Some(&TypeExpr::Primitive(PrimitiveName::Number)));
@@ -2595,7 +2481,9 @@ fn satisfies_preserves_underlying_value_type() {
     // The value type should have literal/inferred properties from the expression,
     // not abstract types from the satisfies annotation
     let x_prop = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(p) if p.name == "x" => Some(&p.ty),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "x" => {
+            Some(&p.ty)
+        }
         _ => None,
     });
     assert!(
@@ -2635,77 +2523,71 @@ fn satisfies_does_not_use_annotation_type() {
 // =============================================================================
 
 #[test]
-fn object_spread_identifier_produces_intersection() {
+fn object_spread_identifier_keeps_operand_as_ordered_entry() {
     let parts = lowered(r#"const extended = { ...base, extra: true }"#);
     let decl = parts.value_decl("extended").expect("lowered extended");
 
-    // Should not lose the spread source — at minimum, the explicit props must be present
-    // AND the spread source should be represented (as typeof base in an intersection)
-    match decl.type_annotation.as_ref() {
-        Some(TypeExpr::Intersection(members)) => {
-            assert!(
-                members.iter().any(|m| matches!(m, TypeExpr::TypeOf(_))),
-                "spread identifier should produce a typeof reference in the intersection"
-            );
-            assert!(
-                members.iter().any(|m| matches!(m, TypeExpr::Object(_))),
-                "explicit properties should be present in the intersection"
-            );
-        }
-        Some(TypeExpr::Object(obj)) => {
-            // At minimum, if we flatten, the explicit property must exist
-            assert!(
-                obj.properties.iter().any(|member| matches!(
-                    member,
-                    ObjectMember::Property(p) if p.name == "extra"
-                )),
-                "explicit property 'extra' must be present"
-            );
-            panic!(
-                "spread source was lost — expected intersection with typeof base, got plain object"
-            );
-        }
-        other => panic!("expected intersection or object, got {other:?}"),
-    }
-}
-
-#[test]
-fn object_spread_object_literal_merges_properties() {
-    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
-    let decl = parts.value_decl("merged").expect("lowered merged");
-
+    // The spread source is never lost: it rides an ordered `Spread` entry
+    // holding `typeof base`, BEFORE the direct member `extra`.
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
-            "expected object type for merged spread, got {:?}",
+            "expected the ordered spread-bearing Object IR, got {:?}",
             decl.type_annotation
         );
     };
+    assert_eq!(obj.properties.len(), 2);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Spread(s) if matches!(&s.ty, TypeExpr::TypeOf(_))),
+        "entry 0 must carry the spread operand as `typeof base`, got {:?}",
+        obj.properties[0]
+    );
+    assert!(
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "extra"),
+        "entry 1 must be the direct member `extra`, got {:?}",
+        obj.properties[1]
+    );
+}
 
-    let names: Vec<&str> = obj
+#[test]
+fn object_spread_inline_literal_stays_a_pre_fold_entry() {
+    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
+
+    // The producer does NOT fold: the inline operand's members stay on the
+    // operand's own object inside the ordered `Spread` entry (the shared
+    // spread materializer merges at graph-lowering time).
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(obj.properties.len(), 2, "spread entry + direct member `c`");
+    let ObjectMember::Spread(spread) = &obj.properties[0] else {
+        panic!(
+            "entry 0 must be the inline spread, got {:?}",
+            obj.properties[0]
+        );
+    };
+    let TypeExpr::Object(operand) = &spread.ty else {
+        panic!("operand keeps its own object type, got {:?}", spread.ty);
+    };
+    let operand_names: Vec<&str> = operand
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
-
-    assert!(
-        names.contains(&"a"),
-        "spread object literal property 'a' should be merged"
-    );
-    assert!(
-        names.contains(&"b"),
-        "spread object literal property 'b' should be merged"
-    );
-    assert!(
-        names.contains(&"c"),
-        "explicit property 'c' should be present"
-    );
     assert_eq!(
-        names.len(),
-        3,
-        "should have exactly 3 properties after merge"
+        operand_names,
+        ["a", "b"],
+        "operand members preserved on the operand"
+    );
+    assert!(
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "c"),
+        "the direct member `c` follows the spread in source order"
     );
 }
 
@@ -2725,7 +2607,11 @@ fn object_spread_later_property_overrides_spread_property() {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "a" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .collect();
@@ -2744,37 +2630,40 @@ fn object_spread_later_property_overrides_spread_property() {
 }
 
 #[test]
-fn object_spread_later_spread_overrides_earlier_property() {
+fn object_spread_later_spread_override_is_the_folds_decision() {
     let parts = lowered(r#"const merged = { a: 1, ...{ a: "override" } }"#);
     let decl = parts.value_decl("merged").expect("lowered merged");
 
+    // The producer preserves BOTH sides in source order — the direct `a`
+    // BEFORE the overriding spread — so the fold (not the producer) applies
+    // the required-spread-wins rule with the operand's `string`.
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
-            "expected object type for merged spread override, got {:?}",
+            "expected the ordered spread-bearing Object IR, got {:?}",
             decl.type_annotation
         );
     };
-
-    let props: Vec<_> = obj
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(
-        props.len(),
-        1,
-        "later spread properties should replace earlier explicit properties"
+    assert_eq!(obj.properties.len(), 2);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "a"
+            && p.ty == TypeExpr::Primitive(PrimitiveName::Number)),
+        "entry 0 is the direct `a: number`, got {:?}",
+        obj.properties[0]
     );
-    // The later spread's `a: "override"` wins (a STRING, not the earlier
-    // explicit number `a: 1`) and — as a fresh object-literal property with no
-    // `as const` — widens to its primitive `string` (TS object-literal
-    // widening). The string-vs-number discrimination still proves override
-    // precedence.
-    assert_eq!(props[0], &TypeExpr::Primitive(PrimitiveName::String));
+    let ObjectMember::Spread(spread) = &obj.properties[1] else {
+        panic!(
+            "entry 1 must be the overriding spread, got {:?}",
+            obj.properties[1]
+        );
+    };
+    let TypeExpr::Object(operand) = &spread.ty else {
+        panic!("operand keeps its own object type, got {:?}", spread.ty);
+    };
+    assert!(
+        matches!(&operand.properties[0], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "a"
+            && p.ty == TypeExpr::Primitive(PrimitiveName::String)),
+        "the operand's `a: string` is preserved for the fold to apply"
+    );
 }
 
 // =============================================================================
@@ -2877,22 +2766,140 @@ fn member_on_call_expression_degrades_to_any() {
 // =============================================================================
 
 #[test]
-fn simple_call_expression_does_not_degrade_to_any() {
+fn call_bearing_initializer_uses_an_indexed_semantic_expression_source() {
     let parts = lowered(r#"const result = someFunction()"#);
     let decl = parts.value_decl("result").expect("lowered result");
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        Some(15),
+        "the initializer root is the indexed program identity"
+    );
 
-    // For unknown function calls, should produce ReturnType<typeof someFunction>
-    // rather than degrading to Any
-    assert_ne!(
+    let env = parse_and_build_env(r#"const result = someFunction()"#);
+    let fact = &env.value_symbols["result"].primary().type_annotation;
+    assert!(matches!(
+        fact.expression_source,
+        Some(SemanticExpressionSource::ProgramExpression(ref point))
+            if point.canonical_id.as_ref() == FIXTURE_CANONICAL && point.offset == 15
+    ));
+    assert_eq!(fact.annotation, None);
+}
+
+#[test]
+fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
+    let source = "make(id())";
+    let allocator = oxc_allocator::Allocator::default();
+    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
+    let mut indexed =
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
+    crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 40);
+    let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = indexed else {
+        panic!("direct call must stay explicit indexed call IR");
+    };
+    assert_eq!(call.point, 40);
+    assert_eq!(call.args[0].point, 45);
+    assert!(matches!(
+        &call.args[0].expression,
+        crate::analysis::type_eval_build::IndexedValueExpression::Call(nested)
+            if nested.point == 45
+    ));
+}
+
+/// Value-expression inference never FABRICATES a call's answer: a bare
+/// call and a call nested inside a compound produce only the honest
+/// `ReturnType<typeof …>` carrier (re-resolved later through the shared
+/// engine, and refused closed by the flow content's carrier reader) —
+/// never a guessed concrete type. An indexed record is how a call reaches
+/// the resolver with its arguments intact.
+#[test]
+fn value_expression_inference_carries_calls_as_the_honest_carrier() {
+    fn inferred(source: &str) -> TypeExpr {
+        let allocator = oxc_allocator::Allocator::default();
+        let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
+        crate::analysis::type_eval_build::infer_declaration_expression_type(
+            &expression,
+            source,
+            crate::analysis::type_eval_build::TopLevelLiteralPolicy::Preserve,
+        )
+        .expect("inference stays within budget")
+    }
+
+    fn mentions_ref(ty: &TypeExpr, name: &str) -> bool {
+        match ty {
+            TypeExpr::Ref {
+                name: candidate,
+                type_arguments,
+            } => {
+                candidate.as_ref() == name
+                    || type_arguments.iter().any(|arg| mentions_ref(arg, name))
+            }
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                arms.iter().any(|arm| mentions_ref(arm, name))
+            }
+            TypeExpr::Array { element, .. } => mentions_ref(element, name),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                ObjectMember::Property(property) => mentions_ref(&property.ty, name),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    // A bare call is the carrier, never a fabricated `any` and never a
+    // guessed concrete return type.
+    let bare = inferred("fn()");
+    assert_eq!(
+        bare,
+        TypeExpr::Ref {
+            name: std::sync::Arc::from("ReturnType"),
+            type_arguments: std::sync::Arc::from(vec![TypeExpr::TypeOf(
+                verter_type_expr::ValueRef {
+                    path: vec!["fn".to_string()],
+                    type_args: Vec::new(),
+                },
+            )]),
+        }
+    );
+
+    // A call in any nested value position — object member, array element,
+    // conditional arm — embeds the same honest carrier and nothing else:
+    // the carrier is the ONLY call content, so a consumer that cannot
+    // resolve it fails closed instead of publishing a fabricated value.
+    for source in ["{ a: fn() }", "[fn()]", "flag ? fn() : other()"] {
+        let ty = inferred(source);
+        assert!(
+            mentions_ref(&ty, "ReturnType"),
+            "`{source}` must carry the honest ReturnType carrier, got {ty:?}"
+        );
+    }
+
+    // The indexed lowering is where a call goes: a direct call is an explicit
+    // record, and a call-bearing compound is a TYPED unsupported carrier —
+    // never a fabricated value.
+    let allocator = oxc_allocator::Allocator::default();
+    let compound = oxc_parser::Parser::new(&allocator, "{ a: fn() }", oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
+    assert!(matches!(
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&compound, "{ a: fn() }"),
+        crate::analysis::type_eval_build::IndexedValueExpression::UnsupportedCall { .. }
+    ));
+}
+
+#[test]
+fn call_result_assertion_remains_authoritative() {
+    let parts = lowered("const result = someFunction() as string");
+    let decl = parts.value_decl("result").expect("lowered result");
+    assert_eq!(
         decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Any)),
-        "call expression should not degrade to any — should produce ReturnType<typeof fn>"
+        Some(TypeExpr::Primitive(PrimitiveName::String))
     );
-    // Should be some kind of structured type reference
-    assert!(
-        decl.type_annotation.is_some(),
-        "call expression should produce a type annotation"
-    );
+    assert_eq!(decl.expression_source_offset, None);
 }
 
 #[test]
@@ -2929,7 +2936,11 @@ fn svelte_runes_explicit_state_type_argument_is_authoritative() {
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "id" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "id" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("id property");
@@ -2937,48 +2948,54 @@ fn svelte_runes_explicit_state_type_argument_is_authoritative() {
 }
 
 #[test]
-fn standard_lowering_does_not_reinterpret_a_user_function_named_state() {
-    let parts = lowered("declare function $state<T>(value: T): boolean; let value = $state(0)");
-    let decl = parts.value_decl("value").expect("lowered value");
-    assert!(
-        matches!(
-            decl.type_annotation,
-            Some(TypeExpr::Ref { ref name, .. }) if name.as_ref() == "ReturnType"
-        ),
-        "plain TypeScript retains ordinary call semantics: {:?}",
-        decl.type_annotation
+fn svelte_rune_nested_call_keeps_the_indexed_initializer_source() {
+    let source = "let item = $state(load())";
+    let parts = svelte_runes_statement(source);
+    let decl = parts
+        .value_decls
+        .iter()
+        .find(|decl| decl.name == "item")
+        .expect("lowered item");
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        source.find("$state").map(|offset| offset as u32)
     );
 }
 
 #[test]
-fn svelte_runes_derived_by_uses_the_callback_return_type() {
-    let parts = svelte_runes_statement("let doubled = $derived.by(() => 2)");
+fn ordinary_call_named_state_still_uses_the_indexed_call_source() {
+    let parts = lowered("declare function $state<T>(value: T): boolean; let value = $state(0)");
+    let decl = parts.value_decl("value").expect("lowered value");
+    assert_eq!(decl.type_annotation, None);
+    assert!(decl.expression_source_offset.is_some());
+}
+
+#[test]
+fn svelte_runes_derived_by_uses_the_indexed_callback_return_source() {
+    let source = "let doubled = $derived.by(() => id(2))";
+    let parts = svelte_runes_statement(source);
     let decl = parts
         .value_decls
         .iter()
         .find(|decl| decl.name == "doubled")
         .expect("lowered doubled");
+    assert_eq!(decl.type_annotation, None);
     assert_eq!(
-        decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Number))
+        decl.expression_source_offset,
+        source.find("() =>").map(|offset| offset as u32),
+        "$derived.by consumes the callback position, not a direct return projection"
     );
 }
 
 #[test]
-fn method_call_expression_does_not_degrade_to_any() {
+fn method_call_initializer_uses_the_indexed_semantic_expression_source() {
     let source = r#"const result = obj.create()"#;
     let parts = lowered(source);
     let decl = parts.value_decl("result").expect("lowered result");
 
-    assert!(
-        decl.type_annotation.is_some(),
-        "method call expression should produce a type, not None (filtered-out Any)"
-    );
-    assert_ne!(
-        decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Any)),
-        "method call expression should not degrade to any"
-    );
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(decl.expression_source_offset, Some(15));
 
     // STORED fact: a non-leaf inferred annotation stays classification-only
     // (Direct, no source) — never a fabricated authored locator for a type
@@ -2988,6 +3005,10 @@ fn method_call_expression_does_not_degrade_to_any() {
     let fact = &env.value_symbols["result"].primary().type_annotation;
     assert_eq!(fact.classification, ValueAnnotationClass::Direct);
     assert_eq!(fact.annotation, None);
+    assert!(matches!(
+        fact.expression_source,
+        Some(SemanticExpressionSource::ProgramExpression(ref point)) if point.offset == 15
+    ));
 }
 
 // =============================================================================
@@ -3019,7 +3040,11 @@ fn extracts_class_as_type_and_value() {
             // id, name, render (constructor is not a member)
             assert_eq!(obj.properties.len(), 3);
             let id_prop = obj.properties.iter().find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "id" => Some(p),
+                ObjectMember::Property(p)
+                    if p.string_name().expect("string-key fixture") == "id" =>
+                {
+                    Some(p)
+                }
                 _ => None,
             });
             assert!(id_prop.unwrap().readonly);
@@ -3082,7 +3107,7 @@ fn extracts_export_default_object_expression_as_default_value() {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            ObjectMember::Property(prop) => Some(prop.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -3145,7 +3170,7 @@ export { RouteLocationRaw as Lt, St, vt }
                 || matches!(
                     ty,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path"))
                 )
         }),
         "RouteLocationRaw should preserve its path-like branch, got {:?}",
@@ -3157,7 +3182,7 @@ export { RouteLocationRaw as Lt, St, vt }
                 || matches!(
                     ty,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "name"))
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "name"))
                 )
         }),
         "RouteLocationRaw should preserve its name-like branch, got {:?}",
@@ -4192,4 +4217,284 @@ fn plus_initializer_degrades_to_number_or_string_domain() {
         inventory[0].value,
         EnumScalar::Primitive(EnumPrimitiveDomain::NumberOrString),
     );
+}
+
+/// Const-assertion recognition runs on the TYPED
+/// [`UnknownValue::is_const_assertion_syntax`] accessor (never a raw
+/// `raw == "const"` string scan), and the `as const` behaviour it gates
+/// (literal preservation + readonly) is unchanged.
+#[test]
+fn const_assertion_recognition_is_typed_and_behavior_preserving() {
+    // The accessor: exactly `const`, provenance-independent, no trimming.
+    assert!(UnknownValue::unsupported_syntax("const").is_const_assertion_syntax());
+    assert!(UnknownValue::jsdoc_parse_fallback("const").is_const_assertion_syntax());
+    assert!(UnknownValue::compatibility_projection("const").is_const_assertion_syntax());
+    assert!(!UnknownValue::unsupported_syntax("const ").is_const_assertion_syntax());
+    assert!(!UnknownValue::unsupported_syntax("constant").is_const_assertion_syntax());
+    assert!(!UnknownValue::missing_output().is_const_assertion_syntax());
+
+    // Behaviour: `{ tag: "x" } as const` keeps the literal + readonly…
+    let const_parts = lowered(r#"const obj = { tag: "x" } as const"#);
+    let const_decl = const_parts.value_decl("obj").expect("lowered const obj");
+    let Some(TypeExpr::Object(obj)) = const_decl.type_annotation.as_ref() else {
+        panic!(
+            "as const must keep the object shape, got {:?}",
+            const_decl.type_annotation
+        );
+    };
+    let Some(ObjectMember::Property(prop)) = obj.properties.first() else {
+        panic!("the const object keeps its property");
+    };
+    assert_eq!(prop.ty, TypeExpr::string_literal("x"));
+    assert!(prop.readonly, "as const marks the property readonly");
+
+    // … while the same literal WITHOUT `as const` widens (the gate is not
+    // vacuously on).
+    let plain_parts = lowered(r#"const obj = { tag: "x" }"#);
+    let plain_decl = plain_parts.value_decl("obj").expect("lowered plain obj");
+    let Some(TypeExpr::Object(obj)) = plain_decl.type_annotation.as_ref() else {
+        panic!("plain object keeps its shape");
+    };
+    let Some(ObjectMember::Property(prop)) = obj.properties.first() else {
+        panic!("the plain object keeps its property");
+    };
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
+    assert!(!prop.readonly);
+}
+
+// =============================================================================
+// Ordered object-literal spread IR (the pre-fold producer contract)
+// =============================================================================
+
+/// `{ a: 1, ...base, b: "x" }` — the producer emits the ORDERED pre-fold IR:
+/// every direct member and every spread entry survives in source order, direct
+/// members are minted `FreshOwn`, and the spread operand rides an
+/// `ObjectMember::Spread` entry (never an intersection synthesis, never an
+/// inline flatten).
+#[test]
+fn object_literal_producer_emits_ordered_spread_ir_with_fresh_own_members() {
+    let parts = lowered(r#"const mixed = { a: 1, ...base, b: "x" }"#);
+    let decl = parts.value_decl("mixed").expect("lowered mixed");
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(
+        obj.properties.len(),
+        3,
+        "every direct member and the spread entry survive in source order"
+    );
+    match &obj.properties[0] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.string_name().expect("string-key fixture"), "a");
+            assert_eq!(
+                p.excess_origin,
+                ExcessPropertyOrigin::FreshOwn,
+                "a direct literal member is FreshOwn"
+            );
+        }
+        other => panic!("entry 0 must be the direct member `a`, got {other:?}"),
+    }
+    match &obj.properties[1] {
+        ObjectMember::Spread(s) => assert!(
+            matches!(&s.ty, TypeExpr::TypeOf(_)),
+            "the spread operand rides the entry as `typeof base`, got {:?}",
+            s.ty
+        ),
+        other => panic!("entry 1 must be the spread of `base` BETWEEN the members, got {other:?}"),
+    }
+    match &obj.properties[2] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.string_name().expect("string-key fixture"), "b");
+            assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
+        }
+        other => panic!("entry 2 must be the direct member `b` AFTER the spread, got {other:?}"),
+    }
+}
+
+/// An inline-literal spread operand stays an ENTRY holding the operand's own
+/// object type (whose members are that literal's `FreshOwn` — the fold, not
+/// the producer, decides taint), and nested literal VALUES of direct members
+/// are recursively `FreshOwn`.
+#[test]
+fn object_literal_producer_keeps_inline_spread_operands_and_nested_freshness() {
+    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: { d: 3 } }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(obj.properties.len(), 2, "spread entry + direct member `c`");
+    match &obj.properties[0] {
+        ObjectMember::Spread(s) => {
+            let TypeExpr::Object(operand) = &s.ty else {
+                panic!("inline operand keeps its object type, got {:?}", s.ty);
+            };
+            assert_eq!(operand.properties.len(), 2);
+            for member in operand.properties.iter() {
+                let ObjectMember::Property(p) = member else {
+                    panic!("operand member must be a property, got {member:?}");
+                };
+                assert_eq!(
+                    p.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "the operand literal's OWN members are its FreshOwn — taint \
+                     is the FOLD's decision, not the producer's"
+                );
+            }
+        }
+        other => panic!("entry 0 must be the inline spread, got {other:?}"),
+    }
+    match &obj.properties[1] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.string_name().expect("string-key fixture"), "c");
+            assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
+            let TypeExpr::Object(nested) = &p.ty else {
+                panic!("nested literal value stays an object, got {:?}", p.ty);
+            };
+            let ObjectMember::Property(d) = &nested.properties[0] else {
+                panic!("nested member must be a property");
+            };
+            assert_eq!(
+                d.excess_origin,
+                ExcessPropertyOrigin::FreshOwn,
+                "an inline NESTED literal's members are FreshOwn (nested freshness)"
+            );
+        }
+        other => panic!("entry 1 must be the direct member `c`, got {other:?}"),
+    }
+}
+
+/// The transient `object_shape` of a spread-bearing initializer keeps the
+/// spread entry in source order — never a silently spread-less shape.
+#[test]
+fn object_shape_preserves_spread_entries_in_order() {
+    let parts = lowered(r#"const extended = { ...base, extra: true }"#);
+    let decl = parts.value_decl("extended").expect("lowered extended");
+    let shape = decl.object_shape.as_ref().expect("object shape recorded");
+    assert_eq!(shape.properties.len(), 2);
+    assert!(
+        matches!(&shape.properties[0], ObjectMember::Spread(_)),
+        "shape entry 0 must be the spread, got {:?}",
+        shape.properties[0]
+    );
+    assert!(
+        matches!(&shape.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "extra"),
+        "shape entry 1 must be `extra`, got {:?}",
+        shape.properties[1]
+    );
+}
+
+/// Getter / setter / method / shorthand members of a literal are all direct
+/// `FreshOwn` members in the ordered IR — every authored member form is an
+/// excess candidate until a spread overlaps it.
+#[test]
+fn object_literal_accessor_method_and_shorthand_members_are_fresh_own() {
+    let parts = lowered(
+        r#"const o = { m() { return 1 }, get g() { return 1 }, set s(v: number) {}, short }"#,
+    );
+    let decl = parts.value_decl("o").expect("lowered o");
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!("expected the object IR, got {:?}", decl.type_annotation);
+    };
+    let mut names: Vec<&str> = Vec::new();
+    for member in obj.properties.iter() {
+        match member {
+            ObjectMember::Property(p) => {
+                assert_eq!(
+                    p.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "member `{}` must be FreshOwn",
+                    p.string_name().expect("string-key fixture")
+                );
+                names.push(p.string_name().expect("string-key fixture"));
+            }
+            ObjectMember::Method(m) => {
+                assert_eq!(
+                    m.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "method `{}` must be FreshOwn",
+                    m.string_name().expect("string-key fixture")
+                );
+                names.push(m.string_name().expect("string-key fixture"));
+            }
+            other => panic!("unexpected member form {other:?}"),
+        }
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        ["g", "m", "s", "short"],
+        "method, getter, setter, and shorthand members all survive as direct members"
+    );
+}
+
+#[test]
+fn object_literal_preserves_accessor_kind_duplicates_and_spread_order() {
+    let source = r#"const o = {
+            get value() { return 1 },
+            ...base,
+            set value(next: number) {},
+            value() { return 2 },
+            value: 3
+        }"#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("o").expect("lowered o");
+    let Some(TypeExpr::Object(object)) = decl.type_annotation.as_ref() else {
+        panic!("expected object IR, got {:?}", decl.type_annotation);
+    };
+
+    assert_eq!(object.properties.len(), 5);
+    assert!(matches!(
+        &object.properties[0],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Get
+    ));
+    assert!(matches!(&object.properties[1], ObjectMember::Spread(_)));
+    assert!(matches!(
+        &object.properties[2],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Set
+    ));
+    assert!(matches!(
+        &object.properties[3],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Method
+    ));
+    assert!(matches!(
+        &object.properties[4],
+        ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "value"
+    ));
+
+    let env = parse_and_build_env(source);
+    let facts = env.value_symbols["o"]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("stored object-shape fact");
+    assert!(matches!(
+        &facts.members[0],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Get
+                && method.function.has_implementation_body
+    ));
+    assert!(matches!(&facts.members[1], ObjectMemberFact::Spread(_)));
+    assert!(matches!(
+        &facts.members[2],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Set
+                && method.function.has_implementation_body
+    ));
+    assert!(matches!(
+        &facts.members[3],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Method
+                && method.function.has_implementation_body
+    ));
 }

@@ -386,27 +386,26 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
 ///    system cannot see.
 #[test]
 fn index_key_number_convention_is_type_enforced() {
-    // (1) Payload pin.
-    let semantic_query = strip_comments_and_strings(&read_workspace_file(
-        "crates/verter_session/src/semantic_query.rs",
+    // (1) Payload pin. The newtype now lives in the shared typed-key
+    // module (`verter_type_expr::property_key`); the session's
+    // `semantic_query::index_key` re-exports it.
+    let owner = strip_comments_and_strings(&read_workspace_file(
+        "crates/verter_type_expr/src/property_key.rs",
     ));
     assert!(
-        semantic_query.contains("Number(CanonicalIndexInt)"),
+        owner.contains("Number(CanonicalIndexInt)"),
         "G4.4 guard: `IndexKey::Number` must carry the proof-carrying \
          `CanonicalIndexInt` payload — the private-field newtype is what makes \
          unbounded construction a compile error."
     );
     assert!(
-        !semantic_query.contains("Number(i64)"),
+        !owner.contains("Number(i64)"),
         "G4.4 guard: `IndexKey::Number(i64)` is the retired raw payload — \
          reverting it reopens every unbounded-construction lane the newtype \
          closed."
     );
 
     // (2) Owning-module privacy + closed constructor inventory.
-    let owner = strip_comments_and_strings(&read_workspace_file(
-        "crates/verter_session/src/semantic_query/index_key.rs",
-    ));
     assert!(
         owner.contains("pub struct CanonicalIndexInt(i64);"),
         "G4.4 guard: `CanonicalIndexInt`'s field must stay PRIVATE (tuple \
@@ -414,37 +413,43 @@ fn index_key_number_convention_is_type_enforced() {
          mechanism."
     );
     assert!(
-        owner.contains("pub fn from_canonical_i64")
-            && owner.contains("pub(crate) fn integer_convention_index_key"),
-        "G4.4 guard: the two blessed constructors (`integer_convention_index_key`, \
+        owner.contains("pub fn from_canonical_i64") && owner.contains("pub fn from_js_number"),
+        "G4.4 guard: the two blessed constructors (`from_js_number`, \
          `from_canonical_i64`) must exist in the owning module."
     );
-    // Exactly two raw tuple-construction tokens: the struct declaration
-    // and the fold's single `CanonicalIndexInt(candidate)`. A third is a
-    // new construction site that must be reviewed (and blessed) HERE.
+    // Exactly one raw tuple-construction token (the fold's single
+    // `Self(candidate)`); the struct declaration is the only
+    // `CanonicalIndexInt(` mention. A second construction site must be
+    // reviewed (and blessed) HERE.
     assert_eq!(
-        owner.matches("CanonicalIndexInt(").count(),
-        2,
+        owner.matches("Self(candidate)").count(),
+        1,
         "G4.4 guard: the owning module must construct `CanonicalIndexInt` \
-         exactly once (plus the struct declaration) — found a new raw \
+         exactly once (the `from_js_number` fold) — found a new raw \
          construction site."
     );
     assert_eq!(
-        owner.matches("Self(").count(),
-        0,
-        "G4.4 guard: no `Self(..)` construction — keep every construction on \
-         the named, countable `CanonicalIndexInt(..)` token."
+        owner.matches("CanonicalIndexInt(").count(),
+        1,
+        "G4.4 guard: the only `CanonicalIndexInt(` token is the struct \
+         declaration itself."
     );
-    // No alternate construction lanes: conversion traits and serde
-    // deserialization would mint values without entering a blessed
-    // constructor.
-    for forbidden in ["impl From<", "impl TryFrom<", "Deserialize", "fn new("] {
+    // No alternate construction lanes: conversion traits or a derived
+    // `Deserialize` would mint values without entering a blessed
+    // constructor. Serde input must round through the checked constructor.
+    for forbidden in ["impl From<", "impl TryFrom<", "fn new("] {
         assert!(
             !owner.contains(forbidden),
             "G4.4 guard: `{forbidden}` in the owning module would reopen an \
              unchecked construction lane around the blessed constructors."
         );
     }
+    assert!(
+        owner.contains("impl<'de> serde::Deserialize<'de> for CanonicalIndexInt")
+            && owner.contains("from_canonical_i64(value).ok_or_else"),
+        "G4.4 guard: `CanonicalIndexInt` deserialization must round through \
+         `from_canonical_i64` — a derive would admit unchecked wire values."
+    );
 
     // (3) Consumer-side decode convention — EVERY walk.rs site that
     // produces a `LiteralKey::Number` recovers the value by integer
@@ -485,19 +490,21 @@ fn index_key_number_convention_is_type_enforced() {
              (window: {walk_window})"
         );
     }
-    // Exactly two of the constructors are `CanonicalIndexInt` DECODE
-    // sites (the third copies an already-recovered f64 literal out of a
-    // resolved `Literal` node); both must recover via the
-    // integer-convention cast. A drop below two is a from_bits-style
-    // revert (or a deleted decode arm); above two is a new decode site
-    // that must be reviewed here.
+    // Exactly three of the constructors are `CanonicalIndexInt` DECODE
+    // sites (the direct `Index(Number)` payload arm, the
+    // `normalized_index_key_node` re-dispatch arm, and the typed
+    // `Member(PropertyKey::Number)` arm); the others copy an
+    // already-recovered f64 literal out of a resolved `Literal` node. All
+    // must recover via the integer-convention cast. A drop below three is
+    // a from_bits-style revert (or a deleted decode arm); above three is
+    // a new decode site that must be reviewed here.
     assert_eq!(
         walk_windows
             .iter()
             .filter(|w| w.contains(".get() as f64"))
             .count(),
-        2,
-        "G4.4 guard: walk.rs must hold exactly two `CanonicalIndexInt` decode sites \
+        3,
+        "G4.4 guard: walk.rs must hold exactly three `CanonicalIndexInt` decode sites \
          recovering via the integer-convention `.get() as f64` cast."
     );
 }
@@ -1004,7 +1011,8 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
     // free-standing helper). The published-surface field-type driver
     // `reduce_published_field_types` is the HIGH-LEVEL publication API and lives
     // in the terminal `output_sink` sink module alongside the now-sink-private
-    // per-field reducer it wraps (`reduce_field_type_expr_with_mode`) — the sink
+    // per-field reducer it wraps (`reduce_field_value_node`; the deleted
+    // TypeExpr helper `reduce_field_type_expr_with_mode` is gone) — the sink
     // is the ONLY module that touches the reverse-materialization boundary.
     let reducer_src = read_workspace_file(
         "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",

@@ -311,7 +311,8 @@ Animate)` + `bind:this` → SKIP, `Spread` → `has_spread`, child `{#snippet na
 → `slots_used`. Expression TEXT is span-sliced from the carrier source; there is
 NO structural source scan and NO type lowering. The neutral per-usage
 `bindings` / `events` fields (and the `ComponentBindingUsage` / `ComponentEventUsage`
-proto messages 9/10, `COMPONENT_META_SCHEMA_VERSION` 3) are ADD-ONLY — Vue keeps
+proto messages 9/10, `COMPONENT_META_SCHEMA_VERSION` 4) are ADD-ONLY. Object
+members use protobuf kind 6 for spread (`OBJECT_MEMBER_KIND_SPREAD`). Vue keeps
 its two-way bindings in `v_models` and leaves these empty. Pinned by
 `svelte_template_data_producer_is_typed_ir_only` and the carrier unit tests.
 

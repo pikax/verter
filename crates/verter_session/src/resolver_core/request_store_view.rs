@@ -1022,6 +1022,7 @@ impl<'a> RequestStoreView<'a> {
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
+            FactVersionRef::ProgramAnalysis(fact) => self.validates_program_analysis_domain(fact),
             FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
@@ -1400,6 +1401,21 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // directly to the base view eliminates the dead probe + lock
         // acquire on every `ModuleAugmentationIndexShape` validation.
         self.base.validates_route_surface_domain(fact)
+    }
+
+    fn validates_program_analysis_domain(
+        &self,
+        fact: &crate::resolver_core::ProgramAnalysisFactRef,
+    ) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
+        // The `FunctionProgramIndex` authority is the base view's
+        // per-canonical snapshot: an overlay-only function body has no
+        // base artifact to validate against, so an overlay-recorded
+        // ProgramAnalysis fact can never validate against the base
+        // (overlay results never populate base-only caches).
+        self.base.validates_program_analysis_domain(fact)
     }
 
     fn promote_route_completion(

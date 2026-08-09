@@ -120,9 +120,9 @@ fn shallow_member_names(
     match dispatch.graph().node_data(terminal).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
-                .members
+                .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref().to_string())
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
                 .collect();
             names.sort();
             names
@@ -824,12 +824,14 @@ fn object_one_member(
 ) -> SemanticNodeId {
     use crate::semantic_query::{IndexSignature, SurfaceMember};
     let member = SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -861,9 +863,12 @@ fn nullary_function(
     dispatch: &ProjectSemanticDispatch<'_>,
     return_type: SemanticNodeId,
 ) -> SemanticNodeId {
-    dispatch.graph().intern_node(SemanticNodeData::Function {
+    dispatch.graph().intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -993,12 +998,14 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
     let source_obj = {
         use crate::semantic_query::{IndexSignature, SurfaceMember};
         let member = |name: &str, value: SemanticNodeId| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),

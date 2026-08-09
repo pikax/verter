@@ -1035,7 +1035,7 @@ pub(crate) fn fact_signature_for_canonical_member(
     observed_hash: Hash16,
 ) -> SignatureAdmission {
     let exporter_name = InternedName::from(exporter);
-    let member_name = InternedName::from(member);
+    let member_name = verter_type_expr::facts::FactPropertyKey::identifier(member);
     let presence_key = FactKey::MemberPresence {
         exporter: exporter_name.clone(),
         name: member_name.clone(),
@@ -1239,7 +1239,7 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// path-precise `FactVersionRef` signature plus the explicit self-root
 /// canonical set the warm-read validator checks **strictly**. Produced
 /// by `materialize_structure_read_set` (the `MaterializeStructureDb`
-/// carrier) and `ref_cycle_read_set` (the `RefCycleResultDb` carrier).
+/// carrier).
 /// `materialize_structure_read_set` returns
 /// `Result<StructuralCarrierReadSet, NonAdmissionReason>` so refusal
 /// modes (`SelfRootConflict`, `RouteGenerationDependency`) reach the

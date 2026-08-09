@@ -14,18 +14,19 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
+use verter_type_expr::{
+    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr, UnknownValue,
+};
 
+use super::fold::{FoldedFunction, FoldedTupleElement};
 use super::{
-    FactShapeTag, FoldedFunction, FoldedTupleElement, RaisedFunction, RaisedFunctionParam,
-    RaisedObjectMember, RaisedRecursiveFrame, RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts,
-    RaisedShapeKey, RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement,
-    RaisedTypeParam, RootOnlySummary, ShapeInterner,
+    FactShapeTag, RaisedFunction, RaisedFunctionParam, RaisedObjectMember, RaisedRecursiveFrame,
+    RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts, RaisedShapeKey, RaisedShapeResult,
+    RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam, RootOnlySummary,
+    ShapeInterner,
 };
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
-use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
-};
+use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
 use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId};
 
 // ===========================================================================
@@ -111,6 +112,7 @@ impl RaisedShapeAlg<'_> {
                 // recurses params + return), so they do not gate `materialized`.
                 constraint: tp.constraint.map(|c| c.key),
                 default: tp.default.map(|d| d.key),
+                is_const: tp.is_const,
             })
             .collect();
         (
@@ -149,18 +151,23 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary::materialized_expanded_leaf(),
         )
     }
-    fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeResult {
-        let summary = summary::unknown(&raw);
-        self.result(RaisedTerm::Unknown { raw }, summary)
+    fn unknown(&mut self, value: UnknownValue) -> RaisedShapeResult {
+        let summary = summary::unknown(&value);
+        self.result(RaisedTerm::Unknown(value), summary)
     }
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeResult {
-        // The interned STRUCTURAL key is the same `Unknown { raw }` the
-        // materializer produces (byte-identical raw, so node-vs-`TypeExpr`
-        // equality is preserved); the SUMMARY is classified from the typed
-        // variant via the shared authority.
+        // The interned STRUCTURAL key is the terminal compatibility
+        // projection — raw-only identity, so node-vs-`TypeExpr` equality is
+        // preserved byte-for-byte; the SUMMARY is classified from the typed
+        // variant via the shared authority. Provenance and the `QueryError`
+        // never enter structural key identity.
         let summary = summary::opaque_sentinel(err);
-        let raw: Arc<str> = Arc::from(semantic_query_error_raw(err));
-        self.result(RaisedTerm::Unknown { raw }, summary)
+        self.result(
+            RaisedTerm::Unknown(UnknownValue::compatibility_projection(
+                semantic_query_error_raw(err),
+            )),
+            summary,
+        )
     }
     fn recursive_ref(&mut self, name: Arc<str>) -> RaisedShapeResult {
         self.result(
@@ -412,45 +419,94 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
         }
     }
 
+    fn out_as_constructor(&self, out: &RaisedShapeResult) -> Option<(RaisedFunction, bool)> {
+        match self
+            .interner
+            .terms
+            .get(out.key.0 as usize)
+            .map(|t| t.as_ref())
+        {
+            Some(RaisedTerm::ConstructorType(function)) => {
+                Some((function.clone(), out.summary.facts.materialized))
+            }
+            _ => None,
+        }
+    }
+
     fn member_property(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeResult,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: RaisedShapeResult,
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
+        let mut materialized = ty.summary.facts.materialized;
+        let key = key.map(
+            |computed| {
+                materialized &= computed.summary.facts.materialized;
+                computed.key
+            },
+            |identity| identity,
+        );
         RaisedMember {
-            materialized: ty.summary.facts.materialized,
+            materialized,
             member: RaisedObjectMember::Property {
-                name: Arc::from(name),
+                key,
                 ty: ty.key,
                 optional,
                 readonly,
                 visibility,
+                excess_origin,
                 spans,
             },
         }
     }
     fn member_method(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeResult,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: (RaisedFunction, bool),
         optional: bool,
+        method_kind: verter_type_expr::ObjectMethodKind,
+        has_implementation_body: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
-        let (function, materialized) = function;
+        let (function, mut materialized) = function;
+        let key = key.map(
+            |computed| {
+                materialized &= computed.summary.facts.materialized;
+                computed.key
+            },
+            |identity| identity,
+        );
         RaisedMember {
             materialized,
             member: RaisedObjectMember::Method {
-                name: Arc::from(name),
+                key,
                 function,
                 optional,
+                method_kind,
+                has_implementation_body,
                 visibility,
+                excess_origin,
                 spans,
             },
+        }
+    }
+    fn member_spread(&mut self, ty: RaisedShapeResult) -> RaisedMember {
+        RaisedMember {
+            materialized: ty.summary.facts.materialized,
+            member: RaisedObjectMember::Spread { ty: ty.key },
         }
     }
     fn member_call_signature(&mut self, function: (RaisedFunction, bool)) -> RaisedMember {
@@ -563,8 +619,8 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     fn infer(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
-    fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeSummary {
-        summary::unknown(&raw)
+    fn unknown(&mut self, value: UnknownValue) -> RaisedShapeSummary {
+        summary::unknown(&value)
     }
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeSummary {
         summary::opaque_sentinel(err)
@@ -695,14 +751,24 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
             materialized: out.facts.materialized,
         })
     }
+    fn out_as_constructor(&self, out: &RaisedShapeSummary) -> Option<FactsFunction> {
+        // Read the shared tag (only `constructor_to_out` tags `Constructor`).
+        (out.tag == FactShapeTag::Constructor).then_some(FactsFunction {
+            materialized: out.facts.materialized,
+        })
+    }
 
     fn member_property(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeSummary,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: RaisedShapeSummary,
         _optional: bool,
         _readonly: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> FactsMember {
         FactsMember {
@@ -711,14 +777,25 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
     fn member_method(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeSummary,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: FactsFunction,
         _optional: bool,
+        _method_kind: verter_type_expr::ObjectMethodKind,
+        _has_implementation_body: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> FactsMember {
         FactsMember {
             materialized: function.materialized,
+        }
+    }
+    fn member_spread(&mut self, ty: RaisedShapeSummary) -> FactsMember {
+        FactsMember {
+            materialized: ty.facts.materialized,
         }
     }
     fn member_call_signature(&mut self, function: FactsFunction) -> FactsMember {
@@ -752,6 +829,371 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
     fn is_empty_object(&self, out: &RaisedShapeSummary) -> bool {
         out.tag == FactShapeTag::EmptyObject
+    }
+}
+
+// ===========================================================================
+// Algebra 4 — `DeclarationFactsAlg`: the node-domain declaration-safety and
+// `typeof`-dependency facts of one node, in ONE facts-only fold (no key
+// interning). Mirrors the terminal splice pipeline's rules exactly:
+//
+// - UNSAFE leaves: `any` / `unknown` primitives, raw `Unknown` carriers,
+//   typed opaque sentinels (they materialize to `Unknown`), and synthetic
+//   slot bindings. A function whose folded return is ABSENT is unsafe.
+// - `typeof <value>` arms record their root path; every other arm combines
+//   child facts (safe = AND, paths = union).
+// ===========================================================================
+
+/// The shape tag a folded declaration-facts value carries (drives the fold's
+/// intersection arm-drop and the function/constructor rewrap inspection).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeclarationTag {
+    Other,
+    EmptyObject,
+    UnrepresentableSurface,
+    Function,
+    Constructor,
+}
+
+/// The folded declaration facts of one node.
+pub(super) struct DeclarationOut {
+    tag: DeclarationTag,
+    pub(super) safe: bool,
+    pub(super) typeof_paths:
+        std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+impl DeclarationOut {
+    fn leaf(tag: DeclarationTag) -> Self {
+        Self {
+            tag,
+            safe: true,
+            typeof_paths: std::collections::BTreeSet::new(),
+        }
+    }
+    fn unsafe_leaf() -> Self {
+        Self {
+            tag: DeclarationTag::Other,
+            safe: false,
+            typeof_paths: std::collections::BTreeSet::new(),
+        }
+    }
+    fn combine(tag: DeclarationTag, children: Vec<DeclarationOut>) -> Self {
+        let mut safe = true;
+        let mut typeof_paths = std::collections::BTreeSet::new();
+        for child in children {
+            safe &= child.safe;
+            typeof_paths.extend(child.typeof_paths);
+        }
+        Self {
+            tag,
+            safe,
+            typeof_paths,
+        }
+    }
+}
+
+/// The declaration-facts function representation: the safety fact plus the
+/// `typeof` dependency paths (the node-domain path never needs the
+/// parameter structure).
+pub(super) struct DeclarationFunction {
+    safe: bool,
+    typeof_paths: std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+/// A declaration-facts object member: only the facts it contributes.
+pub(super) struct DeclarationMember {
+    safe: bool,
+    typeof_paths: std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+/// Stateless declaration-facts algebra — no interner.
+pub(super) struct DeclarationFactsAlg;
+
+impl DeclarationFactsAlg {
+    fn function_safe(function: &FoldedFunction<DeclarationOut>) -> bool {
+        // A function with NO folded return is declaration-unsafe (the
+        // terminal pipeline never splices a return-less function type).
+        let mut safe = function.return_type.is_some();
+        for param in &function.parameters {
+            safe &= param.ty.safe;
+        }
+        if let Some(return_type) = function.return_type.as_ref() {
+            safe &= return_type.safe;
+        }
+        safe
+    }
+    fn function_paths(
+        function: &FoldedFunction<DeclarationOut>,
+    ) -> std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact> {
+        let mut paths = std::collections::BTreeSet::new();
+        for param in &function.parameters {
+            paths.extend(param.ty.typeof_paths.iter().cloned());
+        }
+        if let Some(return_type) = function.return_type.as_ref() {
+            paths.extend(return_type.typeof_paths.iter().cloned());
+        }
+        paths
+    }
+}
+
+impl RaisedShapeAlgebra for DeclarationFactsAlg {
+    type Out = DeclarationOut;
+    type Fn = DeclarationFunction;
+    type Member = DeclarationMember;
+
+    fn primitive(&mut self, kind: PrimitiveName) -> DeclarationOut {
+        match kind {
+            PrimitiveName::Any | PrimitiveName::Unknown => DeclarationOut::unsafe_leaf(),
+            _ => DeclarationOut::leaf(DeclarationTag::Other),
+        }
+    }
+    fn literal(&mut self, _value: LiteralValue) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn infer(&mut self, _name: Arc<str>) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn unknown(&mut self, _value: UnknownValue) -> DeclarationOut {
+        DeclarationOut::unsafe_leaf()
+    }
+    fn opaque_sentinel(&mut self, err: &QueryError) -> DeclarationOut {
+        let tag = if matches!(err, QueryError::UnrepresentableSurface) {
+            DeclarationTag::UnrepresentableSurface
+        } else {
+            DeclarationTag::Other
+        };
+        DeclarationOut {
+            tag,
+            ..DeclarationOut::unsafe_leaf()
+        }
+    }
+    fn recursive_ref(&mut self, _name: Arc<str>) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn reference(
+        &mut self,
+        _name: Arc<str>,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+    }
+    fn synthetic_slot_binding(
+        &mut self,
+        _carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
+    ) -> DeclarationOut {
+        DeclarationOut::unsafe_leaf()
+    }
+    fn import_type(
+        &mut self,
+        _specifier: Arc<str>,
+        _qualifier: Arc<[Arc<str>]>,
+        _typeof_query: bool,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+    }
+    fn type_of(&mut self, path: Vec<String>, type_args: Vec<DeclarationOut>) -> DeclarationOut {
+        let mut out = DeclarationOut::combine(DeclarationTag::Other, type_args);
+        if let Some(fact) = verter_type_expr::facts::TypeDependencyPathFact::from_segments(path) {
+            out.typeof_paths.insert(fact);
+        }
+        out
+    }
+
+    fn union(&mut self, members: Vec<DeclarationOut>) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, members)
+    }
+    fn intersection(&mut self, arms: Vec<DeclarationOut>) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, arms)
+    }
+    fn empty_object(&mut self) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::EmptyObject)
+    }
+    fn array(&mut self, element: DeclarationOut, _readonly: bool) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![element])
+    }
+    fn tuple(
+        &mut self,
+        elements: Vec<FoldedTupleElement<DeclarationOut>>,
+        _readonly: bool,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            elements.into_iter().map(|element| element.ty).collect(),
+        )
+    }
+    fn key_of(&mut self, base: DeclarationOut) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![base])
+    }
+    fn indexed_access(&mut self, object: DeclarationOut, index: DeclarationOut) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![object, index])
+    }
+    fn conditional(
+        &mut self,
+        check: DeclarationOut,
+        extends: DeclarationOut,
+        true_type: DeclarationOut,
+        false_type: DeclarationOut,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            vec![check, extends, true_type, false_type],
+        )
+    }
+    fn mapped(
+        &mut self,
+        _parameter: String,
+        source: DeclarationOut,
+        value: DeclarationOut,
+        _optional: MappedModifier,
+        _readonly: MappedModifier,
+        name_type: Option<DeclarationOut>,
+    ) -> DeclarationOut {
+        let mut children = vec![source, value];
+        children.extend(name_type);
+        DeclarationOut::combine(DeclarationTag::Other, children)
+    }
+    fn template_literal(
+        &mut self,
+        _quasis: Vec<String>,
+        expressions: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, expressions)
+    }
+    fn type_parameter(
+        &mut self,
+        _name: Arc<str>,
+        constraint: Option<DeclarationOut>,
+        default: Option<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            constraint.into_iter().chain(default).collect(),
+        )
+    }
+
+    fn build_function(&mut self, function: FoldedFunction<DeclarationOut>) -> DeclarationFunction {
+        DeclarationFunction {
+            safe: Self::function_safe(&function),
+            typeof_paths: Self::function_paths(&function),
+        }
+    }
+    fn function_to_out(&mut self, function: DeclarationFunction) -> DeclarationOut {
+        DeclarationOut {
+            tag: DeclarationTag::Function,
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn constructor_to_out(&mut self, function: DeclarationFunction) -> DeclarationOut {
+        DeclarationOut {
+            tag: DeclarationTag::Constructor,
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn out_as_function(&self, out: &DeclarationOut) -> Option<DeclarationFunction> {
+        (out.tag == DeclarationTag::Function).then_some(DeclarationFunction {
+            safe: out.safe,
+            typeof_paths: out.typeof_paths.clone(),
+        })
+    }
+    fn out_as_constructor(&self, out: &DeclarationOut) -> Option<DeclarationFunction> {
+        (out.tag == DeclarationTag::Constructor).then_some(DeclarationFunction {
+            safe: out.safe,
+            typeof_paths: out.typeof_paths.clone(),
+        })
+    }
+
+    fn member_property(
+        &mut self,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            DeclarationOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+        ty: DeclarationOut,
+        _optional: bool,
+        _readonly: bool,
+        _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
+        _spans: verter_type_expr::MemberSpans,
+    ) -> DeclarationMember {
+        DeclarationMember {
+            safe: ty.safe,
+            typeof_paths: ty.typeof_paths,
+        }
+    }
+    fn member_method(
+        &mut self,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            DeclarationOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+        function: DeclarationFunction,
+        _optional: bool,
+        _method_kind: verter_type_expr::ObjectMethodKind,
+        _has_implementation_body: bool,
+        _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
+        _spans: verter_type_expr::MemberSpans,
+    ) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_spread(&mut self, ty: DeclarationOut) -> DeclarationMember {
+        DeclarationMember {
+            safe: ty.safe,
+            typeof_paths: ty.typeof_paths,
+        }
+    }
+    fn member_call_signature(&mut self, function: DeclarationFunction) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_construct_signature(&mut self, function: DeclarationFunction) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_index_signature(
+        &mut self,
+        _key_name: String,
+        key_type: DeclarationOut,
+        value_type: DeclarationOut,
+        _readonly: bool,
+        _spans: verter_type_expr::IndexSignatureSpans,
+    ) -> DeclarationMember {
+        let combined = DeclarationOut::combine(DeclarationTag::Other, vec![key_type, value_type]);
+        DeclarationMember {
+            safe: combined.safe,
+            typeof_paths: combined.typeof_paths,
+        }
+    }
+    fn object_from_members(&mut self, members: Vec<DeclarationMember>) -> DeclarationOut {
+        let mut safe = true;
+        let mut typeof_paths = std::collections::BTreeSet::new();
+        for member in members {
+            safe &= member.safe;
+            typeof_paths.extend(member.typeof_paths);
+        }
+        DeclarationOut {
+            tag: DeclarationTag::Other,
+            safe,
+            typeof_paths,
+        }
+    }
+
+    fn is_object_surface_sentinel(&self, out: &DeclarationOut) -> bool {
+        out.tag == DeclarationTag::UnrepresentableSurface
+    }
+    fn is_empty_object(&self, out: &DeclarationOut) -> bool {
+        out.tag == DeclarationTag::EmptyObject
     }
 }
 
@@ -928,9 +1370,7 @@ pub(super) fn type_expr_to_key(interner: &mut ShapeInterner, expr: &TypeExpr) ->
                 .map(|a| type_expr_to_key(interner, a))
                 .collect(),
         },
-        TypeExpr::Unknown { raw } => RaisedTerm::Unknown {
-            raw: Arc::from(raw.as_str()),
-        },
+        TypeExpr::Unknown(value) => RaisedTerm::Unknown(value.clone()),
     };
     interner.intern(term)
 }
@@ -942,19 +1382,32 @@ fn object_member_to_raised(
     use verter_type_expr::ObjectMember;
     match member {
         ObjectMember::Property(property) => RaisedObjectMember::Property {
-            name: Arc::from(property.name.as_str()),
+            key: property.key.clone().map(
+                |computed| type_expr_to_key(interner, &computed),
+                |identity| identity,
+            ),
             ty: type_expr_to_key(interner, &property.ty),
             optional: property.optional,
             readonly: property.readonly,
             visibility: property.visibility,
+            excess_origin: property.excess_origin,
             spans: property.spans,
         },
         ObjectMember::Method(method) => RaisedObjectMember::Method {
-            name: Arc::from(method.name.as_str()),
+            key: method.key.clone().map(
+                |computed| type_expr_to_key(interner, &computed),
+                |identity| identity,
+            ),
             function: function_expr_to_raised(interner, &method.function),
             optional: method.optional,
+            method_kind: method.method_kind,
+            has_implementation_body: method.has_implementation_body,
             visibility: method.visibility,
+            excess_origin: method.excess_origin,
             spans: method.spans,
+        },
+        ObjectMember::Spread(spread) => RaisedObjectMember::Spread {
+            ty: type_expr_to_key(interner, &spread.ty),
         },
         ObjectMember::CallSignature(function) => {
             RaisedObjectMember::CallSignature(function_expr_to_raised(interner, function))
@@ -1001,6 +1454,7 @@ fn function_expr_to_raised(
                 .as_ref()
                 .map(|c| type_expr_to_key(interner, c)),
             default: tp.default.as_ref().map(|d| type_expr_to_key(interner, d)),
+            is_const: tp.is_const,
         })
         .collect();
     RaisedFunction {
@@ -1097,10 +1551,12 @@ pub(super) fn project_root_summary(
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
         | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::ImportType(_)
-        | SemanticNodeData::SyntheticBinding { .. } => {
+        | SemanticNodeData::SyntheticBinding { .. }
+        | SemanticNodeData::DeferredCallable(_) => {
             RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
         }
 
@@ -1115,18 +1571,30 @@ pub(super) fn project_root_summary(
 
         SemanticNodeData::TypeOf(_) => RootOnlySummary::from_summary(summary::type_of()),
 
-        // Required-edge `?` parity with `fold_node`: the operand child must raise
-        // for the operator to, so a dangling operand aborts BOTH (the root class
-        // itself does not read the child — only its `Some`/`None` does). Object
-        // member values stay short-circuited below, so this set mirrors EXACTLY
-        // `fold_node`'s `?`-propagating required edges, with no member deep-walk.
+        // Required-edge `?` parity with `fold_node`, SCOPED to the operator
+        // operands (KeyOf base, IndexedAccess object/index, the four Conditional
+        // operands, Mapped source/value/name_remap, Array element, ConstructorType
+        // signature): a dangling OPERAND aborts BOTH (the root class itself does
+        // not read the child — only its `Some`/`None` does).
+        //
+        // DOCUMENTED ASYMMETRY: `fold_node` ALSO fails a value-composite on a
+        // PRESENT-but-unraisable child (union/intersection members, tuple
+        // elements, template expressions, function params/return/type-param
+        // slots, standalone type-param constraint/default) — this root-only
+        // projection deliberately does NOT mirror those edges (it classifies the
+        // ROOT shape from placeholder facts, it is NOT a raisability oracle), so
+        // it returns `Some` for exactly those malformed composites the full fold
+        // fails. The asymmetry is pinned in
+        // `root_only_projection_returns_none_on_malformed_required_child_like_full_fold`.
+        // Object member values stay short-circuited below, with no member
+        // deep-walk.
         SemanticNodeData::KeyOf { base } => {
             project_root_summary(dispatch, *base, active)?;
             RootOnlySummary::from_summary(summary::key_of(root_only_placeholder_facts()))
         }
         SemanticNodeData::IndexedAccess { object, index } => {
             project_root_summary(dispatch, *object, active)?;
-            if let IndexKey::TypeNode(index_node) = index {
+            if let IndexKey::Computed(index_node) = index {
                 project_root_summary(dispatch, *index_node, active)?;
             }
             RootOnlySummary::from_summary(summary::indexed_access(
@@ -1152,7 +1620,18 @@ pub(super) fn project_root_summary(
                 root_only_placeholder_facts(),
             ))
         }
-        SemanticNodeData::Function { .. } => RootOnlySummary::from_summary(summary::function(true)),
+        // Root-classification only (see the DOCUMENTED ASYMMETRY note above):
+        // function params/return/type-param slots and tuple/union members are
+        // NOT probed — the full fold fails those malformed composites while
+        // this projection still answers the root class.
+        SemanticNodeData::Signature { kind, .. } => match kind {
+            crate::semantic_query::SignatureKind::Call => {
+                RootOnlySummary::from_summary(summary::function(true))
+            }
+            crate::semantic_query::SignatureKind::Construct => {
+                RootOnlySummary::from_summary(summary::constructor(true))
+            }
+        },
         SemanticNodeData::Array { element, .. } => {
             project_root_summary(dispatch, *element, active)?;
             RootOnlySummary::from_summary(summary::array(root_only_placeholder_facts()))
@@ -1163,8 +1642,8 @@ pub(super) fn project_root_summary(
         SemanticNodeData::Union(_) => {
             RootOnlySummary::from_summary(summary::union(std::iter::empty::<RaisedShapeFacts>()))
         }
-        SemanticNodeData::RawFallback { raw } => {
-            RootOnlySummary::from_summary(summary::unknown(raw))
+        SemanticNodeData::RawFallback { value } => {
+            RootOnlySummary::from_summary(summary::unknown(value))
         }
 
         SemanticNodeData::Alias(target) => {
@@ -1185,10 +1664,12 @@ pub(super) fn project_root_summary(
             return project_root_summary(dispatch, merged, active);
         }
         SemanticNodeData::Intersection(members) => {
-            // filter_map recurse (root-only), drop the SEMANTIC_OBJECT_SURFACE
-            // sentinel + empty-object arms, then collapse: empty -> empty object,
-            // len==1 -> that arm, else Intersection — identical to `fold_node`'s
-            // Intersection arm, but each arm classified root-only.
+            // filter_map recurse (root-only), drop the ObjectSurfaceSentinel +
+            // empty-object arms, then collapse: empty -> empty object,
+            // len==1 -> that arm, else Intersection — the same COLLAPSE shape as
+            // `fold_node`'s Intersection arm, but each arm classified root-only,
+            // and a DANGLING arm is dropped here while the full fold fails the
+            // whole composite (the DOCUMENTED ASYMMETRY).
             let mut arms: Vec<RootOnlySummary> = members
                 .iter()
                 .filter_map(|member| project_root_summary(dispatch, *member, active))
@@ -1226,28 +1707,12 @@ pub(super) fn project_root_summary(
                 value.root_semantic_miss_sentinel,
             ))
         }
-        SemanticNodeData::ConstructorType { signature } => {
-            // The rewrap reads the SIGNATURE child: a `Function` signature
-            // rewraps to a `ConstructorType` (root Other); any other signature
-            // shape passes through unchanged (its own root class). Mirror
-            // `fold_node`'s `?` on the signature.
-            let signature = project_root_summary(dispatch, *signature, active)?;
-            if signature.tag == FactShapeTag::Function {
-                RootOnlySummary::from_summary(summary::constructor(true))
-            } else {
-                signature
-            }
-        }
         SemanticNodeData::Object(surface) => {
-            if surface.members.is_empty()
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
-            {
+            if surface.closed().is_empty() {
                 RootOnlySummary::from_summary(summary::empty_object())
-            } else if surface.members.is_empty()
+            } else if surface.positive_members().is_empty()
                 && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
+                && !surface.has_known_index_signature()
                 && surface.call_signatures.len() == 1
             {
                 // Single-call-signature surface IS that signature's value
@@ -1271,9 +1736,9 @@ pub(super) fn project_root_summary(
                 // `UnrepresentableSurface` sentinel (tag `ObjectSurfaceSentinel`,
                 // root `Other`). The signature scan runs ONLY when a property /
                 // index has not already settled it (short-circuit `||`).
-                let has_member = !surface.members.is_empty()
+                let has_member = !surface.positive_members().is_empty()
                     || !surface.index_signatures.is_empty()
-                    || surface.has_index_signature
+                    || surface.has_known_index_signature()
                     || surface
                         .call_signatures
                         .iter()
@@ -1294,6 +1759,9 @@ pub(super) fn project_root_summary(
                 }
             }
         }
+        SemanticNodeData::ObjectSpreadProgram(_) => RootOnlySummary::from_summary(
+            summary::opaque_sentinel(&QueryError::UnrepresentableSurface),
+        ),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { .. } => {
                 RootOnlySummary::from_summary(summary::materialized_expanded_leaf())

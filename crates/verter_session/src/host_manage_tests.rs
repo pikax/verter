@@ -13411,7 +13411,9 @@ export const defaults: Props = { label: 'ok' }
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("prepared type decl should materialize on demand");
     assert!(
-        prepared_type.member_index.contains_key("label"),
+        prepared_type
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
         "on-demand prepared type materialization should retain the shallow member index",
     );
 
@@ -17259,12 +17261,16 @@ fn bundle_fact_validation_round_trip() {
     // changed). We verify the bundle was invalidated by checking the prepared
     // decl's member index reflects the new content.
     assert!(
-        updated.member_index.contains_key("title"),
+        updated
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("title")),
         "updated prepared decl should contain the new property 'title', got: {:?}",
         updated.member_index.keys().collect::<Vec<_>>()
     );
     assert!(
-        !updated.member_index.contains_key("label"),
+        !updated
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
         "updated prepared decl should NOT contain the old property 'label', got: {:?}",
         updated.member_index.keys().collect::<Vec<_>>()
     );

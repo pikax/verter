@@ -1,7 +1,7 @@
 //! Transit-Shallow Publication — primary gate.
 //!
 //! Counts `OriginEdgeKind::ProjectMember` edges in the audit's
-//! derivation subgraph whose `OriginEdgeMetaDto::ProjectMember.member_name`
+//! derivation subgraph whose `OriginEdgeMetaDto::ProjectMember.member_key`
 //! is `outputSchema` or `execute` — the exact pattern the ChatMessages
 //! cold-seq corpus exposes. Hermetic SFC fixture that mimics
 //! ChatMessages's slot shape (Mapped over `keyof` of an imported
@@ -78,7 +78,7 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
         .expect("footprint_capture is enabled in this harness");
 
     // Sum ProjectMember edges in the derivation subgraph whose
-    // member_name is one of the leak keys.
+    // member_key is one of the leak keys.
     //
     // R18 — scope the leak counter to intermediate
     // provenances (`PathProjection` / `KeyOfEnumerated` /
@@ -96,7 +96,7 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
             continue;
         }
         if let OriginEdgeMetaDto::ProjectMember {
-            member_name,
+            member_key,
             provenance,
         } = &edge.meta
         {
@@ -106,22 +106,22 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
             ) {
                 continue;
             }
-            match member_name.as_ref() {
-                "outputSchema" => outputschema_count += 1,
-                "execute" => execute_count += 1,
+            match member_key.as_string() {
+                Some("outputSchema") => outputschema_count += 1,
+                Some("execute") => execute_count += 1,
                 _ => {}
             }
         }
     }
 
     // Also scan the `projections` records (paths containing
-    // `ProjectPathSegment::Member { name }`) — the diagnostic report
+    // `ProjectPathSegment::Member { key }`) — the diagnostic report
     // showed both shapes contribute to the corpus grep count.
     let mut projection_path_count = 0usize;
     for projection in footprint.projections.iter() {
         for seg in projection.path.iter() {
-            if let verter_audit::origin_graph::ProjectPathSegment::Member { name } = seg {
-                if name.as_ref() == "outputSchema" || name.as_ref() == "execute" {
+            if let verter_audit::origin_graph::ProjectPathSegment::Member { key } = seg {
+                if key.as_string() == Some("outputSchema") || key.as_string() == Some("execute") {
                     projection_path_count += 1;
                 }
             }

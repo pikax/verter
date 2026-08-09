@@ -112,6 +112,46 @@ pub struct TemplateAnalysisSnapshot {
     /// directive-keyword doc hovers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub svelte_directives: Vec<SvelteDirectiveInfo>,
+
+    /// Parsed typed value-expression records referenced by template usage
+    /// locators. Internal semantic IR is rebuilt with the compiler snapshot;
+    /// the public template-analysis wire remains source-analysis only.
+    #[serde(skip)]
+    pub expression_records: Vec<TemplateExpressionRecord>,
+}
+
+/// Index into [`TemplateAnalysisSnapshot::expression_records`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TemplateExpressionLocator(pub u32);
+
+/// One parsed typed template-expression record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateExpressionRecord {
+    pub span: Span,
+    pub expression: verter_type_expr::IndexedValueExpression,
+}
+
+impl TemplateAnalysisSnapshot {
+    #[must_use]
+    pub fn expression(
+        &self,
+        locator: TemplateExpressionLocator,
+    ) -> Option<&verter_type_expr::IndexedValueExpression> {
+        self.expression_records
+            .get(locator.0 as usize)
+            .map(|record| &record.expression)
+    }
+
+    #[must_use]
+    pub fn expression_at_span(
+        &self,
+        span: Span,
+    ) -> Option<&verter_type_expr::IndexedValueExpression> {
+        self.expression_records
+            .iter()
+            .find(|record| record.span == span)
+            .map(|record| &record.expression)
+    }
 }
 
 /// A Svelte `{#snippet name(params)}` declaration (typed template IR).
@@ -241,6 +281,8 @@ pub struct TemplatePropUsage {
     pub is_bound: bool,
     /// Raw expression/value text when available.
     pub expression: Option<String>,
+    /// Parsed typed expression record; `None` for static/absent values.
+    pub expression_locator: Option<TemplateExpressionLocator>,
     /// Constness classification of the expression.
     pub constness: PropValueConstness,
     /// Bindings referenced in the prop expression.
@@ -1536,6 +1578,9 @@ impl<'de> serde::Deserialize<'de> for TemplatePropUsage {
             name: w.name,
             is_bound: w.is_bound,
             expression: w.expression,
+            // Indexed expression records are retained compiler/session IR and
+            // are intentionally absent from the public analysis wire.
+            expression_locator: None,
             constness: w.constness,
             referenced_bindings: w.referenced_bindings,
             from_spread: w.from_spread,
@@ -2417,6 +2462,7 @@ mod tests {
                     name: "msg".to_string(),
                     is_bound: false,
                     expression: Some("hello".to_string()),
+                    expression_locator: None,
                     constness: PropValueConstness::Const,
                     referenced_bindings: vec![],
                     from_spread: false,
@@ -2697,6 +2743,7 @@ mod tests {
             name: "".to_string(),
             is_bound: true,
             expression: Some("obj".to_string()),
+            expression_locator: None,
             constness: PropValueConstness::Unknown,
             referenced_bindings: vec!["obj".to_string()],
             from_spread: true,
@@ -3243,6 +3290,7 @@ mod tests {
                 name: "foo".into(),
                 is_bound: true,
                 expression: Some("foo".into()),
+                expression_locator: None,
                 constness: PropValueConstness::Const,
                 referenced_bindings: vec![],
                 from_spread: false,

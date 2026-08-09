@@ -121,3 +121,15 @@ export function ap15GenericConstraintLength<T extends string>(x: T) {
   return x.length;
 }
 export type Ap15GenericConstraintLengthResult = ReturnType<typeof ap15GenericConstraintLength>;
+
+// ----- 16) Callable apparent surface -> number ---------------------------
+// A value whose type carries call signatures exposes the members of the
+// standard-library `Function` interface. `.length` is one of them.
+export function ap16Callable(name: string): string {
+  return name;
+}
+export function ap16CallableApparentLength() {
+  const f = ap16Callable;
+  return f.length;
+}
+export type Ap16CallableApparentLengthResult = ReturnType<typeof ap16CallableApparentLength>;

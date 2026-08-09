@@ -134,7 +134,13 @@ impl TypeResolutionRequestError {
             | QueryError::RaiseAliasCycle
             | QueryError::TypeParamCycle
             | QueryError::RaiseMiss
+            | QueryError::OpenSurface
             | QueryError::UnrepresentableSurface
+            // A POSITION the flow substrate has no model for is a
+            // well-formed "no resolved node", exactly like `Miss`: the
+            // flow rail already folded its own partial/ReturnOnly rails
+            // at the consumer boundary, so it is not a request FAULT.
+            | QueryError::UnmodeledPosition
             | QueryError::UnrepresentableSurfaceMember => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
@@ -471,6 +477,9 @@ fn noop_type_resolution_record(
 fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
     match key {
         SemanticQueryKey::ProjectPath { context, .. } => context.mode,
+        SemanticQueryKey::ProjectObjectSpread { context, .. } => {
+            context.projection_reduction().mode
+        }
         SemanticQueryKey::ProjectMember { mode, .. }
         | SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
         SemanticQueryKey::ResolveMacroPayload { context, .. } => context.mode,
@@ -491,9 +500,18 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::TemplateLiteralReduce { .. }
         | SemanticQueryKey::FlowNarrowingAt { .. }
         | SemanticQueryKey::ContextualTypeAt { .. }
+        // FlowReturn is the whole-function return evaluation — mode-free by
+        // design (the canonical whole-return node; consumers project under
+        // their own mode).
+        | SemanticQueryKey::FlowReturn(_)
+        // ResolveCall is the call/construct applicability resolution —
+        // mode-free by design (the selected occurrence + final
+        // substitution; consumers project under their own mode).
+        | SemanticQueryKey::ResolveCall(_)
         // LowerLocator is the fixed locator-shape lowering — mode-free by
         // design (no projection demand to consume a budget).
         | SemanticQueryKey::LowerLocator { .. }
+        | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
         | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }

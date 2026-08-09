@@ -437,6 +437,7 @@ pub(crate) fn classify_resolution_observation(fact: &FactVersionRef) -> Resoluti
         | FactVersionRef::RouteSurface(_)
         | FactVersionRef::ProjectGeneration { .. }
         | FactVersionRef::DomainGeneration(_)
+        | FactVersionRef::ProgramAnalysis(_)
         | FactVersionRef::StrictSelfRootWorld(_) => ResolutionEdgeClass::Terminal,
     }
 }
