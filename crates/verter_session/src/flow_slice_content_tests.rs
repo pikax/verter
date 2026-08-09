@@ -24,7 +24,7 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceGuard, SliceObjectEntry, SliceObjectMember, SliceStatement, SliceUnsupported,
+    SliceGuard, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -445,6 +445,49 @@ fn try_lowers_clause_regions() {
     // The catch falls through, so the try does — and the body has no
     // trailing return.
     assert!(node.can_fall_through);
+}
+
+fn pending_break_undefined_flag(region: &SliceRegion) -> Option<bool> {
+    region
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Try {
+                pending_break_contributes_undefined,
+                ..
+            } => Some(*pending_break_contributes_undefined),
+            SliceStatement::Labeled { body, .. } => pending_break_undefined_flag(body),
+            _ => None,
+        })
+}
+
+#[test]
+fn labelled_break_undefined_uses_a_guaranteed_return_suffix() {
+    let wrapped = content_for(
+        "function makeProps() { OUT: INNER: { try { break OUT; } finally { return \"a\" as const; } } }",
+        "makeProps",
+    );
+    assert_eq!(pending_break_undefined_flag(&wrapped.body), Some(true));
+
+    let conditional = content_for(
+        "function makeProps(flag: boolean) { L: try { break L; } finally { return \"a\" as const; } if (flag) return \"b\" as const; }",
+        "makeProps",
+    );
+    assert_eq!(
+        pending_break_undefined_flag(&conditional.body),
+        Some(true),
+        "a conditional suffix return leaves the function-end path alive"
+    );
+
+    let direct = content_for(
+        "function makeProps() { L: try { break L; } finally { return \"a\" as const; } return \"b\" as const; }",
+        "makeProps",
+    );
+    assert_eq!(
+        pending_break_undefined_flag(&direct.body),
+        Some(false),
+        "a guaranteed suffix return consumes the function-end path"
+    );
 }
 
 /// @ai-generated - return of a parameter lowers to the Param carrier with its annotation

@@ -2752,6 +2752,19 @@ fn signature_answer_is_frame_shadowed(
         .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
 }
 
+/// One branch-local narrowing verdict. `Impossible` is distinct from
+/// `Unchanged`: a conjunction whose later fact removes its last survivor is a
+/// dead alternative, not an alternative that contributes the earlier overlay
+/// to an enclosing disjunction.
+enum GuardNarrowing {
+    Unchanged,
+    Narrowed(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    ),
+    Impossible,
+}
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
@@ -4474,6 +4487,55 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
             return declared;
         }
+        // A fresh, non-spread object carries exact own-key evidence that
+        // assignability alone cannot recover when optional members make two
+        // declared arms mutually assignable. Prefer the comparable arms whose
+        // known member set has the greatest overlap with the literal's exact
+        // surface. Spread programs deliberately do not enter this rule: their
+        // final key set is construction-dependent, so the declared union stays
+        // intact unless ordinary strict dominance proves otherwise.
+        if survivors.len() > 1 {
+            if let Some(SemanticNodeData::Object(init_view)) =
+                self.dispatch.graph().node_data(init).as_deref()
+            {
+                let scores: Vec<(SemanticNodeId, usize)> = survivors
+                    .iter()
+                    .copied()
+                    .map(|arm| {
+                        let score = self
+                            .dispatch
+                            .resolve_typeinfo_surface_view(
+                                arm,
+                                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                            )
+                            .map(|candidate| {
+                                candidate
+                                    .positive_members()
+                                    .iter()
+                                    .filter(|member| {
+                                        member.key.cloned_known().is_some_and(|key| {
+                                            matches!(
+                                                init_view.project_known_key(&key),
+                                                crate::semantic_query::SurfaceKeyProjection::Exact(_)
+                                            )
+                                        })
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        (arm, score)
+                    })
+                    .collect();
+                let max_score = scores.iter().map(|(_, score)| *score).max().unwrap_or(0);
+                if scores.iter().any(|(_, score)| *score < max_score) {
+                    survivors.retain(|arm| {
+                        scores
+                            .iter()
+                            .any(|(candidate, score)| candidate == arm && *score == max_score)
+                    });
+                }
+            }
+        }
         // When multiple comparable arms overlap, retain the provably most
         // specific constituents. A fresh object can satisfy both
         // `{ kind: string }` and `{ kind: "b"; b: number }`; the latter is
@@ -4613,84 +4675,77 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         guard: &crate::flow_slice_content::SliceGuard,
         positive: bool,
-    ) {
+    ) -> bool {
         use crate::flow_slice_content::SliceGuard;
-        match guard {
-            SliceGuard::None => {}
+        let fact = match guard {
+            SliceGuard::None => return true,
             SliceGuard::Typeof {
                 subject,
                 kind,
                 negated,
-            } => {
-                if let Some(entry) = self.narrow_typeof(subject, *kind, *negated == positive) {
-                    self.narrowings.push(entry);
-                }
-            }
+            } => self.narrow_typeof(subject, *kind, *negated == positive),
             SliceGuard::Truthy { subject, negated } => {
-                if let Some(entry) = self.narrow_truthy(subject, *negated == positive) {
-                    self.narrowings.push(entry);
-                }
+                self.narrow_truthy(subject, *negated == positive)
             }
             SliceGuard::EqLiteral {
                 subject,
                 literal,
                 negated,
-            } => {
-                if let Some(entry) = self.narrow_eq_literal(subject, literal, *negated == positive)
-                {
-                    self.narrowings.push(entry);
-                }
-            }
+            } => self.narrow_eq_literal(subject, literal, *negated == positive),
             SliceGuard::Instanceof {
                 subject,
                 ctor,
                 negated,
-            } => {
-                if let Some(entry) = self.narrow_instanceof(subject, ctor, *negated == positive) {
-                    self.narrowings.push(entry);
-                }
-            }
+            } => self.narrow_instanceof(subject, ctor, *negated == positive),
             SliceGuard::In {
                 key,
                 subject,
                 negated,
-            } => {
-                if let Some(entry) = self.narrow_in(key, subject, *negated == positive) {
-                    self.narrowings.push(entry);
-                }
-            }
+            } => self.narrow_in(key, subject, *negated == positive),
             SliceGuard::TypePredicate {
                 subject,
                 target,
                 negated,
-            } => {
-                if let Some(entry) =
-                    self.narrow_to_predicate_target(subject, target, *negated == positive)
-                {
-                    self.narrowings.push(entry);
-                }
-            }
+            } => self.narrow_to_predicate_target(subject, target, *negated == positive),
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
             // symmetry the lowering's `!` uses).
             SliceGuard::And(parts) => {
                 if positive {
+                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        self.apply_guard_scoped(part, true);
+                        if !self.apply_guard_scoped(part, true) {
+                            self.narrowings.truncate(base);
+                            return false;
+                        }
                     }
+                    return true;
                 } else {
-                    self.apply_guard_union(parts, false);
+                    return self.apply_guard_union(parts, false);
                 }
             }
             SliceGuard::Or(parts) => {
                 if positive {
-                    self.apply_guard_union(parts, true);
+                    return self.apply_guard_union(parts, true);
                 } else {
+                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        self.apply_guard_scoped(part, false);
+                        if !self.apply_guard_scoped(part, false) {
+                            self.narrowings.truncate(base);
+                            return false;
+                        }
                     }
+                    return true;
                 }
             }
+        };
+        match fact {
+            GuardNarrowing::Unchanged => true,
+            GuardNarrowing::Narrowed(subject, node) => {
+                self.narrowings.push((subject, node));
+                true
+            }
+            GuardNarrowing::Impossible => false,
         }
     }
 
@@ -4704,7 +4759,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         parts: &[crate::flow_slice_content::SliceGuard],
         positive: bool,
-    ) {
+    ) -> bool {
         let mut alternatives: Vec<
             Vec<(
                 crate::flow_slice_content::SliceNarrowSubject,
@@ -4713,8 +4768,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         > = Vec::with_capacity(parts.len());
         for part in parts.iter() {
             let base = self.narrowings.len();
-            self.apply_guard_scoped(part, positive);
+            let possible = self.apply_guard_scoped(part, positive);
             let applied = self.narrowings.split_off(base);
+            if !possible {
+                continue;
+            }
             let mut final_overlay = Vec::with_capacity(applied.len());
             for (subject, node) in applied {
                 match final_overlay
@@ -4726,6 +4784,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             alternatives.push(final_overlay);
+        }
+        if alternatives.is_empty() {
+            return false;
         }
         let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
@@ -4758,42 +4819,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .intern_normalized_union_or_intersection(&nodes, true);
             self.narrowings.push((subject, node));
         }
+        true
     }
 
     /// Filter `subject`'s arms by a per-arm predicate, joining the
-    /// survivors back into the narrow's node. `None` — the guard
-    /// establishes nothing — when the filter keeps everything (no fact),
-    /// drops everything (the branch is dead; publishing the unnarrowed
-    /// type stays the conservative pre-guard answer rather than a
-    /// fabricated `never` the union join would keep as a visible arm),
-    /// or the filter itself cannot decide (an undecided relation, a
-    /// failed projection).
+    /// survivors back into the narrow's node. An empty survivor set is an
+    /// impossible branch, distinct from an unchanged/undecidable fact, so a
+    /// disjunction can omit the dead alternative without retaining an
+    /// intermediate conjunction overlay.
     fn narrow_arms_by(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         entry_subject: &crate::flow_slice_content::SliceNarrowSubject,
         mut keep: impl FnMut(&mut Self, SemanticNodeId) -> Option<bool>,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
-        let current = self.subject_current_node(subject)?;
+    ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
         let arms = self.union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
             match keep(self, *arm) {
                 Some(true) => survivors.push(*arm),
                 Some(false) => {}
-                None => return None,
+                None => return GuardNarrowing::Unchanged,
             }
         }
-        if survivors.len() == arms.len() || survivors.is_empty() {
-            return None;
+        if survivors.is_empty() {
+            return GuardNarrowing::Impossible;
+        }
+        if survivors.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
         }
         let node = self
             .dispatch
             .intern_normalized_union_or_intersection(&survivors, true);
-        Some((entry_subject.clone(), node))
+        GuardNarrowing::Narrowed(entry_subject.clone(), node)
     }
 
     /// `typeof subject === "kind"`: keep the arms whose runtime type the
@@ -4803,10 +4864,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         kind: crate::flow_slice_content::SliceTypeofKind,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
+    ) -> GuardNarrowing {
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(this.arm_typeof_matches(arm, kind) != negated)
         })
@@ -4860,10 +4918,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
+    ) -> GuardNarrowing {
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(this.arm_is_definitely_falsy(arm) == negated)
         })
@@ -4902,11 +4957,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         literal: &crate::flow_slice_content::SliceGuardLiteral,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
-        let literal_ty = guard_literal_type_expr(literal)?;
+    ) -> GuardNarrowing {
+        let Some(literal_ty) = guard_literal_type_expr(literal) else {
+            return GuardNarrowing::Unchanged;
+        };
         let literal_node = self.lower_body_type(&literal_ty);
         if subject.path.is_empty() {
             let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
@@ -4914,17 +4968,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let backward = this.assignable(literal_node, arm)?;
                 Some((forward || backward) != negated)
             });
-            if narrowed.is_none() && !negated {
+            if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
                 // No arm was filtered. The literal can still be a STRICT
                 // subtype of the subject's whole type — then the literal
                 // IS the narrow (`x: string` guarded by `=== "a"` reads
                 // `"a"` on the positive edge). A mutually-assignable
                 // subject (`any`) establishes nothing.
-                let current = self.subject_current_node(subject)?;
+                let Some(current) = self.subject_current_node(subject) else {
+                    return GuardNarrowing::Unchanged;
+                };
                 if self.assignable(literal_node, current) == Some(true)
                     && self.assignable(current, literal_node) != Some(true)
                 {
-                    return Some((subject.clone(), literal_node));
+                    return GuardNarrowing::Narrowed(subject.clone(), literal_node);
                 }
             }
             narrowed
@@ -5074,20 +5130,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         ctor: &Arc<str>,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
+    ) -> GuardNarrowing {
         let ctor_ty = verter_type_expr::TypeExpr::Ref {
             name: Arc::clone(ctor),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
-        let instance = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        let Some(instance) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
             self.canonical,
             self.owner,
             &ctor_ty,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
+        ) else {
+            return GuardNarrowing::Unchanged;
+        };
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(this.assignable(arm, instance)? != negated)
         })
@@ -5102,10 +5157,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         key: &Arc<str>,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
+    ) -> GuardNarrowing {
         let segments: [Arc<str>; 1] = [Arc::clone(key)];
         self.narrow_arms_by(subject, subject, |this, arm| {
             let carries = this
@@ -5132,19 +5184,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         target: &crate::flow_slice_content::GatedType,
         negated: bool,
-    ) -> Option<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
+    ) -> GuardNarrowing {
         if target
             .shadowed()
             .iter()
             .any(|name| self.owner_scope_answers_name(name))
         {
-            return None;
+            return GuardNarrowing::Unchanged;
         }
         let target_node = self.lower_body_type(target.ty());
-        let current = self.subject_current_node(subject)?;
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
         if !negated {
             let arms = self.union_arms_or_self(current);
             let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
@@ -5152,22 +5203,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 match self.assignable(*arm, target_node) {
                     Some(true) => survivors.push(*arm),
                     Some(false) => {}
-                    None => return None,
+                    None => return GuardNarrowing::Unchanged,
                 }
             }
             if !survivors.is_empty() {
                 if survivors.len() == arms.len() {
-                    return None;
+                    return GuardNarrowing::Unchanged;
                 }
                 let node = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&survivors, true);
-                return Some((subject.clone(), node));
+                return GuardNarrowing::Narrowed(subject.clone(), node);
             }
             if self.assignable(target_node, current) == Some(true) {
-                return Some((subject.clone(), target_node));
+                return GuardNarrowing::Narrowed(subject.clone(), target_node);
             }
-            return None;
+            return GuardNarrowing::Impossible;
         }
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(this.assignable(arm, target_node)? != negated)
@@ -5619,17 +5670,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             match &case.test {
                                 // The dispatch edge: the discriminant IS
                                 // this test.
-                                Some(test) => {
-                                    if let Some((fact_subject, node)) =
-                                        self.narrow_eq_literal(subject, test, false)
-                                    {
+                                Some(test) => match self.narrow_eq_literal(subject, test, false) {
+                                    GuardNarrowing::Narrowed(fact_subject, node) => {
                                         Self::bake_narrow_into_state(
                                             &mut dispatch,
                                             &fact_subject,
                                             node,
                                         );
                                     }
-                                }
+                                    GuardNarrowing::Impossible => dead_dispatch = true,
+                                    GuardNarrowing::Unchanged => {}
+                                },
                                 // The default clause's dispatch edge: the
                                 // discriminant minus every test.
                                 None => {
@@ -6303,8 +6354,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Some(target) => self.narrow_to_predicate_target(subject, target, false),
                         None => self.narrow_truthy(subject, false),
                     };
-                    if let Some(entry) = fact {
-                        self.narrowings.push(entry);
+                    match fact {
+                        GuardNarrowing::Narrowed(subject, node) => {
+                            self.narrowings.push((subject, node));
+                        }
+                        GuardNarrowing::Impossible => path_alive = false,
+                        GuardNarrowing::Unchanged => {}
                     }
                 }
                 crate::flow_slice_content::SliceStatement::TransparentLoop => {}
@@ -6316,6 +6371,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                             crate::flow_slice_content::SliceUnsupported::Jump => {
                                 FlowReturnUnsupported::Jump
+                            }
+                            crate::flow_slice_content::SliceUnsupported::InvokedClosureEffect => {
+                                FlowReturnUnsupported::InvokedClosureEffect
                             }
                             crate::flow_slice_content::SliceUnsupported::With => {
                                 FlowReturnUnsupported::With
@@ -6415,6 +6473,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        mutable_capture_authorities: &[crate::flow_slice_content::SliceCaptureAuthority],
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
@@ -6546,7 +6605,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // The captured function-scope layer: the enclosing parameters BY
         // NAME, overlaid by the enclosing `var` layer (a redeclaring
         // enclosing `var` shares the parameter's slot and still wins).
+        let mut captured_locals = self.locals.clone();
         let mut captured_var_locals = self.var_locals.clone();
+        for authority in mutable_capture_authorities {
+            let node = if authority
+                .declared
+                .shadowed()
+                .iter()
+                .any(|name| self.owner_scope_answers_name(name))
+            {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                self.unmodeled_position()
+            } else {
+                self.lower_body_type(authority.declared.ty())
+            };
+            captured_locals.insert(authority.name.to_string(), node);
+        }
         for (ordinal, param) in self.param_names.iter().enumerate() {
             let (Some(name), Some(node)) = (param.name.as_ref(), self.params.get(ordinal)) else {
                 continue;
@@ -6566,7 +6642,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
-                locals: self.locals.clone(),
+                locals: captured_locals,
                 declared_locals: self.declared_locals.clone(),
                 var_locals: captured_var_locals,
                 var_declared_locals: self.var_declared_locals.clone(),
@@ -6932,6 +7008,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,
                 type_parameters,
+                mutable_capture_authorities,
                 declared_return,
                 body,
                 can_fall_through,
@@ -6943,6 +7020,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 Positional::Value(self.eval_nested_function_signature(
                     nested_params,
                     type_parameters,
+                    mutable_capture_authorities,
                     declared_return.as_ref(),
                     body,
                     *can_fall_through,

@@ -1682,6 +1682,9 @@ pub enum FlowReturnUnsupported {
     Loop,
     /// A `break` / `continue` crossing the modeled region.
     Jump,
+    /// A directly invoked closure statement whose captured flow effect is not
+    /// represented by the sequential statement evaluator.
+    InvokedClosureEffect,
     /// A `with` statement.
     With,
     /// A module-level statement inside the body.

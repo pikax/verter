@@ -2054,6 +2054,12 @@ const OPEN_DEBTS: &[&str] = &[
     // The macro lane correctly rejects a generator return, but the TSX lane
     // faults with the same code — the consumer-reach debt class.
     "X19_generator_yield",
+    // A return-bearing loop remains outside the value-inference surface. The
+    // NoValue refusal is honest until loop-owned break/return joining exists.
+    "X82_loop_break_finally_return_awaits_return_bearing_loop_support",
+    // A scalar literal is correctly rejected as a props macro type, but that
+    // runtime diagnostic must not delete the file's IDE TSX surface.
+    "E05_scalar_flow_answer_keeps_tsx_surface",
     // ── TypeScript semantics: mapped heritage (index signature, nested builtin) ──
     // The mapped route over an index-signature heritage interface drops the
     // index signature and publishes complete; the direct-alias route drops it
@@ -2094,15 +2100,15 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 61, 57, 1),
+    (Owner::U6ValueInference, 68, 63, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
-    (Owner::U6FlowReturnSubstrate, 53, 40, 2),
+    (Owner::U6FlowReturnSubstrate, 55, 41, 2),
     (Owner::U6NarrowTypeof, 14, 14, 0),
-    (Owner::U6NarrowLattice, 3, 3, 0),
+    (Owner::U6NarrowLattice, 4, 4, 0),
     (Owner::U6NarrowSubstitution, 5, 5, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
-    (Owner::SharedCompilePipeline, 7, 1, 6),
+    (Owner::SharedCompilePipeline, 8, 1, 7),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];
 
@@ -2224,6 +2230,7 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
+    "E05_scalar_flow_answer_keeps_tsx_surface",
     // The generator-return shape: the macro lane's rejection is correct, the
     // TSX lane fault is not.
     "X19_generator_yield",

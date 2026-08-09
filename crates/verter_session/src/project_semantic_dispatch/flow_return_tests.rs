@@ -4194,19 +4194,22 @@ fn expect_clean_flow_value(script: &str) -> verter_type_expr::TypeExpr {
 }
 
 #[track_caller]
-fn expect_refused_flow(script: &str) {
+fn expect_refused_flow_as(script: &str, expected: crate::semantic_query::FlowReturnUnsupported) {
     match flow_source_probe(script) {
         FlowSourceProbe::NoValue { error, candidates } => {
             assert_eq!(
                 error,
-                crate::semantic_query::FlowReturnFailure::Unsupported(
-                    crate::semantic_query::FlowReturnUnsupported::Loop,
-                )
+                crate::semantic_query::FlowReturnFailure::Unsupported(expected)
             );
             assert_eq!(candidates, 0, "a refusal must not admit a candidate");
         }
         other => panic!("expected a fail-closed flow refusal, got {other:?}"),
     }
+}
+
+#[track_caller]
+fn expect_refused_flow(script: &str) {
+    expect_refused_flow_as(script, crate::semantic_query::FlowReturnUnsupported::Loop);
 }
 
 #[test]
@@ -4238,6 +4241,29 @@ fn flow_return_guard_union_joins_each_alternatives_final_overlay() {
     }
 }
 
+/// The corpus can assert only that `v` is a union. Pin the exact surviving
+/// arms: an impossible conjunction contributes no intermediate `string`
+/// overlay to the enclosing three-way disjunction.
+#[test]
+fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: string | number | boolean) { if (!((typeof x === \"string\" && typeof x === \"number\") || typeof x === \"number\" || typeof x === \"boolean\")) throw 0; return { v: x } }",
+    );
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+    ]);
+    assert_eq!(member_types(&expr, "v"), vec![expected]);
+    assert_ne!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        ])]
+    );
+}
+
 #[test]
 fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
     let forward = expect_clean_flow_value(
@@ -4263,18 +4289,37 @@ fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
     );
 }
 
+/// The corpus can assert only that the returned value is a union. Pin the
+/// authored mutable-capture authority, including a declaration after closure
+/// creation, rather than accepting a broad primitive or an opaque position.
+#[test]
+fn flow_return_mutable_closures_use_declared_capture_authority() {
+    let expected =
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]);
+    for script in [
+        "function makeProps() { var x: \"a\" | \"b\" = \"a\"; const read = () => x; return read() }",
+        "function makeProps() { const read = () => x; let x: \"a\" | \"b\" = \"a\"; return read() }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(expr, expected);
+        assert_ne!(expr, string_literal("a"));
+    }
+}
+
 #[test]
 fn flow_return_abrupt_finally_over_pending_break_contributes_undefined() {
-    let expr = expect_clean_flow_value(
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    for script in [
         "function makeProps() { L: try { break L; } finally { return \"a\" as const; } }",
-    );
-    assert_eq!(
-        expr,
-        verter_type_expr::TypeExpr::union(vec![
-            string_literal("a"),
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined,),
-        ])
-    );
+        "function makeProps() { OUT: INNER: { try { break OUT; } finally { return \"a\" as const; } } }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(expr, expected);
+        assert_ne!(expr, string_literal("a"));
+    }
 }
 
 #[test]
@@ -4303,10 +4348,49 @@ fn flow_return_assignment_uses_fresh_literal_to_select_the_most_specific_union_a
     };
     assert!(matches!(v, verter_type_expr::TypeExpr::Object(_)));
     assert_eq!(member_types(v, "kind"), vec![string_literal("b")]);
+
+    for script in [
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", a: 1 }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const key = \"a\" as const; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", [key]: 1 }; return x }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        let verter_type_expr::TypeExpr::Ref { name, .. } = &expr else {
+            panic!("the fresh exact-key witness must select WithA, got {expr:?}");
+        };
+        assert_eq!(name.as_ref(), "WithA");
+    }
+
+    // Spread construction does not provide a closed exact-key witness. Keep
+    // the declared union for inline, computed, and named spread sources.
+    for script in [
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...{ a: 1 } }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const key = \"a\" as const; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...{ [key]: 1 } }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const patch = { a: 1 }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...patch }; return x }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("a spread assignment must preserve the declared union, got {expr:?}");
+        };
+        let mut names = arms
+            .iter()
+            .map(|arm| match arm {
+                verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+                other => panic!("the declared union arm must stay a reference, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Broad", "WithA", "WithB"]);
+    }
 }
 
 #[test]
 fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachability() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let x: \"a\" | \"b\" = \"a\"; while (false) { x = \"b\" } return x }",
+        ),
+        string_literal("a")
+    );
     assert_eq!(
         expect_clean_flow_value(
             "declare function sink(cb: () => void): void; function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { sink(() => { x = \"b\" }) } while (false); return x }",
@@ -4328,6 +4412,11 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
 
     expect_refused_flow(
         "function makeProps(x: string | number) { do { (() => { if (typeof x !== \"string\") throw 0 })() } while (false); return { v: x } }",
+    );
+
+    expect_refused_flow_as(
+        "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); return { v: x } }",
+        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
     // Negative controls: a directly invoked write, a same-path write, and a

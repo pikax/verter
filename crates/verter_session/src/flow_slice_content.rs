@@ -56,6 +56,7 @@ use oxc_ast::ast::{
     BindingPattern, Expression, FormalParameters, LogicalOperator, Program, Statement, TSType,
     UnaryOperator, VariableDeclarationKind,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
@@ -700,6 +701,10 @@ pub enum SliceExpr {
         /// The nested function's own type parameters (the signature's own
         /// binders — carried so the composed signature keeps `<T>`).
         type_parameters: Arc<[SliceTypeParam]>,
+        /// Authored declared authorities for mutable bindings captured from
+        /// enclosing frames. These exact declaration facts type reads across
+        /// the closure boundary without changing source-ordered initialization.
+        mutable_capture_authorities: Arc<[SliceCaptureAuthority]>,
         /// The DECLARED return annotation, when authored. A declared
         /// return always wins over the body-derived join (the checker
         /// checks the body AGAINST the annotation; the signature's return
@@ -784,6 +789,13 @@ pub enum SliceExpr {
     /// and fails closed at the evaluator — it is never a fabricated
     /// `any` and never a silently widened sibling.
     Elided,
+}
+
+/// One mutable closure capture's authored declaration authority.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceCaptureAuthority {
+    pub name: Arc<str>,
+    pub declared: GatedType,
 }
 
 /// The CLOSED vocabulary of call forms — every way a callee's return can
@@ -1246,6 +1258,9 @@ pub enum SliceUnsupported {
     /// A `break` / `continue` jump of the current function's statement
     /// list that no enclosing modelled construct absorbs.
     Jump,
+    /// A directly invoked closure statement whose captured flow effects are
+    /// selected but not modelled by the sequential evaluator.
+    InvokedClosureEffect,
     /// A `with` statement.
     With,
     /// A module-level statement inside the body.
@@ -1488,7 +1503,8 @@ pub(crate) fn build_flow_slice_content(
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         break_targets: Vec::new(),
-        direct_labeled_try: None,
+        break_target_followed_by_return: Vec::new(),
+        current_statement_followed_by_return: false,
     };
     let region = if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
@@ -1672,6 +1688,28 @@ fn declares_var(statement: &Statement<'_>) -> bool {
     !inventory_statement_list(std::slice::from_ref(statement))
         .var_names
         .is_empty()
+}
+
+/// Whether entering this statement guarantees that the current function
+/// reaches an authored return before normal completion. This is deliberately
+/// stricter than the control inventory's `has_return`: a conditional return
+/// does not prevent a preceding labelled break from reaching function end.
+fn statement_guarantees_current_function_return(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::ReturnStatement(_) => true,
+        Statement::BlockStatement(block) => block
+            .body
+            .iter()
+            .any(statement_guarantees_current_function_return),
+        Statement::IfStatement(branch) => {
+            statement_guarantees_current_function_return(&branch.consequent)
+                && branch
+                    .alternate
+                    .as_ref()
+                    .is_some_and(statement_guarantees_current_function_return)
+        }
+        _ => false,
+    }
 }
 
 /// The names THIS signature's parameter list binds, paired with their
@@ -1954,9 +1992,10 @@ enum NameBinding {
 /// authority classified it at the nested function value's own position.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapturedBinding {
-    /// A modelable enclosing parameter / local: the evaluator seeds the
-    /// nested frame with the captured reaching definition BY NAME.
-    Local,
+    /// A modelable enclosing parameter / local. Mutable captures use authored
+    /// declared authority across the closure boundary; stable captures retain
+    /// their reaching value.
+    Local { mutable: bool },
     /// An enclosing binding the content half cannot model.
     Unmodeled,
 }
@@ -1967,6 +2006,7 @@ enum CapturedBinding {
 #[derive(Default)]
 struct CaptureScope {
     names: FxHashMap<Arc<str>, CapturedBinding>,
+    mutable_declared: FxHashMap<Arc<str>, GatedType>,
     /// The captured names an enclosing frame binds in TYPE meaning — a
     /// captured `class` / `enum` / `type` / `interface` / `import =`.
     ///
@@ -1999,13 +2039,34 @@ struct CaptureScope {
     binder_names: FxHashSet<Arc<str>>,
 }
 
+struct DeclaratorAnnotationFinder<'s> {
+    source: &'s str,
+    target: oxc_span::Span,
+    found: Option<TypeExpr>,
+}
+
+impl<'a> Visit<'a> for DeclaratorAnnotationFinder<'_> {
+    fn visit_variable_declarator(&mut self, declarator: &oxc_ast::ast::VariableDeclarator<'a>) {
+        if self.found.is_none()
+            && matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.span == self.target)
+        {
+            self.found = declarator
+                .type_annotation
+                .as_ref()
+                .map(|annotation| lower_ts_type(&annotation.type_annotation, self.source));
+            return;
+        }
+        walk::walk_variable_declarator(self, declarator);
+    }
+}
+
 impl CaptureScope {
     fn lookup(&self, name: &str) -> NameBinding {
         match self.names.get(name) {
             // A captured binding is read BY NAME from the evaluator's
             // seeded snapshot: no parameter ordinal applies (ordinals
             // index the NESTED frame's own signature).
-            Some(CapturedBinding::Local) => NameBinding::Captured,
+            Some(CapturedBinding::Local { .. }) => NameBinding::Captured,
             Some(CapturedBinding::Unmodeled) => NameBinding::Unmodeled,
             None => NameBinding::Free,
         }
@@ -2078,10 +2139,14 @@ struct Lowerer<'a> {
     /// accept unlabeled breaks), a labeled one the innermost matching
     /// name. Loop bodies never lower, so a loop is never an entry.
     break_targets: Vec<Option<Arc<str>>>,
-    /// The exact try statement currently serving as a labeled statement's
-    /// direct body, if any. The checker gives that syntax a distinct implicit
-    /// return-inference edge; a try nested inside a labeled block does not.
-    direct_labeled_try: Option<FrameSpan>,
+    /// For each break target, whether the target statement has a guaranteed
+    /// current-function return later in its enclosing statement list. A
+    /// pending break contributes implicit `undefined` only when its
+    /// destination can reach the function end rather than that return.
+    break_target_followed_by_return: Vec<bool>,
+    /// The suffix fact for the statement currently being lowered; captured
+    /// when that statement introduces a break target.
+    current_statement_followed_by_return: bool,
 }
 
 impl Lowerer<'_> {
@@ -2369,6 +2434,25 @@ impl Lowerer<'_> {
         transfers
     }
 
+    /// Whether a bare call statement directly invokes a closure whose
+    /// captured write or control fact can change a later selected read. The
+    /// sequential evaluator has no single-invocation closure-effect carrier,
+    /// so such a statement must fail closed instead of being reduced to a
+    /// value-neutral throw point.
+    fn direct_invoked_closure_transfers_downstream_slot(
+        &self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) -> bool {
+        let call_span = self.rebase(call.span);
+        let call_region = self.skeleton.innermost_region_containing(call_span);
+        let node = match unwrap_parenthesized(&call.callee) {
+            Expression::FunctionExpression(function) => FunctionNode::Function(function),
+            Expression::ArrowFunctionExpression(arrow) => FunctionNode::Arrow(arrow),
+            _ => return false,
+        };
+        self.nested_function_transfers_downstream_slot(&node, call_region, call_span)
+    }
+
     fn nested_function_transfers_downstream_slot(
         &self,
         node: &FunctionNode<'_>,
@@ -2463,7 +2547,8 @@ impl Lowerer<'_> {
                 self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
             }
             Statement::WhileStatement(loop_stmt) => {
-                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+                (contains(&loop_stmt.body) && literal_boolean_value(&loop_stmt.test) == Some(false))
+                    || self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
             }
             Statement::ForStatement(loop_stmt) => {
                 self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
@@ -2725,6 +2810,32 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Recover one mutable capture's authored annotation by exact binding
+    /// identity. The skeleton supplies the declaration-precise span; the
+    /// retained AST supplies the type syntax. No name-based or source-text
+    /// reconstruction participates.
+    fn mutable_declared_authority(
+        &self,
+        binding: &verter_semantic::analysis::flow::SkeletonBinding,
+    ) -> Option<GatedType> {
+        if !matches!(
+            binding.kind,
+            SkeletonBindingKind::Let | SkeletonBindingKind::Var
+        ) || binding.destructured
+        {
+            return None;
+        }
+        let absolute = binding.span.to_absolute(self.anchor);
+        let target = oxc_span::Span::new(absolute.start, absolute.end);
+        let mut finder = DeclaratorAnnotationFinder {
+            source: self.source,
+            target,
+            found: None,
+        };
+        finder.visit_program(self.program);
+        finder.found.map(|ty| self.gate(ty, target, &[]))
+    }
+
     /// The capture scope one nested function value lowers under: every
     /// name the ENCLOSING frames bind at the function value's own
     /// position, classified by the enclosing frame's authority. Inner
@@ -2737,6 +2848,7 @@ impl Lowerer<'_> {
         for (name, binding) in self.captures.names.iter() {
             names.insert(Arc::clone(name), *binding);
         }
+        let mut mutable_declared = self.captures.mutable_declared.clone();
         let mut type_names = self.captures.type_names.clone();
         let mut namespace_names = self.captures.namespace_names.clone();
         // This frame's OWN type parameters join every enclosing frame's
@@ -2803,16 +2915,39 @@ impl Lowerer<'_> {
                 continue;
             }
             let captured = match self.classify_bindings(text, &resolved) {
-                NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured => {
-                    CapturedBinding::Local
-                }
+                NameBinding::Param(_) => CapturedBinding::Local { mutable: true },
+                NameBinding::Local(_) => CapturedBinding::Local {
+                    mutable: resolved.iter().any(|id| {
+                        matches!(
+                            self.skeleton.binding(*id).kind,
+                            SkeletonBindingKind::Let | SkeletonBindingKind::Var
+                        )
+                    }),
+                },
+                NameBinding::Captured => self
+                    .captures
+                    .names
+                    .get(text)
+                    .copied()
+                    .unwrap_or(CapturedBinding::Unmodeled),
                 NameBinding::Free => continue,
                 NameBinding::NestedFunction | NameBinding::Unmodeled => CapturedBinding::Unmodeled,
             };
+            if let Some(declared) = resolved
+                .iter()
+                .find_map(|id| self.mutable_declared_authority(self.skeleton.binding(*id)))
+            {
+                mutable_declared.insert(Arc::from(text), declared);
+            } else {
+                // A nearer binding without a mutable annotation shadows any
+                // inherited authority of the same name.
+                mutable_declared.remove(text);
+            }
             names.insert(Arc::from(text), captured);
         }
         CaptureScope {
             names,
+            mutable_declared,
             type_names,
             namespace_names,
             binder_names,
@@ -2840,10 +2975,13 @@ impl Lowerer<'_> {
         let mut can_fall_through = true;
         let mut hit_unsupported = false;
         let mut may_break: Vec<SliceBreakTarget> = Vec::new();
-        for statement in statements {
+        for (index, statement) in statements.iter().enumerate() {
             if !can_fall_through {
                 break;
             }
+            self.current_statement_followed_by_return = statements[index + 1..]
+                .iter()
+                .any(statement_guarantees_current_function_return);
             match statement {
                 Statement::ReturnStatement(ret) => {
                     let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
@@ -3038,12 +3176,11 @@ impl Lowerer<'_> {
                     // statement's reachability.
                     let label: Arc<str> = Arc::from(labeled.label.name.as_str());
                     self.break_targets.push(Some(Arc::clone(&label)));
-                    let previous_direct_labeled_try = self.direct_labeled_try;
-                    self.direct_labeled_try = matches!(&labeled.body, Statement::TryStatement(_))
-                        .then(|| self.rebase(labeled.body.span()));
+                    self.break_target_followed_by_return
+                        .push(self.current_statement_followed_by_return);
                     let child = self.lower_arm(&labeled.body);
-                    self.direct_labeled_try = previous_direct_labeled_try;
                     self.break_targets.pop();
+                    self.break_target_followed_by_return.pop();
                     let mut absorbed = false;
                     for target in child.may_break {
                         match target {
@@ -3081,6 +3218,7 @@ impl Lowerer<'_> {
                     let has_default = switch.cases.iter().any(|case| case.test.is_none());
                     let discriminant = self.narrow_subject_of(&switch.discriminant);
                     self.break_targets.push(None);
+                    self.break_target_followed_by_return.push(false);
                     let mut cases = Vec::with_capacity(switch.cases.len());
                     for case in &switch.cases {
                         let test = case
@@ -3103,6 +3241,7 @@ impl Lowerer<'_> {
                         });
                     }
                     self.break_targets.pop();
+                    self.break_target_followed_by_return.pop();
                     // Past the switch is reachable when no `default`
                     // exists (a non-matching discriminant skips every
                     // case), when the LAST clause falls off the end of the
@@ -3162,9 +3301,22 @@ impl Lowerer<'_> {
                     let finally_blocks_exits = finally
                         .as_ref()
                         .is_some_and(|(region, _)| !region.can_fall_through);
+                    // A named break crossing this try for any enclosing
+                    // label remains an authored return-inference path even
+                    // when blocks or inner labels wrap the try. An abrupt
+                    // finally replaces the runtime edge, but not that
+                    // implicit-`undefined` inference contribution.
                     let pending_break_contributes_undefined = finally_blocks_exits
-                        && !clause_may_break.is_empty()
-                        && self.direct_labeled_try == Some(self.rebase(try_stmt.span));
+                        && clause_may_break.iter().any(|target| match target {
+                            SliceBreakTarget::Named(name) => self
+                                .break_targets
+                                .iter()
+                                .zip(self.break_target_followed_by_return.iter())
+                                .rev()
+                                .find(|(entry, _)| entry.as_ref() == Some(name))
+                                .is_some_and(|(_, followed_by_return)| !followed_by_return),
+                            SliceBreakTarget::Anonymous => false,
+                        });
                     if !finally_blocks_exits {
                         may_break.extend(clause_may_break);
                     }
@@ -3618,6 +3770,11 @@ impl Lowerer<'_> {
                 })
             }
             Expression::CallExpression(call) => {
+                if self.direct_invoked_closure_transfers_downstream_slot(call) {
+                    return Some(SliceStatement::Unsupported(
+                        SliceUnsupported::InvokedClosureEffect,
+                    ));
+                }
                 // A bare call is a THROW POINT regardless of what it
                 // resolves to; a same-file assertion call additionally
                 // narrows. The marker keeps the throw point even when the
@@ -4183,6 +4340,22 @@ impl Lowerer<'_> {
             .unwrap_or_default();
         let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
         let captures = self.capture_scope_for(node_span(node));
+        let mut mutable_capture_authorities = captures
+            .mutable_declared
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    captures.names.get(name.as_ref()),
+                    Some(CapturedBinding::Local { mutable: true })
+                )
+            })
+            .map(|(name, declared)| SliceCaptureAuthority {
+                name: Arc::clone(name),
+                declared: declared.clone(),
+            })
+            .collect::<Vec<_>>();
+        mutable_capture_authorities.sort_by(|a, b| a.name.cmp(&b.name));
+        let mutable_capture_authorities = Arc::from(mutable_capture_authorities.into_boxed_slice());
         let mut nested = Lowerer {
             source: self.source,
             anchor: nested_anchor,
@@ -4203,7 +4376,8 @@ impl Lowerer<'_> {
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
             break_targets: Vec::new(),
-            direct_labeled_try: None,
+            break_target_followed_by_return: Vec::new(),
+            current_statement_followed_by_return: false,
         };
         let region = if node.is_expression_body() {
             // An expression-bodied arrow's body is one synthesized
@@ -4247,6 +4421,7 @@ impl Lowerer<'_> {
         SliceExpr::NestedFunctionValue {
             params: Arc::from(params.into_boxed_slice()),
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            mutable_capture_authorities,
             declared_return,
             can_fall_through: region.can_fall_through,
             body: region,
