@@ -2295,6 +2295,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             param_writes: rustc_hash::FxHashMap::default(),
             conditional_lexicals: rustc_hash::FxHashSet::default(),
             conditional_params: rustc_hash::FxHashSet::default(),
+            inference_only_path: false,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
             return_edges: Vec::new(),
@@ -2428,6 +2429,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // graph interns identical literals to one node id — then widen a
         // lone FRESH literal.
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
+        let mut inference_only: Vec<bool> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
         for contribution in contributors {
             // Fold freshness over EVERY contributor, including the ones
@@ -2443,10 +2445,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // these two arms ARE the same type, and separating them would
             // emit `1 | 1`.
             all_fresh &= contribution.fresh_literal;
-            if arms.contains(&contribution.node) {
+            if let Some(index) = arms.iter().position(|node| *node == contribution.node) {
+                inference_only[index] &= contribution.inference_only;
                 continue;
             }
             arms.push(contribution.node);
+            inference_only.push(contribution.inference_only);
         }
         // A recursive HOLD counts as a contributor: the SCC close joins
         // its discharged return into this result, so the join is not a
@@ -2485,22 +2489,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ));
             }
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+            inference_only.push(false);
         }
         if implicit_undefined_seen {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+            inference_only.push(false);
         }
         if can_fall_through {
             if arms.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)));
+                inference_only.push(false);
             } else {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+                inference_only.push(false);
             }
         } else if arms.is_empty() {
             if holds.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)));
+                inference_only.push(false);
             } else {
                 return Err(FlowReturnFailure::EmptyCycle);
             }
+        }
+        // A suffix reached only through the checker's return-inference view
+        // of an overridden break is not a second runtime path. Drop that
+        // synthetic contributor when an ordinary authored return already
+        // covers it; keep incomparable suffixes, which are precisely why the
+        // inference-only edge exists. Ordinary return contributors retain
+        // their established graph shape — this is not generic union
+        // dominance or assignment-time constituent selection.
+        if inference_only.iter().any(|flag| *flag) {
+            arms = arms
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    let covered = inference_only[index]
+                        && arms.iter().enumerate().any(|(other_index, other)| {
+                            !inference_only[other_index]
+                                && matches!(
+                                    self.execute_relate_pair(*candidate, *other),
+                                    super::dispatch_txn::RelationStep::Assignable { .. }
+                                )
+                                && matches!(
+                                    self.execute_relate_pair(*other, *candidate),
+                                    super::dispatch_txn::RelationStep::NotAssignable
+                                )
+                        });
+                    (!covered).then_some(*candidate)
+                })
+                .collect();
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
         Ok((
@@ -2879,6 +2916,9 @@ struct FlowEvaluator<'d, 'b> {
     conditional_lexicals: rustc_hash::FxHashSet<String>,
     /// The parameter-ordinal twin of `conditional_lexicals`.
     conditional_params: rustc_hash::FxHashSet<u32>,
+    /// Whether the current path exists only for return inference after an
+    /// abrupt `finally` replaced the pending break at runtime.
+    inference_only_path: bool,
     /// Return nodes a COMPLETED call in this frame marked
     /// `fresh_literal_return` (a generic callee whose naked-binder return
     /// fixed to a fresh-preserved literal). The call executor records the
@@ -2934,11 +2974,15 @@ struct FlowContribution {
     node: SemanticNodeId,
     /// The contributor is a fresh (widening) literal source.
     fresh_literal: bool,
+    /// The contributor is reached only through an overridden break's
+    /// return-inference suffix edge.
+    inference_only: bool,
 }
 
 /// One captured `break` exit: the target the lowering resolved
 /// (`None` = the innermost switch) and the complete layer state at the
 /// break point.
+#[derive(Clone)]
 struct FlowBreakExit {
     target: Option<Arc<str>>,
     state: FlowLayerState,
@@ -2985,6 +3029,9 @@ struct FlowLayerState {
     conditional_lexicals: rustc_hash::FxHashSet<String>,
     /// The parameter-write twin of `conditional_lexicals`, by ordinal.
     conditional_params: rustc_hash::FxHashSet<u32>,
+    /// Whether this snapshot exists only for the return-inference suffix
+    /// of a break that an abrupt `finally` replaced at runtime.
+    inference_only_path: bool,
 }
 
 /// The outcome of evaluating ONE POSITION — a sub-expression, or one call
@@ -3747,6 +3794,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             narrowings: self.narrowings.clone(),
             conditional_lexicals: self.conditional_lexicals.clone(),
             conditional_params: self.conditional_params.clone(),
+            inference_only_path: self.inference_only_path,
         }
     }
 
@@ -3765,6 +3813,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.narrowings = state.narrowings;
         self.conditional_lexicals = state.conditional_lexicals;
         self.conditional_params = state.conditional_params;
+        self.inference_only_path = state.inference_only_path;
     }
 
     /// Close ONE block scope over `state` (a snapshot, or the live layers
@@ -3993,6 +4042,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .filter(|fact| b.narrowings.contains(fact))
             .cloned()
             .collect();
+        // A joined path is inference-only only when every incoming edge is.
+        // One ordinary runtime edge makes the merged continuation ordinary.
+        joined.inference_only_path = a.inference_only_path && b.inference_only_path;
         joined
     }
 
@@ -4236,14 +4288,62 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Project one destructured object-pattern element from its annotated
+    /// parameter node, applying the element's optional/default rule.
+    fn destructured_param_element_node(
+        &mut self,
+        base: SemanticNodeId,
+        key: &Arc<str>,
+        has_default: bool,
+    ) -> Option<SemanticNodeId> {
+        let data = self.dispatch.graph().node_data(base);
+        let view = match data.as_deref() {
+            Some(SemanticNodeData::Object(view)) => view,
+            _ => return None,
+        };
+        let crate::semantic_query::SurfaceKeyProjection::Exact(member) = view.project_known_key(
+            &crate::semantic_query::PropertyKey::identifier(Arc::clone(key)),
+        ) else {
+            return None;
+        };
+        let value = member.value;
+        if has_default {
+            // A default removes the member's `undefined` arm — the authored
+            // one included. A member whose type is only `undefined` keeps it:
+            // the default initializer's own type is not modelled.
+            return Some(match self.dispatch.graph().node_data(value).as_deref() {
+                Some(SemanticNodeData::Union(arms)) => {
+                    let kept: Vec<SemanticNodeId> = arms
+                        .iter()
+                        .copied()
+                        .filter(|arm| !self.arm_reduces_to_undefined(*arm))
+                        .collect();
+                    if kept.is_empty() || kept.len() == arms.len() {
+                        value
+                    } else {
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&kept, true)
+                    }
+                }
+                _ => value,
+            });
+        }
+        if member.optional {
+            let undefined = self
+                .dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+            return Some(
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&[value, undefined], true),
+            );
+        }
+        Some(value)
+    }
+
     /// Seed one destructured object-pattern parameter element into the
-    /// lexical layer on its first read: the element binds the annotation's
-    /// same-named member — `T | undefined` when the member is optional and
-    /// the element authored no default, the member's value otherwise (a
-    /// default removes the `undefined` arm). An element whose annotation
-    /// is not an object surface, or names no such member, binds the typed
-    /// unmodelled-position marker with the failed-initializer membership:
-    /// the fail-closed answer the position had before, now positional.
+    /// lexical layer on its first read. A projection miss binds the typed
+    /// unmodelled-position marker with failed-initializer membership.
     fn seed_destructured_param_element(&mut self, name: &str) {
         let Some((ordinal, key, has_default)) =
             self.param_names
@@ -4259,65 +4359,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         else {
             return;
         };
-        let base = self.params.get(ordinal).copied();
-        let member = base.and_then(|base| {
-            let data = self.dispatch.graph().node_data(base);
-            let view = match data.as_deref() {
-                Some(SemanticNodeData::Object(view)) => view,
-                _ => return None,
-            };
-            match view.project_known_key(&crate::semantic_query::PropertyKey::identifier(
-                Arc::clone(&key),
-            )) {
-                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                    Some((member.value, member.optional))
-                }
-                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
-            }
-        });
-        let (node, degraded) = match member {
-            Some((value, optional)) => {
-                if has_default {
-                    // A default removes the member's `undefined` arm — the
-                    // authored one included (`{ x = 1 }` over
-                    // `x: number | undefined` binds `number`). A member
-                    // whose type IS `undefined` alone keeps it: the
-                    // default initializer's own type is not modelled. The
-                    // test is the arm's REDUCTION, never its spelling:
-                    // `type U = undefined` strips identically.
-                    let stripped = match self.dispatch.graph().node_data(value).as_deref() {
-                        Some(SemanticNodeData::Union(arms)) => {
-                            let kept: Vec<SemanticNodeId> = arms
-                                .iter()
-                                .copied()
-                                .filter(|arm| !self.arm_reduces_to_undefined(*arm))
-                                .collect();
-                            if kept.is_empty() || kept.len() == arms.len() {
-                                value
-                            } else {
-                                self.dispatch
-                                    .intern_normalized_union_or_intersection(&kept, true)
-                            }
-                        }
-                        _ => value,
-                    };
-                    (stripped, false)
-                } else if optional {
-                    let undefined = self
-                        .dispatch
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-                    (
-                        self.dispatch
-                            .intern_normalized_union_or_intersection(&[value, undefined], true),
-                        false,
-                    )
-                } else {
-                    (value, false)
-                }
-            }
-            None => (self.unmodeled_position(), true),
-        };
+        let projected = self
+            .params
+            .get(ordinal)
+            .copied()
+            .and_then(|base| self.destructured_param_element_node(base, &key, has_default));
+        let (node, degraded) = projected
+            .map(|node| (node, false))
+            .unwrap_or_else(|| (self.unmodeled_position(), true));
         self.set_declared_local(
             name,
             crate::flow_slice_content::SliceBindingKind::Const,
@@ -4461,7 +4510,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Comparability is judged by the crate's SOLE relation authority
     /// (`execute_relate_pair`); an undecided constituent or an empty
     /// survivor set fails closed onto the whole declared union with the
-    /// typed `UnreducedDeclaredUnion` degradation — never a guess.
+    /// typed `UnreducedDeclaredUnion` degradation — never a guess. Generic
+    /// strict-subtype dominance is not a checker constituent-selection rule:
+    /// required-property presence does not discard an overlapping optional
+    /// constituent. Only the exact-own-key and discriminant evidence below
+    /// can select among comparable object arms.
     fn assignment_reduced_union(
         &mut self,
         declared: SemanticNodeId,
@@ -4493,7 +4546,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // known member set has the greatest overlap with the literal's exact
         // surface. Spread programs deliberately do not enter this rule: their
         // final key set is construction-dependent, so the declared union stays
-        // intact unless ordinary strict dominance proves otherwise.
+        // intact unless the exact-own-key/discriminant rules above select it.
         if survivors.len() > 1 {
             if let Some(SemanticNodeData::Object(init_view)) =
                 self.dispatch.graph().node_data(init).as_deref()
@@ -4536,25 +4589,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         }
-        // When multiple comparable arms overlap, retain the provably most
-        // specific constituents. A fresh object can satisfy both
-        // `{ kind: string }` and `{ kind: "b"; b: number }`; the latter is
-        // strictly assignable to the former and is the assignment-selected
-        // arm. Undecided relations establish no dominance and therefore drop
-        // nothing.
-        let most_specific: Vec<SemanticNodeId> = survivors
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                !survivors.iter().copied().any(|other| {
-                    other != *candidate
-                        && self.assignable(other, *candidate) == Some(true)
-                        && self.assignable(*candidate, other) == Some(false)
-                })
-            })
-            .collect();
         self.dispatch
-            .intern_normalized_union_or_intersection(&most_specific, true)
+            .intern_normalized_union_or_intersection(&survivors, true)
     }
 
     // ── Guard narrowing ─────────────────────────────────────────────
@@ -4664,6 +4700,84 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             | super::dispatch_txn::RelationStep::BudgetExceeded(_)
             | super::dispatch_txn::RelationStep::Assumed(_) => None,
         }
+    }
+
+    /// Whether two nodes have a provably empty intersection. The authority is
+    /// deliberately conservative: concrete primitive/literal tag conflicts,
+    /// or two structural surfaces with the same required member carrying
+    /// conflicting concrete tags. Different object key sets can overlap and
+    /// therefore are never declared disjoint here.
+    fn nodes_provably_disjoint(&self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
+        fn tag_disjoint(left: &SemanticNodeData, right: &SemanticNodeData) -> bool {
+            fn literal_base(value: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
+                match value {
+                    crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
+                    crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
+                    crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+                    crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+                }
+            }
+            fn concrete(kind: PrimitiveKind) -> bool {
+                !matches!(
+                    kind,
+                    PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
+                )
+            }
+            match (left, right) {
+                (SemanticNodeData::Primitive(a), SemanticNodeData::Primitive(b)) => {
+                    let widening_pair = matches!(
+                        (*a, *b),
+                        (PrimitiveKind::Undefined, PrimitiveKind::Void)
+                            | (PrimitiveKind::Void, PrimitiveKind::Undefined)
+                    );
+                    concrete(*a) && concrete(*b) && a != b && !widening_pair
+                }
+                (SemanticNodeData::Literal(a), SemanticNodeData::Literal(b)) => a != b,
+                (SemanticNodeData::Literal(literal), SemanticNodeData::Primitive(primitive))
+                | (SemanticNodeData::Primitive(primitive), SemanticNodeData::Literal(literal)) => {
+                    concrete(*primitive) && literal_base(literal) != *primitive
+                }
+                _ => false,
+            }
+        }
+
+        let graph = self.dispatch.graph();
+        if let (Some(left_data), Some(right_data)) = (graph.node_data(left), graph.node_data(right))
+        {
+            if tag_disjoint(&left_data, &right_data) {
+                return true;
+            }
+        }
+        let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
+        let (Some(left_view), Some(right_view)) = (
+            self.dispatch.resolve_typeinfo_surface_view(left, context),
+            self.dispatch.resolve_typeinfo_surface_view(right, context),
+        ) else {
+            return false;
+        };
+        left_view.positive_members().iter().any(|left_member| {
+            if left_member.optional {
+                return false;
+            }
+            let Some(key) = left_member.key.cloned_known() else {
+                return false;
+            };
+            let crate::semantic_query::SurfaceKeyProjection::Exact(right_member) =
+                right_view.project_known_key(&key)
+            else {
+                return false;
+            };
+            if right_member.optional {
+                return false;
+            }
+            match (
+                graph.node_data(left_member.value),
+                graph.node_data(right_member.value),
+            ) {
+                (Some(left_data), Some(right_data)) => tag_disjoint(&left_data, &right_data),
+                _ => false,
+            }
+        })
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -4910,27 +5024,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         primitive == Some(kind)
     }
 
-    /// A bare truthiness test: the positive reading keeps the arms that
-    /// are not DEFINITELY falsy (a possibly-falsy primitive like `string`
-    /// stays, exactly as the checker keeps it), the negated reading keeps
-    /// only the definitely-falsy ones.
+    /// A bare truthiness test keeps every arm that CAN take the requested
+    /// edge. Broad primitives such as `boolean`, `string`, and `number` can
+    /// be either truthy or falsy; treating "not definitely falsy" as
+    /// "definitely truthy" would incorrectly make their negative edge dead.
     fn narrow_truthy(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
         self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.arm_is_definitely_falsy(arm) == negated)
+            Some(if negated {
+                this.arm_can_be_falsy(arm)
+            } else {
+                this.arm_can_be_truthy(arm)
+            })
         })
     }
 
-    /// Whether one union arm is DEFINITELY falsy: `undefined`, `null`,
-    /// `void`, and the falsy literals (`false`, `""`, `0`, `-0`, `0n`).
-    fn arm_is_definitely_falsy(&self, arm: SemanticNodeId) -> bool {
+    /// Whether one union arm has a truthy runtime inhabitant.
+    fn arm_can_be_truthy(&self, arm: SemanticNodeId) -> bool {
         match self.dispatch.graph().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(
                 PrimitiveKind::Undefined | PrimitiveKind::Null | PrimitiveKind::Void,
-            )) => true,
+            )) => false,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => false,
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                crate::semantic_query::LiteralValue::Boolean(value) => *value,
+                crate::semantic_query::LiteralValue::String(value) => !value.is_empty(),
+                crate::semantic_query::LiteralValue::Number(value) => *value != 0.0,
+                crate::semantic_query::LiteralValue::BigInt(value) => {
+                    !value.trim_start_matches('-').chars().all(|c| c == '0')
+                }
+            },
+            _ => true,
+        }
+    }
+
+    /// Whether one union arm has a falsy runtime inhabitant. Only broad
+    /// scalar primitives and the concrete falsy values qualify; object and
+    /// callable surfaces are always truthy, while unresolved forms stay
+    /// conservative and keep both edges.
+    fn arm_can_be_falsy(&self, arm: SemanticNodeId) -> bool {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(primitive)) => matches!(
+                primitive,
+                PrimitiveKind::Any
+                    | PrimitiveKind::Unknown
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Void
+                    | PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+            ),
             Some(SemanticNodeData::Literal(literal)) => match literal {
                 crate::semantic_query::LiteralValue::Boolean(value) => !value,
                 crate::semantic_query::LiteralValue::String(value) => value.is_empty(),
@@ -4939,7 +5087,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     value.trim_start_matches('-').chars().all(|c| c == '0')
                 }
             },
-            _ => false,
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::ObjectSpreadProgram(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. },
+            ) => false,
+            Some(SemanticNodeData::Union(_)) | Some(SemanticNodeData::Intersection(_)) => true,
+            Some(_) | None => true,
         }
     }
 
@@ -4964,9 +5120,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let literal_node = self.lower_body_type(&literal_ty);
         if subject.path.is_empty() {
             let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
+                if matches!(
+                    this.dispatch.graph().node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(
+                        PrimitiveKind::Any | PrimitiveKind::Unknown
+                    ))
+                ) {
+                    return None;
+                }
                 let forward = this.assignable(arm, literal_node)?;
                 let backward = this.assignable(literal_node, arm)?;
-                Some((forward || backward) != negated)
+                // The positive edge keeps overlapping arms. The negative
+                // edge drops only an arm wholly covered by the literal: a
+                // broad `string` can exclude `"a"` and remain `string`, so
+                // the unrepresentable exclusion leaves that arm unchanged.
+                Some(if negated {
+                    !forward
+                } else {
+                    forward || backward
+                })
             });
             if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
                 // No arm was filtered. The literal can still be a STRICT
@@ -4995,7 +5167,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let path = subject.path.clone();
             self.narrow_arms_by(&root_subject, &root_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &path)?;
-                Some(this.assignable(literal_node, member)? != negated)
+                if negated {
+                    // Excluding one literal removes a root arm only when
+                    // the projected member is wholly that literal. A named
+                    // alias can project a broad discriminant union without
+                    // exposing its root constituents; `"a"` fits
+                    // `"a" | "b"`, but its negative edge remains possible.
+                    Some(!this.assignable(member, literal_node)?)
+                } else {
+                    Some(this.assignable(literal_node, member)?)
+                }
             })
         }
     }
@@ -5218,6 +5399,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if self.assignable(target_node, current) == Some(true) {
                 return GuardNarrowing::Narrowed(subject.clone(), target_node);
             }
+            if !self.nodes_provably_disjoint(current, target_node) {
+                let intersection = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&[current, target_node], false);
+                return GuardNarrowing::Narrowed(subject.clone(), intersection);
+            }
             return GuardNarrowing::Impossible;
         }
         self.narrow_arms_by(subject, subject, |this, arm| {
@@ -5408,6 +5595,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Ok(Some(node)) => contributors.push(FlowContribution {
                                 node,
                                 fresh_literal: false,
+                                inference_only: self.inference_only_path,
                             }),
                             Ok(None) => {}
                             Err(failure) => return (Err(failure), region.can_fall_through),
@@ -5446,6 +5634,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
+                                    inference_only: self.inference_only_path,
                                 });
                             }
                         }
@@ -5496,8 +5685,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     self.conditional_arm_nesting += 1;
-                    self.apply_guard_scoped(guard, true);
-                    let (consequent_result, consequent_falls) = self.eval_region(consequent);
+                    let consequent_possible = self.apply_guard_scoped(guard, true);
+                    let (consequent_result, consequent_falls) = if consequent_possible {
+                        self.eval_region(consequent)
+                    } else {
+                        (Ok(Vec::new()), false)
+                    };
                     self.narrowings.truncate(narrow_len);
                     // Close the arm's lexical scope BEFORE snapshotting its
                     // contribution to the post-if join, and replay the same
@@ -5527,13 +5720,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     };
                     contributors.extend(consequent_contributors);
+                    let mut implicit_alternate_falls = true;
                     let alternate_layers = if let Some(alternate) = alternate {
                         let shadow_base = self.scope_shadows.len();
                         let break_base = self.break_exits.len();
                         let return_base = self.return_edges.len();
                         let throw_base = self.throw_points.len();
-                        self.apply_guard_scoped(guard, false);
-                        let (alternate_result, alternate_falls) = self.eval_region(alternate);
+                        let alternate_possible = self.apply_guard_scoped(guard, false);
+                        let (alternate_result, alternate_falls) = if alternate_possible {
+                            self.eval_region(alternate)
+                        } else {
+                            (Ok(Vec::new()), false)
+                        };
                         self.narrowings.truncate(narrow_len);
                         let shadows = self.split_scope_shadows_close_exits(
                             shadow_base,
@@ -5567,6 +5765,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             alternate_falls,
                         ))
                     } else {
+                        implicit_alternate_falls = self.apply_guard_scoped(guard, false);
+                        self.narrowings.truncate(narrow_len);
                         None
                     };
                     self.conditional_arm_nesting -= 1;
@@ -5581,9 +5781,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Some((locals, var, param_writes, falls)) => {
                                 (Some(locals), Some(var), Some(param_writes), *falls)
                             }
-                            // No `else`: the implicit alternate always
-                            // reaches past the `if`.
-                            None => (None, None, None, true),
+                            // No `else`: the implicit alternate reaches past
+                            // the `if` only when the guard's negated edge is
+                            // possible under the current overlay.
+                            None => (None, None, None, implicit_alternate_falls),
                         };
                     self.join_arm_writes(
                         &consequent_locals,
@@ -5603,12 +5804,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // truncation does not erase them. (Both arms reaching
                     // establishes nothing; both terminating makes the rest
                     // of the region unreachable.)
-                    if !consequent_falls && alternate_falls {
-                        self.apply_guard_scoped(guard, false);
+                    let surviving_edge_possible = if !consequent_falls && alternate_falls {
+                        self.apply_guard_scoped(guard, false)
                     } else if consequent_falls && !alternate_falls {
-                        self.apply_guard_scoped(guard, true);
-                    }
-                    path_alive = consequent_falls || alternate_falls;
+                        self.apply_guard_scoped(guard, true)
+                    } else {
+                        true
+                    };
+                    path_alive = (consequent_falls || alternate_falls) && surviving_edge_possible;
                 }
                 crate::flow_slice_content::SliceStatement::Switch {
                     discriminant,
@@ -5806,6 +6009,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     catch,
                     finally,
                     pending_break_contributes_undefined,
+                    pending_break_following_return_targets,
                 } => {
                     // The catch / finally clauses are entered from ANY
                     // throw point of the try block, so they start from the
@@ -6036,8 +6240,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.return_edges.split_off(finally_return_base);
                                 self.return_edges.truncate(return_base);
                                 self.return_edges.extend(finally_returns);
+                                let retained_pending_breaks: Vec<FlowBreakExit> = self.break_exits
+                                    [break_base..finally_break_base]
+                                    .iter()
+                                    .filter(|exit| {
+                                        exit.target.as_ref().is_some_and(|target| {
+                                            pending_break_following_return_targets.contains(target)
+                                        })
+                                    })
+                                    .cloned()
+                                    .map(|mut exit| {
+                                        exit.state.inference_only_path = true;
+                                        exit
+                                    })
+                                    .collect();
                                 let finally_breaks = self.break_exits.split_off(finally_break_base);
                                 self.break_exits.truncate(break_base);
+                                self.break_exits.extend(retained_pending_breaks);
                                 self.break_exits.extend(finally_breaks);
                             }
                             path_alive = !exit_states.is_empty() && finally.can_fall_through;
@@ -6607,8 +6826,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // enclosing `var` shares the parameter's slot and still wins).
         let mut captured_locals = self.locals.clone();
         let mut captured_var_locals = self.var_locals.clone();
+        let mut captured_declared_locals = self.declared_locals.clone();
+        let mut captured_var_declared_locals = self.var_declared_locals.clone();
         for authority in mutable_capture_authorities {
-            let node = if authority
+            let base = if authority
                 .declared
                 .shadowed()
                 .iter()
@@ -6621,7 +6842,46 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             } else {
                 self.lower_body_type(authority.declared.ty())
             };
-            captured_locals.insert(authority.name.to_string(), node);
+            let node = match &authority.source {
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+                    key: Some(key),
+                    has_default,
+                } => self
+                    .destructured_param_element_node(base, key, *has_default)
+                    .unwrap_or_else(|| {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                        );
+                        self.unmodeled_position()
+                    }),
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(_)
+                | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+                    key: None,
+                    ..
+                } => base,
+            };
+            let name = authority.name.to_string();
+            match authority.source {
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                    crate::flow_slice_content::SliceBindingKind::Var,
+                ) => {
+                    captured_var_declared_locals.insert(name.clone(), node);
+                    captured_var_locals.insert(name, node);
+                }
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                    crate::flow_slice_content::SliceBindingKind::Let,
+                ) => {
+                    captured_declared_locals.insert(name.clone(), node);
+                    captured_locals.entry(name).or_insert(node);
+                }
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. } => {
+                    captured_declared_locals.insert(name.clone(), node);
+                    captured_locals.insert(name, node);
+                }
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                    crate::flow_slice_content::SliceBindingKind::Const,
+                ) => {}
+            }
         }
         for (ordinal, param) in self.param_names.iter().enumerate() {
             let (Some(name), Some(node)) = (param.name.as_ref(), self.params.get(ordinal)) else {
@@ -6643,9 +6903,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param_names: nested_params,
                 binder_env: &binder_env,
                 locals: captured_locals,
-                declared_locals: self.declared_locals.clone(),
+                declared_locals: captured_declared_locals,
                 var_locals: captured_var_locals,
-                var_declared_locals: self.var_declared_locals.clone(),
+                var_declared_locals: captured_var_declared_locals,
                 widening_locals: self.widening_locals.clone(),
                 var_widening_locals: self.var_widening_locals.clone(),
                 bare_return_seen: false,
@@ -6669,6 +6929,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param_writes: rustc_hash::FxHashMap::default(),
                 conditional_lexicals: rustc_hash::FxHashSet::default(),
                 conditional_params: rustc_hash::FxHashSet::default(),
+                inference_only_path: false,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
                 return_edges: Vec::new(),
@@ -7074,10 +7335,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // of the union survives, degraded.
                     let holds_before = self.holds.len();
                     let narrow_len = self.narrowings.len();
-                    self.apply_guard_scoped(guard, index == 0);
-                    let outcome = self.eval_expr(arm);
+                    let possible = self.apply_guard_scoped(guard, index == 0);
+                    let outcome = possible.then(|| self.eval_expr(arm));
                     self.narrowings.truncate(narrow_len);
-                    nodes.push(self.settle_composite_part(outcome, holds_before));
+                    if let Some(outcome) = outcome {
+                        nodes.push(self.settle_composite_part(outcome, holds_before));
+                    }
                 }
                 Positional::Value(
                     self.dispatch

@@ -3861,6 +3861,17 @@ fn string_literal(value: &str) -> verter_type_expr::TypeExpr {
     verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(value.to_string()))
 }
 
+#[track_caller]
+fn projected_function_return(expr: &verter_type_expr::TypeExpr) -> &verter_type_expr::TypeExpr {
+    let verter_type_expr::TypeExpr::Function(function) = expr else {
+        panic!("expected a projected function type, got {expr:?}");
+    };
+    function
+        .return_type
+        .as_deref()
+        .unwrap_or_else(|| panic!("expected the function return in {expr:?}"))
+}
+
 /// A case that exits via `break` passes NO state to the next case: case 1
 /// is reachable only by the dispatch edge, so `x` there reads the entry
 /// value. tsgo 7.0.0-dev.20260526.1: `{ v: "a" } | { v: "b" }` — joining
@@ -4429,5 +4440,92 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
     );
     expect_refused_flow(
         "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
+    );
+}
+
+#[test]
+fn flow_return_sequence_wrapped_iife_effect_fails_closed() {
+    expect_refused_flow_as(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; ((() => { x = \"b\" })(), (() => { x = \"b\" })()); return x }",
+        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+}
+
+#[test]
+fn flow_return_impossible_predicate_edges_contribute_no_return_value() {
+    let expected =
+        verter_type_expr::TypeExpr::union(vec![string_literal("ok"), string_literal("no")]);
+    for script in [
+        "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }",
+        "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { if (isA(x)) { if (isB(x)) return x; return \"ok\" as const } return \"no\" as const }",
+    ] {
+        assert_eq!(expect_clean_flow_value(script), expected);
+    }
+}
+
+#[test]
+fn flow_return_structurally_possible_predicate_intersection_survives() {
+    let expr = expect_clean_flow_value(
+        "type A = { a: number }; type B = { b: number }; function isA(x: A | B): x is A { return \"a\" in x } function isB(x: A | B): x is B { return \"b\" in x } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }",
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the possible intersection must join the literal arms");
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Intersection(_))),
+        "the structurally possible intersection must survive in {expr:?}"
+    );
+    assert!(arms.contains(&string_literal("ok")));
+    assert!(arms.contains(&string_literal("no")));
+}
+
+#[test]
+fn flow_return_required_property_does_not_dominate_optional_union_arm() {
+    let expr = expect_clean_flow_value(
+        "type Opt = { kind: \"x\"; a?: number }; type Req = { kind: \"x\"; a: number }; function makeProps() { let x: Opt | Req; x = { kind: \"x\", a: 1 } as const; return x }",
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the declared Opt | Req union must survive, got {expr:?}");
+    };
+    let mut names = arms
+        .iter()
+        .map(|arm| match arm {
+            verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+            other => panic!("the declared arm must remain a reference, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["Opt", "Req"]);
+}
+
+#[test]
+fn flow_return_nested_capture_state_matches_the_closure_position() {
+    let written = expect_clean_flow_value(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => { x = \"b\"; return x } }",
+    );
+    assert_eq!(projected_function_return(&written), &string_literal("b"));
+
+    let destructured = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
+    );
+    assert_eq!(
+        projected_function_return(&destructured),
+        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+
+    let read_only = expect_clean_flow_value(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => x }",
+    );
+    assert_eq!(projected_function_return(&read_only), &string_literal("a"));
+}
+
+#[test]
+fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { OUT: INNER: { try { break INNER } finally { return \"a\" as const } } return \"b\" as const }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
     );
 }

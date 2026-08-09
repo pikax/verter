@@ -1108,6 +1108,19 @@ impl SkeletonBuilder {
             // half is where the verdict differs (it fails closed).
             ValueDescent::Leaf | ValueDescent::UnmodeledCall => {
                 let id = self.alloc_site(span, parent);
+                let nested = match expression {
+                    Expression::FunctionExpression(function) => {
+                        FunctionBodySource::from_function_expression(function)
+                            .map(|source| build_function_body_skeleton(&source))
+                    }
+                    Expression::ArrowFunctionExpression(arrow) => Some(
+                        build_function_body_skeleton(&FunctionBodySource::from_arrow(arrow)),
+                    ),
+                    _ => None,
+                };
+                if let Some(nested) = nested.as_ref() {
+                    self.push_nested_capture_reads(id, nested);
+                }
                 self.site_stack.push(id.index());
                 self.visit_expression(expression);
                 self.site_stack.pop();
@@ -1206,6 +1219,41 @@ impl SkeletonBuilder {
         self.sites[site.index()]
             .reads
             .push(SkeletonRead { name, path });
+    }
+
+    /// A nested function value depends on each enclosing binding its own
+    /// frame reads. Record those free reads on the function-value site so the
+    /// value frontier selects the reaching outer definitions that seed the
+    /// nested evaluator. Reads resolved by the nested frame remain there.
+    fn push_nested_capture_reads(
+        &mut self,
+        site: SkeletonExprSiteId,
+        nested: &FunctionBodySkeleton,
+    ) {
+        let mut captures: Vec<(Arc<str>, Arc<[SkeletonPathSegment]>)> = Vec::new();
+        for nested_site in nested.expr_sites.iter() {
+            for read in nested_site.reads.iter() {
+                if !nested
+                    .bindings_of_name_in_scope(read.name, nested_site.region)
+                    .is_empty()
+                {
+                    continue;
+                }
+                let name: Arc<str> = Arc::from(nested.name(read.name));
+                if !captures
+                    .iter()
+                    .any(|(seen_name, seen_path)| seen_name == &name && seen_path == &read.path)
+                {
+                    captures.push((name, Arc::clone(&read.path)));
+                }
+            }
+        }
+        for (name, path) in captures {
+            let name = self.intern(name.as_ref());
+            self.sites[site.index()]
+                .reads
+                .push(SkeletonRead { name, path });
+        }
     }
 
     /// `span` is the call expression's ABSOLUTE position; the recorded

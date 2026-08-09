@@ -2081,21 +2081,19 @@ fn flow_return_genuinely_free_name_still_resolves_through_the_file_scope() {
 /// binding resolves through the enclosing frame's lexical authority,
 /// never through a same-named file-scope declaration.
 ///
-/// A captured PARAMETER is always available (the evaluator seeds the
-/// nested frame with every enclosing parameter by name) — tsgo 7.0.0-dev.20260526.1:
-/// `r5CaptureParam(n: number): () => number`. A captured LOCAL depends
-/// on the demand plan having selected a definition for it, and the
-/// planner does not walk nested function bodies, so it currently FAILS
-/// CLOSED (tsc says `() => number`; the honest partial is no value at
-/// all). Either way the file-scope `n` / `a` is never bound.
+/// Captured parameters and locals are both explicit dependencies of the
+/// nested function-value site. The planner selects their enclosing reaching
+/// definitions, so each closure returns `number`; neither read can bind the
+/// same-named file-scope declaration.
 #[test]
 fn flow_return_nested_function_captures_the_enclosing_binding_not_the_file_scope() {
     let host = make_r5_host();
-    let outcome = r5_eval(&host, "r5CaptureParam").expect("r5CaptureParam evaluates");
-    assert_eq!(outcome.degradation, None, "r5CaptureParam evaluates clean");
-    assert_eq!(function_return(&outcome.ty), &number());
-    assert_eq!(outcome.candidates, 1, "r5CaptureParam admits warm");
-    assert_fails_closed(&host, "r5CaptureLocal");
+    for name in ["r5CaptureParam", "r5CaptureLocal"] {
+        let outcome = r5_eval(&host, name).unwrap_or_else(|| panic!("{name} evaluates"));
+        assert_eq!(outcome.degradation, None, "{name} evaluates clean");
+        assert_eq!(function_return(&outcome.ty), &number());
+        assert_eq!(outcome.candidates, 1, "{name} admits warm");
+    }
 }
 
 /// A block-scoped `let` SHADOWS a same-named parameter: the local wins.

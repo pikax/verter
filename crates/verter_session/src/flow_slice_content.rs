@@ -66,8 +66,8 @@ use verter_semantic::analysis::flow::{
     ObjectEntryKind, SkeletonBindingKind, SkeletonPathSegment, SkeletonWriteTarget, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
-    for_each_call_expression, inventory_statement_list, resolve_function_node,
-    FunctionControlRegion, FunctionNode, FunctionProgramEntry,
+    for_each_call_expression, for_each_call_expression_in_expression, inventory_statement_list,
+    resolve_function_node, FunctionControlRegion, FunctionNode, FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, infer_declaration_expression_type, TopLevelLiteralPolicy,
@@ -336,6 +336,10 @@ pub enum SliceStatement {
         /// implicit-undefined return-inference contributor while keeping the
         /// runtime control edge overridden.
         pending_break_contributes_undefined: bool,
+        /// Named pending breaks whose crossed label is followed by a
+        /// guaranteed return. Inference retains that suffix-return edge even
+        /// though the abrupt finally replaces the runtime completion.
+        pending_break_following_return_targets: Arc<[Arc<str>]>,
     },
     /// A labeled statement. The label is a break target for its OWN body:
     /// a `break` naming it exits to after the statement, which the lowering
@@ -791,11 +795,26 @@ pub enum SliceExpr {
     Elided,
 }
 
+/// The source of one mutable closure capture's authored declaration authority.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceCaptureAuthoritySource {
+    /// A lexical or function-scoped local declaration.
+    Local(SliceBindingKind),
+    /// A formal parameter, optionally projected from an object pattern.
+    Parameter {
+        /// The annotated object's member key for a destructured element.
+        key: Option<Arc<str>>,
+        /// Whether the destructured element authored a default.
+        has_default: bool,
+    },
+}
+
 /// One mutable closure capture's authored declaration authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceCaptureAuthority {
     pub name: Arc<str>,
     pub declared: GatedType,
+    pub source: SliceCaptureAuthoritySource,
 }
 
 /// The CLOSED vocabulary of call forms — every way a callee's return can
@@ -2006,7 +2025,7 @@ enum CapturedBinding {
 #[derive(Default)]
 struct CaptureScope {
     names: FxHashMap<Arc<str>, CapturedBinding>,
-    mutable_declared: FxHashMap<Arc<str>, GatedType>,
+    mutable_declared: FxHashMap<Arc<str>, SliceCaptureAuthority>,
     /// The captured names an enclosing frame binds in TYPE meaning — a
     /// captured `class` / `enum` / `type` / `interface` / `import =`.
     ///
@@ -2453,6 +2472,24 @@ impl Lowerer<'_> {
         self.nested_function_transfers_downstream_slot(&node, call_region, call_span)
     }
 
+    /// Whether an expression contains a directly invoked closure whose
+    /// effects can change a downstream-selected slot. The shared call walk
+    /// reaches calls under value-neutral wrappers such as sequences while
+    /// still distinguishing a closure in callee position from a callback
+    /// merely passed as an argument.
+    fn invoked_closure_expression_transfers_downstream_slot(
+        &self,
+        expression: &Expression<'_>,
+    ) -> bool {
+        let mut transfers = false;
+        for_each_call_expression_in_expression(expression, |call| {
+            if !transfers && self.direct_invoked_closure_transfers_downstream_slot(call) {
+                transfers = true;
+            }
+        });
+        transfers
+    }
+
     fn nested_function_transfers_downstream_slot(
         &self,
         node: &FunctionNode<'_>,
@@ -2816,15 +2853,38 @@ impl Lowerer<'_> {
     /// reconstruction participates.
     fn mutable_declared_authority(
         &self,
+        name: &str,
         binding: &verter_semantic::analysis::flow::SkeletonBinding,
-    ) -> Option<GatedType> {
-        if !matches!(
-            binding.kind,
-            SkeletonBindingKind::Let | SkeletonBindingKind::Var
-        ) || binding.destructured
-        {
-            return None;
+    ) -> Option<SliceCaptureAuthority> {
+        if binding.kind == SkeletonBindingKind::Param {
+            let (param, key, has_default) = if binding.destructured {
+                self.params.iter().find_map(|param| {
+                    param
+                        .destructured
+                        .iter()
+                        .find(|element| element.name.as_ref() == name)
+                        .map(|element| (param, Some(Arc::clone(&element.key)), element.has_default))
+                })?
+            } else {
+                (
+                    self.params
+                        .iter()
+                        .find(|param| param.name.as_deref() == Some(name))?,
+                    None,
+                    false,
+                )
+            };
+            return Some(SliceCaptureAuthority {
+                name: Arc::from(name),
+                declared: param.ty.clone(),
+                source: SliceCaptureAuthoritySource::Parameter { key, has_default },
+            });
         }
+        let kind = match binding.kind {
+            SkeletonBindingKind::Let if !binding.destructured => SliceBindingKind::Let,
+            SkeletonBindingKind::Var if !binding.destructured => SliceBindingKind::Var,
+            _ => return None,
+        };
         let absolute = binding.span.to_absolute(self.anchor);
         let target = oxc_span::Span::new(absolute.start, absolute.end);
         let mut finder = DeclaratorAnnotationFinder {
@@ -2833,7 +2893,11 @@ impl Lowerer<'_> {
             found: None,
         };
         finder.visit_program(self.program);
-        finder.found.map(|ty| self.gate(ty, target, &[]))
+        finder.found.map(|ty| SliceCaptureAuthority {
+            name: Arc::from(name),
+            declared: self.gate(ty, target, &[]),
+            source: SliceCaptureAuthoritySource::Local(kind),
+        })
     }
 
     /// The capture scope one nested function value lowers under: every
@@ -2920,7 +2984,9 @@ impl Lowerer<'_> {
                     mutable: resolved.iter().any(|id| {
                         matches!(
                             self.skeleton.binding(*id).kind,
-                            SkeletonBindingKind::Let | SkeletonBindingKind::Var
+                            SkeletonBindingKind::Param
+                                | SkeletonBindingKind::Let
+                                | SkeletonBindingKind::Var
                         )
                     }),
                 },
@@ -2935,7 +3001,7 @@ impl Lowerer<'_> {
             };
             if let Some(declared) = resolved
                 .iter()
-                .find_map(|id| self.mutable_declared_authority(self.skeleton.binding(*id)))
+                .find_map(|id| self.mutable_declared_authority(text, self.skeleton.binding(*id)))
             {
                 mutable_declared.insert(Arc::from(text), declared);
             } else {
@@ -2971,6 +3037,7 @@ impl Lowerer<'_> {
     /// terminal path are unreachable and dropped; an unsupported construct
     /// ends the region with its marker and propagates.
     fn lower_region(&mut self, statements: &[Statement<'_>]) -> LoweredRegion {
+        let enclosing_followed_by_return = self.current_statement_followed_by_return;
         let mut out: Vec<SliceStatement> = Vec::new();
         let mut can_fall_through = true;
         let mut hit_unsupported = false;
@@ -2979,9 +3046,10 @@ impl Lowerer<'_> {
             if !can_fall_through {
                 break;
             }
-            self.current_statement_followed_by_return = statements[index + 1..]
-                .iter()
-                .any(statement_guarantees_current_function_return);
+            self.current_statement_followed_by_return = enclosing_followed_by_return
+                || statements[index + 1..]
+                    .iter()
+                    .any(statement_guarantees_current_function_return);
             match statement {
                 Statement::ReturnStatement(ret) => {
                     let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
@@ -3306,19 +3374,49 @@ impl Lowerer<'_> {
                     // when blocks or inner labels wrap the try. An abrupt
                     // finally replaces the runtime edge, but not that
                     // implicit-`undefined` inference contribution.
+                    let target_followed_by_return = |name: &Arc<str>| {
+                        self.break_targets
+                            .iter()
+                            .zip(self.break_target_followed_by_return.iter())
+                            .rev()
+                            .find(|(entry, _)| entry.as_ref() == Some(name))
+                            .map(|(_, followed_by_return)| *followed_by_return)
+                    };
                     let pending_break_contributes_undefined = finally_blocks_exits
                         && clause_may_break.iter().any(|target| match target {
-                            SliceBreakTarget::Named(name) => self
-                                .break_targets
-                                .iter()
-                                .zip(self.break_target_followed_by_return.iter())
-                                .rev()
-                                .find(|(entry, _)| entry.as_ref() == Some(name))
-                                .is_some_and(|(_, followed_by_return)| !followed_by_return),
+                            SliceBreakTarget::Named(name) => {
+                                target_followed_by_return(name) == Some(false)
+                            }
                             SliceBreakTarget::Anonymous => false,
                         });
+                    let mut pending_break_following_return_targets: Vec<Arc<str>> = Vec::new();
+                    if finally_blocks_exits {
+                        for target in &clause_may_break {
+                            let SliceBreakTarget::Named(name) = target else {
+                                continue;
+                            };
+                            if target_followed_by_return(name) == Some(true)
+                                && !pending_break_following_return_targets.contains(name)
+                            {
+                                pending_break_following_return_targets.push(Arc::clone(name));
+                            }
+                        }
+                    }
                     if !finally_blocks_exits {
                         may_break.extend(clause_may_break);
+                    } else {
+                        // When the crossed target is followed by a guaranteed
+                        // return, inference keeps that suffix return instead
+                        // of the implicit-undefined contribution. Propagate
+                        // the named exit until its label absorbs it; the
+                        // qualifier is inherited through intervening labels
+                        // and blocks by `lower_region`.
+                        may_break.extend(
+                            pending_break_following_return_targets
+                                .iter()
+                                .cloned()
+                                .map(SliceBreakTarget::Named),
+                        );
                     }
                     if let Some((_, finally_may_break)) = &finally {
                         may_break.extend(finally_may_break.iter().cloned());
@@ -3336,6 +3434,9 @@ impl Lowerer<'_> {
                         catch,
                         finally: finally.map(|(region, _)| region),
                         pending_break_contributes_undefined,
+                        pending_break_following_return_targets: Arc::from(
+                            pending_break_following_return_targets.into_boxed_slice(),
+                        ),
                     });
                 }
                 Statement::WithStatement(_) => {
@@ -3426,6 +3527,7 @@ impl Lowerer<'_> {
                 can_fall_through = false;
             }
         }
+        self.current_statement_followed_by_return = enclosing_followed_by_return;
         LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
@@ -3723,6 +3825,11 @@ impl Lowerer<'_> {
     /// not select all keep the typed unapplied-write degradation rather
     /// than acquiring a second, divergent verdict here.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
+        if self.invoked_closure_expression_transfers_downstream_slot(expression) {
+            return Some(SliceStatement::Unsupported(
+                SliceUnsupported::InvokedClosureEffect,
+            ));
+        }
         match unwrap_parenthesized(expression) {
             Expression::AssignmentExpression(assignment)
                 if matches!(
@@ -3739,10 +3846,10 @@ impl Lowerer<'_> {
                 let root = match self.resolve_name(name, identifier.span) {
                     NameBinding::Param(ordinal) => SliceNarrowRoot::Param(ordinal),
                     NameBinding::Local(_) => SliceNarrowRoot::Local(Arc::from(name)),
-                    NameBinding::Free
-                    | NameBinding::Captured
-                    | NameBinding::NestedFunction
-                    | NameBinding::Unmodeled => return None,
+                    NameBinding::Captured => SliceNarrowRoot::Local(Arc::from(name)),
+                    NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => {
+                        return None
+                    }
                 };
                 if !self.value_span_selected(assignment.right.span()) {
                     return None;
@@ -3770,11 +3877,6 @@ impl Lowerer<'_> {
                 })
             }
             Expression::CallExpression(call) => {
-                if self.direct_invoked_closure_transfers_downstream_slot(call) {
-                    return Some(SliceStatement::Unsupported(
-                        SliceUnsupported::InvokedClosureEffect,
-                    ));
-                }
                 // A bare call is a THROW POINT regardless of what it
                 // resolves to; a same-file assertion call additionally
                 // narrows. The marker keeps the throw point even when the
@@ -4342,17 +4444,14 @@ impl Lowerer<'_> {
         let captures = self.capture_scope_for(node_span(node));
         let mut mutable_capture_authorities = captures
             .mutable_declared
-            .iter()
-            .filter(|(name, _)| {
+            .values()
+            .filter(|authority| {
                 matches!(
-                    captures.names.get(name.as_ref()),
+                    captures.names.get(authority.name.as_ref()),
                     Some(CapturedBinding::Local { mutable: true })
                 )
             })
-            .map(|(name, declared)| SliceCaptureAuthority {
-                name: Arc::clone(name),
-                declared: declared.clone(),
-            })
+            .cloned()
             .collect::<Vec<_>>();
         mutable_capture_authorities.sort_by(|a, b| a.name.cmp(&b.name));
         let mutable_capture_authorities = Arc::from(mutable_capture_authorities.into_boxed_slice());
