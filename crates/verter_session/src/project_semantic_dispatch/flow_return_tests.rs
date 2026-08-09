@@ -4107,3 +4107,238 @@ fn flow_return_negated_conjunction_recovers_the_positive_predicate() {
         ])]
     );
 }
+
+#[derive(Debug)]
+enum FlowSourceProbe {
+    Value {
+        expr: verter_type_expr::TypeExpr,
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        candidates: usize,
+    },
+    NoValue {
+        error: crate::semantic_query::FlowReturnFailure,
+        candidates: usize,
+    },
+}
+
+/// Exercise the served return source through the sealed consumer and retain
+/// the exact projected graph value for distinctions coarser corpus shapes
+/// intentionally erase.
+fn flow_source_probe(script: &str) -> FlowSourceProbe {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-source-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(script),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let prepared = host
+            .prepared_value_decl_in(canonical, owner, "makeProps")
+            .expect("makeProps has a prepared value declaration");
+        let [signature] = prepared.signatures.as_slice() else {
+            panic!("makeProps has one served signature")
+        };
+        let mut source = signature.return_source.clone();
+        let verter_type_expr::facts::FunctionReturnSource::Flow(identity) = &mut source else {
+            panic!("makeProps serves a flow return source")
+        };
+        identity.anchor.canonical_id = Arc::from(canonical);
+        identity.anchor.owner = owner;
+        let identity = identity.clone();
+        let candidate_key =
+            SemanticQueryKey::FlowReturn(Box::new(dispatch.flow_return_key_for(&identity)));
+        match dispatch.execute_function_return_source(&source, canonical) {
+            super::flow_return::FunctionReturnNode::Flow(result) => {
+                let expr = host
+                    .project_node_to_type_expr_for_test(result.return_type())
+                    .expect("the flow graph node projects to an exact type expression");
+                FlowSourceProbe::Value {
+                    expr,
+                    degradation: result.degradation(),
+                    candidates: dispatch
+                        .graph()
+                        .slot_candidate_count_for_tests(&candidate_key),
+                }
+            }
+            super::flow_return::FunctionReturnNode::NoValue(error) => FlowSourceProbe::NoValue {
+                error,
+                candidates: dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&candidate_key),
+            },
+            other => panic!("makeProps must execute its flow source, got {other:?}"),
+        }
+    })
+}
+
+#[track_caller]
+fn expect_clean_flow_value(script: &str) -> verter_type_expr::TypeExpr {
+    match flow_source_probe(script) {
+        FlowSourceProbe::Value {
+            expr,
+            degradation,
+            candidates,
+        } => {
+            assert_eq!(degradation, None, "the graph result must be clean");
+            assert_eq!(candidates, 1, "the clean graph result admits once");
+            expr
+        }
+        other => panic!("expected a clean graph value, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn expect_refused_flow(script: &str) {
+    match flow_source_probe(script) {
+        FlowSourceProbe::NoValue { error, candidates } => {
+            assert_eq!(
+                error,
+                crate::semantic_query::FlowReturnFailure::Unsupported(
+                    crate::semantic_query::FlowReturnUnsupported::Loop,
+                )
+            );
+            assert_eq!(candidates, 0, "a refusal must not admit a candidate");
+        }
+        other => panic!("expected a fail-closed flow refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn flow_return_guard_union_joins_each_alternatives_final_overlay() {
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+    ]);
+    for script in [
+        "function makeProps(x: string | number | boolean) { if (!((typeof x !== \"boolean\" && typeof x === \"string\") || typeof x === \"boolean\")) throw 0; return { v: x } }",
+        "function makeProps(x: string | number | boolean) { if (!!((typeof x !== \"boolean\" && typeof x === \"string\") || typeof x === \"boolean\")) return { v: x }; throw 0 }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(member_types(&expr, "v"), vec![expected.clone()]);
+        assert_ne!(
+            member_types(&expr, "v"),
+            vec![verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::String,
+                ),
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Number,
+                ),
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Boolean,
+                ),
+            ])]
+        );
+    }
+}
+
+#[test]
+fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
+    let forward = expect_clean_flow_value(
+        "function makeProps() { const y = x; var x: \"a\" | undefined = \"a\"; return { v: y } }",
+    );
+    assert_eq!(
+        member_types(&forward, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("a"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined,),
+        ])]
+    );
+
+    let destructured = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { x = \"b\"; return { v: x } }",
+    );
+    assert_eq!(member_types(&destructured, "v"), vec![string_literal("b")]);
+    assert_ne!(
+        member_types(&destructured, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+}
+
+#[test]
+fn flow_return_abrupt_finally_over_pending_break_contributes_undefined() {
+    let expr = expect_clean_flow_value(
+        "function makeProps() { L: try { break L; } finally { return \"a\" as const; } }",
+    );
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![
+            string_literal("a"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined,),
+        ])
+    );
+}
+
+#[test]
+fn flow_return_assignment_uses_fresh_literal_to_select_the_most_specific_union_arm() {
+    let expr = expect_clean_flow_value(
+        "function makeProps() { let x: { kind: string } | { kind: \"b\"; b: number }; x = { kind: \"b\", b: 2 }; return x }",
+    );
+    assert!(
+        matches!(expr, verter_type_expr::TypeExpr::Object(_)),
+        "the graph node is the selected object arm, got {expr:?}"
+    );
+    assert_eq!(member_types(&expr, "kind"), vec![string_literal("b")]);
+    assert_eq!(
+        member_types(&expr, "b"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number,
+        )]
+    );
+
+    let sibling = expect_clean_flow_value(
+        "function makeProps(x: { kind: \"a\" } | { kind: \"b\" }) { x = { kind: \"b\" }; return { v: x } }",
+    );
+    let v = member_types(&sibling, "v");
+    let [v] = v.as_slice() else {
+        panic!("the assignment selects one object constituent, got {v:?}")
+    };
+    assert!(matches!(v, verter_type_expr::TypeExpr::Object(_)));
+    assert_eq!(member_types(v, "kind"), vec![string_literal("b")]);
+}
+
+#[test]
+fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachability() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "declare function sink(cb: () => void): void; function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { sink(() => { x = \"b\" }) } while (false); return x }",
+        ),
+        string_literal("a")
+    );
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let o: { x: 0 | 1; y: \"a\" | \"b\" } = { x: 0, y: \"a\" }; do { o.x = 1 } while (false); return o.y }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { if (false) x = \"b\" } while (false); return x }",
+        ),
+        string_literal("a")
+    );
+
+    expect_refused_flow(
+        "function makeProps(x: string | number) { do { (() => { if (typeof x !== \"string\") throw 0 })() } while (false); return { v: x } }",
+    );
+
+    // Negative controls: a directly invoked write, a same-path write, and a
+    // reachable write all remain effectful and fail closed.
+    expect_refused_flow(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
+    );
+    expect_refused_flow(
+        "function makeProps() { let o: { y: \"a\" | \"b\" } = { y: \"a\" }; do { o.y = \"b\" } while (false); return o.y }",
+    );
+    expect_refused_flow(
+        "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
+    );
+}

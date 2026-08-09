@@ -424,6 +424,7 @@ fn try_lowers_clause_regions() {
         block,
         catch,
         finally,
+        ..
     }] = node.body.statements.as_ref()
     else {
         panic!("expected a single Try statement");

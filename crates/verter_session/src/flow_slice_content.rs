@@ -62,7 +62,7 @@ use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     build_function_body_skeleton, object_entry_descent, value_descent, FrameSpan,
     FunctionBodySkeleton, FunctionBodySource, NameMeaning, ObjectEntryDescent, ObjectEntryKey,
-    ObjectEntryKind, SkeletonBindingKind, SkeletonWriteTarget, ValueDescent,
+    ObjectEntryKind, SkeletonBindingKind, SkeletonPathSegment, SkeletonWriteTarget, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, resolve_function_node,
@@ -148,6 +148,10 @@ pub struct SliceContent {
     /// with the typed budget reason). Unselected content never lowers,
     /// so it can never charge this edge.
     pub budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
+    /// Skeleton write spans proven inert by the content-side syntactic
+    /// reachability filter. The evaluator subtracts them from unapplied write
+    /// effects exactly as it subtracts writes it applies in source order.
+    pub inert_write_spans: FxHashSet<FrameSpan>,
 }
 
 /// One formal parameter.
@@ -326,6 +330,11 @@ pub enum SliceStatement {
         catch: Option<Box<SliceCatchClause>>,
         /// The finally clause's region, when authored.
         finally: Option<Box<SliceRegion>>,
+        /// Whether an abrupt finally can replace a pending break from the
+        /// try/catch clauses. The evaluator retains that authored exit as an
+        /// implicit-undefined return-inference contributor while keeping the
+        /// runtime control edge overridden.
+        pending_break_contributes_undefined: bool,
     },
     /// A labeled statement. The label is a break target for its OWN body:
     /// a `break` naming it exits to after the statement, which the lowering
@@ -1213,6 +1222,11 @@ pub struct SliceObjectMember {
     pub key: SliceObjectKey,
     /// The member value.
     pub value: SliceExpr,
+    /// The member's pre-widening value, when ordinary mutable-property
+    /// widening changed it. Assignment reduction uses this contextual fresh
+    /// view to select declared union constituents; ordinary object evaluation
+    /// continues to use `value`.
+    pub assignment_value: Option<SliceExpr>,
     /// The authored method / accessor kind (`None` for a plain property).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
     /// Whether the member is `readonly` — true exactly under an enclosing
@@ -1472,7 +1486,9 @@ pub(crate) fn build_flow_slice_content(
         direct_calls: &entry.direct_calls,
         program,
         budget_failure: None,
+        inert_write_spans: FxHashSet::default(),
         break_targets: Vec::new(),
+        direct_labeled_try: None,
     };
     let region = if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
@@ -1499,6 +1515,7 @@ pub(crate) fn build_flow_slice_content(
         lowerer.lower_region(&body.statements).region
     };
     let budget_failure = lowerer.budget_failure;
+    let inert_write_spans = lowerer.inert_write_spans;
     Some(SliceContent {
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
@@ -1506,6 +1523,7 @@ pub(crate) fn build_flow_slice_content(
         enclosing_type_parameters: Arc::from(enclosing_type_parameters.into_boxed_slice()),
         body: region,
         budget_failure,
+        inert_write_spans,
     })
 }
 
@@ -1524,6 +1542,34 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
         Expression::ParenthesizedExpression(paren) => unwrap_parenthesized(&paren.expression),
         inner => inner,
     }
+}
+
+fn literal_boolean_value(expression: &Expression<'_>) -> Option<bool> {
+    match unwrap_parenthesized(expression) {
+        Expression::BooleanLiteral(literal) => Some(literal.value),
+        _ => None,
+    }
+}
+
+/// Whether a write path can affect a read path. A whole-root access and a
+/// computed segment are conservative wildcards; otherwise different static
+/// siblings are disjoint and prefix paths overlap.
+fn paths_may_overlap(
+    write_path: &[SkeletonPathSegment],
+    read_path: &[SkeletonPathSegment],
+) -> bool {
+    if write_path.is_empty() || read_path.is_empty() {
+        return true;
+    }
+    write_path
+        .iter()
+        .zip(read_path.iter())
+        .all(|(write, read)| match (write, read) {
+            (SkeletonPathSegment::Computed, _) | (_, SkeletonPathSegment::Computed) => true,
+            (SkeletonPathSegment::Static(write), SkeletonPathSegment::Static(read)) => {
+                write == read
+            }
+        })
 }
 
 /// Unwrap the wrappers that are TRANSPARENT to literal freshness: a
@@ -2023,6 +2069,8 @@ struct Lowerer<'a> {
     program: &'a Program<'a>,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
+    /// Write effects proven unreachable by a literal control edge.
+    inert_write_spans: FxHashSet<FrameSpan>,
     /// The stack of breakable constructs whose bodies are currently being
     /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
     /// a labeled statement. A `break` resolves against this stack — an
@@ -2030,6 +2078,10 @@ struct Lowerer<'a> {
     /// accept unlabeled breaks), a labeled one the innermost matching
     /// name. Loop bodies never lower, so a loop is never an entry.
     break_targets: Vec<Option<Arc<str>>>,
+    /// The exact try statement currently serving as a labeled statement's
+    /// direct body, if any. The checker gives that syntax a distinct implicit
+    /// return-inference edge; a try nested inside a labeled block does not.
+    direct_labeled_try: Option<FrameSpan>,
 }
 
 impl Lowerer<'_> {
@@ -2080,14 +2132,25 @@ impl Lowerer<'_> {
         binding: verter_semantic::analysis::flow::SkeletonBindingId,
         loop_span: FrameSpan,
     ) -> bool {
+        self.binding_is_read_after_loop_at_path(binding, &[], loop_span)
+    }
+
+    fn binding_is_read_after_loop_at_path(
+        &self,
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        write_path: &[SkeletonPathSegment],
+        loop_span: FrameSpan,
+    ) -> bool {
         self.binding_is_selected(binding)
             && self.skeleton.expr_sites.iter().any(|site| {
                 !loop_span.contains(site.span)
                     && site.span > loop_span
                     && site.reads.iter().any(|read| {
-                        self.skeleton
-                            .bindings_of_name_in_scope(read.name, site.region)
-                            .contains(&binding)
+                        paths_may_overlap(write_path, &read.path)
+                            && self
+                                .skeleton
+                                .bindings_of_name_in_scope(read.name, site.region)
+                                .contains(&binding)
                     })
             })
     }
@@ -2128,6 +2191,7 @@ impl Lowerer<'_> {
         let call_reads_selected = self.skeleton.expr_sites.iter().any(|site| {
             site.calls.iter().any(|call| {
                 loop_span.contains(call.span)
+                    && !self.span_is_in_literal_dead_branch(statement, call.span)
                     && self.span_reads_downstream_slot(call.span, loop_span)
             })
         });
@@ -2135,12 +2199,16 @@ impl Lowerer<'_> {
             return true;
         }
 
-        if self.called_closure_writes_downstream_slot(statement, loop_span) {
+        if self.invoked_closure_transfers_downstream_slot(statement, loop_span) {
             return true;
         }
 
         self.skeleton.writes.iter().any(|write| {
             if !loop_span.contains(write.span) {
+                return false;
+            }
+            if self.span_is_in_literal_dead_branch(statement, write.span) {
+                self.inert_write_spans.insert(write.span);
                 return false;
             }
             let SkeletonWriteTarget::Named(name) = write.target else {
@@ -2149,7 +2217,9 @@ impl Lowerer<'_> {
             self.skeleton
                 .bindings_of_name_in_scope(name, write.region)
                 .iter()
-                .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
+                .any(|binding| {
+                    self.binding_is_read_after_loop_at_path(*binding, &write.path, loop_span)
+                })
         })
     }
 
@@ -2180,11 +2250,33 @@ impl Lowerer<'_> {
                 .iter()
                 .any(|statement| self.statement_has_selected_guard_transfer(statement, loop_span)),
             Statement::IfStatement(if_stmt) => {
-                self.control_test_narrows_downstream_slot(&if_stmt.test, loop_span)
-                    || self.statement_has_selected_guard_transfer(&if_stmt.consequent, loop_span)
-                    || if_stmt.alternate.as_ref().is_some_and(|alternate| {
-                        self.statement_has_selected_guard_transfer(alternate, loop_span)
-                    })
+                let test_transfer =
+                    self.control_test_narrows_downstream_slot(&if_stmt.test, loop_span);
+                match literal_boolean_value(&if_stmt.test) {
+                    Some(true) => {
+                        test_transfer
+                            || self.statement_has_selected_guard_transfer(
+                                &if_stmt.consequent,
+                                loop_span,
+                            )
+                    }
+                    Some(false) => {
+                        test_transfer
+                            || if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                                self.statement_has_selected_guard_transfer(alternate, loop_span)
+                            })
+                    }
+                    None => {
+                        test_transfer
+                            || self.statement_has_selected_guard_transfer(
+                                &if_stmt.consequent,
+                                loop_span,
+                            )
+                            || if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                                self.statement_has_selected_guard_transfer(alternate, loop_span)
+                            })
+                    }
+                }
             }
             Statement::ForStatement(for_stmt) => {
                 for_stmt
@@ -2238,14 +2330,12 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Fail-closed closure boundary for calls under a return-free loop. The
-    /// outer skeleton intentionally excludes nested function bodies, so inspect
-    /// each called closure through its own skeleton and ask only one structural
-    /// question: does it write a name free in that closure but bound to a
-    /// downstream-selected slot at the call site? This does not model when or
-    /// how often the closure runs; a positive answer takes the existing loop
-    /// refusal.
-    fn called_closure_writes_downstream_slot(
+    /// Fail-closed closure boundary for directly invoked callees under a
+    /// return-free loop. A function passed as an argument is only a value; the
+    /// call does not establish that the callback runs. A direct closure callee
+    /// is inspected for captured writes and control/call reads that can change
+    /// downstream-selected flow.
+    fn invoked_closure_transfers_downstream_slot(
         &self,
         statement: &Statement<'_>,
         loop_span: FrameSpan,
@@ -2255,11 +2345,14 @@ impl Lowerer<'_> {
             if transfers {
                 return;
             }
+            if self.span_is_in_literal_dead_branch(statement, self.rebase(call.span)) {
+                return;
+            }
             let call_region = self
                 .skeleton
                 .innermost_region_containing(self.rebase(call.span));
             let mut inspect = |node: FunctionNode<'_>| {
-                if self.nested_function_writes_downstream_slot(&node, call_region, loop_span) {
+                if self.nested_function_transfers_downstream_slot(&node, call_region, loop_span) {
                     transfers = true;
                 }
             };
@@ -2272,25 +2365,11 @@ impl Lowerer<'_> {
                 }
                 _ => {}
             }
-            for argument in &call.arguments {
-                let Some(expression) = argument.as_expression() else {
-                    continue;
-                };
-                match unwrap_parenthesized(expression) {
-                    Expression::FunctionExpression(function) => {
-                        inspect(FunctionNode::Function(function));
-                    }
-                    Expression::ArrowFunctionExpression(arrow) => {
-                        inspect(FunctionNode::Arrow(arrow));
-                    }
-                    _ => {}
-                }
-            }
         });
         transfers
     }
 
-    fn nested_function_writes_downstream_slot(
+    fn nested_function_transfers_downstream_slot(
         &self,
         node: &FunctionNode<'_>,
         outer_region: verter_semantic::analysis::flow::SkeletonRegionId,
@@ -2306,12 +2385,9 @@ impl Lowerer<'_> {
             return false;
         };
         let nested = build_function_body_skeleton(&nested_source);
-        nested.writes.iter().any(|write| {
-            let SkeletonWriteTarget::Named(nested_name) = write.target else {
-                return false;
-            };
+        let free_name_targets_downstream = |nested_name, nested_region| {
             if !nested
-                .bindings_of_name_in_scope(nested_name, write.region)
+                .bindings_of_name_in_scope(nested_name, nested_region)
                 .is_empty()
             {
                 return false;
@@ -2323,7 +2399,113 @@ impl Lowerer<'_> {
                 .bindings_of_name_in_scope(outer_name, outer_region)
                 .iter()
                 .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
+        };
+        if nested.writes.iter().any(|write| {
+            let SkeletonWriteTarget::Named(nested_name) = write.target else {
+                return false;
+            };
+            free_name_targets_downstream(nested_name, write.region)
+        }) {
+            return true;
+        }
+
+        nested.expr_sites.iter().enumerate().any(|(index, site)| {
+            let control_or_call = !site.calls.is_empty()
+                || nested.regions.iter().any(|region| {
+                    region
+                        .control_input
+                        .is_some_and(|site| site.index() == index)
+                });
+            control_or_call
+                && site
+                    .reads
+                    .iter()
+                    .any(|read| free_name_targets_downstream(read.name, site.region))
         })
+    }
+
+    /// Whether `target` lies under an `if` branch whose literal test proves
+    /// that branch unreachable. This is deliberately a small, syntactic
+    /// reachability authority: it filters facts that cannot execute without
+    /// pretending to solve general control flow.
+    fn span_is_in_literal_dead_branch(&self, statement: &Statement<'_>, target: FrameSpan) -> bool {
+        if !self.rebase(statement.span()).contains(target) {
+            return false;
+        }
+        let contains = |statement: &Statement<'_>| self.rebase(statement.span()).contains(target);
+        match statement {
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .find(|statement| contains(statement))
+                .is_some_and(|statement| self.span_is_in_literal_dead_branch(statement, target)),
+            Statement::IfStatement(if_stmt) => {
+                let consequent_contains = contains(&if_stmt.consequent);
+                let alternate_contains = if_stmt
+                    .alternate
+                    .as_ref()
+                    .is_some_and(|alternate| contains(alternate));
+                match literal_boolean_value(&if_stmt.test) {
+                    Some(false) if consequent_contains => true,
+                    Some(true) if alternate_contains => true,
+                    _ if consequent_contains => {
+                        self.span_is_in_literal_dead_branch(&if_stmt.consequent, target)
+                    }
+                    _ if alternate_contains => {
+                        if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                            self.span_is_in_literal_dead_branch(alternate, target)
+                        })
+                    }
+                    _ => false,
+                }
+            }
+            Statement::DoWhileStatement(loop_stmt) => {
+                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+            }
+            Statement::WhileStatement(loop_stmt) => {
+                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+            }
+            Statement::ForStatement(loop_stmt) => {
+                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+            }
+            Statement::ForInStatement(loop_stmt) => {
+                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+            }
+            Statement::ForOfStatement(loop_stmt) => {
+                self.span_is_in_literal_dead_branch(&loop_stmt.body, target)
+            }
+            Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+                case.consequent
+                    .iter()
+                    .find(|statement| contains(statement))
+                    .is_some_and(|statement| self.span_is_in_literal_dead_branch(statement, target))
+            }),
+            Statement::TryStatement(try_stmt) => try_stmt
+                .block
+                .body
+                .iter()
+                .chain(
+                    try_stmt
+                        .handler
+                        .iter()
+                        .flat_map(|handler| handler.body.body.iter()),
+                )
+                .chain(
+                    try_stmt
+                        .finalizer
+                        .iter()
+                        .flat_map(|finalizer| finalizer.body.iter()),
+                )
+                .find(|statement| contains(statement))
+                .is_some_and(|statement| self.span_is_in_literal_dead_branch(statement, target)),
+            Statement::LabeledStatement(labeled) => {
+                self.span_is_in_literal_dead_branch(&labeled.body, target)
+            }
+            Statement::WithStatement(with_stmt) => {
+                self.span_is_in_literal_dead_branch(&with_stmt.body, target)
+            }
+            _ => false,
+        }
     }
 
     fn param_ordinal(&self, name: &str) -> Option<u32> {
@@ -2856,7 +3038,11 @@ impl Lowerer<'_> {
                     // statement's reachability.
                     let label: Arc<str> = Arc::from(labeled.label.name.as_str());
                     self.break_targets.push(Some(Arc::clone(&label)));
+                    let previous_direct_labeled_try = self.direct_labeled_try;
+                    self.direct_labeled_try = matches!(&labeled.body, Statement::TryStatement(_))
+                        .then(|| self.rebase(labeled.body.span()));
                     let child = self.lower_arm(&labeled.body);
+                    self.direct_labeled_try = previous_direct_labeled_try;
                     self.break_targets.pop();
                     let mut absorbed = false;
                     for target in child.may_break {
@@ -2976,6 +3162,9 @@ impl Lowerer<'_> {
                     let finally_blocks_exits = finally
                         .as_ref()
                         .is_some_and(|(region, _)| !region.can_fall_through);
+                    let pending_break_contributes_undefined = finally_blocks_exits
+                        && !clause_may_break.is_empty()
+                        && self.direct_labeled_try == Some(self.rebase(try_stmt.span));
                     if !finally_blocks_exits {
                         may_break.extend(clause_may_break);
                     }
@@ -2994,6 +3183,7 @@ impl Lowerer<'_> {
                         block: Box::new(block),
                         catch,
                         finally: finally.map(|(region, _)| region),
+                        pending_break_contributes_undefined,
                     });
                 }
                 Statement::WithStatement(_) => {
@@ -3827,6 +4017,7 @@ impl Lowerer<'_> {
                 entries.push(SliceObjectEntry::Member(SliceObjectMember {
                     key,
                     value: SliceExpr::Elided,
+                    assignment_value: None,
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -3853,6 +4044,7 @@ impl Lowerer<'_> {
                 entries.push(SliceObjectEntry::Member(SliceObjectMember {
                     key,
                     value,
+                    assignment_value: None,
                     method_kind,
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
@@ -3875,6 +4067,7 @@ impl Lowerer<'_> {
                     self.source,
                 );
             let value = self.lower_expr(value_expression, mode);
+            let assignment_value = value.clone();
             let value = match (widen_member, value) {
                 (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
                     leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
@@ -3902,9 +4095,11 @@ impl Lowerer<'_> {
                 },
                 (_, value) => value,
             };
+            let assignment_value = (assignment_value != value).then_some(assignment_value);
             entries.push(SliceObjectEntry::Member(SliceObjectMember {
                 key,
                 value,
+                assignment_value,
                 method_kind,
                 readonly: policy.readonly(),
                 spans,
@@ -4006,7 +4201,9 @@ impl Lowerer<'_> {
             direct_calls: self.direct_calls,
             program: self.program,
             budget_failure: None,
+            inert_write_spans: FxHashSet::default(),
             break_targets: Vec::new(),
+            direct_labeled_try: None,
         };
         let region = if node.is_expression_body() {
             // An expression-bodied arrow's body is one synthesized

@@ -387,6 +387,38 @@ fn skeleton_is_arena_free_send_sync_static() {
 }
 
 #[test]
+fn skeleton_static_member_reads_preserve_the_full_projection_path() {
+    let skeleton = skeleton_of(
+        r#"
+function f(o: { x: number; y: { z: string } }) {
+  const x = o.x;
+  return o.y.z;
+}
+"#,
+    );
+    let o = skeleton.name_id("o").expect("o is interned");
+    let x = skeleton.name_id("x").expect("x is interned");
+    let y = skeleton.name_id("y").expect("y is interned");
+    let z = skeleton.name_id("z").expect("z is interned");
+    let paths: Vec<Vec<SkeletonPathSegment>> = skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.reads.iter())
+        .filter(|read| read.name == o)
+        .map(|read| read.path.to_vec())
+        .collect();
+    assert!(paths.contains(&vec![SkeletonPathSegment::Static(x)]));
+    assert!(paths.contains(&vec![
+        SkeletonPathSegment::Static(y),
+        SkeletonPathSegment::Static(z),
+    ]));
+    assert!(
+        !paths.contains(&Vec::new()),
+        "a fully static member read must not collapse to its root"
+    );
+}
+
+#[test]
 fn skeleton_build_is_deterministic_per_content_version() {
     let source = r#"
 function d(a: number, b: string) {

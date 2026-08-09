@@ -344,6 +344,9 @@ pub struct SkeletonRead {
     /// A read carries NO span: the reference position has no consumer, and
     /// dead state is exactly where a stale coordinate hides.
     pub name: FlowNameId,
+    /// The statically known projection path under the root. Empty is a
+    /// whole-root read; a computed segment conservatively aliases every key.
+    pub path: Arc<[SkeletonPathSegment]>,
 }
 
 /// The callee shape of one call / construct site.
@@ -1190,8 +1193,19 @@ impl SkeletonBuilder {
     }
 
     fn push_read(&mut self, name: FlowNameId, span: verter_span::Span) {
+        self.push_read_path(name, Arc::from(Vec::new().into_boxed_slice()), span);
+    }
+
+    fn push_read_path(
+        &mut self,
+        name: FlowNameId,
+        path: Arc<[SkeletonPathSegment]>,
+        span: verter_span::Span,
+    ) {
         let site = self.footprint_site(span);
-        self.sites[site.index()].reads.push(SkeletonRead { name });
+        self.sites[site.index()]
+            .reads
+            .push(SkeletonRead { name, path });
     }
 
     /// `span` is the call expression's ABSOLUTE position; the recorded
@@ -1897,6 +1911,23 @@ impl<'a> Visit<'a> for SkeletonBuilder {
     fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
         let name = self.intern(it.name.as_str());
         self.push_read(name, it.span.into());
+    }
+
+    fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        let mut names = Vec::new();
+        if collect_static_callee_path(it, &mut names) {
+            let root = self.intern(&names[0]);
+            let path: Arc<[SkeletonPathSegment]> = Arc::from(
+                names[1..]
+                    .iter()
+                    .map(|name| SkeletonPathSegment::Static(self.intern(name)))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            self.push_read_path(root, path, it.span.into());
+        } else {
+            walk::walk_static_member_expression(self, it);
+        }
     }
 
     fn visit_object_expression(&mut self, it: &ObjectExpression<'a>) {

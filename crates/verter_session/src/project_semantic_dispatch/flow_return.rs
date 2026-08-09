@@ -2127,6 +2127,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let applied_write_spans = {
             let mut spans = rustc_hash::FxHashSet::default();
             collect_assignment_spans(&ir.body, &mut spans);
+            spans.extend(ir.inert_write_spans.iter().copied());
             spans
         };
         // Unapplied write effects fail CLOSED as a degraded success. The
@@ -2277,6 +2278,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             widening_locals: rustc_hash::FxHashSet::default(),
             var_widening_locals: rustc_hash::FxHashSet::default(),
             bare_return_seen: false,
+            implicit_undefined_seen: false,
             member_filter,
             holds: Vec::new(),
             degradation: unapplied_write_effect
@@ -2303,12 +2305,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let holds;
         let degradation;
         let bare_return_seen;
+        let implicit_undefined_seen;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             holds = std::mem::take(&mut evaluator.holds);
             degradation = evaluator.degradation;
             bare_return_seen = evaluator.bare_return_seen;
+            implicit_undefined_seen = evaluator.implicit_undefined_seen;
             (outcome, body_falls_through)
         };
         // Both failure exits carry the degradation the evaluation had
@@ -2356,6 +2360,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // see. The override only ever narrows downward.
             ir.can_fall_through && body_falls_through,
             bare_return_seen,
+            implicit_undefined_seen,
             &holds,
             degradation,
         ) {
@@ -2409,6 +2414,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         contributors: Vec<FlowContribution>,
         can_fall_through: bool,
         bare_return_seen: bool,
+        implicit_undefined_seen: bool,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
@@ -2457,7 +2463,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // two arms and stay pinned). Deferring is also what makes the
         // decision demand-ORDER-independent — the fixed point is
         // computed once per component, not per entry order.
-        let fresh_seed = all_fresh && !bare_return_seen && !can_fall_through;
+        let fresh_seed =
+            all_fresh && !bare_return_seen && !implicit_undefined_seen && !can_fall_through;
         if fresh_seed && arms.len() == 1 && holds.is_empty() {
             arms[0] = widen_literal_node(self, arms[0]);
         }
@@ -2477,6 +2484,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     false,
                 ));
             }
+            arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+        }
+        if implicit_undefined_seen {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
         }
         if can_fall_through {
@@ -2547,6 +2557,7 @@ fn collect_assignment_spans(
                 block,
                 catch,
                 finally,
+                ..
             } => {
                 collect_assignment_spans(block, out);
                 if let Some(catch) = catch {
@@ -2791,6 +2802,10 @@ struct FlowEvaluator<'d, 'b> {
     /// contributions are bare returns models as `void` (BL12);
     /// alongside value returns a bare return contributes `undefined`.
     bare_return_seen: bool,
+    /// Whether an abrupt `finally` replaced a pending break authored in its
+    /// try/catch clauses. The checker retains that exit as an implicit
+    /// `undefined` contributor even though the runtime edge is overridden.
+    implicit_undefined_seen: bool,
     /// The member-projection demand filter, when this evaluation serves
     /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
     /// f>['b']`). Return sites evaluate ONLY the demanded member of a
@@ -3088,6 +3103,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_object_literal(
         &mut self,
         entries: &[crate::flow_slice_content::SliceObjectEntry],
+        assignment_fresh: bool,
     ) -> Positional<SemanticNodeId> {
         let mut surface_members = Vec::with_capacity(entries.len());
         let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
@@ -3137,7 +3153,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // undecided (recursive object construction is beyond the
             // direct same-slot hold the return sites model).
             let holds_before = self.holds.len();
-            let outcome = self.eval_expr(&member.value);
+            let member_value = if assignment_fresh {
+                member.assignment_value.as_ref().unwrap_or(&member.value)
+            } else {
+                &member.value
+            };
+            let outcome = self.eval_expr(member_value);
             let value = self.settle_composite_part(outcome, holds_before);
             // Selective object widening (BL02-class): a member read of a
             // WIDENING-literal local widens to its primitive at the
@@ -3146,7 +3167,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // literal locals stay pinned. Direct literal members already
             // widened (or stayed pinned under a const assertion) at IR
             // lowering.
-            let value = self.widen_if_widening_local_read(&member.value, value);
+            let value = self.widen_if_widening_local_read(member_value, value);
             // A non-static key is its own evaluated position. It names
             // the member only if it settles to a LITERAL; anything else
             // leaves the surface's key SET unknown, which an object
@@ -3192,6 +3213,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 has_index_signature: false,
             },
         )))
+    }
+
+    /// Evaluate a right-hand side under assignment context. Object literals
+    /// retain their pre-property-widening member values solely for declared
+    /// union selection; every other expression uses its ordinary flow value.
+    fn eval_assignment_expr(
+        &mut self,
+        expression: &crate::flow_slice_content::SliceExpr,
+    ) -> Positional<SemanticNodeId> {
+        match expression {
+            crate::flow_slice_content::SliceExpr::Object { entries } => {
+                self.eval_object_literal(entries, true)
+            }
+            other => self.eval_expr(other),
+        }
     }
 
     /// The property key one structurally lowered member names, or `None`
@@ -3370,6 +3406,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         value: SemanticNodeId,
     ) -> SemanticNodeId {
+        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
+            if !self.locals.contains_key(name.as_ref())
+                && !self.var_locals.contains_key(name.as_ref())
+            {
+                self.seed_destructured_param_element(name.as_ref());
+            }
+        }
         let declared = match &target.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 self.params.get(*ordinal as usize).copied()
@@ -3417,6 +3460,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(arms) => self.assignment_reduced_union(declared, &arms, value),
             None => declared,
         }
+    }
+
+    /// Whether a write target is governed by a declared union. The check
+    /// performs the same lazy destructured-parameter bootstrap as assignment
+    /// application so RHS context and target authority cannot diverge.
+    fn target_has_declared_union(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> bool {
+        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
+            if !self.locals.contains_key(name.as_ref())
+                && !self.var_locals.contains_key(name.as_ref())
+            {
+                self.seed_destructured_param_element(name.as_ref());
+            }
+        }
+        let declared = match &target.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+                self.params.get(*ordinal as usize).copied()
+            }
+            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                if self.locals.contains_key(name.as_ref()) {
+                    self.declared_locals.get(name.as_ref()).copied()
+                } else {
+                    self.var_declared_locals.get(name.as_ref()).copied()
+                }
+            }
+        };
+        declared.is_some_and(|node| self.dispatch.union_arms_of(node).is_some())
     }
 
     /// Read the newest narrow fact for exactly `subject`, if a guard
@@ -4098,7 +4170,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.conditional_lexicals.contains(name),
             )
         } else {
-            let node = *self.var_locals.get(name)?;
+            let node = self
+                .var_locals
+                .get(name)
+                .copied()
+                .or_else(|| self.var_declared_locals.get(name).copied())?;
             (
                 node,
                 self.var_degraded_locals.contains(name),
@@ -4229,6 +4305,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             None => (self.unmodeled_position(), true),
         };
+        self.set_declared_local(
+            name,
+            crate::flow_slice_content::SliceBindingKind::Const,
+            Some(node),
+        );
         self.bind_local(
             name,
             crate::flow_slice_content::SliceBindingKind::Const,
@@ -4393,8 +4474,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
             return declared;
         }
+        // When multiple comparable arms overlap, retain the provably most
+        // specific constituents. A fresh object can satisfy both
+        // `{ kind: string }` and `{ kind: "b"; b: number }`; the latter is
+        // strictly assignable to the former and is the assignment-selected
+        // arm. Undecided relations establish no dominance and therefore drop
+        // nothing.
+        let most_specific: Vec<SemanticNodeId> = survivors
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                !survivors.iter().copied().any(|other| {
+                    other != *candidate
+                        && self.assignable(other, *candidate) == Some(true)
+                        && self.assignable(*candidate, other) == Some(false)
+                })
+            })
+            .collect();
         self.dispatch
-            .intern_normalized_union_or_intersection(&survivors, true)
+            .intern_normalized_union_or_intersection(&most_specific, true)
     }
 
     // ── Guard narrowing ─────────────────────────────────────────────
@@ -4616,7 +4714,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         for part in parts.iter() {
             let base = self.narrowings.len();
             self.apply_guard_scoped(part, positive);
-            alternatives.push(self.narrowings.split_off(base));
+            let applied = self.narrowings.split_off(base);
+            let mut final_overlay = Vec::with_capacity(applied.len());
+            for (subject, node) in applied {
+                match final_overlay
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == subject)
+                {
+                    Some((_, current)) => *current = node,
+                    None => final_overlay.push((subject, node)),
+                }
+            }
+            alternatives.push(final_overlay);
         }
         let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
@@ -5645,6 +5754,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     block,
                     catch,
                     finally,
+                    pending_break_contributes_undefined,
                 } => {
                     // The catch / finally clauses are entered from ANY
                     // throw point of the try block, so they start from the
@@ -5862,6 +5972,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // completion at runtime.
                             own.extend(finally_contributors);
                             if !finally.can_fall_through {
+                                if *pending_break_contributes_undefined
+                                    && finally_break_base > break_base
+                                {
+                                    self.implicit_undefined_seen = true;
+                                }
                                 // Control edges remain runtime-honest: an
                                 // abrupt finally replaces pending try/catch
                                 // returns with its own return edges before an
@@ -6091,7 +6206,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 continue;
                             }
                             (Some(init), Some(arms)) => {
-                                let node = match self.eval_expr(init) {
+                                let node = match self.eval_assignment_expr(init) {
                                     Positional::Value(init_node) => self.assignment_reduced_union(
                                         declared_node,
                                         &arms,
@@ -6152,7 +6267,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // with the failed-initializer membership, exactly like
                     // an unmodelled declarator initializer.
                     let holds_before = self.holds.len();
-                    let outcome = self.eval_expr(value);
+                    let outcome = if self.target_has_declared_union(target) {
+                        self.eval_assignment_expr(value)
+                    } else {
+                        self.eval_expr(value)
+                    };
                     match outcome {
                         Positional::Value(node) => {
                             self.holds.truncate(holds_before);
@@ -6261,6 +6380,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     block,
                     catch,
                     finally,
+                    ..
                 } => {
                     self.seed_hoisted_var_declarations(block);
                     if let Some(catch) = catch.as_deref() {
@@ -6436,6 +6556,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let nested_holds;
         let nested_degradation;
         let nested_bare_return_seen;
+        let nested_implicit_undefined_seen;
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -6452,6 +6573,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 widening_locals: self.widening_locals.clone(),
                 var_widening_locals: self.var_widening_locals.clone(),
                 bare_return_seen: false,
+                implicit_undefined_seen: false,
                 // A nested function value always evaluates its WHOLE
                 // return (its signature's return type) — the member
                 // filter is a top-level demand axis.
@@ -6483,6 +6605,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             nested_holds = nested_evaluator.holds.clone();
             nested_degradation = nested_evaluator.degradation;
             nested_bare_return_seen = nested_evaluator.bare_return_seen;
+            nested_implicit_undefined_seen = nested_evaluator.implicit_undefined_seen;
             self.holds.append(&mut nested_evaluator.holds);
             (outcome, nested_body_falls_through)
         };
@@ -6509,6 +6632,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 contributors,
                 can_fall_through && nested_body_falls_through,
                 nested_bare_return_seen,
+                nested_implicit_undefined_seen,
                 &nested_holds,
                 nested_degradation,
             )
@@ -6803,7 +6927,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             crate::flow_slice_content::SliceExpr::Object { entries } => {
-                self.eval_object_literal(entries)
+                self.eval_object_literal(entries, false)
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,
