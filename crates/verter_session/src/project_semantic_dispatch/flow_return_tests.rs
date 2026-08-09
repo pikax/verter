@@ -3873,16 +3873,11 @@ fn flow_return_switch_case_entry_excludes_broken_off_arm_state() {
     );
     assert_eq!(degradation, None);
     // The case-1 arm reads the entry value `"a"` EXACTLY (the broken-off
-    // arm's write never reaches it). The trailing arm publishes the
-    // WRITE's widened `String` where the checker assignment-reduces to
-    // `"b"` — the write-widening debt ledger entry X29_write_annotated_union_write_widens,
-    // pinned here so its fix flips this assertion to `Literal("b")`.
+    // arm's write never reaches it), while the trailing arm publishes the
+    // assignment-reduced `"b"` constituent.
     assert_eq!(
         member_types(&expr, "v"),
-        vec![
-            string_literal("a"),
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-        ]
+        vec![string_literal("a"), string_literal("b")]
     );
 }
 
@@ -3995,5 +3990,120 @@ fn flow_return_destructured_default_drops_authored_undefined() {
         vec![verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Number
         )]
+    );
+}
+
+/// The state at a try-return edge enters a crossing finally. This is below
+/// the corpus's union-discriminant granularity: the graph is a `Union` both
+/// before and after the repair, so the literal `"b"` arm is asserted here.
+#[test]
+fn flow_return_finally_entry_includes_pending_return_state() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(flag: boolean, c: boolean) { let x: \"a\" | \"b\" = \"a\"; try { if (flag) { x = \"b\"; return 0 as const } } finally { if (c) return x } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the return aggregate must be a union, got {expr:?}");
+    };
+    assert!(
+        arms.iter().any(|arm| arm == &string_literal("b")),
+        "the pending return's pre-state contributes the `\"b\"` arm: {expr:?}"
+    );
+    assert!(
+        arms.iter().any(|arm| arm == &string_literal("a")),
+        "positive control: the ordinary finally-entry path keeps `\"a\"`: {expr:?}"
+    );
+    assert!(
+        !arms.iter().any(|arm| arm == &string_literal("not-present")),
+        "negative control: the literal-arm probe must distinguish an absent arm"
+    );
+}
+
+/// An unannotated assignment keeps ordinary widening even though the RHS is
+/// preserved until the evaluator can inspect the target declaration.
+#[test]
+fn flow_return_unannotated_assignment_still_widens() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(k: boolean) { var v = 1; if (k) { v = 2 } return v }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+/// Closing one arm restores an outer declaration's assignment authority
+/// before the sibling arm evaluates.
+#[test]
+fn flow_return_if_arm_restores_shadowed_declared_type() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; if (flag) { let x: \"c\" | \"d\" = \"c\"; x = \"d\" } else { x = \"b\" } return x }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+}
+
+/// The graph-node corpus can see only `Union`; this probe pins both literal
+/// contributors and proves that the finally-authored break reaches its label.
+#[test]
+fn flow_return_abrupt_finally_keeps_its_own_break_exit() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps() { L: { try { return \"a\" as const } finally { break L } } return \"b\" as const }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+    assert_ne!(
+        expr,
+        string_literal("a"),
+        "the trailing edge must not vanish"
+    );
+}
+
+/// The corpus's `Literal` discriminant does not carry its value. Pin the
+/// assignment-selected constituent, plus controls for the overwritten union
+/// and ordinary primitive widening.
+#[test]
+fn flow_return_initializerless_var_does_not_reset_a_reaching_write() {
+    let (expr, degradation) =
+        flow_expr_for_script("function makeProps() { x = \"b\"; var x: \"a\" | \"b\"; return x }");
+    assert_eq!(degradation, None);
+    assert_eq!(expr, string_literal("b"));
+    assert_ne!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+    assert_ne!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+/// The corpus's primitive member discriminant intentionally erases the
+/// primitive kind, so assert the exact predicate-recovered member here.
+#[test]
+fn flow_return_negated_conjunction_recovers_the_positive_predicate() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function isStr(v: string | number): v is string { return typeof v === \"string\" }\nfunction makeProps(x: string | number, n: number) { if (!(isStr(x) && n > 0)) throw 0; return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )]
+    );
+    assert_ne!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
     );
 }

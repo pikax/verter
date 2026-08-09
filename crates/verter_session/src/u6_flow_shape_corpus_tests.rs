@@ -2046,11 +2046,6 @@ const OPEN_DEBTS: &[&str] = &[
     // computes the contextual union.
     "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
-    // A whole-binding write to an annotated literal-union binding binds the
-    // RHS widened where the checker assignment-reduces to the declared
-    // constituent — pre-existing in the write application, surfaced by the
-    // switch case-entry measurement.
-    "X29_write_annotated_union_write_widens",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // Async return wrapping is unmodelled: the Promise is silently unwrapped
@@ -2076,6 +2071,10 @@ const OPEN_DEBTS: &[&str] = &[
     // The gap and its repair are named on both rows' notes.
     "CC09_satisfies_widening_target",
     "X21_satisfies_plain_return",
+    // A bare object-literal assignment widens its fresh member before the
+    // declared object union can select the matching constituent. The whole
+    // declared union is retained with a typed, non-warming degradation.
+    "X65_object_assignment_declared_union_refuses_reduction",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2099,10 +2098,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 50, 45, 2),
+    (Owner::U6ValueInference, 57, 52, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
-    (Owner::U6FlowReturnSubstrate, 44, 36, 2),
-    (Owner::U6NarrowTypeof, 10, 10, 0),
+    (Owner::U6FlowReturnSubstrate, 49, 37, 2),
+    (Owner::U6NarrowTypeof, 13, 13, 0),
     (Owner::U6NarrowLattice, 3, 3, 0),
     (Owner::U6NarrowSubstitution, 4, 4, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),

@@ -23,8 +23,8 @@
 //! Control semantics: sequential region evaluation (a terminal return or
 //! throw ends the region; statements after it are unreachable and
 //! dropped), an `if` whose arms both terminate cannot fall through, blocks
-//! nest, return-free loop/labeled constructs are fall-through transparent,
-//! and `switch` / `try` / return-bearing labeled constructs lower their
+//! nest, transfer-inert return-free loops and return-free labeled constructs
+//! are fall-through transparent, and `switch` / `try` / return-bearing labeled constructs lower their
 //! clauses as regions whose return contributions the evaluator joins —
 //! a `break` targeting an enclosing `switch` or labeled statement is a
 //! path terminator the lowering absorbs into that construct's
@@ -62,11 +62,11 @@ use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     build_function_body_skeleton, object_entry_descent, value_descent, FrameSpan,
     FunctionBodySkeleton, FunctionBodySource, NameMeaning, ObjectEntryDescent, ObjectEntryKey,
-    ObjectEntryKind, SkeletonBindingKind, ValueDescent,
+    ObjectEntryKind, SkeletonBindingKind, SkeletonWriteTarget, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
-    inventory_statement_list, resolve_function_node, FunctionControlRegion, FunctionNode,
-    FunctionProgramEntry,
+    for_each_call_expression, inventory_statement_list, resolve_function_node,
+    FunctionControlRegion, FunctionNode, FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, infer_declaration_expression_type, TopLevelLiteralPolicy,
@@ -315,12 +315,10 @@ pub enum SliceStatement {
         /// the evaluator proves the case tests exhaust the discriminant.
         has_default: bool,
     },
-    /// A `try` statement. Each clause is its own region; the evaluator
-    /// joins the try/catch return contributions and applies the finally
-    /// clause's override rule (a `finally` that may return replaces the
-    /// pending try/catch contributions on the paths where it does not
-    /// fall through — the checker reads abrupt finally completion the
-    /// same way).
+    /// A `try` statement. Each clause is its own region. The evaluator
+    /// aggregates every authored return for inference, while an abrupt
+    /// `finally` still replaces the pending control edges that would enter
+    /// an enclosing `finally`.
     Try {
         /// The try block's region.
         block: Box<SliceRegion>,
@@ -368,10 +366,11 @@ pub enum SliceStatement {
         /// and preserve the literal.
         widening_literal: bool,
     },
-    /// A return-free loop: effectful but fall-through transparent. (A
-    /// return-free LABELED statement is transparent too, but its body
-    /// still lowers — as a labeled region, so its inner rails and its
-    /// break exits keep deciding.)
+    /// A return-free loop with no selected downstream transfer: fall-through
+    /// transparent because no captured guard, call, write, or escaping `var`
+    /// can change a later selected read. (A return-free LABELED statement is
+    /// transparent too, but its body still lowers — as a labeled region, so
+    /// its inner rails and its break exits keep deciding.)
     TransparentLoop,
     /// An unsupported construct (return-bearing loop, `with`, a
     /// `break`/`continue` jump no enclosing modelled construct absorbs, a
@@ -407,53 +406,6 @@ pub struct SliceCatchClause {
     pub param: Option<Arc<str>>,
     /// The clause body's region.
     pub region: SliceRegion,
-}
-
-/// Whether any path through the region returns from the frame (a `return`
-/// statement anywhere in its statement tree).
-///
-/// This is the ONE finally-override classifier both halves read: the
-/// lowering consults it to decide whether a `finally` clause absorbs the
-/// try/catch's pending `break` exits, and the evaluator consults it to
-/// decide whether the finally clause's own return contributions replace
-/// the try/catch's pending ones — the two halves can never disagree about
-/// what "the finally may return" means.
-pub(crate) fn slice_region_may_return(region: &SliceRegion) -> bool {
-    region.statements.iter().any(|statement| match statement {
-        SliceStatement::Return { .. } => true,
-        SliceStatement::If {
-            consequent,
-            alternate,
-            ..
-        } => {
-            slice_region_may_return(consequent)
-                || alternate.as_deref().is_some_and(slice_region_may_return)
-        }
-        SliceStatement::Block(region) => slice_region_may_return(region),
-        SliceStatement::Labeled { body, .. } => slice_region_may_return(body),
-        SliceStatement::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| slice_region_may_return(&case.region)),
-        SliceStatement::Try {
-            block,
-            catch,
-            finally,
-        } => {
-            slice_region_may_return(block)
-                || catch
-                    .as_deref()
-                    .is_some_and(|catch| slice_region_may_return(&catch.region))
-                || finally.as_deref().is_some_and(slice_region_may_return)
-        }
-        SliceStatement::Binding { .. }
-        | SliceStatement::Assignment { .. }
-        | SliceStatement::Assertion { .. }
-        | SliceStatement::Break { .. }
-        | SliceStatement::Throw
-        | SliceStatement::ThrowPoint
-        | SliceStatement::TransparentLoop
-        | SliceStatement::Unsupported(_) => false,
-    })
 }
 
 /// The kind of one local binding declarator.
@@ -614,6 +566,8 @@ pub enum SliceGuard {
         subject: SliceNarrowSubject,
         /// The predicate's target type.
         target: GatedType,
+        /// Whether this is the predicate's negative reading.
+        negated: bool,
     },
     /// A conjunction: every fact applies at once.
     And(Arc<[SliceGuard]>),
@@ -2107,6 +2061,271 @@ impl Lowerer<'_> {
             .is_none_or(|selection| selection.value_slot_span(self.rebase(span)))
     }
 
+    /// Whether one resolved binding is part of the demanded value slice.
+    /// Nested function values lower without a selection and therefore treat
+    /// every binding as selected within their own frame.
+    fn binding_is_selected(
+        &self,
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+    ) -> bool {
+        self.selection
+            .is_none_or(|selection| selection.value_slot_span(self.skeleton.binding(binding).span))
+    }
+
+    /// Whether one selected binding is read after `loop_span`. A slot used
+    /// only by the loop's own control (for example its induction variable)
+    /// cannot affect a later selected value and does not defeat transparency.
+    fn binding_is_read_after_loop(
+        &self,
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        loop_span: FrameSpan,
+    ) -> bool {
+        self.binding_is_selected(binding)
+            && self.skeleton.expr_sites.iter().any(|site| {
+                !loop_span.contains(site.span)
+                    && site.span > loop_span
+                    && site.reads.iter().any(|read| {
+                        self.skeleton
+                            .bindings_of_name_in_scope(read.name, site.region)
+                            .contains(&binding)
+                    })
+            })
+    }
+
+    /// Whether the reads anywhere under `span` resolve to a selected slot
+    /// that is observed after the loop. Resolution uses each skeleton site's
+    /// own region, so a same-named loop local never aliases a downstream outer
+    /// binding by name alone.
+    fn span_reads_downstream_slot(&self, span: FrameSpan, loop_span: FrameSpan) -> bool {
+        self.skeleton.expr_sites.iter().any(|site| {
+            span.contains(site.span)
+                && site.reads.iter().any(|read| {
+                    self.skeleton
+                        .bindings_of_name_in_scope(read.name, site.region)
+                        .iter()
+                        .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
+                })
+        })
+    }
+
+    /// Whether a return-free loop carries a transfer the transparent summary
+    /// cannot justify for a downstream-selected binding. This deliberately
+    /// does not implement loop flow: it recognizes only the unsound admission
+    /// boundary and routes it to the existing typed loop refusal.
+    ///
+    /// Three syntax-independent skeleton facts can change a selected value
+    /// past a loop: a control input whose exit establishes a guard, a call
+    /// involving the slot (which may be a predicate/assertion), or a write to
+    /// the slot. A loop with none of those captures stays transparent.
+    fn loop_has_selected_transfer(&mut self, statement: &Statement<'_>) -> bool {
+        let loop_span = self.rebase(statement.span());
+        let control_guard_reads_selected =
+            self.statement_has_selected_guard_transfer(statement, loop_span);
+        if control_guard_reads_selected {
+            return true;
+        }
+
+        let call_reads_selected = self.skeleton.expr_sites.iter().any(|site| {
+            site.calls.iter().any(|call| {
+                loop_span.contains(call.span)
+                    && self.span_reads_downstream_slot(call.span, loop_span)
+            })
+        });
+        if call_reads_selected {
+            return true;
+        }
+
+        if self.called_closure_writes_downstream_slot(statement, loop_span) {
+            return true;
+        }
+
+        self.skeleton.writes.iter().any(|write| {
+            if !loop_span.contains(write.span) {
+                return false;
+            }
+            let SkeletonWriteTarget::Named(name) = write.target else {
+                return false;
+            };
+            self.skeleton
+                .bindings_of_name_in_scope(name, write.region)
+                .iter()
+                .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
+        })
+    }
+
+    /// Whether a loop test carries a modelled guard over a downstream-selected
+    /// slot. A bare arithmetic/truthy expression that establishes no narrowing
+    /// fact is inert here; calls and writes are classified independently.
+    fn control_test_narrows_downstream_slot(
+        &mut self,
+        test: &Expression<'_>,
+        loop_span: FrameSpan,
+    ) -> bool {
+        !matches!(self.lower_guard(test), SliceGuard::None)
+            && self.span_reads_downstream_slot(self.rebase(test.span()), loop_span)
+    }
+
+    /// Search the loop's control tree without entering nested function/class
+    /// frames. Only tests the shared guard lowerer can model count as narrowing
+    /// transfers; a switch discriminant is separately control-bearing because
+    /// its case dispatch can select a surviving edge.
+    fn statement_has_selected_guard_transfer(
+        &mut self,
+        statement: &Statement<'_>,
+        loop_span: FrameSpan,
+    ) -> bool {
+        match statement {
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .any(|statement| self.statement_has_selected_guard_transfer(statement, loop_span)),
+            Statement::IfStatement(if_stmt) => {
+                self.control_test_narrows_downstream_slot(&if_stmt.test, loop_span)
+                    || self.statement_has_selected_guard_transfer(&if_stmt.consequent, loop_span)
+                    || if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                        self.statement_has_selected_guard_transfer(alternate, loop_span)
+                    })
+            }
+            Statement::ForStatement(for_stmt) => {
+                for_stmt
+                    .test
+                    .as_ref()
+                    .is_some_and(|test| self.control_test_narrows_downstream_slot(test, loop_span))
+                    || self.statement_has_selected_guard_transfer(&for_stmt.body, loop_span)
+            }
+            Statement::WhileStatement(while_stmt) => {
+                self.control_test_narrows_downstream_slot(&while_stmt.test, loop_span)
+                    || self.statement_has_selected_guard_transfer(&while_stmt.body, loop_span)
+            }
+            Statement::DoWhileStatement(do_stmt) => {
+                self.control_test_narrows_downstream_slot(&do_stmt.test, loop_span)
+                    || self.statement_has_selected_guard_transfer(&do_stmt.body, loop_span)
+            }
+            Statement::ForInStatement(for_stmt) => {
+                self.statement_has_selected_guard_transfer(&for_stmt.body, loop_span)
+            }
+            Statement::ForOfStatement(for_stmt) => {
+                self.statement_has_selected_guard_transfer(&for_stmt.body, loop_span)
+            }
+            Statement::SwitchStatement(switch) => {
+                self.span_reads_downstream_slot(self.rebase(switch.discriminant.span()), loop_span)
+                    || switch.cases.iter().any(|case| {
+                        case.consequent.iter().any(|statement| {
+                            self.statement_has_selected_guard_transfer(statement, loop_span)
+                        })
+                    })
+            }
+            Statement::TryStatement(try_stmt) => {
+                try_stmt.block.body.iter().any(|statement| {
+                    self.statement_has_selected_guard_transfer(statement, loop_span)
+                }) || try_stmt.handler.as_ref().is_some_and(|handler| {
+                    handler.body.body.iter().any(|statement| {
+                        self.statement_has_selected_guard_transfer(statement, loop_span)
+                    })
+                }) || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                    finalizer.body.iter().any(|statement| {
+                        self.statement_has_selected_guard_transfer(statement, loop_span)
+                    })
+                })
+            }
+            Statement::LabeledStatement(labeled) => {
+                self.statement_has_selected_guard_transfer(&labeled.body, loop_span)
+            }
+            Statement::WithStatement(with_stmt) => {
+                self.statement_has_selected_guard_transfer(&with_stmt.body, loop_span)
+            }
+            _ => false,
+        }
+    }
+
+    /// Fail-closed closure boundary for calls under a return-free loop. The
+    /// outer skeleton intentionally excludes nested function bodies, so inspect
+    /// each called closure through its own skeleton and ask only one structural
+    /// question: does it write a name free in that closure but bound to a
+    /// downstream-selected slot at the call site? This does not model when or
+    /// how often the closure runs; a positive answer takes the existing loop
+    /// refusal.
+    fn called_closure_writes_downstream_slot(
+        &self,
+        statement: &Statement<'_>,
+        loop_span: FrameSpan,
+    ) -> bool {
+        let mut transfers = false;
+        for_each_call_expression(std::slice::from_ref(statement), |call| {
+            if transfers {
+                return;
+            }
+            let call_region = self
+                .skeleton
+                .innermost_region_containing(self.rebase(call.span));
+            let mut inspect = |node: FunctionNode<'_>| {
+                if self.nested_function_writes_downstream_slot(&node, call_region, loop_span) {
+                    transfers = true;
+                }
+            };
+            match unwrap_parenthesized(&call.callee) {
+                Expression::FunctionExpression(function) => {
+                    inspect(FunctionNode::Function(function));
+                }
+                Expression::ArrowFunctionExpression(arrow) => {
+                    inspect(FunctionNode::Arrow(arrow));
+                }
+                _ => {}
+            }
+            for argument in &call.arguments {
+                let Some(expression) = argument.as_expression() else {
+                    continue;
+                };
+                match unwrap_parenthesized(expression) {
+                    Expression::FunctionExpression(function) => {
+                        inspect(FunctionNode::Function(function));
+                    }
+                    Expression::ArrowFunctionExpression(arrow) => {
+                        inspect(FunctionNode::Arrow(arrow));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        transfers
+    }
+
+    fn nested_function_writes_downstream_slot(
+        &self,
+        node: &FunctionNode<'_>,
+        outer_region: verter_semantic::analysis::flow::SkeletonRegionId,
+        loop_span: FrameSpan,
+    ) -> bool {
+        let nested_source = match node {
+            FunctionNode::Function(function) => {
+                FunctionBodySource::from_function_expression(function)
+            }
+            FunctionNode::Arrow(arrow) => Some(FunctionBodySource::from_arrow(arrow)),
+        };
+        let Some(nested_source) = nested_source else {
+            return false;
+        };
+        let nested = build_function_body_skeleton(&nested_source);
+        nested.writes.iter().any(|write| {
+            let SkeletonWriteTarget::Named(nested_name) = write.target else {
+                return false;
+            };
+            if !nested
+                .bindings_of_name_in_scope(nested_name, write.region)
+                .is_empty()
+            {
+                return false;
+            }
+            let Some(outer_name) = self.skeleton.name_id(nested.name(nested_name)) else {
+                return false;
+            };
+            self.skeleton
+                .bindings_of_name_in_scope(outer_name, outer_region)
+                .iter()
+                .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
+        })
+    }
+
     fn param_ordinal(&self, name: &str) -> Option<u32> {
         self.params
             .iter()
@@ -2614,13 +2833,15 @@ impl Lowerer<'_> {
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
                     // A return-free loop is fall-through TRANSPARENT only
-                    // while it binds nothing that outlives it. A `var` it
-                    // declares is FUNCTION-scoped, so its reaching
-                    // definition escapes the loop and depends on the
-                    // iteration count — which the region evaluation does
-                    // not model. Fail closed through the same typed loop
-                    // rail a return-bearing loop takes.
-                    if self.control_has_return(statement) || declares_var(statement) {
+                    // while it binds nothing that outlives it and carries no
+                    // unmodelled transfer for a downstream-selected slot. A
+                    // `var` declaration escapes the loop; a selected guard,
+                    // call/assertion, or write depends on iteration flow.
+                    // Either shape takes the existing typed loop refusal.
+                    if self.control_has_return(statement)
+                        || declares_var(statement)
+                        || self.loop_has_selected_transfer(statement)
+                    {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
                         can_fall_through = false;
@@ -3052,7 +3273,11 @@ impl Lowerer<'_> {
         let Some(subject) = self.narrow_subject_of(argument) else {
             return SliceGuard::None;
         };
-        SliceGuard::TypePredicate { subject, target }
+        SliceGuard::TypePredicate {
+            subject,
+            target,
+            negated: false,
+        }
     }
 
     /// Read a SAME-FILE function declaration's return-type predicate:
@@ -3183,7 +3408,11 @@ impl Lowerer<'_> {
                 let value = self.lower_expr(
                     &assignment.right,
                     ExprMode::BindingInit {
-                        preserve_literal: false,
+                        // Preserve the RHS until the evaluator can reduce it
+                        // against the target's authored declared type. It
+                        // widens the literal itself when the target has no
+                        // annotation.
+                        preserve_literal: true,
                     },
                 );
                 Some(SliceStatement::Assignment {
@@ -4079,11 +4308,15 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             subject,
             negated: !negated,
         },
-        // A user-defined predicate has no reliable NEGATED reading
-        // (`!isStr(u)` does not subtract `string` in general — tsc does
-        // subtract for single-argument `x is T` predicates, but the
-        // positive form is the one the corpus measures).
-        SliceGuard::TypePredicate { .. } => SliceGuard::None,
+        SliceGuard::TypePredicate {
+            subject,
+            target,
+            negated,
+        } => SliceGuard::TypePredicate {
+            subject,
+            target,
+            negated: !negated,
+        },
         SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
             parts
                 .iter()
@@ -4101,40 +4334,43 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
     }
 }
 
-/// Conjoin two guards: a [`SliceGuard::None`] conjunct contributes no
-/// fact and drops out; the rest flatten into one conjunction.
+/// Conjoin two guards while preserving an unmodelled conjunct as an
+/// explicit [`SliceGuard::None`] alternative. The positive edge may apply
+/// every modelled conjunct, but the false edge is a disjunction of their
+/// negations: an unmodelled conjunct could be the false one, so no modelled
+/// negation is guaranteed there. Keeping `None` in the tree lets the shared
+/// evaluator derive both readings from this one authority.
 fn and_guard(left: SliceGuard, right: SliceGuard) -> SliceGuard {
     let mut parts: Vec<SliceGuard> = Vec::new();
     for guard in [left, right] {
         match guard {
-            SliceGuard::None => {}
             SliceGuard::And(nested) => parts.extend(nested.iter().cloned()),
             other => parts.push(other),
         }
     }
-    match parts.len() {
-        0 => SliceGuard::None,
-        1 => parts.pop().unwrap_or(SliceGuard::None),
-        _ => SliceGuard::And(Arc::from(parts.into_boxed_slice())),
+    if parts.iter().all(|part| matches!(part, SliceGuard::None)) {
+        SliceGuard::None
+    } else {
+        SliceGuard::And(Arc::from(parts.into_boxed_slice()))
     }
 }
 
-/// Disjoin two guards: an unnarrowable disjunct makes the whole
-/// disjunction's positive reading the identity (the union of "narrowed"
-/// and "unnarrowed" is unnarrowed), so the honest guard is none.
+/// Disjoin two guards while preserving an unmodelled disjunct explicitly.
+/// The positive edge then establishes nothing (one alternative is
+/// unnarrowed), while the false edge still applies every modelled disjunct's
+/// negation because reaching it proves all disjuncts false.
 fn or_guard(left: SliceGuard, right: SliceGuard) -> SliceGuard {
     let mut parts: Vec<SliceGuard> = Vec::new();
     for guard in [left, right] {
         match guard {
-            SliceGuard::None => return SliceGuard::None,
             SliceGuard::Or(nested) => parts.extend(nested.iter().cloned()),
             other => parts.push(other),
         }
     }
-    match parts.len() {
-        0 => SliceGuard::None,
-        1 => parts.pop().unwrap_or(SliceGuard::None),
-        _ => SliceGuard::Or(Arc::from(parts.into_boxed_slice())),
+    if parts.iter().all(|part| matches!(part, SliceGuard::None)) {
+        SliceGuard::None
+    } else {
+        SliceGuard::Or(Arc::from(parts.into_boxed_slice()))
     }
 }
 

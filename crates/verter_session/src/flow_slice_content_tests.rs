@@ -24,7 +24,7 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceObjectEntry, SliceObjectMember, SliceStatement, SliceUnsupported,
+    SliceGuard, SliceObjectEntry, SliceObjectMember, SliceStatement, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -229,6 +229,121 @@ fn return_free_loop_is_transparent() {
             ..
         }
     ));
+}
+
+/// @ai-generated - a loop whose transfer depends on a downstream-selected
+/// binding must use the typed loop refusal until fixed-point semantics exist.
+#[test]
+fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
+    for source in [
+        "function makeProps(x: \"s\" | 0) { while (typeof x === \"string\") { } return x }",
+        "declare function assertNumber(v: unknown): asserts v is number\nfunction makeProps(x: string | number) { do { assertNumber(x); break } while (true); return x }",
+        "function makeProps(x: \"a\" | \"b\") { exit: while (true) { if (x === \"a\") break exit; throw 0 } return x }",
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
+    ] {
+        let node = content_for(source, "makeProps");
+        let unsupported = node.body.statements.iter().any(|statement| match statement {
+            SliceStatement::Unsupported(SliceUnsupported::Loop) => true,
+            SliceStatement::Labeled { body, .. } => matches!(
+                body.statements.first(),
+                Some(SliceStatement::Unsupported(SliceUnsupported::Loop))
+            ),
+            _ => false,
+        });
+        assert!(
+            unsupported,
+            "a loop transfer involving the selected return binding must refuse: {source}"
+        );
+    }
+
+    let inert = content_for(
+        "declare function opaque(): boolean\nfunction makeProps(x: string | number) { while (opaque()) { } return x }",
+        "makeProps",
+    );
+    assert!(
+        matches!(
+            inert.body.statements.first(),
+            Some(SliceStatement::TransparentLoop)
+        ),
+        "a loop with no selected capture keeps the existing transparent path"
+    );
+
+    let arithmetic = content_for(
+        "function makeProps(x: number) { while (x + 1) { break } return x }",
+        "makeProps",
+    );
+    assert!(
+        matches!(
+            arithmetic.body.statements.first(),
+            Some(SliceStatement::TransparentLoop)
+        ),
+        "an inert arithmetic control read must not turn the loop into a transfer"
+    );
+}
+
+/// @ai-generated - unknown logical operands stay explicit so the evaluator
+/// can derive the positive and negative edges asymmetrically.
+#[test]
+fn logical_guards_preserve_unmodelled_operands_for_both_edge_readings() {
+    let and_node = content_for(
+        "declare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" && opaque()) throw 0; return { v: x } }",
+        "makeProps",
+    );
+    let Some(guard) = and_node
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::If { guard, .. } => Some(guard),
+            _ => None,
+        })
+    else {
+        panic!("the conjunction fixture must lower an if guard");
+    };
+    assert!(
+        matches!(guard, SliceGuard::And(parts) if parts.iter().any(|part| matches!(part, SliceGuard::None))),
+        "the unmodelled conjunction must remain explicit for the ambiguous false edge: {guard:?}"
+    );
+
+    let or_node = content_for(
+        "declare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" || opaque()) throw 0; return { v: x } }",
+        "makeProps",
+    );
+    let Some(guard) = or_node
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::If { guard, .. } => Some(guard),
+            _ => None,
+        })
+    else {
+        panic!("the disjunction fixture must lower an if guard");
+    };
+    assert!(
+        matches!(guard, SliceGuard::Or(parts) if parts.iter().any(|part| matches!(part, SliceGuard::None))),
+        "the unmodelled disjunction must remain explicit so its false edge negates every modelled disjunct: {guard:?}"
+    );
+
+    let negated = content_for(
+        "function isStr(v: string | number): v is string { return typeof v === \"string\" }\nfunction makeProps(x: string | number, n: number) { if (!(isStr(x) && n > 0)) throw 0; return { v: x } }",
+        "makeProps",
+    );
+    let Some(guard) = negated
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::If { guard, .. } => Some(guard),
+            _ => None,
+        })
+    else {
+        panic!("the negated-conjunction fixture must lower an if guard");
+    };
+    assert!(
+        matches!(guard, SliceGuard::Or(parts) if parts.iter().any(|part| matches!(part, SliceGuard::TypePredicate { .. }))),
+        "negating a conjunction must retain the predicate leaf for the opposite edge: {guard:?}"
+    );
 }
 
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region

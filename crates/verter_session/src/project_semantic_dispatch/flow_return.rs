@@ -2271,7 +2271,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             param_names: &ir.params,
             binder_env: &binder_env,
             locals: rustc_hash::FxHashMap::default(),
+            declared_locals: rustc_hash::FxHashMap::default(),
             var_locals: rustc_hash::FxHashMap::default(),
+            var_declared_locals: rustc_hash::FxHashMap::default(),
             widening_locals: rustc_hash::FxHashSet::default(),
             var_widening_locals: rustc_hash::FxHashSet::default(),
             bare_return_seen: false,
@@ -2293,6 +2295,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             conditional_params: rustc_hash::FxHashSet::default(),
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
+            return_edges: Vec::new(),
             throw_points: Vec::new(),
             collect_throw_points: false,
             scope_shadows: Vec::new(),
@@ -2301,6 +2304,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let degradation;
         let bare_return_seen;
         let (contributors, body_falls_through) = {
+            evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             holds = std::mem::take(&mut evaluator.holds);
             degradation = evaluator.degradation;
@@ -2764,11 +2768,17 @@ struct FlowEvaluator<'d, 'b> {
     /// layer (and its widening / degraded membership); the
     /// function-scoped `var` layer below survives those restores.
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    /// Authored declared types for the lexical layer. Reaching values change
+    /// at assignments; these nodes do not, and are the authority used to
+    /// assignment-reduce a later write.
+    declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// The FUNCTION-scoped local layer: `var`-kind reaching definitions.
     /// `var` hoists to function scope, so block / `if` restores never
     /// touch this layer; a lexical same-name binding shadows it only
     /// while its block scope is live (reads consult `locals` first).
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    /// Function-scoped twin of `declared_locals`.
+    var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// Locals bound to a WIDENING literal (`const b = 1` — unannotated,
     /// no const assertion). Reads of these widen to the literal's
     /// primitive at return-object member positions and at the return
@@ -2861,6 +2871,10 @@ struct FlowEvaluator<'d, 'b> {
     /// is a typed jump failure at lowering, so no exit can outlive its
     /// target.
     break_exits: Vec<FlowBreakExit>,
+    /// Complete states at evaluated return edges. A crossing `finally`
+    /// starts from every pending return path, and lexical scope closes replay
+    /// over these snapshots exactly as over break and throw edges.
+    return_edges: Vec<FlowLayerState>,
     /// The throw-point snapshots collected while a `try` block (or a
     /// `catch` clause whose statement has a `finally`) evaluates: the
     /// complete state at each call / `throw`, which is where the checker
@@ -2908,6 +2922,7 @@ struct FlowBreakExit {
 struct ScopeShadow {
     name: String,
     prior: Option<(SemanticNodeId, bool, bool, bool)>,
+    prior_declared: Option<SemanticNodeId>,
 }
 
 /// One point-in-time snapshot of the evaluator's binding layers — the
@@ -2921,9 +2936,11 @@ struct ScopeShadow {
 #[derive(Clone)]
 struct FlowLayerState {
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     degraded_locals: rustc_hash::FxHashSet<String>,
     widening_locals: rustc_hash::FxHashSet<String>,
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     var_degraded_locals: rustc_hash::FxHashSet<String>,
     var_widening_locals: rustc_hash::FxHashSet<String>,
     var_conditional_locals: rustc_hash::FxHashSet<String>,
@@ -3322,6 +3339,86 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.narrowings.retain(|(subject, _)| subject.root != root);
     }
 
+    /// Record the authored declared type of a declaration separately from its
+    /// reaching value. A later assignment is reduced against this stable type,
+    /// just as an annotated initializer is. An unannotated lexical declaration
+    /// clears an outer declaration's metadata while it shadows that binding;
+    /// `close_lexical_scope` restores it at the boundary.
+    fn set_declared_local(
+        &mut self,
+        name: &str,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        declared: Option<SemanticNodeId>,
+    ) {
+        if kind == crate::flow_slice_content::SliceBindingKind::Var {
+            if let Some(node) = declared {
+                self.var_declared_locals.insert(name.to_owned(), node);
+            }
+        } else if let Some(node) = declared {
+            self.declared_locals.insert(name.to_owned(), node);
+        } else {
+            self.declared_locals.remove(name);
+        }
+    }
+
+    /// Apply the checker's assignment typing rule to a preserved RHS literal.
+    /// Annotated unions select their comparable declared constituents;
+    /// annotated non-unions retain the declared type; an unannotated target
+    /// gets the ordinary widening-literal value.
+    fn assignment_node_for_target(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let declared = match &target.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+                self.params.get(*ordinal as usize).copied()
+            }
+            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                if self.locals.contains_key(name.as_ref()) {
+                    self.declared_locals.get(name.as_ref()).copied()
+                } else {
+                    self.var_declared_locals.get(name.as_ref()).copied()
+                }
+            }
+        };
+        let Some(declared) = declared else {
+            let widened = widen_literal_node(self.dispatch, value);
+            // Reuse an equivalent reaching-definition arm when one already
+            // exists. Primitive nodes can originate in distinct lowered
+            // arenas; joining two ids that both spell `number` would otherwise
+            // manufacture `number | number` instead of deduplicating the
+            // assignment path.
+            let current = match &target.root {
+                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                    .param_writes
+                    .get(ordinal)
+                    .copied()
+                    .or_else(|| self.params.get(*ordinal as usize).copied()),
+                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
+                    .locals
+                    .get(name.as_ref())
+                    .copied()
+                    .or_else(|| self.var_locals.get(name.as_ref()).copied()),
+            };
+            if let Some(current) = current {
+                let widened_data = self.dispatch.graph().node_data(widened);
+                if let Some(existing) = self
+                    .union_arms_or_self(current)
+                    .into_iter()
+                    .find(|node| self.dispatch.graph().node_data(*node) == widened_data)
+                {
+                    return existing;
+                }
+            }
+            return widened;
+        };
+        match self.dispatch.union_arms_of(declared) {
+            Some(arms) => self.assignment_reduced_union(declared, &arms, value),
+            None => declared,
+        }
+    }
+
     /// Read the newest narrow fact for exactly `subject`, if a guard
     /// established one.
     fn narrowed_read(
@@ -3348,6 +3445,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         node: SemanticNodeId,
         degraded: bool,
     ) {
+        // A failed RHS carries the explicit unmodelled-position marker. It
+        // cannot select a declared constituent; preserving the marker keeps
+        // the positional failure visible to every downstream consumer.
+        let node = if degraded {
+            node
+        } else {
+            self.assignment_node_for_target(target, node)
+        };
         match &target.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 let ordinal = *ordinal;
@@ -3545,9 +3650,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn layer_state(&self) -> FlowLayerState {
         FlowLayerState {
             locals: self.locals.clone(),
+            declared_locals: self.declared_locals.clone(),
             degraded_locals: self.degraded_locals.clone(),
             widening_locals: self.widening_locals.clone(),
             var_locals: self.var_locals.clone(),
+            var_declared_locals: self.var_declared_locals.clone(),
             var_degraded_locals: self.var_degraded_locals.clone(),
             var_widening_locals: self.var_widening_locals.clone(),
             var_conditional_locals: self.var_conditional_locals.clone(),
@@ -3561,9 +3668,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Restore a snapshot into the live layers.
     fn restore_layer_state(&mut self, state: FlowLayerState) {
         self.locals = state.locals;
+        self.declared_locals = state.declared_locals;
         self.degraded_locals = state.degraded_locals;
         self.widening_locals = state.widening_locals;
         self.var_locals = state.var_locals;
+        self.var_declared_locals = state.var_declared_locals;
         self.var_degraded_locals = state.var_degraded_locals;
         self.var_widening_locals = state.var_widening_locals;
         self.var_conditional_locals = state.var_conditional_locals;
@@ -3586,6 +3695,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// a scope can never drop (or keep) another scope's binding.
     fn close_lexical_scope(state: &mut FlowLayerState, shadows: &[ScopeShadow]) {
         for shadow in shadows.iter().rev() {
+            if let Some(node) = shadow.prior_declared {
+                state.declared_locals.insert(shadow.name.clone(), node);
+            } else {
+                state.declared_locals.remove(&shadow.name);
+            }
             match &shadow.prior {
                 Some((node, widening, degraded, conditional)) => {
                     state.locals.insert(shadow.name.clone(), *node);
@@ -3632,6 +3746,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.scope_shadows.push(ScopeShadow {
             name: name.to_owned(),
             prior,
+            prior_declared: self.declared_locals.get(name).copied(),
         });
     }
 
@@ -3647,25 +3762,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         mine.into_iter().map(|exit| exit.state).collect()
     }
 
-    /// Split off one block scope's declaration records and replay the
-    /// close over every PENDING break exit the scope's evaluation
-    /// captured: an exit rides its captured bindings across the scope
-    /// boundary, so the close must apply to it exactly as to the
-    /// fall-through end state — a declaration must not leak out on that
-    /// edge, and a shadowed outer binding must be restored there. The
-    /// caller applies the returned records to its own end / exit states
-    /// BEFORE joining them, so a shadowed value cannot be unioned into
-    /// the join first.
+    /// Split off one block scope's declaration records and replay the close
+    /// over every pending abrupt edge the scope's evaluation captured. A
+    /// break, return, or throw edge rides its point-in-time bindings across
+    /// the boundary, so declarations cannot leak and shadowed outer bindings
+    /// are restored before any later join observes the state. The caller
+    /// applies the returned records to its fall-through end state too.
     fn split_scope_shadows_close_exits(
         &mut self,
         shadow_base: usize,
         break_base: usize,
+        return_base: usize,
+        throw_base: usize,
     ) -> Vec<ScopeShadow> {
         let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
         for exit in &mut self.break_exits[break_base..] {
             Self::close_lexical_scope(&mut exit.state, &shadows);
         }
+        for state in &mut self.return_edges[return_base..] {
+            Self::close_lexical_scope(state, &shadows);
+        }
+        for state in &mut self.throw_points[throw_base..] {
+            Self::close_lexical_scope(state, &shadows);
+        }
         shadows
+    }
+
+    /// Capture the complete state at a return edge. A crossing `finally`
+    /// executes from this state; the returned value remains a separate flow
+    /// contribution.
+    fn capture_return_edge(&mut self) {
+        let mut state = self.layer_state();
+        self.complete_param_writes(&mut state);
+        self.return_edges.push(state);
     }
 
     /// Snapshot the complete state at a throw point (a call or a
@@ -3730,7 +3859,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             };
         let mut joined = a.clone();
         join_values(&b.locals, &mut joined.locals);
+        join_values(&b.declared_locals, &mut joined.declared_locals);
         join_values(&b.var_locals, &mut joined.var_locals);
+        join_values(&b.var_declared_locals, &mut joined.var_declared_locals);
         joined
             .degraded_locals
             .extend(b.degraded_locals.iter().cloned());
@@ -3898,6 +4029,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let shadow_base = self.scope_shadows.len();
         let throw_base = self.throw_points.len();
         let break_base = self.break_exits.len();
+        let return_base = self.return_edges.len();
         let saved_collect = self.collect_throw_points;
         self.collect_throw_points = collect_throws;
         if let Some(param) = catch_param {
@@ -3926,11 +4058,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // The scope close replays on every state the clause's evaluation
         // produced: the end state, the throw points, and the pending
         // break exits that crossed the clause's scope.
-        let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
+        let shadows =
+            self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
         Self::close_lexical_scope(&mut end, &shadows);
-        for state in &mut self.throw_points[throw_base..] {
-            Self::close_lexical_scope(state, &shadows);
-        }
         self.restore_layer_state(end.clone());
         Ok((contributions, end, written))
     }
@@ -4431,8 +4561,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.narrowings.push(entry);
                 }
             }
-            SliceGuard::TypePredicate { subject, target } => {
-                if let Some(entry) = self.narrow_to_predicate_target(subject, target, !positive) {
+            SliceGuard::TypePredicate {
+                subject,
+                target,
+                negated,
+            } => {
+                if let Some(entry) =
+                    self.narrow_to_predicate_target(subject, target, *negated == positive)
+                {
                     self.narrowings.push(entry);
                 }
             }
@@ -5116,6 +5252,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Ok(None) => {}
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         }
+                        self.capture_return_edge();
                         continue;
                     }
                     match argument {
@@ -5159,6 +5296,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.bare_return_seen = true;
                         }
                     }
+                    self.capture_return_edge();
                 }
                 crate::flow_slice_content::SliceStatement::If {
                     guard,
@@ -5186,6 +5324,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // restores; the function-scoped `var` layer (and
                     // parameter writes) join by the same rule.
                     let saved = self.locals.clone();
+                    let saved_declared = self.declared_locals.clone();
                     let saved_degraded = self.degraded_locals.clone();
                     let saved_widening = self.widening_locals.clone();
                     let saved_var = self.var_locals.clone();
@@ -5194,18 +5333,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let narrow_len = self.narrowings.len();
                     let shadow_base = self.scope_shadows.len();
                     let break_base = self.break_exits.len();
+                    let return_base = self.return_edges.len();
+                    let throw_base = self.throw_points.len();
                     self.conditional_arm_nesting += 1;
                     self.apply_guard_scoped(guard, true);
                     let (consequent_result, consequent_falls) = self.eval_region(consequent);
-                    let consequent_locals = self.locals.clone();
-                    let consequent_var = self.var_locals.clone();
-                    let consequent_param_writes = self.param_writes.clone();
                     self.narrowings.truncate(narrow_len);
-                    // The arm's scope close replays on any break exit the
-                    // arm captured — the exit rides its captured bindings
-                    // past the arm's boundary.
-                    let _ = self.split_scope_shadows_close_exits(shadow_base, break_base);
+                    // Close the arm's lexical scope BEFORE snapshotting its
+                    // contribution to the post-if join, and replay the same
+                    // close on every abrupt edge that crossed the arm.
+                    let shadows = self.split_scope_shadows_close_exits(
+                        shadow_base,
+                        break_base,
+                        return_base,
+                        throw_base,
+                    );
+                    let mut consequent_state = self.layer_state();
+                    Self::close_lexical_scope(&mut consequent_state, &shadows);
+                    let consequent_locals = consequent_state.locals;
+                    let consequent_var = consequent_state.var_locals;
+                    let consequent_param_writes = consequent_state.param_writes;
                     self.locals = saved.clone();
+                    self.declared_locals = saved_declared.clone();
                     self.degraded_locals = saved_degraded.clone();
                     self.widening_locals = saved_widening.clone();
                     self.var_locals = saved_var.clone();
@@ -5219,14 +5368,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     contributors.extend(consequent_contributors);
                     let alternate_layers = if let Some(alternate) = alternate {
+                        let shadow_base = self.scope_shadows.len();
+                        let break_base = self.break_exits.len();
+                        let return_base = self.return_edges.len();
+                        let throw_base = self.throw_points.len();
                         self.apply_guard_scoped(guard, false);
                         let (alternate_result, alternate_falls) = self.eval_region(alternate);
-                        let alternate_locals = self.locals.clone();
-                        let alternate_var = self.var_locals.clone();
-                        let alternate_param_writes = self.param_writes.clone();
                         self.narrowings.truncate(narrow_len);
-                        let _ = self.split_scope_shadows_close_exits(shadow_base, break_base);
+                        let shadows = self.split_scope_shadows_close_exits(
+                            shadow_base,
+                            break_base,
+                            return_base,
+                            throw_base,
+                        );
+                        let mut alternate_state = self.layer_state();
+                        Self::close_lexical_scope(&mut alternate_state, &shadows);
+                        let alternate_locals = alternate_state.locals;
+                        let alternate_var = alternate_state.var_locals;
+                        let alternate_param_writes = alternate_state.param_writes;
                         self.locals = saved.clone();
+                        self.declared_locals = saved_declared.clone();
                         self.degraded_locals = saved_degraded.clone();
                         self.widening_locals = saved_widening.clone();
                         self.var_locals = saved_var.clone();
@@ -5250,6 +5411,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     self.conditional_arm_nesting -= 1;
                     self.locals = saved;
+                    self.declared_locals = saved_declared;
                     self.degraded_locals = saved_degraded;
                     self.widening_locals = saved_widening;
                     self.var_locals = saved_var;
@@ -5320,6 +5482,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let mut entry = self.layer_state();
                     self.complete_param_writes(&mut entry);
                     let break_base = self.break_exits.len();
+                    let return_base = self.return_edges.len();
+                    let throw_base = self.throw_points.len();
                     let shadow_base = self.scope_shadows.len();
                     let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> =
                         cases.iter().filter_map(|case| case.test.clone()).collect();
@@ -5390,15 +5554,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                         }
-                        if dead_dispatch {
-                            chain_end = None;
-                            last_end = None;
-                            last_falls = false;
-                            continue;
-                        }
-                        let start = match &chain_end {
-                            None => dispatch,
-                            Some(end) => {
+                        let start = match (dead_dispatch, &chain_end) {
+                            // The dispatch edge is dead, but a preceding
+                            // clause may still fall through into this body.
+                            // Exhaustiveness kills only the dispatch
+                            // component, never that live chain edge.
+                            (true, Some(end)) => end.clone(),
+                            (true, None) => {
+                                last_end = None;
+                                last_falls = false;
+                                continue;
+                            }
+                            (false, None) => dispatch,
+                            (false, Some(end)) => {
                                 let mut start = self.join_layer_states(&dispatch, end);
                                 // A `var` the fall-through edge first
                                 // defines has no reaching definition on the
@@ -5437,7 +5605,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // clause-declared binding cannot be unioned into the
                     // post-switch state, and the clauses' writes to
                     // bindings that PREDATE the switch survive.
-                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
+                    let shadows = self.split_scope_shadows_close_exits(
+                        shadow_base,
+                        break_base,
+                        return_base,
+                        throw_base,
+                    );
                     // The `break` exits, with the state each captured at
                     // its own point (scope-closed above, like every state
                     // that crossed the switch body's scope).
@@ -5490,14 +5663,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // when no `catch` exists — the abrupt paths then leave
                     // the frame, so the normal-completion path's facts
                     // hold (tsgo narrows there) — minus any the finally
-                    // clause's own writes killed. A finally that may
-                    // RETURN overrides the pending try/catch contributions
-                    // on the paths where it does not fall through (abrupt
-                    // finally completion discards a pending return — the
-                    // checker's own rule), and joins them where it does.
+                    // clause's own writes killed. Return inference
+                    // aggregates every authored return contribution,
+                    // including a try return whose runtime completion is
+                    // overridden by an abrupt finally.
                     let mut entry = self.layer_state();
                     self.complete_param_writes(&mut entry);
                     let break_base = self.break_exits.len();
+                    let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     let mut own: Vec<FlowContribution> = Vec::new();
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
@@ -5574,9 +5747,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // try-internal write — the checker reads the
                             // pre-try value inside the finally too), every
                             // throw point of the clauses, and every
-                            // pending abrupt edge's pre-state (a `break`
-                            // crosses the finally — the finally runs
-                            // before the edge proceeds). Its overlay is
+                            // pending abrupt edge's pre-state (`break` and
+                            // `return` both cross the finally before their
+                            // completion proceeds). Its overlay is
                             // the ENTRY's, whatever the clauses
                             // established (tsgo: a narrow from the try
                             // does not apply inside the finally). The
@@ -5601,6 +5774,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             for state in &pending_exits {
                                 finally_start = self.join_layer_states(&finally_start, state);
                             }
+                            let pending_returns = self.return_edges[return_base..].to_vec();
+                            for state in &pending_returns {
+                                finally_start = self.join_layer_states(&finally_start, state);
+                            }
+                            let finally_break_base = self.break_exits.len();
+                            let finally_return_base = self.return_edges.len();
                             let (finally_contributors, finally_end, finally_written) =
                                 match self.eval_try_clause(&finally_start, finally, None, false) {
                                     Ok(clause) => clause,
@@ -5678,18 +5857,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     }
                                 }
                             }
-                            if finally.can_fall_through {
-                                own.extend(finally_contributors);
-                            } else {
-                                // An abrupt finally discards every pending
-                                // exit of the clauses — pending returns AND
-                                // pending `break`s alike.
+                            // The checker aggregates authored returns even
+                            // when an abrupt finally overrides an earlier
+                            // completion at runtime.
+                            own.extend(finally_contributors);
+                            if !finally.can_fall_through {
+                                // Control edges remain runtime-honest: an
+                                // abrupt finally replaces pending try/catch
+                                // returns with its own return edges before an
+                                // OUTER finally is entered.
+                                let finally_returns =
+                                    self.return_edges.split_off(finally_return_base);
+                                self.return_edges.truncate(return_base);
+                                self.return_edges.extend(finally_returns);
+                                let finally_breaks = self.break_exits.split_off(finally_break_base);
                                 self.break_exits.truncate(break_base);
-                                if crate::flow_slice_content::slice_region_may_return(finally) {
-                                    own = finally_contributors;
-                                } else {
-                                    own = Vec::new();
-                                }
+                                self.break_exits.extend(finally_breaks);
                             }
                             path_alive = !exit_states.is_empty() && finally.can_fall_through;
                         }
@@ -5721,6 +5904,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let mut entry = self.layer_state();
                     self.complete_param_writes(&mut entry);
                     let break_base = self.break_exits.len();
+                    let return_base = self.return_edges.len();
+                    let throw_base = self.throw_points.len();
                     let shadow_base = self.scope_shadows.len();
                     let (result, body_falls) = self.eval_region(body);
                     let body_contributors = match result {
@@ -5734,7 +5919,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // BEFORE the join, so a shadowed or body-declared
                     // binding cannot be unioned into the post-statement
                     // state.
-                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
+                    let shadows = self.split_scope_shadows_close_exits(
+                        shadow_base,
+                        break_base,
+                        return_base,
+                        throw_base,
+                    );
                     let mut exits: Vec<FlowLayerState> =
                         self.drain_break_exits(break_base, Some(label));
                     Self::close_lexical_scope(&mut end, &shadows);
@@ -5777,6 +5967,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // block's boundary.
                     let shadow_base = self.scope_shadows.len();
                     let break_base = self.break_exits.len();
+                    let return_base = self.return_edges.len();
+                    let throw_base = self.throw_points.len();
                     let (result, block_falls) = self.eval_region(block);
                     let block_contributors = match result {
                         Ok(contributors) => contributors,
@@ -5784,7 +5976,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     contributors.extend(block_contributors);
                     let mut end = self.layer_state();
-                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
+                    let shadows = self.split_scope_shadows_close_exits(
+                        shadow_base,
+                        break_base,
+                        return_base,
+                        throw_base,
+                    );
                     Self::close_lexical_scope(&mut end, &shadows);
                     self.restore_layer_state(end);
                     path_alive = block_falls;
@@ -5845,6 +6042,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     //   - an initializer with a UNION declared type ⇒
                     //     `getAssignmentReducedType`, below.
                     if let Some(declared) = declared.as_ref() {
+                        let no_init_var_with_reaching_value = init.is_none()
+                            && matches!(kind, crate::flow_slice_content::SliceBindingKind::Var)
+                            && (self.var_locals.contains_key(name.as_ref())
+                                || self.param_names.iter().enumerate().any(|(ordinal, param)| {
+                                    param.name.as_deref() == Some(name.as_ref())
+                                        && (self.param_writes.contains_key(&(ordinal as u32))
+                                            || self.params.get(ordinal).is_some())
+                                }));
                         // THE root-identifier gate at the declarator
                         // annotation. `const v: Info` in a frame that
                         // declares its own `Info` names the LOCAL one;
@@ -5864,10 +6069,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // reads this binding still publishes its
                             // return (degraded, never warm).
                             let marker = self.unmodeled_position();
-                            self.bind_local(name, *kind, marker, false, false);
+                            self.set_declared_local(name, *kind, Some(marker));
+                            if !no_init_var_with_reaching_value {
+                                self.bind_local(name, *kind, marker, false, false);
+                            }
                             continue;
                         }
                         let declared_node = self.lower_body_type(declared.ty());
+                        self.set_declared_local(name, *kind, Some(declared_node));
+                        // An initializer-less `var` declaration has no
+                        // runtime write. Keep the authored declaration as the
+                        // stable authority for later assignments, but do not
+                        // replace a value already reaching this statement.
+                        if no_init_var_with_reaching_value {
+                            continue;
+                        }
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
                             (None, _) | (Some(_), None) => {
@@ -5897,6 +6113,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         }
                     }
+                    self.set_declared_local(name, *kind, None);
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
                     // the whole declaration, so nothing here can observe
@@ -5994,6 +6211,68 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         (Ok(contributors), region.can_fall_through && path_alive)
+    }
+
+    /// Seed the authored type authority of selected `var` declarations before
+    /// executing the frame. The declaration is hoisted for assignment
+    /// checking, while its initializer (if any) and its runtime reaching value
+    /// remain source-ordered in [`Self::eval_region`]. An annotation whose
+    /// frame gate is unresolved stays source-ordered so an unreachable or
+    /// unobserved declaration cannot degrade the frame merely by existing.
+    fn seed_hoisted_var_declarations(&mut self, region: &crate::flow_slice_content::SliceRegion) {
+        use crate::flow_slice_content::{SliceBindingKind, SliceStatement};
+        for statement in region.statements.iter() {
+            match statement {
+                SliceStatement::Binding {
+                    name,
+                    kind: SliceBindingKind::Var,
+                    declared: Some(declared),
+                    ..
+                } if !declared
+                    .shadowed()
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name)) =>
+                {
+                    let node = self.lower_body_type(declared.ty());
+                    self.set_declared_local(name, SliceBindingKind::Var, Some(node));
+                }
+                SliceStatement::If {
+                    consequent,
+                    alternate,
+                    ..
+                } => {
+                    self.seed_hoisted_var_declarations(consequent);
+                    if let Some(alternate) = alternate.as_deref() {
+                        self.seed_hoisted_var_declarations(alternate);
+                    }
+                }
+                SliceStatement::Block(body) => {
+                    self.seed_hoisted_var_declarations(body);
+                }
+                SliceStatement::Labeled { body, .. } => {
+                    self.seed_hoisted_var_declarations(body);
+                }
+                SliceStatement::Switch { cases, .. } => {
+                    for case in cases.iter() {
+                        self.seed_hoisted_var_declarations(&case.region);
+                    }
+                }
+                SliceStatement::Try {
+                    block,
+                    catch,
+                    finally,
+                } => {
+                    self.seed_hoisted_var_declarations(block);
+                    if let Some(catch) = catch.as_deref() {
+                        self.seed_hoisted_var_declarations(&catch.region);
+                    }
+                    if let Some(finally) = finally.as_deref() {
+                        self.seed_hoisted_var_declarations(finally);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Evaluate a nested function value's signature: bind its OWN type
@@ -6167,7 +6446,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param_names: nested_params,
                 binder_env: &binder_env,
                 locals: self.locals.clone(),
+                declared_locals: self.declared_locals.clone(),
                 var_locals: captured_var_locals,
+                var_declared_locals: self.var_declared_locals.clone(),
                 widening_locals: self.widening_locals.clone(),
                 var_widening_locals: self.var_widening_locals.clone(),
                 bare_return_seen: false,
@@ -6192,10 +6473,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 conditional_params: rustc_hash::FxHashSet::default(),
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
+                return_edges: Vec::new(),
                 throw_points: Vec::new(),
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
             };
+            nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
             nested_degradation = nested_evaluator.degradation;
