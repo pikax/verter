@@ -53,10 +53,9 @@ this directory and that external ledger to continue the program.
 
 ## Registered amendments
 
-Amendments record deltas to the execution plan WITHOUT editing the
-verbatim-reconstructed authority files (editing those would void the fidelity
-attestation — see [`PROVENANCE.md`](PROVENANCE.md)). They live in
-[`amendments/`](amendments/) and bind the program:
+Amendments normally record deltas without editing the verbatim-reconstructed authority files. AMD-002 is the maintainer-ratified exception because predecessor authority must be materialized in the machine-readable DAG and exact-state template. The published consolidated and release artifacts remain immutable historical originals; for execution, AMD-002 and the amended live split files supersede their A2-to-A3 lineage.
+
+Amendments live in [`amendments/`](amendments/) and bind the program:
 
 - [`amendments/AMD-001-stack-window-validator-prerequisite.md`](amendments/AMD-001-stack-window-validator-prerequisite.md)
   — the program-state validator fails closed on every begun successor of a
@@ -65,6 +64,11 @@ attestation — see [`PROVENANCE.md`](PROVENANCE.md)). They live in
   Node stack-window validator, composite program-state cross-validation, CI wiring,
   and a discriminating D1/D2 transition test. The refusal is superseded by that
   delivery, never simply deleted.
+- **AMD-002 — A2C completion-model predecessor for A3:**
+  [`amendments/AMD-002-a2c-completion-predecessor.md`](amendments/AMD-002-a2c-completion-predecessor.md)
+  inserts `A2C` between `A2` and `A3`, makes accepted content-free completion facts
+  A3's sole G10 discriminator, and requires D6 / `U6.LOOP_CLOSURE` to consume the
+  same completion algebra rather than rebuild it.
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.

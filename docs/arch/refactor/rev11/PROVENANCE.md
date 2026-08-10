@@ -21,13 +21,20 @@ run. Package validation state: UNVERIFIED, waived by explicit maintainer decisio
 
 ## Reconstruction
 
-The split authority files in this directory were reconstructed VERBATIM (byte-for-byte
-content) from the digest-verified consolidated master, with **one landed-name
+The 67/67 byte-verbatim attestation applies to the originally reconstructed bytes
+recoverable from the digest-verified consolidated master, with **one landed-name
 exception, disclosed here**: the package's canonical `README.md` was landed as
 `package-README.md`, and a new repository-local index occupies `README.md`.
 `ORCHESTRATOR.md` §3 makes `README.md` normative read-order item 1; readers following
 that order should read `package-README.md` as the package README (the landed
 `README.md` states this near its top).
+
+AMD-002 subsequently amended the live split files `program-dag.toml`, `program.md`,
+`charters/A3.md`, and `templates/program-state.template.toml`, and added
+`charters/A2C.md`. The current bytes of those amended or added files are execution
+authority under AMD-002; they are not covered by the historical 67/67 byte-verbatim
+claim. The pinned consolidated master remains the immutable source from which the
+originally reconstructed bytes are recoverable.
 
 ## Aggregate digest of the landed split-package tree (including the repository-local index files)
 
@@ -42,11 +49,11 @@ Input set: every `.md`/`.toml` file under this directory EXCEPT `consolidated/`,
 `release/`, `evidence/`, and this file. Note the set is NOT exactly "the authority
 files": it INCLUDES the repository-local `README.md` index, `_EXTRACTION_INDEX.md`,
 and the `amendments/` records (none of which are package files) and EXCLUDES the
-consolidated canonical master. **Amendments live OUTSIDE the verbatim set:** the
-files under `amendments/` are repository-local program records, not reconstructions
-of package content, so their presence (and inclusion in this aggregate) does not
-affect the 67/67 verbatim fidelity attestation — the verbatim-reconstructed
-authority files themselves are unedited. Each exclusion has a reason:
+consolidated canonical master. **Amendments live OUTSIDE the historical verbatim
+set:** files under `amendments/` are repository-local program records, not
+reconstructions of package content. Their inclusion in this aggregate does not alter
+the historical 67/67 attestation. AMD-002 is the disclosed exception that subsequently
+edited the named live split files above. Each exclusion has a reason:
 
 - `consolidated/` — the single-file canonical master is already pinned individually by
   its own SHA-256 row above (digest-matched to the published validation report);
@@ -68,8 +75,8 @@ differs. Files must be checked out with their committed LF line endings (this
 repository uses `core.autocrlf=false`; a CRLF-translating checkout changes the bytes
 and therefore the digest).
 
-- File count: 70
-- Aggregate digest: `80dc835a080f258d85101a15c580e19a685c0984e1cce6f90666c162b9a4817e`
+- File count: 72
+- Aggregate digest: `5385b92113affe07db54cadb799c514e6fa3883c0f17255fc2a217a1cba5b014`
 
 (The historical aggregate reconstruction digest
 `4ab1523c4fc769cc02da61d017d7e447adf62652189350c947a3f642128d8e5c` was published

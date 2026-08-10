@@ -7,8 +7,8 @@ the way it does. A future agent continuing the program reads this file together 
 `evidence/A0-summary.md` (the committed, identity-free description of the A0
 landing; live A0 state lives in the external ledger).
 
-**Maintainer:** Carlos Rodrigues (GitHub `pikax`). All rulings were made and recorded on
-**2026-08-09**.
+**Maintainer:** Carlos Rodrigues (GitHub `pikax`). Rulings R-1 through R-8 were made
+and recorded on **2026-08-09**; R-9 was made and recorded on **2026-08-10**.
 
 ## R-1 — Maintainer designation
 
@@ -110,11 +110,24 @@ and landing is a local fast-forward of `main` — nothing is pushed to `origin`,
 `origin/main` is frozen until this work lands. No GitHub action of any kind is taken
 as part of this program work.
 
+## R-9 — Ratify A2C completion-model predecessor for A3
+
+The maintainer ratifies **AMD-002 — A2C completion-model predecessor for A3**. `A2C`
+is inserted directly after `A2` and directly before `A3`; `A3` now depends on `A2C`,
+and no other predecessor list changes. `A2C` owns only content-free,
+exact-or-typed-unknown completion facts and does not change public semantic results.
+`A3` must consume those accepted facts as its sole G10 discriminator, while `D6` /
+`U6.LOOP_CLOSURE` must consume the same completion algebra for final graph and flow
+semantics rather than create a second classifier. The published consolidated master,
+release artifacts, `_EXTRACTION_INDEX.md`, and historical readiness reviews remain
+immutable historical originals; for execution, AMD-002 and the amended live split
+files supersede their `A0 → A1 → A2 → A3` lineage.
+
 ## Registered amendments
 
-Amendments record deltas to the execution plan without editing the
-verbatim-reconstructed authority files (which would void the fidelity attestation —
-see `PROVENANCE.md`). Registry:
+Amendments normally record deltas without editing the verbatim-reconstructed authority
+files. AMD-002 is the maintainer-ratified exception described by R-9; the historical
+fidelity boundary is stated in `PROVENANCE.md`. Registry:
 
 - **AMD-001** — [`../amendments/AMD-001-stack-window-validator-prerequisite.md`](../amendments/AMD-001-stack-window-validator-prerequisite.md):
   the program-state validator's fail-closed rejection of begun successors of a
@@ -125,3 +138,8 @@ see `PROVENANCE.md`). Registry:
   composite validator accepts `D2` only when `D1` is the declared private checkpoint
   in the same validated `ATOMIC_REVIEW` snapshot with `D2` as its acceptance block;
   the refusal is superseded by that delivery, never simply deleted.
+- **AMD-002 — A2C completion-model predecessor for A3** —
+  [`../amendments/AMD-002-a2c-completion-predecessor.md`](../amendments/AMD-002-a2c-completion-predecessor.md):
+  inserts `A2C` between `A2` and `A3`; A2C provides the accepted content-free
+  completion facts that A3 must use as its sole G10 discriminator, and D6 /
+  `U6.LOOP_CLOSURE` consumes the same algebra for final semantics.

@@ -166,7 +166,7 @@ Mapping the gaps onto their owners:
 | G3 | shared relation authority | nominal `unique symbol` identity + tri-state comparability |
 | G4, G5 | `U6.LOOP_CLOSURE` | closure-escape edges + one position-independent effect transfer |
 | G6–G9 | `U6.LOOP_CLOSURE` | closure-escape edges + capture summaries |
-| G10 | `U6.LOOP_CLOSURE` | `try`/`finally`-override edges + completion channels |
+| G10 | `A2C` for Gate 0 discrimination; `D6` / `U6.LOOP_CLOSURE` for final semantics | accepted content-free completion facts for A3; later `try`/`finally`-override graph edges and completion-state routing |
 | G11 (`this`) | `U6.FLOW_RETURN_SUBSTRATE` | content-free `this` facts + `This`/`Capture` IR carriers |
 | G11 (sequence) | `U6.FLOW_RETURN_SUBSTRATE` | a pass-through disposition in the shared value classifier |
 | `ClassExpression` | recorded ledger entry | executable-region kind for field initializers |
@@ -240,6 +240,8 @@ transformed by `try`/`finally`, routed by labels and loops. Delete
 `statement_guarantees_current_function_return`, the pending-break booleans, and the
 per-syntax suffix flags. G10's three cases and their unsampled siblings (`switch`, `catch`)
 close together.
+
+Revision 11 staging: `A2C` pulls forward only the content-free completion fact algebra needed for Gate 0 G10 discrimination. `D6` / `U6.LOOP_CLOSURE` consumes that same algebra and remains the owner of graph edges, loop fixed points, state routing, and final clean semantics. No second classifier is permitted.
 
 ### 4.4 Bindings as lattice state, not name maps
 
