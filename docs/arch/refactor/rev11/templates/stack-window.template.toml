@@ -1,0 +1,75 @@
+schema = 1
+revision = 11
+status = "TEMPLATE"
+
+# The immutable StackSnapshotId is the SHA-256 of this fully resolved,
+# validated file. LANDABLE is one connected dependency path whose layers may
+# merge independently. ATOMIC_REVIEW has private checkpoints and one final
+# mergeable acceptance layer.
+mode = "LANDABLE"
+stack_id = "REQUIRED_STACK_ID"
+acceptance_block_id = ""
+authority_package_digest = "REQUIRED_PACKAGE_SHA256"
+implementation_lock_digest = "REQUIRED_A6_LOCK_SHA256"
+program_state_basis_digest = "REQUIRED_PRE_STACK_PROGRAM_STATE_SHA256"
+previous_stack_snapshot_digest = "NOT_APPLICABLE"
+root_branch = "REQUIRED_ROOT_BRANCH"
+root_base_sha = "REQUIRED_FULL_SHA"
+root_base_tree = "REQUIRED_TREE_OID"
+stack_tool = "REQUIRED_STACK_TOOL"
+stack_tool_version = "REQUIRED_STACK_TOOL_VERSION"
+landing_mode = "bottom-up"
+max_open_layers = 4
+owner = "REQUIRED_ORCHESTRATOR_OR_STACK_OWNER"
+evidence_root = "REQUIRED_REPOSITORY_RELATIVE_PATH"
+shared_writer_surfaces = []
+integration_commands = []
+notes = ""
+
+[[layer]]
+index = 1
+layer_id = "B1"
+block_id = "B1"
+charter_digest = "REQUIRED_B1_CHARTER_DIGEST"
+kind = "mergeable"
+branch = "REQUIRED_B1_BRANCH"
+base_branch = "REQUIRED_ROOT_BRANCH"
+worktree = "REQUIRED_B1_WORKTREE_ID_OR_PATH"
+worker = "REQUIRED_B1_WORKER"
+pr_number = 0
+pr_url = ""
+base_sha = "REQUIRED_FULL_SHA"
+base_tree = "REQUIRED_TREE_OID"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = true
+notes = ""
+
+[[layer]]
+index = 2
+layer_id = "B2"
+block_id = "B2"
+charter_digest = "REQUIRED_B2_CHARTER_DIGEST"
+kind = "mergeable"
+branch = "REQUIRED_B2_BRANCH"
+base_branch = "REQUIRED_B1_BRANCH"
+worktree = "REQUIRED_B2_WORKTREE_ID_OR_PATH"
+worker = "REQUIRED_B2_WORKER"
+pr_number = 0
+pr_url = ""
+base_sha = "REQUIRED_B1_HEAD_SHA"
+base_tree = "REQUIRED_B1_HEAD_TREE_OID"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = true
+notes = ""

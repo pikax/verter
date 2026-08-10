@@ -22,9 +22,14 @@
 //! * `script` — the authored program, spliced verbatim into every lane.
 //! * `checker` — what tsgo `7.0.0-dev.20260526.1`
 //!   (`--noEmit --strict --ignoreConfig`, CHECKER only, never `.d.ts`) prints
-//!   for the row's `probe`. Verified live by
-//!   [`oracle::corpus_checker_column_matches_tsgo`] whenever the pinned binary
-//!   is resolvable, so it is never a guess.
+//!   for the row's `probe`. This is a RECORDED measurement, refreshed by the
+//!   generation-only procedure in [`oracle`] — the suite itself never invokes
+//!   tsgo (the checker is generation-only in this codebase). What the suite
+//!   enforces instead: the column is never empty, the probe program is
+//!   derivable from the row ([`oracle::every_row_records_the_checkers_answer`]),
+//!   and for every deep-pinned row the recorded text is parsed and compared
+//!   SEMANTICALLY against the live graph
+//!   ([`corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict`]).
 //! * `flow` — the row's function return as PRODUCTION composes it: the
 //!   graph node and its per-MEMBER node shapes, plus (on the body-derived
 //!   rail) the typed `degradation` and the `slot_candidate_count`. A
@@ -104,10 +109,14 @@
 //!    Every lane prints its MEASURED value. Transcribe them into the row.
 //! 3. **Record the checker's answer.** `checker` is what tsgo prints for
 //!    `probe`; leave it empty and the row is rejected. Do not hand-write it —
-//!    run the suite, and [`oracle::corpus_checker_column_matches_tsgo`]
-//!    regenerates the probe from your own `script` + `probe` and byte-compares
-//!    it against the pinned binary. If the row is `any`, set `checker_is_any`:
-//!    `any` is assignable to `null`, so the shape probe alone cannot see it.
+//!    dump the probe program (`U6_CORPUS_DUMP=1`, see
+//!    [`corpus_suite::corpus_probe_programs`]) and run it through the PINNED
+//!    tsgo binary yourself; the printed diagnostic IS the column. The suite
+//!    never invokes tsgo (generation-only), so the column is a recorded
+//!    measurement — [`oracle`] documents the exact refresh procedure and
+//!    enforces that the probe is reproducible from the row. If the row is
+//!    `any`, set `checker_is_any`: `any` is assignable to `null`, so the
+//!    shape probe alone cannot see it.
 //! 4. **Pin the MEMBER shapes, not just the enclosing node.** For anything
 //!    that depends on a computed member type — every narrowing row — the
 //!    enclosing node is `Object` whether or not the guard applied. `members`
@@ -136,13 +145,23 @@
 
 use std::sync::Arc;
 
+use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowReturnDegradation, QueryError, SemanticNodeData, SemanticQueryKey,
+    FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind, QueryError,
+    SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::{FileLanguage, VerterHost};
 use verter_compiler::compile::CompileTarget;
+
+// The strengthening layer: recursive expectations, the public cold/warm
+// boundary companion, negative controls, and the crossed capture-write
+// matrix. Declared as a CHILD of this module (not in `lib.rs`) so the
+// corpus and its strengthening travel as one unit.
+#[path = "u6_flow_expect_tests.rs"]
+pub(crate) mod u6_flow_expect_tests;
+use self::u6_flow_expect_tests::{Boundary, Expect, ExpectedNode, Lit};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Row vocabulary
@@ -561,6 +580,17 @@ pub(crate) struct Row {
     pub(crate) flow: Flow,
     pub(crate) svelte: Svelte,
     pub(crate) verdict: Verdict,
+    /// RECURSIVE graph-node expectation, matched through the public
+    /// audited boundary — the strengthening layer that makes
+    /// `() => "a"` distinguishable from `() => "b"` where the root
+    /// [`NodeShape`] cannot. See
+    /// [`u6_flow_expect_tests::ExpectedNode`].
+    pub(crate) expect: Expect,
+    /// Public cold/warm boundary companion:
+    /// `get_flow_return_type_with_audit` invoked TWICE, pinning the exact
+    /// projected JSON, the typed degradation, and the second call's
+    /// cache-replay state. See [`u6_flow_expect_tests::Boundary`].
+    pub(crate) boundary: Boundary,
 }
 
 impl Row {
@@ -583,6 +613,8 @@ impl Row {
         flow: Flow::Skip,
         svelte: Svelte::Skip,
         verdict: Verdict::MatchesChecker,
+        expect: Expect::Skip,
+        boundary: Boundary::Skip,
     };
 }
 
@@ -603,7 +635,7 @@ fn make_host() -> Arc<VerterHost> {
     ))
 }
 
-fn upsert(host: &VerterHost, id: &str, source: &str, language: FileLanguage) {
+pub(crate) fn upsert(host: &VerterHost, id: &str, source: &str, language: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some(id.to_owned()),
@@ -807,7 +839,7 @@ fn node_shape(data: Option<&SemanticNodeData>) -> NodeShape {
     }
 }
 
-fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
+pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
     match reason {
         None => Degr::None,
         Some(FlowReturnDegradation::UnmodeledPosition) => Degr::UnmodeledPosition,
@@ -1159,6 +1191,11 @@ mod corpus_suite {
                 probe_program(row.probe, row.script)
             );
         }
+        panic!(
+            "U6_CORPUS_DUMP=1: probe programs dumped above; corpus_probe_programs EVALUATED \
+             NO PINS in this mode. A dump run is measurement, never evidence — re-run \
+             without U6_CORPUS_DUMP for a verdict."
+        );
     }
 
     #[test]
@@ -1328,6 +1365,13 @@ mod corpus_suite {
                 (Runtime::Skip, _) => {}
             }
         }
+        if dump {
+            panic!(
+                "U6_CORPUS_DUMP=1: measurements dumped above; corpus_runtime_lane EVALUATED \
+                 NO PINS in this mode. A dump run is measurement, never evidence — re-run \
+                 without U6_CORPUS_DUMP for a verdict."
+            );
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
@@ -1413,6 +1457,13 @@ mod corpus_suite {
                 )),
                 (Tsx::Skip, _) => {}
             }
+        }
+        if dump {
+            panic!(
+                "U6_CORPUS_DUMP=1: measurements dumped above; corpus_tsx_lane EVALUATED NO \
+                 PINS in this mode. A dump run is measurement, never evidence — re-run \
+                 without U6_CORPUS_DUMP for a verdict."
+            );
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
@@ -1559,7 +1610,514 @@ mod corpus_suite {
                 )),
             }
         }
+        if dump {
+            panic!(
+                "U6_CORPUS_DUMP=1: measurements dumped above; corpus_flow_lane EVALUATED NO \
+                 PINS in this mode. A dump run is measurement, never evidence — re-run \
+                 without U6_CORPUS_DUMP for a verdict."
+            );
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The RECURSIVE-expectation + PUBLIC-BOUNDARY lane.
+    ///
+    /// For every row carrying an [`Expect::Node`], [`Boundary::Audit`],
+    /// or [`Boundary::AuditRefusal`] pin, drive
+    /// `get_flow_return_type_with_audit` TWICE on a fresh host: the
+    /// recursive expectation is matched against the first call's result
+    /// node at the GRAPH-NODE level, and the boundary pin models BOTH
+    /// calls — result class, typed degradation, exact projected JSON,
+    /// `from_cache`, and cold-compute count — in both directions. A
+    /// refusal row ([`Flow::NoValue`] + [`Boundary::AuditRefusal`])
+    /// asserts the typed non-admission contract: both calls refuse,
+    /// cold, never warm-served.
+    #[test]
+    fn corpus_expect_and_boundary_lane() {
+        use super::u6_flow_expect_tests::{
+            check_boundary, check_boundary_refusal, drive_expect_boundary,
+        };
+        let dump = dump_mode();
+        let mut failures = Vec::new();
+        for row in CORPUS {
+            let wants =
+                !matches!(row.expect, Expect::Skip) || !matches!(row.boundary, Boundary::Skip);
+            if !wants && !dump {
+                continue;
+            }
+            let function = match (row.flow, row.boundary) {
+                (Flow::Result { function, .. }, _) => function,
+                // A refusal row: Flow::NoValue names no function; every
+                // corpus refusal program uses the `makeProps` convention
+                // (the same default `drive_flow` applies).
+                (Flow::NoValue, Boundary::AuditRefusal { .. }) => "makeProps",
+                _ => {
+                    if wants {
+                        failures.push(report(
+                            row,
+                            "expect/boundary lane",
+                            "a Flow::Result (body-derived) row, or Flow::NoValue with \
+                             Boundary::AuditRefusal",
+                            "a row on another rail",
+                            "the recursive expectation and the value boundary drive the \
+                             body-derived FlowReturn rail; the refusal boundary rides only \
+                             on a Flow::NoValue row; a declared-rail or skipped row cannot \
+                             carry these pins",
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let expected = match row.expect {
+                Expect::Node(node) => Some(node),
+                Expect::Skip => None,
+            };
+            let measured = drive_expect_boundary(row.aux, row.id, row.script, function, expected);
+            if dump {
+                println!(
+                    "EXPECT {} => node {:?}  degr {:?}  cold1 {}  fc1 {}  fc2 {}  cold2 {}  \
+                     err {:?}  json1 {:?}",
+                    row.id,
+                    measured.rendered,
+                    measured.boundary.degradation,
+                    measured.boundary.first_cold_computes,
+                    measured.boundary.first_from_cache,
+                    measured.boundary.second_from_cache,
+                    measured.boundary.second_cold_computes,
+                    measured.boundary.error,
+                    measured.boundary.json,
+                );
+                continue;
+            }
+            if let Some(fails) = &measured.expect_failures {
+                for failure in fails {
+                    failures.push(report(
+                        row,
+                        &format!("recursive expectation on `{function}`'s return"),
+                        failure,
+                        measured.rendered.as_deref().unwrap_or("<no value>"),
+                        "the recursive graph-node expectation did not match. This lane is \
+                         what distinguishes `() => \"a\"` from `() => \"b\"` — re-measure \
+                         with the dump before re-pinning.",
+                    ));
+                }
+            }
+            match row.boundary {
+                Boundary::Audit {
+                    json,
+                    degradation,
+                    warm_replay,
+                } => {
+                    for failure in
+                        check_boundary(json, degradation, warm_replay, &measured.boundary)
+                    {
+                        failures.push(report(
+                            row,
+                            &format!("public cold/warm boundary on `{function}`"),
+                            &failure,
+                            "see the clause above",
+                            "get_flow_return_type_with_audit, invoked twice: call 1 must be \
+                             cold with the pinned typed degradation and EXACT projected JSON; \
+                             call 2 must keep the result class and typed degradation, project \
+                             identically, and hold the pinned cache-replay state in both \
+                             directions (a cold replay must genuinely recompute).",
+                        ));
+                    }
+                }
+                Boundary::AuditRefusal { error } => {
+                    for failure in check_boundary_refusal(error, &measured.boundary) {
+                        failures.push(report(
+                            row,
+                            &format!("public refusal boundary on `{function}`"),
+                            &failure,
+                            "see the clause above",
+                            "get_flow_return_type_with_audit, invoked twice: both calls must \
+                             REFUSE with exactly the pinned typed refusal, cold each time, \
+                             keeping the same refusal identity across the calls; the refusal \
+                             is never admitted warm and recomputes on every demand — the \
+                             typed non-admission contract.",
+                        ));
+                    }
+                }
+                Boundary::Skip => {}
+            }
+        }
+        if dump {
+            panic!(
+                "U6_CORPUS_DUMP=1: measurements dumped above; corpus_expect_and_boundary_lane \
+                 EVALUATED NO PINS in this mode. A dump run is measurement, never evidence — \
+                 re-run without U6_CORPUS_DUMP for a verdict."
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The `checker` column of a deep-pinned row is cross-validated at
+    /// the PRESENTATION-BYTE level: wherever the checker's printed
+    /// syntax coincides with the harness renderer's syntax, the LIVE
+    /// recursive rendering of the row's flow return must equal the
+    /// row's `checker` text verbatim.
+    ///
+    /// `RENDER_INCOMPARABLE` exempts PRESENTATION BYTES ONLY — never
+    /// semantic equality, which
+    /// [`deep_pinned_rows_semantic_equality_follows_their_verdict`]
+    /// compares for EVERY deep-pinned row regardless of these lists.
+    /// The incomparability claim is itself VERIFIED: an incomparable
+    /// row's live rendering must genuinely BYTE-DIFFER from its checker
+    /// text, so reclassifying a comparable row into
+    /// `RENDER_INCOMPARABLE` with a bogus reason fails here instead of
+    /// silently dropping the byte comparison. Both lists are exhaustive
+    /// over the deep-pinned (`Expect::Node`) population and
+    /// stale-failing.
+    #[test]
+    fn checker_column_cross_validates_against_live_rendering() {
+        use super::u6_flow_expect_tests::drive_expect_boundary;
+        /// Deep-pinned rows whose `checker` text IS renderer syntax.
+        const RENDER_COMPARABLE: &[&str] = &[
+            "X85_nested_closure_write_updates_captured_binding",
+            "X87_read_only_let_capture_keeps_reaching_literal",
+        ];
+        /// Deep-pinned rows whose `checker` text is NOT byte-comparable
+        /// to the renderer, each with the PRESENTATION reason. Semantic
+        /// equality is NOT exempted — it is compared for every entry by
+        /// the verdict-directed semantic test, and the byte-divergence
+        /// claimed here is asserted live below.
+        const RENDER_INCOMPARABLE: &[(&str, &str)] = &[
+            (
+                "X88_nested_label_inherits_enclosing_suffix_return",
+                "checker prints `\"a\" | \"b\"`; the renderer spells the same node \
+                 `Union(\"a\" | \"b\")`",
+            ),
+            (
+                "N25_impossible_predicate_statement_keeps_dead_contributor",
+                "the renderer spells the (KnownOwed-divergent) union \
+                 `{ v: Union(…) }` where the checker prints `{ v: \"no\" | \"ok\"; }` — \
+                 print syntax AND semantics differ; the semantic divergence is held by \
+                 the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N26_structurally_possible_predicate_intersection_survives",
+                "checker prints `{ v: string | (A & B); }` (object print with a \
+                 parenthesised intersection); the renderer spells \
+                 `{ v: Union(string | Intersection(DeclRef(A) & DeclRef(B))) }`",
+            ),
+            (
+                "D01_helper_new",
+                "checker prints `{ label: string; made: Box; }`; the renderer spells \
+                 `{ label: string, made: Opaque(UnmodeledPosition) }` — print syntax AND \
+                 semantics differ; the Degraded divergence is held by the semantic test",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for row in CORPUS {
+            let comparable = RENDER_COMPARABLE.contains(&row.id);
+            let incomparable = RENDER_INCOMPARABLE.iter().any(|(id, _)| *id == row.id);
+            let deep_pinned = matches!(row.expect, Expect::Node(_));
+            if deep_pinned && !(comparable ^ incomparable) {
+                failures.push(format!(
+                    "{}: every deep-pinned row must appear in EXACTLY ONE of \
+                     RENDER_COMPARABLE / RENDER_INCOMPARABLE (comparable={comparable}, \
+                     incomparable={incomparable}) — classify it deliberately",
+                    row.id
+                ));
+            }
+            if !deep_pinned && (comparable || incomparable) {
+                failures.push(format!(
+                    "{}: named in a cross-validation list but carries no Expect::Node pin — \
+                     stale entry",
+                    row.id
+                ));
+            }
+            if !deep_pinned || !(comparable || incomparable) {
+                continue;
+            }
+            let Flow::Result { function, .. } = row.flow else {
+                failures.push(format!(
+                    "{}: cross-validated rows ride the body-derived rail",
+                    row.id
+                ));
+                continue;
+            };
+            let measured = drive_expect_boundary(row.aux, row.id, row.script, function, None);
+            let rendered = measured.rendered.as_deref();
+            if comparable && rendered != Some(row.checker) {
+                failures.push(format!(
+                    "{}: the `checker` column must EQUAL the live rendering for a \
+                     render-comparable row — checker `{}`, rendered `{}`. One of the two \
+                     changed without the other; re-measure against the pinned oracle before \
+                     re-pinning.",
+                    row.id,
+                    row.checker,
+                    rendered.unwrap_or("<no value>")
+                ));
+            }
+            if incomparable && rendered == Some(row.checker) {
+                failures.push(format!(
+                    "{}: listed RENDER_INCOMPARABLE but the live rendering EQUALS the \
+                     checker byte-for-byte (`{}`) — the incomparability claim is FALSE; \
+                     move the row to RENDER_COMPARABLE. A reclassification may never drop \
+                     the byte comparison for a row that satisfies it.",
+                    row.id, row.checker
+                ));
+            }
+        }
+        let named_ids = RENDER_COMPARABLE
+            .iter()
+            .copied()
+            .chain(RENDER_INCOMPARABLE.iter().map(|(id, _)| *id));
+        for id in named_ids {
+            if !CORPUS.iter().any(|row| row.id == id) {
+                failures.push(format!(
+                    "{id}: named in a cross-validation list but absent from the corpus — \
+                     stale entry"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// SEMANTIC checker-column authority, verdict-directed. For EVERY
+    /// deep-pinned row — independent of the presentation-byte lists —
+    /// the row's `checker` text is parsed into the typed
+    /// checker-syntax form
+    /// ([`u6_flow_expect_tests::checker_syntax`], one canonical
+    /// projection: order-insensitive exact union sets, ordered
+    /// intersections, exact object member sets, arity-exact function
+    /// prints, reference names matched against the graph trio) and
+    /// compared against the LIVE graph:
+    ///
+    /// * a [`Verdict::MatchesChecker`] row's live surface must EQUAL
+    ///   its parsed checker — editing the checker column (or regressing
+    ///   the surface) fails here;
+    /// * every OTHER verdict (KnownOwed / Degraded) must NOT match —
+    ///   the recorded divergence must be REAL in the tree, so silently
+    ///   repairing the debt, or editing the checker column to the live
+    ///   value, fails here and forces the deliberate re-pin.
+    ///
+    /// An unparseable deep-pinned checker is a FAILURE naming the gap —
+    /// extend the parser deliberately; never exempt silently.
+    #[test]
+    fn deep_pinned_rows_semantic_equality_follows_their_verdict() {
+        use super::u6_flow_expect_tests::{checker_syntax, render_node, with_live_flow_node};
+        let mut failures = Vec::new();
+        for row in CORPUS {
+            if !matches!(row.expect, Expect::Node(_)) {
+                continue;
+            }
+            let Flow::Result { function, .. } = row.flow else {
+                continue; // the expect/boundary lane already fails this shape
+            };
+            let parsed = match checker_syntax::parse(row.checker) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    failures.push(format!(
+                        "{}: checker text `{}` did not parse into the typed checker-syntax \
+                         form ({err}) — a deep-pinned checker that cannot be compared is an \
+                         unverified semantic claim; extend the parser deliberately",
+                        row.id, row.checker
+                    ));
+                    continue;
+                }
+            };
+            let (matches, rendered) = with_live_flow_node(
+                row.aux,
+                &format!("{}__sem", row.id),
+                row.script,
+                function,
+                |dispatch, node| match node {
+                    Some(node) => (
+                        checker_syntax::matches_node(dispatch, node, &parsed, 0),
+                        render_node(dispatch, node, 0),
+                    ),
+                    None => (false, "<no value>".to_owned()),
+                },
+            );
+            match row.verdict {
+                Verdict::MatchesChecker => {
+                    if !matches {
+                        failures.push(format!(
+                            "{}: labelled MatchesChecker but the LIVE semantic surface does \
+                             not equal the parsed checker `{}` — measured `{rendered}`. \
+                             Either the surface regressed or the checker column was edited; \
+                             re-measure against the pinned oracle before re-pinning.",
+                            row.id, row.checker
+                        ));
+                    }
+                }
+                _ => {
+                    if matches {
+                        failures.push(format!(
+                            "{}: labelled {:?} but the LIVE semantic surface EQUALS the \
+                             parsed checker `{}` — the recorded divergence is GONE. This \
+                             failure is the INTENDED signal: the debt looks repaired (or \
+                             the checker column was edited to the live value); re-pin the \
+                             row and close its ledger entries in the same change.",
+                            row.id, row.verdict, row.checker
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// CONTROL — the checker columns of the deep rows the byte lists
+    /// exempt (X88, N26) are DISCRIMINATING through the semantic
+    /// projection: each live surface accepts exactly its recorded
+    /// checker text and rejects every minimally-mutated neighbour. This
+    /// is what binds an exempted row's pins to its `checker` text — the
+    /// proven hatch is editing N26 checker text to name the wrong
+    /// intersection arm with everything green.
+    #[test]
+    fn checker_column_mutations_are_rejected_semantically() {
+        use super::u6_flow_expect_tests::{checker_syntax, with_live_flow_node};
+        fn row(id: &str) -> &'static Row {
+            CORPUS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("corpus row `{id}` exists"))
+        }
+        let x88 = row("X88_nested_label_inherits_enclosing_suffix_return");
+        with_live_flow_node(
+            x88.aux,
+            "ctl_x88_checker",
+            x88.script,
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("X88 produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts(x88.checker),
+                    "the recorded checker `{}` must match X88's live surface",
+                    x88.checker
+                );
+                assert!(
+                    accepts("\"b\" | \"a\""),
+                    "union comparison is order-insensitive — the checker's own print order \
+                     must not matter"
+                );
+                assert!(
+                    !accepts("\"a\" | \"c\""),
+                    "a WRONG constituent must be rejected"
+                );
+                assert!(
+                    !accepts("\"a\""),
+                    "a DROPPED constituent (subset) must be rejected"
+                );
+                assert!(
+                    !accepts("\"a\" | \"b\" | \"c\""),
+                    "an EXTRA constituent (superset) must be rejected"
+                );
+            },
+        );
+        let n26 = row("N26_structurally_possible_predicate_intersection_survives");
+        with_live_flow_node(
+            n26.aux,
+            "ctl_n26_checker",
+            n26.script,
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("N26 produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts(n26.checker),
+                    "the recorded checker `{}` must match N26's live surface",
+                    n26.checker
+                );
+                assert!(
+                    !accepts("{ v: string | (A & C); }"),
+                    "a checker edited to name the WRONG intersection arm must be rejected — \
+                     this is the proven exemption hatch"
+                );
+                assert!(
+                    !accepts("{ v: string | (B & A); }"),
+                    "REVERSED intersection arms must be rejected — intersections are ordered"
+                );
+                assert!(
+                    !accepts("{ v: number | (A & B); }"),
+                    "a wrong union constituent must be rejected"
+                );
+                assert!(
+                    !accepts("{ w: string | (A & B); }"),
+                    "a wrong member NAME must be rejected"
+                );
+                assert!(
+                    !accepts("{ v: string; }"),
+                    "a dropped constituent must be rejected"
+                );
+            },
+        );
+        // Function-print parameter/return and number-literal clauses,
+        // exercised on CONTROL programs (no deep-pinned row carries a
+        // parametered signature or number literal yet — these controls
+        // are what keep those comparator clauses characterized).
+        with_live_flow_node(
+            "",
+            "ctl_checker_fn",
+            "function makeProps() { return (a: string, b: number) => \"a\" as const }",
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("the control signature produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts("(a: string, b: number) => \"a\""),
+                    "the live parametered signature must accept its own checker print"
+                );
+                assert!(
+                    accepts("(x: string, y: number) => \"a\""),
+                    "parameter NAMES are print artifacts and must not participate"
+                );
+                assert!(
+                    !accepts("(a: number, b: number) => \"a\""),
+                    "a wrong parameter TYPE must be rejected"
+                );
+                assert!(
+                    !accepts("(a: number, b: string) => \"a\""),
+                    "swapped parameter types must be rejected — parameters are ordered"
+                );
+                assert!(
+                    !accepts("(a: string) => \"a\""),
+                    "a wrong arity must be rejected"
+                );
+                assert!(
+                    !accepts("(a: string, b: number) => \"b\""),
+                    "a wrong return must be rejected"
+                );
+            },
+        );
+        with_live_flow_node(
+            "",
+            "ctl_checker_num",
+            "function makeProps() { return 1 as const }",
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("the control literal produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts("1"),
+                    "the live number literal must accept its print"
+                );
+                assert!(!accepts("2"), "a different numeric value must be rejected");
+                assert!(!accepts("\"1\""), "a string print must be rejected");
+                assert!(!accepts("number"), "the widened primitive must be rejected");
+            },
+        );
     }
 
     #[test]
@@ -1603,6 +2161,13 @@ mod corpus_suite {
                 (Svelte::Skip, _) => {}
             }
         }
+        if dump {
+            panic!(
+                "U6_CORPUS_DUMP=1: measurements dumped above; corpus_svelte_twins EVALUATED \
+                 NO PINS in this mode. A dump run is measurement, never evidence — re-run \
+                 without U6_CORPUS_DUMP for a verdict."
+            );
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
@@ -1613,7 +2178,7 @@ mod corpus_suite {
 
 /// The pinned checker. CHECKER only, never `.d.ts`.
 #[cfg(test)]
-const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
+pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 
 /// One generated probe program for a row.
 ///
@@ -1831,10 +2396,14 @@ mod verdict_consistency {
                     let pins_members = matches!(row.flow,
                         Flow::Result { members, .. } | Flow::Declared { members, .. }
                         if !members.is_empty());
+                    // A recursive expectation is a full-depth pin of the
+                    // CURRENT (wrong) value: the owner's fix flips it.
+                    let pins_expect = matches!(row.expect, Expect::Node(_));
                     let observable = matches!(row.runtime, Runtime::Refused)
                         || matches!(row.tsx, Tsx::Faults(_))
                         || !owed_absent.is_empty()
-                        || pins_members;
+                        || pins_members
+                        || pins_expect;
                     if !observable {
                         failures.push(format!(
                             "{}: labelled KnownOwed but the row pins nothing that would change \
@@ -1878,6 +2447,139 @@ mod verdict_consistency {
             owed, pinned,
             "the open-debt ledger names a different SET of rows than the table labels KnownOwed"
         );
+    }
+
+    /// ANTI-RECURRENCE FLOOR (the §7 defect class): a row whose `checker`
+    /// names a VALUE the root [`NodeShape`] vocabulary cannot distinguish
+    /// must either carry a recursive [`Expect::Node`] pin or be NAMED in
+    /// [`SHALLOW_PINNED_ROWS`] — exact set equality in BOTH directions,
+    /// so deleting a deep pin is loud (the row appears unnamed) and a
+    /// stale ledger entry is loud too. A deep-pinned row must also carry
+    /// its [`Boundary::Audit`] companion: the pin pair rides together,
+    /// and deleting either half fails here instead of silently skipping
+    /// the row green.
+    #[test]
+    fn value_indistinct_rows_carry_deep_pins_or_are_named_shallow() {
+        /// The [`NodeShape`] buckets the FLOOR covers: `Other` (all
+        /// function values), `Union` (all constituent sets), `Literal`
+        /// (all literal values) — the three buckets the repaired §7
+        /// five-row defect actually rode. These are NOT the only
+        /// conflating buckets: `Primitive` conflates `string` ↔
+        /// `number` ↔ …, `ObjectSpreadProgram` conflates construction
+        /// plans, and `OpaqueOther` conflates error kinds — but
+        /// extending the floor to them was measured to sweep ~180 of
+        /// the corpus's rows into the ledger (nearly every row),
+        /// erasing the ledger's review signal, so those buckets are
+        /// DELIBERATELY un-floored here and recorded as such: a
+        /// `Primitive` member flip (e.g. N24's `{ v: string }` going
+        /// `string` → `number`) is caught only by a deep pin or by the
+        /// runtime `has` needles where the row carries them — NOT by
+        /// this floor, and NOT by the checker column: checker
+        /// cross-validation (byte and semantic) runs over DEEP-PINNED
+        /// rows only, so on a shallow row the checker column is
+        /// recorded documentation compared by nothing. Widening the
+        /// floor bucket-by-bucket belongs to the D8 ledger-governance
+        /// block.
+        /// `Object` roots stay out — their per-member shapes are
+        /// asserted member-by-member, and a member in one of the three
+        /// floored buckets is caught by the member scan.
+        fn indistinct(shape: NodeShape) -> bool {
+            matches!(
+                shape,
+                NodeShape::Other | NodeShape::Union | NodeShape::Literal
+            )
+        }
+        let mut measured: Vec<&str> = Vec::new();
+        let mut failures = Vec::new();
+        for row in CORPUS {
+            let needs = match row.flow {
+                Flow::Result { node, members, .. } | Flow::Declared { node, members, .. } => {
+                    indistinct(node) || members.iter().any(|(_, member)| indistinct(*member))
+                }
+                // A Skip row drives no flow lane; a NoValue row pins a
+                // refusal, not a value — neither names a value to deepen.
+                Flow::Skip | Flow::NoValue => false,
+            };
+            let deep_pinned = matches!(row.expect, Expect::Node(_));
+            if deep_pinned && !matches!(row.boundary, Boundary::Audit { .. }) {
+                failures.push(format!(
+                    "{}: carries Expect::Node without Boundary::Audit — the deep-pin pair \
+                     rides together; restore the boundary pin",
+                    row.id
+                ));
+            }
+            if matches!(row.boundary, Boundary::Audit { .. }) && !deep_pinned {
+                failures.push(format!(
+                    "{}: carries Boundary::Audit without Expect::Node — the deep-pin pair \
+                     rides together; restore the expect pin",
+                    row.id
+                ));
+            }
+            if matches!(row.boundary, Boundary::AuditRefusal { .. }) {
+                if !matches!(row.flow, Flow::NoValue) {
+                    failures.push(format!(
+                        "{}: Boundary::AuditRefusal requires Flow::NoValue — the refusal \
+                         boundary models the same refusal the flow lane pins",
+                        row.id
+                    ));
+                }
+                if deep_pinned {
+                    failures.push(format!(
+                        "{}: Boundary::AuditRefusal cannot carry Expect::Node — a refusal \
+                         has no result node",
+                        row.id
+                    ));
+                }
+            }
+            if needs && !deep_pinned {
+                measured.push(row.id);
+            }
+        }
+        measured.sort_unstable();
+        let mut named: Vec<&str> = SHALLOW_PINNED_ROWS.iter().map(|entry| entry.0).collect();
+        named.sort_unstable();
+        for (id, owner, reason) in SHALLOW_PINNED_ROWS {
+            let Some(row) = CORPUS.iter().find(|row| row.id == *id) else {
+                continue; // the set-equality below reports the stale entry
+            };
+            if row.owner != *owner {
+                failures.push(format!(
+                    "{id}: the shallow ledger names owning block {:?} but the row's owner \
+                     column is {:?} — the ledger's owner must equal the row's",
+                    owner, row.owner
+                ));
+            }
+            if reason.trim().is_empty() {
+                failures.push(format!(
+                    "{id}: a shallow ledger entry must record WHY the row is still shallow"
+                ));
+            }
+        }
+        if measured != named {
+            failures.push(format!(
+                "the shallow-pinned ledger drifted.\nmeasured (value-indistinct rows WITHOUT \
+                 an Expect::Node pin): {measured:?}\nnamed (SHALLOW_PINNED_ROWS): {named:?}\n\
+                 If a deep pin was DELETED, restore it. If a NEW value-indistinct row landed \
+                 shallow, deepen it or name it in SHALLOW_PINNED_ROWS deliberately. If a \
+                 named row was deepened, remove it from the ledger in the same change."
+            ));
+        }
+        // The BURN-DOWN-ONLY governance, ENFORCED (not prose): the
+        // ledger may only shrink. Deepening a row removes its entry;
+        // adding an entry (a new deliberately-shallow value-indistinct
+        // row) requires LOWERING nothing but consciously raising this
+        // ceiling in the same reviewed change — the same mechanism as
+        // the `CORPUS.len() >= 87` floor, pointed the other way.
+        assert!(
+            SHALLOW_PINNED_ROWS.len() <= SHALLOW_PINNED_ROWS_CEILING,
+            "the shallow-pinned ledger GREW ({} entries > ceiling {}) — the ledger is \
+             burn-down-only; a new value-indistinct row lands DEEP by default. If a \
+             deliberate, reviewed shallow exception is truly required, raise \
+             SHALLOW_PINNED_ROWS_CEILING in the same change and record why.",
+            SHALLOW_PINNED_ROWS.len(),
+            SHALLOW_PINNED_ROWS_CEILING
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
 
@@ -2009,6 +2711,406 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
     "F05_defineoptions_runtime_spread",
 ];
 
+/// The rows in the VALUE-INDISTINCT class (the §7 defect class: the row's
+/// `checker` names a value the root [`NodeShape`] vocabulary buckets away —
+/// a function value under `Other`, union constituents under `Union`, a
+/// literal's value under `Literal`, at the root or at a member) that do NOT
+/// carry a recursive [`Expect::Node`] pin.
+///
+/// Each entry is `(row id, owning block, reason)`: the owning block MUST
+/// equal the row's own `owner` column (guard-asserted), and the reason
+/// names the value-indistinct site and what a deepening would pin.
+///
+/// This ledger is the ANTI-RECURRENCE FLOOR for the repaired five-row
+/// non-discriminating-pin defect: deleting a row's deep pin makes the row appear here unnamed
+/// and fails `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`
+/// (in [`verdict_consistency`]); landing a NEW value-indistinct row without
+/// a deep pin requires naming it here, deliberately, in review. Named rows
+/// are the recorded shallow residue — visible and one edit away from a pin
+/// — not silent green.
+///
+/// **BURN-DOWN-ONLY — ENFORCED.** This ledger only shrinks: an entry is
+/// REMOVED in the same change that deepens its row (adding the
+/// `Expect::Node` + `Boundary::Audit` pair), and entries are never added
+/// casually — a new value-indistinct row lands DEEP by default, and
+/// naming it here instead is a deliberate, reviewed exception recorded
+/// with its owner and reason. The governance is asserted, not prose:
+/// [`SHALLOW_PINNED_ROWS_CEILING`] caps the ledger at its current size
+/// and `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`
+/// fails any growth past it. (The full frozen-ledger governance is the
+/// D8 block's; the per-row rationale lives here.)
+#[cfg(test)]
+const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
+    (
+        "C03_emits_intersection_clean",
+        Owner::SharedTypeResolution,
+        "member `evA` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "C13_emits_heritage_clean",
+        Owner::SharedTypeResolution,
+        "member `evA` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "CC02_annotated_return_literal_union",
+        Owner::U6ContextualCore,
+        "member `mode` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "CC03_as_const_plain_return",
+        Owner::U6ContextualCore,
+        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "CC04_as_const_member",
+        Owner::U6ContextualCore,
+        "member `label` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "CC05_satisfies_literal_union",
+        Owner::U6ContextualCore,
+        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "CC08_contextual_through_call_return",
+        Owner::U6ContextualCore,
+        "member `label` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "CC09_satisfies_widening_target",
+        Owner::U6ContextualCore,
+        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "D06_switch_return",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "E05_scalar_flow_answer_keeps_tsx_surface",
+        Owner::SharedCompilePipeline,
+        "root Literal — deepening pins the exact literal value",
+    ),
+    (
+        "F01_withdefaults",
+        Owner::FrameworkOnly,
+        "member `extra` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "F03_defineslots",
+        Owner::FrameworkOnly,
+        "member `default` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "G06_emits_plain",
+        Owner::U6FlowReturnSubstrate,
+        "member `evA` Other + member `evB` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "N07_branch_join_widens",
+        Owner::U6NarrowLattice,
+        "member `label` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "N18_logical_and_opaque_false_edge_keeps_union",
+        Owner::U6NarrowTypeof,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "N21_guard_union_uses_final_alternative_overlay",
+        Owner::U6NarrowTypeof,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "N22_double_negated_guard_union_uses_final_alternative_overlay",
+        Owner::U6NarrowTypeof,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "N23_impossible_conjunction_drops_dead_disjunction_alternative",
+        Owner::U6NarrowLattice,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X04_try_catch_join",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X09_generic_wrap_return",
+        Owner::U6CallResolve,
+        "member `box` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X10_destructured_default_conditional",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X14_accessor_pair",
+        Owner::U6FlowReturnSubstrate,
+        "member `g` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "X15_labelled_block_return",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X16_switch_fallthrough",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X21_satisfies_plain_return",
+        Owner::U6ValueInference,
+        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X22_switch_break_case_entry",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X23_switch_fallthrough_var",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X24_try_write_catch_read",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X25_try_assertion_catch_scope",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X26_switch_assertion_case_scope",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X27_finally_fallthrough_break_override",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X29_write_annotated_union_write_widens",
+        Owner::U6ValueInference,
+        "member `v` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X30_switch_terminating_arm_write_fallthrough",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X31_switch_default_break_state",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X32_switch_exhaustive_single_case",
+        Owner::U6ValueInference,
+        "member `v` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X33_switch_case_narrows_discriminant",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X34_switch_exhaustive_union_no_implicit_undefined",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X35_labeled_break_carries_write_state",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X36_labeled_break_drops_arm_assertion",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X37_labeled_conditional_break_write",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X38_switch_conditional_break_write",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X39_try_catch_throw_point_join",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X44_switch_exhaustive_boolean",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X45_switch_fallthrough_case_narrows_by_chain_tests",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X46_try_catch_template_throw_point",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X47_try_catch_sequence_throw_point",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X48_try_catch_if_guard_throw_point",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X49_try_catch_new_callee_throw_point",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X50_switch_break_exit_closes_crossed_scope",
+        Owner::U6ValueInference,
+        "member `n` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X52_finally_entry_joins_pending_break",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X54_switch_live_fallthrough_reaches_default",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X55_finally_entry_joins_pending_return",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X56_finally_return_preserves_try_return",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X57_if_arm_closes_lexical_shadow",
+        Owner::U6ValueInference,
+        "member `y` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X61_finally_break_preserves_own_exit",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X63_hoisted_var_no_init_preserves_write",
+        Owner::U6ValueInference,
+        "root Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X66_hoisted_annotated_var_authority_serves_forward_read",
+        Owner::U6ValueInference,
+        "member `v` Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X67_destructured_parameter_authority_precedes_writes",
+        Owner::U6ValueInference,
+        "member `v` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X68_finally_return_over_labelled_break_keeps_undefined",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X69_overlapping_object_union_assignment_selects_narrow_arm",
+        Owner::U6ValueInference,
+        "member `kind` Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X70_loop_callback_argument_is_not_invoked_closure",
+        Owner::U6FlowReturnSubstrate,
+        "root Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X71_loop_member_write_compares_full_selected_path",
+        Owner::U6FlowReturnSubstrate,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X72_loop_unreachable_write_does_not_trigger_refusal",
+        Owner::U6FlowReturnSubstrate,
+        "root Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X75_fresh_object_assignment_selects_optional_member_arm",
+        Owner::U6ValueInference,
+        "root Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "X76_fresh_computed_object_assignment_selects_optional_member_arm",
+        Owner::U6ValueInference,
+        "root Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "X77_spread_object_assignment_preserves_declared_union",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X78_mutable_var_capture_uses_declared_authority",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X79_forward_let_capture_uses_declared_authority",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X80_wrapped_labelled_try_finally_keeps_undefined",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X81_while_false_body_write_is_inert",
+        Owner::U6FlowReturnSubstrate,
+        "root Literal — deepening pins the exact literal value",
+    ),
+    (
+        "X84_required_property_assignment_preserves_optional_union_arm",
+        Owner::U6ValueInference,
+        "root Union — deepening pins the exact constituent set",
+    ),
+    (
+        "X86_destructured_parameter_capture_retains_declared_union",
+        Owner::U6ValueInference,
+        "root Other — a function value; deepening pins the signature (params + return)",
+    ),
+];
+
+/// The ENFORCED burn-down ceiling of [`SHALLOW_PINNED_ROWS`]: the ledger
+/// may never exceed this size. LOWER it freely as rows are deepened;
+/// raising it is the deliberate, reviewed act of admitting a new shallow
+/// exception (see the ledger's governance doc). Asserted by
+/// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
+#[cfg(test)]
+const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
+
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
 ///
@@ -2041,6 +3143,11 @@ const OPEN_DEBTS: &[&str] = &[
     // `N07_branch_join_widens` was always absent here: it is the
     // over-narrow control and agreed with the checker from day one.
     "N09_narrow_then_write",
+    // The impossible-predicate STATEMENT spelling keeps the dead `x`
+    // contributor (`v: A | B | "ok" | "no"` where the checker computes
+    // `"no" | "ok"`), wrong-and-warm. Exposed by the recursive expect
+    // pin — the root `v: Union` member pin could not see it.
+    "N25_impossible_predicate_statement_keeps_dead_contributor",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
     // typed: withheld from the first inference pass and never re-typed
@@ -2108,7 +3215,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 57, 42, 2),
     (Owner::U6NarrowTypeof, 14, 14, 0),
-    (Owner::U6NarrowLattice, 7, 7, 0),
+    // N25's MatchesChecker label predated the recursive expect pin; the
+    // deep measurement showed the dead contributor SURVIVES (wrong-and-
+    // warm), so the row is parked against its narrowing block.
+    (Owner::U6NarrowLattice, 7, 6, 1),
     (Owner::U6NarrowSubstitution, 5, 5, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),

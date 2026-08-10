@@ -381,17 +381,58 @@ acceptance test passes cold **and** warm.
 
 ## 7. The corpus harness must be strengthened first
 
-Five rows added in the last round do not discriminate their parent tree and therefore
-characterize nothing:
+**Status: the strengthening below is LANDED** —
+`crates/verter_session/src/u6_flow_expect_tests.rs` provides the recursive `ExpectedNode`
+expectation (signatures with exact ARITY and ordered parameter types, exact literal
+string/number values, intersections in source order, order-insensitive EXACT union
+constituent sets, distinct `TypeParam` / `DeclRef` / `BareRef` identities), the
+public-boundary companion (`Boundary::Audit` / `Boundary::AuditRefusal`:
+`get_flow_return_type_with_audit` invoked twice with BOTH calls modelled — result class,
+typed `degradation`, exact projected JSON, `from_cache`, cold-compute count; a cold replay
+must genuinely recompute, a refusal pins its full typed `FlowReturnError` identity —
+compared on BOTH calls, so a refusal that changes kind across calls or is swapped for a
+different typed refusal fails — and a refusal is never admitted warm), a typed
+checker-syntax projection that parses each deep-pinned row's `checker` column and compares
+it SEMANTICALLY against the live graph verdict-directed (a `MatchesChecker` row must equal
+it; a `KnownOwed`/`Degraded` row must NOT — so `RENDER_INCOMPARABLE` exempts presentation
+bytes only, and a bogus reclassification fails the verified byte-divergence check),
+negative controls for every RETAINED comparison clause (unexercised vocabulary was
+deleted only under an exhaustive DIRECTIONAL argument — accept-arm removals that
+fall to the controlled `_ => false`: `Lit::Bool` / `Lit::BigInt`; alias transparency
+in the matcher; the checker-syntax `Ref` ↔ `BareRef`/`TypeParam` acceptance arms.
+The round-3 deletion of the `SignatureKind::Call` discriminant was made on a FALSE
+sample-probe claim — the annotation-typed parameter form `x: new () => Box` DOES
+reach a `Construct` signature on this rail — and is RESTORED in both comparators,
+controlled live in both directions), the crossed capture-write position
+matrix, and oracle/profile stamps on every assertion. The five rows named below carry
+recursive + boundary pins; `D01_helper_new` additionally carries the real-corpus
+`ReturnOnly` boundary pin (`warm_replay: false`) and
+`X83_sequence_wrapped_iife_effect_fails_closed` the real-corpus refusal pin
+(`Boundary::AuditRefusal` carrying the typed
+`Failure(Unsupported(InvokedClosureEffect))` identity) — the typed non-admission
+contract exercised on real rows.
+Four of the five named rows measure deep-equal to the checker;
+`N25_impossible_predicate_statement_keeps_dead_contributor` measured DIVERGENT
+(`v: A | B | "ok" | "no"` where the checker computes `"no" | "ok"`, wrong-and-warm) and is
+re-pinned as a `KnownOwed` expected-versus-actual gap against `U6.NARROW_LATTICE`. The
+matrix records the live position-dependence of the invoked-IIFE capture-write (statement /
+sequence / call-argument positions refuse; declarator-init / if-test / template /
+short-circuit / object-literal positions publish the stale pre-write value clean and warm)
+as pinned per-position outcomes that fail on ANY position-local movement.
+
+The original finding, kept for the record — five rows added in the last round did not
+discriminate their parent tree and therefore characterized nothing:
 
 - `X85_nested_closure_write_updates_captured_binding`, `X87_read_only_let_capture_keeps_reaching_literal`
   — assert only root `NodeShape::Other` + `degradation: None` + `candidates: 1`, which cannot
   distinguish `() => "a"` from `() => "b"` — exactly the distinction G6/G7 turn on.
-- `X88_nested_label_inherits_enclosing_suffix_return`, `N25_impossible_predicate_statement_omits_dead_contributor`,
+- `X88_nested_label_inherits_enclosing_suffix_return`, `N25_impossible_predicate_statement_keeps_dead_contributor`
+  (named `…omits_dead_contributor` in that round — renamed once measurement showed the dead
+  contributor SURVIVES, so the id now describes the characterized behaviour),
   `N26_structurally_possible_predicate_intersection_survives` — same under root `NodeShape::Union`.
 
-This violates the repository rule that a characterization test must fail against the
-pre-change tree. Repairing it needs harness surgery, which is authorized:
+This violated the repository rule that a characterization test must fail against the
+pre-change tree. Repairing it needed harness surgery, which was authorized and delivered:
 
 - a recursive `ExpectedNode` expectation able to assert signatures, exact literal/primitive
   values, intersections, and order-insensitive exact union constituents;
