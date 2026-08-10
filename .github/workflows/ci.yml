@@ -57,6 +57,8 @@ jobs:
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
               - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/validate-program-state.mjs'
+              - 'scripts/validate-program-state.test.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:

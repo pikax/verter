@@ -15,6 +15,14 @@ export default defineConfig({
       "**/.claude/worktrees/**",
       "**/tmp/**",
       "tmp/**",
+      // This one file is a node:test suite (run via `node --test`), not a vitest
+      // suite; collecting it from the root config fails with "No test suite found
+      // in file". Scoped to the single file on purpose — a broad `scripts/**`
+      // exclude would change root collection for all 10 pre-existing test/spec
+      // files under scripts/ (5 vitest suites, plus 5 node:test files that fail
+      // root collection the same way this one does); the single-file exclude
+      // leaves every one of them collected exactly as before.
+      "scripts/validate-program-state.test.mjs",
       ".integration-tests/**",
       "packages/playground/**",
       // packages/types has its own vitest.config.ts with typecheck: { only: true }

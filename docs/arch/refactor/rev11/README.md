@@ -1,0 +1,70 @@
+# Verter Revision 11 — Architecture-Lock Program
+
+> **Naming note:** the authority package's own canonical `README.md` was landed as
+> [`package-README.md`](package-README.md); this file is a repository-local index
+> occupying the `README.md` path. `ORCHESTRATOR.md` §3 makes `README.md` normative
+> read-order item 1 — wherever the plan refers to the package `README.md`, read
+> `package-README.md`.
+
+This directory contains the Revision 11 architecture-lock program: the split authority
+package, the consolidated canonical master, the release artifacts, and the A0 evidence
+records. The plan, contracts, charters, decisions, and evidence live here; the **live
+program ledger (`program-state.toml`) is external** by maintainer decision
+([`evidence/maintainer-rulings.md`](evidence/maintainer-rulings.md), R-6). Its location
+is held by the maintainer and deliberately not recorded here — recording the real path
+would embed a machine-specific root in the tracked tree. A future agent needs both
+this directory and that external ledger to continue the program.
+
+## Where to start
+
+- **Normative entry point:** [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — the orchestration
+  contract for executing the program.
+- [`governance.md`](governance.md) — review mandates, acceptance rules, maintainer decisions.
+- [`program.md`](program.md) + [`program-dag.toml`](program-dag.toml) — the block program
+  and its dependency DAG.
+- [`architecture.md`](architecture.md) — the target architecture.
+- [`verification.md`](verification.md) — verification requirements.
+- [`charters/`](charters/) — per-block charters (A0–A6 plus templates).
+- [`contracts/`](contracts/) — the normative contracts the blocks implement against.
+- [`decisions/`](decisions/) — ADR-001 … ADR-020.
+- [`templates/`](templates/) — record/report templates.
+- [`baseline/`](baseline/) — the locked baseline record for entry SHA `9af553dd`.
+- [`package-README.md`](package-README.md) — the authority package's own README
+  (renamed here to avoid colliding with this index).
+- [`consolidated/verter-architecture-lock-master-plan-v11.md`](consolidated/verter-architecture-lock-master-plan-v11.md)
+  — the single-file canonical master the split files were reconstructed from.
+- [`release/`](release/) — the published orchestrator prompt, start-here note, and
+  validation report for Revision 11.
+- [`evidence/A0-summary.md`](evidence/A0-summary.md) — a stable, identity-free
+  description of the A0 landing and where its live state and exact-candidate
+  evidence live (in the external ledger and evidence root, not in this tree).
+- [`evidence/maintainer-rulings.md`](evidence/maintainer-rulings.md) — the maintainer
+  rulings that shape this tree.
+- [`evidence/A0-preflight-blocked.md`](evidence/A0-preflight-blocked.md) — the
+  historical pre-candidate entry inspection (not the current A0 state).
+
+## Program state
+
+- Entry state is **A0**, locked at entry SHA `9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0`
+  (tree `3cf111cf5665586b7d8fdfd520f01cfee3bf8108`).
+- **A0 is NOT accepted.** No implementation block has started. Only `A0` is exposed in
+  program state; per `program-dag.toml`, `A1` becomes legal only on maintainer
+  acceptance of A0.
+
+## Registered amendments
+
+Amendments record deltas to the execution plan WITHOUT editing the
+verbatim-reconstructed authority files (editing those would void the fidelity
+attestation — see [`PROVENANCE.md`](PROVENANCE.md)). They live in
+[`amendments/`](amendments/) and bind the program:
+
+- [`amendments/AMD-001-stack-window-validator-prerequisite.md`](amendments/AMD-001-stack-window-validator-prerequisite.md)
+  — the program-state validator fails closed on every begun successor of a
+  `PRIVATE_CHECKPOINT` predecessor, yet `D1 PRIVATE_CHECKPOINT -> D2` is the plan's
+  canonical atomic path; before any post-A6 stacked delivery, `A6` must deliver the
+  Node stack-window validator, composite program-state cross-validation, CI wiring,
+  and a discriminating D1/D2 transition test. The refusal is superseded by that
+  delivery, never simply deleted.
+
+See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
+these files.
