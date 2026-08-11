@@ -611,6 +611,13 @@ Scopes: `core` (verter_compiler), `napi` (verter_napi / @verter/native), `wasm` 
 
 Example: `feat(core): add v-memo directive support`
 
+**No program vocabulary in commit messages or source.** A commit message describes the change on
+its own terms: it must not name the architecture program, its revision, or any of its block
+identifiers. A commit that lands plan text says what the text decides, not which block decided it.
+The same prohibition applies to source under `crates/`, `packages/` and `scripts/` — see "No phase
+archaeology in production code". The program's own document tree and this file are exempt while the
+program runs; this file carries the program banner and may cite blocks by identifier.
+
 ## CI/CD
 
 See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for CI/CD documentation: workflow specifications (CI, nightly, release), pre-release versioning flow (alpha → beta → rc → stable), publishing (npm + crates.io), nightly WASM builds + playground deployment, required GitHub secrets configuration.
