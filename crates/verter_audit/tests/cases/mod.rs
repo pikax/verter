@@ -1,3 +1,4 @@
+mod attribution_compile_fail;
 mod batch_aggregator;
 mod cli_summary;
 mod member_edge_provenance_arch_guard;

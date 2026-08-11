@@ -136,7 +136,9 @@ pub(crate) fn decode_type_info_graph_request(
 
 /// Encode a [`TypeInfoGraphResponse`] to protobuf bytes.
 pub(crate) fn encode_type_info_graph_response(resp: &TypeInfoGraphResponse) -> Vec<u8> {
-    resp.encode_to_vec()
+    let encoded = resp.encode_to_vec();
+    verter_audit::attribute_n!(TypeInfoGraphEncode, encoded.len());
+    encoded
 }
 
 /// Wrap a typed `TypeInfoRequestError` back into the `error` arm of a

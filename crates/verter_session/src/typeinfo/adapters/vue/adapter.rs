@@ -83,6 +83,7 @@ impl FrameworkSurfaceAdapter for VueFrameworkAdapter {
         selector: &ResolvedComponentSelector,
         requested: &[FrameworkSurfaceKind],
     ) -> FrameworkSurfacePlan {
+        verter_audit::attribute_n!(FrameworkPlanSurfaces, requested.len());
         let owner = Arc::clone(&selector.canonical);
         let mut items = Vec::with_capacity(requested.len());
         // One macro-payload demand per requested macro surface kind. Planning is

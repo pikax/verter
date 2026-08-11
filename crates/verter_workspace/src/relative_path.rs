@@ -73,6 +73,7 @@ pub fn join_relative(importer_id: &str, specifier: &str) -> String {
 /// be revisited. Today's resolver treats both as the same path-join target,
 /// so the trim is correct.
 pub fn normalize_relative_specifier(specifier: &str) -> String {
+    verter_audit::attribute!(NormalizeRelativeSpec);
     if specifier.len() > 1 && specifier.ends_with('/') {
         specifier[..specifier.len() - 1].to_string()
     } else {

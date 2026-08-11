@@ -223,6 +223,7 @@ pub fn generate_template<'alloc>(
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,
 ) -> TemplateImports {
+    verter_audit::attribute_scope!(TemplateCodegenRuntime);
     // Convert owned const_props (FxHashSet<String>) to arena-allocated (&'alloc str)
     // for the BindingResolver's lifetime.
     let const_props_alloc: Option<rustc_hash::FxHashSet<&'alloc str>> = options

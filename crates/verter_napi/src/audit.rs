@@ -72,6 +72,7 @@ pub(crate) fn encode_record(record: &RequestAuditRecord) -> Result<Buffer> {
             format!("audit record serialization error: {e}"),
         )
     })?;
+    verter_audit::attribute_n!(AuditRecordEncode, bytes.len());
     Ok(Buffer::from(bytes))
 }
 

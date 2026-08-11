@@ -36,6 +36,7 @@ pub(crate) fn reduce_published_field_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
+    verter_audit::attribute_scope!(PublishFieldTypes);
     use verter_type_expr::facts::SemanticTypeSource;
 
     // One dispatch for the source raises and every per-field leaf projection.

@@ -111,6 +111,7 @@ impl std::fmt::Debug for SnapshotLease {
 
 impl Drop for SnapshotLease {
     fn drop(&mut self) {
+        verter_audit::attribute!(ArtifactPinRelease);
         self.service.release_key(&self.key);
     }
 }
@@ -225,7 +226,12 @@ impl SnapshotShard {
         &self,
         key: &SnapshotKey,
     ) -> Option<Option<std::rc::Rc<crate::ParsedEvalProgram>>> {
-        self.entries.get(key).map(|entry| entry.parsed.clone())
+        self.entries.get(key).map(|entry| {
+            // Counted on the HIT arm only: a lease miss re-enters the parse
+            // rail, so the two are never both charged for one demand.
+            verter_audit::attribute!(RetainedSnapshotReuse);
+            entry.parsed.clone()
+        })
     }
 }
 
@@ -573,6 +579,7 @@ impl DeclLoweringService {
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
     ) -> LeaseOutcome {
+        verter_audit::attribute!(ArtifactPinAcquire);
         #[cfg(not(target_arch = "wasm32"))]
         let parsed_now = {
             // First lowering demand spawns the worker threads if the

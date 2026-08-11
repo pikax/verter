@@ -40,6 +40,7 @@ pub(crate) struct ParsedEvalProgram {
 
 impl ParsedEvalProgram {
     pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
+        verter_audit::attribute_n!(EvalProgramParse, source.len());
         let mut panicked = false;
         let mut had_errors = false;
         let cell = ParsedEvalProgramCell::new(
@@ -61,6 +62,11 @@ impl ParsedEvalProgram {
                 .parse();
                 panicked = result.panicked;
                 had_errors = !result.errors.is_empty();
+                // The retained arena is the dominant per-file live footprint;
+                // `used_bytes()` walks the chunk list, which is why the amount
+                // must never be evaluated when attribution is off.
+                verter_audit::attribute_n!(ParseArenaUsed, owner.allocator.used_bytes());
+                verter_audit::attribute_max!(ParseArenaCapacity, owner.allocator.capacity());
                 result.program
             },
         );

@@ -1314,6 +1314,7 @@ pub fn build_prepared_decl_bundle(
     import_canonicalization: ImportCanonicalization,
     interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
+    verter_audit::attribute_scope!(PreparedDeclBuild);
     let dep_edges = Arc::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 

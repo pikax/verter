@@ -87,6 +87,17 @@ pub enum Admission {
 /// here. A `Clean` taint therefore always returns `Warm`.
 #[must_use]
 pub fn admit_decision(taint: ResultTaint, sig: &ReadSetSignature) -> Admission {
+    let decision = admit_decision_inner(taint, sig);
+    // Split on the ACTUAL returned decision rather than the taint, so the
+    // two counters partition every admission call exactly.
+    match decision {
+        Admission::Warm => verter_audit::attribute!(CacheAdmitCacheable),
+        Admission::ReturnOnly => verter_audit::attribute!(CacheAdmitReturnOnly),
+    }
+    decision
+}
+
+fn admit_decision_inner(taint: ResultTaint, sig: &ReadSetSignature) -> Admission {
     match taint {
         // Normal publish: a clean result over a sound carrier publishes warm.
         ResultTaint::Clean => Admission::Warm,

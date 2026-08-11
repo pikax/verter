@@ -976,6 +976,7 @@ pub(crate) fn materialize_component_meta_structure(
         &crate::loop5_instrumentation::MATERIALIZE_STRUCTURE_CALLS,
         &crate::loop5_instrumentation::MATERIALIZE_STRUCTURE_NS,
     );
+    verter_audit::attribute_scope!(MaterializeStructure);
     crate::host_manage::record_materialize_structure_call();
 
     let db = ctx.project_type_store().materialize_structure_db();

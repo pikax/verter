@@ -734,6 +734,7 @@ impl ShallowFileState {
         route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
     ) -> Self {
+        verter_audit::attribute_scope!(ShallowStateBuild);
         let state =
             Self::assemble_from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies);
         state.install_shallow_lens_from_final_state();

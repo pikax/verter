@@ -1098,6 +1098,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: &FlowReturnKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
+        verter_audit::attribute_scope!(FlowGraphBuild);
         let fence = self.project_generation_signature();
         let idx = self.flow_frame_open(key);
         let evaluated = self.evaluate_flow_return(key);
@@ -1920,6 +1921,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
+        verter_audit::attribute_scope!(FlowSliceCompute);
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
         // Every call site of this closure fails BEFORE the evaluator
         // runs, so no degradation has been observed yet: `None` is the

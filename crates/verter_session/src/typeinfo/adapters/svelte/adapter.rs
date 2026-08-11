@@ -89,6 +89,7 @@ impl FrameworkSurfaceAdapter for SvelteFrameworkAdapter {
         selector: &ResolvedComponentSelector,
         requested: &[FrameworkSurfaceKind],
     ) -> FrameworkSurfacePlan {
+        verter_audit::attribute_n!(FrameworkPlanSurfaces, requested.len());
         let owner = Arc::clone(&selector.canonical);
         let mut items = Vec::new();
         for &kind in requested {

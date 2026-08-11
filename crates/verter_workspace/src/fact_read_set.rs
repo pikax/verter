@@ -592,6 +592,10 @@ impl FactReadSet {
     /// the appropriate audit event.
     #[must_use]
     pub fn finalise(mut self) -> FactReadSetFinalise {
+        // Width of the read set this compute observed, charged before the
+        // stability / cardinality outcomes are decided so an overflowing or
+        // unstable compute is still counted for what it actually read.
+        verter_audit::attribute_n!(ReadSetSignatureBuild, self.observations.len());
         // STABILITY is settled before CARDINALITY, and stays a separate
         // outcome. An unstable attempt must never be reported as a size
         // failure: it would be refused under a rail that is about the

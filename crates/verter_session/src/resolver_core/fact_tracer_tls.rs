@@ -111,6 +111,7 @@ pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
 /// from inside a tracer are safe.
 #[inline]
 pub(super) fn observe_fan_out(fact: FactVersionRef) {
+    verter_audit::attribute_n!(FactObserve, 1);
     // Collect pointers under a short borrow, then drop the borrow
     // before calling into FactReadSetCell so re-entrant installs
     // from inside an observer don't cause RefCell panics.
@@ -140,6 +141,7 @@ pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
     if sig.is_empty() {
         return;
     }
+    verter_audit::attribute_n!(FactObserve, sig.len());
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
     for ptr in ptrs {

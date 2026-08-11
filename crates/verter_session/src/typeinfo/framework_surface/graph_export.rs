@@ -442,6 +442,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
     supported_surfaces: &[FrameworkSurfaceKind],
     unsupported_message: &str,
 ) -> EncodedFrameworkSurfaces {
+    verter_audit::attribute_n!(GraphExportEncode, normalized.surfaces.len());
     let mut arena = GraphArena::new();
 
     // Index the normalized surfaces by kind for a single-pass per-kind fill.

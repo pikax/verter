@@ -1836,6 +1836,7 @@ impl Scheduler {
 
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
     pub fn submit_request(&self, request: Request) -> CompletionHandle<RequestResult> {
+        verter_audit::attribute!(SchedulerSubmitRequest);
         let (handle, sender) = completion_pair();
         // Attach a request-level completion target so the
         // cooperative pump's same-path detection can match by
@@ -1903,6 +1904,7 @@ impl Scheduler {
     /// Returns a [`BatchHandle`] whose completion handles are in input
     /// order; drain it via [`Self::wait_batch`].
     pub fn submit_batch_atomic(&self, requests: Vec<Request>) -> BatchHandle {
+        verter_audit::attribute_n!(SchedulerSubmitBatch, requests.len());
         let mut handles = Vec::with_capacity(requests.len());
         let mut queued = Vec::with_capacity(requests.len());
         let submitted_epoch = self.removal_epoch.load(Ordering::Acquire);
@@ -5012,6 +5014,18 @@ impl Scheduler {
             .as_secs_f64()
             * 1000.0;
         let inbox_depth = self.inbox.sender.len() as u32;
+        // One dispatch = one executed task; the dwell is the time the entry
+        // sat in the DAG, and the pre-dequeue depth is the queue high-water
+        // mark this dispatch observed.
+        verter_audit::attribute!(TaskExecute);
+        verter_audit::attribute_n!(
+            TaskWait,
+            dequeue_at
+                .saturating_duration_since(job.enqueue_time)
+                .as_nanos()
+                .min(u64::MAX as u128)
+        );
+        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue);
 
         let inbox_sender = self.inbox.sender.clone();
         let executor = Arc::clone(&self.executor);

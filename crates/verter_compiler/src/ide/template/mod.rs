@@ -151,6 +151,7 @@ pub fn generate_ide_template<'alloc>(
     options: &IdeTemplateOptions<'_>,
     components: &TemplateComponentBindings,
 ) {
+    verter_audit::attribute_scope!(TemplateCodegenIde);
     let mut resolver = BindingResolver::new(bindings.clone(), true);
     resolver.set_tsx(true);
 

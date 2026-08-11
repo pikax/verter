@@ -1307,6 +1307,7 @@ impl<'a> CodeTransform<'a> {
             + self.intro.len()
             + self.outro.len();
 
+        verter_audit::attribute_n!(CodeTransformRender, capacity);
         let mut out = String::with_capacity(capacity);
         out.push_str(self.intro);
         for chunk in &self.chunks {

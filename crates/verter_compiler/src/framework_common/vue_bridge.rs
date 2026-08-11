@@ -469,14 +469,27 @@ pub fn compile_registered_vue_artifact(
             adapter_id: artifact.adapter_id.clone(),
         });
     }
-    Ok(compile_from_parsed(
+    let result = compile_from_parsed(
         source,
         parsed,
         options,
         verter_options,
         macro_semantics,
         allocator,
-    ))
+    );
+    // Determinism digest over the emitted block LENGTHS: two runs over the
+    // same source must emit the same sizes. A cheap tripwire for
+    // nondeterministic codegen — it does not hash the bytes.
+    verter_audit::attribute_digest!(
+        CompiledOutputDigest,
+        (result.script.as_ref().map_or(0usize, |b| b.code.len()) as u64).wrapping_mul(0x1000_0001)
+            ^ (result.template.as_ref().map_or(0usize, |b| b.code.len()) as u64)
+                .wrapping_mul(0x1000_0003)
+            ^ (result.tsx.as_ref().map_or(0usize, |b| b.code.len()) as u64)
+                .wrapping_mul(0x1000_0007)
+            ^ (result.styles.len() as u64).wrapping_mul(0x1000_000d)
+    );
+    Ok(result)
 }
 
 impl CarrierCompiler for VueCarrierCompiler {

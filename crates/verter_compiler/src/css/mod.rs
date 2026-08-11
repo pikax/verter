@@ -66,6 +66,7 @@ fn normalize_css(css: &str) -> Result<String, CssError> {
     #[cfg(test)]
     normalize_probe::record();
 
+    verter_audit::attribute_n!(CssParse, css.len());
     let stylesheet = StyleSheet::parse(css, ParserOptions::default())
         .map_err(|e| CssError::Parse(e.to_string()))?;
     let result = stylesheet
@@ -92,6 +93,7 @@ pub fn process_style<'a>(
     css: &'a str,
     options: &ProcessStyleOptions<'_>,
 ) -> Result<ProcessStyleResult<'a>, CssError> {
+    verter_audit::attribute_scope!(CssTransform);
     // Pre-pass — replace v-bind()/:deep()/:slotted(); borrows when none are present.
     let prepass_result = prepass::prepass(css, options.scope_id);
     let v_bind_vars = prepass_result.v_bind_vars;

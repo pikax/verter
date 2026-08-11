@@ -329,6 +329,7 @@ fn write_membership(buf: &mut Vec<u8>, membership: &ConfiguredMembership) {
 }
 
 fn compute_hash16(bytes: &[u8]) -> Hash16 {
+    verter_audit::attribute_n!(EnvHash, bytes.len());
     xxh3_128(bytes).to_le_bytes()
 }
 

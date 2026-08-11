@@ -35,6 +35,7 @@ use super::tokenizer_scan::{
 /// Parse Svelte component `source` into a [`ParsedSvelte`].
 #[must_use]
 pub fn parse_svelte(source: &str) -> ParsedSvelte {
+    verter_audit::attribute_n!(CarrierParse, source.len());
     let mut parser = SvelteParser::new(source);
     parser.parse_root();
     parser.finish()
