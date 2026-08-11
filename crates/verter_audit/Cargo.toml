@@ -11,6 +11,23 @@ publish = false
 
 [features]
 default = []
+# Measurement-only work attribution. Compiles the counter table, the
+# scope guards, the attributing global allocator, and the report
+# renderers behind `attribution::*`. NOT in `default`, requested by no
+# production edge (`verter_napi`, `verter_lsp`, `verter_wasm`,
+# `verter_tsc`), and enabled only by the `verter_bench` measurement
+# harness. With it off, the recording macros expand to a site-name check
+# that emits no code and evaluates no argument, and the reader path does
+# not exist — which is what structurally prevents a counter from
+# reaching a semantic decision.
+attribution = []
+# Opt-in: enables the trybuild compile-fail fixture that proves the
+# attribution reader path is absent from a default build. trybuild
+# spawns a full `cargo build` of a fixture crate, so the test is
+# `#[ignore]`d unless this feature is on. The `cfg_attr` applies the
+# ignore only when the feature is OFF, so enabling it is enough:
+# `cargo test -p verter_audit --features compile-fail`.
+compile-fail = []
 
 [[bin]]
 name = "verter-audit-inspect"
@@ -44,6 +61,7 @@ web-time = "1.1"
 # [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
 # no parser dependency.
 [dev-dependencies]
+trybuild = "1.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

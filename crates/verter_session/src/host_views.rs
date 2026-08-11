@@ -201,6 +201,9 @@ impl VerterHost {
 
         let _ = profile;
 
+        // One effective-file-state projection duplicates the whole parse
+        // snapshot's analysis surface per call.
+        verter_audit::attribute!(AnalysisSnapshotCopy);
         Some(EffectiveFileState {
             source: snap.source.clone(),
             meta: hd.parse.meta.clone(),

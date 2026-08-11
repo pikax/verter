@@ -1,0 +1,572 @@
+CMD: pnpm run test:lsp:neutral
+CWD: <REPO>-wt-a1
+ENV: root composite: cargo build lsp+relay-shim, build language-shared + typescript-plugin, then dx-harness editor-neutral vitest lane; receipt redirected into the evidence bundle
+DATE: 2026-08-10T07:36:42Z
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+
+> verter@0.0.1-beta.1 test:lsp:neutral <REPO>-wt-a1
+> cargo build -p verter_lsp -p verter_relay_shim && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm --filter @verter/dx-harness test:editor-neutral-lsp
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.59s
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/language-shared@0.0.1-beta.3 build <REPO>-wt-a1\packages\language-shared
+> tsc -b
+
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/typescript-plugin@0.0.1-beta.3 build <REPO>-wt-a1\packages\typescript-plugin
+> tsc -b
+
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/dx-harness@0.0.1 test:editor-neutral-lsp <REPO>-wt-a1\packages\dx-harness
+> vitest --run -c vitest.editor-neutral-lsp.config.ts
+
+
+ RUN  v4.1.7 <REPO>-wt-a1/packages/dx-harness
+
+stdout | test/editorNeutralLsp.contract.ts
+editor-neutral LSP receipt: <HOME>/AppData/Local/Temp/claude/D--dev-personal-verter/9f04d440-da78-4d9d-b1de-d594036367ef/scratchpad/a1r2/command-proofs/18r-editor-neutral-receipt.json
+
+ ❯ test/editorNeutralLsp.contract.ts (277 tests | 36 failed) 71761ms
+     × standard-lsp: vue-ts.direct-import.hover 20ms
+     × standard-lsp: vue-ts.barrel-import.hover 6ms
+     × standard-lsp: vue-js.direct-import.hover 11ms
+     × standard-lsp: vue-js.barrel-import.hover 6ms
+     × standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean 0ms
+     × standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean 0ms
+     × standard-lsp: plain-jsx-pointer-event.hover 4ms
+     × standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member 0ms
+     × standard-lsp: vue-ts.markup.rename 1ms
+     × standard-lsp: vue-ts.direct-import.hover 15ms
+     × standard-lsp: vue-ts.barrel-import.hover 2ms
+     × standard-lsp: vue-js.markup.rename 1ms
+     × standard-lsp: vue-js.direct-import.hover 3ms
+     × standard-lsp: vue-js.barrel-import.hover 2ms
+     × standard-lsp: svelte-ts.markup.rename 2ms
+     × standard-lsp: svelte-js.markup.rename 2ms
+     × standard-lsp: vue-js-dom-event-policy-lax.diagnostics.clean 0ms
+     × standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean 0ms
+     × standard-lsp: vue-js-dom-event-policy-lax-jsconfig.diagnostics.clean 0ms
+     × standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean 0ms
+     × standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member 0ms
+     × standard-lsp: vue-ts.markup.rename 1ms
+     × standard-lsp: vue-ts.direct-import.hover 19ms
+     × standard-lsp: vue-ts.barrel-import.hover 2ms
+     × standard-lsp: vue-js.markup.rename 1ms
+     × standard-lsp: vue-js.direct-import.hover 4ms
+     × standard-lsp: vue-js.barrel-import.hover 2ms
+     × standard-lsp: svelte-ts.markup.rename 2ms
+     × standard-lsp: svelte-ts.direct-import.hover 2ms
+     × standard-lsp: svelte-js.markup.rename 2ms
+     × standard-lsp: svelte-js.direct-import.hover 1ms
+     × standard-lsp: vue-js-dom-event-policy-lax.diagnostics.clean 0ms
+     × standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean 0ms
+     × standard-lsp: vue-js-dom-event-policy-lax-jsconfig.diagnostics.clean 0ms
+     × standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean 0ms
+     × standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member 0ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 36 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: vue-ts.direct-import.hover
+Error: vue-ts.direct-import.hover: hover is missing "label": ```typescript
+(const) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: vue-ts.barrel-import.hover
+Error: vue-ts.barrel-import.hover: hover is missing "label": ```typescript
+(const) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: vue-js.direct-import.hover
+Error: vue-js.direct-import.hover: hover matched forbidden /__Verter\w*/: ```typescript
+(const) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & {
+    label: string;
+} & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+    label: string;
+})> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & {
+        label: string;
+    } & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+        label: string;
+    })> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1863:17
+    1861|                 `from captured output if the contractual rendering cha…
+    1862|                 `${JSON.stringify(unapplied)})`;
+    1863|           throw new Error(`${testCase.id}: hover matched forbidden ${p…
+       |                 ^
+    1864|         }
+    1865|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: vue-js.barrel-import.hover
+Error: vue-js.barrel-import.hover: hover matched forbidden /__Verter\w*/: ```typescript
+(const) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & {
+    label: string;
+} & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+    label: string;
+})> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & {
+        label: string;
+    } & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+        label: string;
+    })> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1863:17
+    1861|                 `from captured output if the contractual rendering cha…
+    1862|                 `${JSON.stringify(unapplied)})`;
+    1863|           throw new Error(`${testCase.id}: hover matched forbidden ${p…
+       |                 ^
+    1864|         }
+    1865|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-js-dom-event-policy-lax.diagnostics.clean
+Error: svelte-js-dom-event-policy-lax.diagnostics.clean: expected zero errors, got 2339: Property '__verterMissingPointerMember' does not exist on type 'PointerEvent'.
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1788:15
+    1786|       const errors = diagnostics.filter((diagnostic) => diagnostic.sev…
+    1787|       if (errors.length > 0) {
+    1788|         throw new Error(`${testCase.id}: expected zero errors, got ${d…
+       |               ^
+    1789|       }
+    1790|       return;
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean
+Error: svelte-js-dom-event-policy-lax-jsconfig.diagnostics.clean: expected zero errors, got 2339: Property '__verterMissingPointerMember' does not exist on type 'PointerEvent'.
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1788:15
+    1786|       const errors = diagnostics.filter((diagnostic) => diagnostic.sev…
+    1787|       if (errors.length > 0) {
+    1788|         throw new Error(`${testCase.id}: expected zero errors, got ${d…
+       |               ^
+    1789|       }
+    1790|       return;
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: plain-jsx-pointer-event.hover
+Error: plain-jsx-pointer-event.hover: hover is missing "PointerEvent": ```typescript
+(parameter) e: any
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsserver] (default) > standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: plain-jsx-pointer-event.diagnostics.invalid-member
+Error: plain-jsx-pointer-event.diagnostics.invalid-member: expected exactly one TS2339 error, got 
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1798:15
+    1796|       const errors = diagnostics.filter((diagnostic) => diagnostic.sev…
+    1797|       if (errors.length !== 1 || diagnosticCode(errors[0]) !== expecte…
+    1798|         throw new Error(
+       |               ^
+    1799|           `${testCase.id}: expected exactly one TS${expected} error, g…
+    1800|         );
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-ts.markup.rename
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-ts.markup.rename
+Error: vue-ts.markup.rename: rename produced 0 edits, expected exactly 2
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1977:15
+    1975|       }
+    1976|       if (edits.length !== expectedAnchors.length) {
+    1977|         throw new Error(
+       |               ^
+    1978|           `${testCase.id}: rename produced ${edits.length} edits, expe…
+    1979|         );
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-ts.direct-import.hover
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-ts.direct-import.hover
+Error: vue-ts.direct-import.hover: hover is missing "label": ```typescript
+(alias) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-ts.barrel-import.hover
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-ts.barrel-import.hover
+Error: vue-ts.barrel-import.hover: hover is missing "label": ```typescript
+(alias) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-js.markup.rename
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-js.markup.rename
+Error: vue-js.markup.rename: rename produced 0 edits, expected exactly 2
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1977:15
+    1975|       }
+    1976|       if (edits.length !== expectedAnchors.length) {
+    1977|         throw new Error(
+       |               ^
+    1978|           `${testCase.id}: rename produced ${edits.length} edits, expe…
+    1979|         );
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-js.direct-import.hover
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-js.direct-import.hover
+Error: vue-js.direct-import.hover: hover matched forbidden /__Verter\w*/: ```typescript
+(alias) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & {
+    label: string;
+} & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+    label: string;
+})> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & {
+        label: string;
+    } & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+        label: string;
+    })> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1863:17
+    1861|                 `from captured output if the contractual rendering cha…
+    1862|                 `${JSON.stringify(unapplied)})`;
+    1863|           throw new Error(`${testCase.id}: hover matched forbidden ${p…
+       |                 ^
+    1864|         }
+    1865|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-js.barrel-import.hover
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-js.barrel-import.hover
+Error: vue-js.barrel-import.hover: hover matched forbidden /__Verter\w*/: ```typescript
+(alias) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<ExtractPropTypes<{
+    label: {
+        type: StringConstructor;
+        required: true;
+    };
+}>, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & {
+    label: string;
+} & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+    label: string;
+})> & __Verter_DataAttrs) => {
+    $props: import("vue").PublicProps & {
+        label: string;
+    } & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof ({
+        label: string;
+    })> & __Verter_DataAttrs;
+    $emit: (event: string, ...args: unknown[]) => void;
+    $data: {};
+    $attrs: import("vue").HTMLAttributes;
+    $refs: {};
+})
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1863:17
+    1861|                 `from captured output if the contractual rendering cha…
+    1862|                 `${JSON.stringify(unapplied)})`;
+    1863|           throw new Error(`${testCase.id}: hover matched forbidden ${p…
+       |                 ^
+    1864|         }
+    1865|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: svelte-ts.markup.rename
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-ts.markup.rename
+Error: svelte-ts.markup.rename: rename produced 0 edits, expected exactly 2
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1977:15
+    1975|       }
+    1976|       if (edits.length !== expectedAnchors.length) {
+    1977|         throw new Error(
+       |               ^
+    1978|           `${testCase.id}: rename produced ${edits.length} edits, expe…
+    1979|         );
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: svelte-js.markup.rename
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-js.markup.rename
+Error: svelte-js.markup.rename: rename produced 0 edits, expected exactly 2
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1977:15
+    1975|       }
+    1976|       if (edits.length !== expectedAnchors.length) {
+    1977|         throw new Error(
+       |               ^
+    1978|           `${testCase.id}: rename produced ${edits.length} edits, expe…
+    1979|         );
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-js-dom-event-policy-lax.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-js-dom-event-policy-lax.diagnostics.clean
+Error: vue-js-dom-event-policy-lax.diagnostics.clean: expected zero errors, got 2339: Property '__verterMissingPointerMember' does not exist on type 'PointerEvent'.
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1788:15
+    1786|       const errors = diagnostics.filter((diagnostic) => diagnostic.sev…
+    1787|       if (errors.length > 0) {
+    1788|         throw new Error(`${testCase.id}: expected zero errors, got ${d…
+       |               ^
+    1789|       }
+    1790|       return;
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [tsgo] (default) > standard-lsp: vue-js-dom-event-policy-lax-jsconfig.diagnostics.clean
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: vue-js-dom-event-policy-lax-jsconfig.diagnostics.clean
+Error: vue-js-dom-event-policy-lax-jsconfig.diagnostics.clean: expected zero errors, got 2339: Property '__verterMissingPointerMember' does not exist on type 'PointerEvent'.
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1788:15
+    1786|       const errors = diagnostics.filter((diagnostic) => diagnostic.sev…
+    1787|       if (errors.length > 0) {
+    1788|         throw new Error(`${testCase.id}: expected zero errors, got ${d…
+       |               ^
+    1789|       }
+    1790|       return;
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-ts.direct-import.hover
+Error: svelte-ts.direct-import.hover: hover is missing "label": ```typescript
+(alias) const SvelteTypeScriptCase: Component<Props, {}, "">
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/36]⎯
+
+ FAIL  test/editorNeutralLsp.contract.ts > editor-neutral LSP contract [shared-tsgo] (default) > standard-lsp: svelte-js.direct-import.hover
+Error: svelte-js.direct-import.hover: hover is missing "focus": ```typescript
+(alias) const SvelteJavaScriptCase: Component<{
+    label: string;
+}, {}, "">
+```
+ ❯ executeEditorNeutralContractCase ../lsp-test-client/src/contracts/editorNeutral.ts:1828:17
+    1826|       for (const fragment of testCase.requiredHoverFragments ?? []) {
+    1827|         if (!text.includes(fragment)) {
+    1828|           throw new Error(`${testCase.id}: hover is missing ${JSON.str…
+       |                 ^
+    1829|         }
+    1830|       }
+ ❯ test/editorNeutralLsp.contract.ts:236:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/36]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  36 failed | 241 passed (277)
+   Start at  08:36:45
+   Duration  72.03s (transform 88ms, setup 0ms, import 113ms, tests 71.76s, environment 0ms)
+
+<REPO>-wt-a1\packages\dx-harness:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @verter/dx-harness@0.0.1 test:editor-neutral-lsp: `vitest --run -c vitest.editor-neutral-lsp.config.ts`
+Exit status 1
+ ELIFECYCLE  Command failed with exit code 1.
+EXIT: 1
+END-DATE: 2026-08-10T07:37:58Z

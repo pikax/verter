@@ -114,6 +114,10 @@ pub(crate) fn extract_vue_script_content(
     parsed_sfc: &verter_compiler::parser::types::ParsedSfc,
 ) -> Option<String> {
     let spans = script_content_spans_from_parsed(parsed_sfc)?;
+    // A whole-source-length duplicate of the carrier per extraction: the
+    // position-preserving projection is the single largest source-text copy
+    // in the pipeline, so it is what this rail is measuring.
+    verter_audit::attribute_n!(SourceTextCopy, source.len());
     Some(build_position_preserving_script_source(source, &spans))
 }
 

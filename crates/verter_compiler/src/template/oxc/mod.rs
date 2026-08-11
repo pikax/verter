@@ -112,6 +112,7 @@ fn parse_expression<'alloc>(
         );
     }
 
+    verter_audit::attribute_n!(CompilerExpressionParse, source_slice.len());
     let parser = oxc_parser::Parser::new(alloc, source_slice, source_type);
 
     match parser.parse_expression() {
@@ -167,6 +168,7 @@ fn expression_spans_whole_value(
 ) -> bool {
     use oxc_span::GetSpan;
 
+    verter_audit::attribute_n!(CompilerExpressionParse, source_slice.len());
     let Ok(expr) = oxc_parser::Parser::new(alloc, source_slice, source_type).parse_expression()
     else {
         return false;
@@ -201,6 +203,7 @@ fn parse_statement_list<'alloc>(
     let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied())
         .completion_aware(ide_completion);
 
+    verter_audit::attribute_n!(CompilerExpressionParse, source_slice.len());
     let ret = oxc_parser::Parser::new(alloc, source_slice, source_type).parse();
 
     if ret.panicked || !ret.errors.is_empty() {

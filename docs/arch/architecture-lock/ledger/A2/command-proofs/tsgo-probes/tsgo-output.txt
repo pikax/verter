@@ -1,0 +1,53 @@
+N25.ts(7,14): error TS2322: Type '{ v: "no" | "ok"; }' is not assignable to type 'null'.
+N25.ts(9,14): error TS2322: Type 'false' is not assignable to type 'null'.
+N26.ts(7,14): error TS2322: Type '{ v: string | (A & B); }' is not assignable to type 'null'.
+N26.ts(9,14): error TS2322: Type 'false' is not assignable to type 'null'.
+X85.ts(4,14): error TS2322: Type '() => "b"' is not assignable to type 'null'.
+X85.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+X87.ts(4,14): error TS2322: Type '() => "a"' is not assignable to type 'null'.
+X87.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+X88.ts(4,14): error TS2322: Type '"a" | "b"' is not assignable to type 'null'.
+  Type '"a"' is not assignable to type 'null'.
+X88.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+bind_const_never.ts(4,14): error TS2322: Type '() => "a"' is not assignable to type 'null'.
+bind_const_never.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+bind_param_after.ts(4,14): error TS2322: Type '() => "a" | "b"' is not assignable to type 'null'.
+bind_param_after.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+bind_var_after.ts(4,14): error TS2322: Type '() => "a" | "b"' is not assignable to type 'null'.
+bind_var_after.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+cont_if.ts(5,14): error TS2322: Type '"a" | "b"' is not assignable to type 'null'.
+  Type '"a"' is not assignable to type 'null'.
+cont_if.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+cont_labeled.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+cont_labeled.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+cont_switch.ts(5,14): error TS2322: Type '"a" | "b"' is not assignable to type 'null'.
+  Type '"a"' is not assignable to type 'null'.
+cont_switch.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+cont_try.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+cont_try.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+guard_typeof.ts(4,14): error TS2322: Type '() => string' is not assignable to type 'null'.
+guard_typeof.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_callarg.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_callarg.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_declarator.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_declarator.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_iftest.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_iftest.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_objectliteral.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_objectliteral.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_sequence.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_sequence.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_shortcircuit.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_shortcircuit.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_statement.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_statement.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+pos_template.ts(5,14): error TS2322: Type '"b"' is not assignable to type 'null'.
+pos_template.ts(7,14): error TS2322: Type 'false' is not assignable to type 'null'.
+tim_after.ts(4,14): error TS2322: Type '() => "a" | "b"' is not assignable to type 'null'.
+tim_after.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+tim_before.ts(4,14): error TS2322: Type '() => "b"' is not assignable to type 'null'.
+tim_before.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+tim_deeper.ts(4,14): error TS2322: Type '() => "a" | "b"' is not assignable to type 'null'.
+tim_deeper.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.
+tim_sibling.ts(4,14): error TS2322: Type '() => "a" | "b"' is not assignable to type 'null'.
+tim_sibling.ts(6,14): error TS2322: Type 'false' is not assignable to type 'null'.

@@ -1,0 +1,52 @@
+=== SENTINEL B: canonical selector = pnpm test (root: pnpm -r --parallel run test) ===
+DATE: 2026-08-10T06:04:07Z
+SENTINEL TREE: b7ea2dc88bda86473de81de3438b7f88ef30adc7 clean=0
+PLANT: append a throwing it() with token A1_SENTINEL_PLANT_VITEST_b27d41 to packages/types/src/exports.spec.ts (@verter/types — hermetic, no native/wasm dependency)
+--- plant-proof (before): token in sentinel tree (expect 0): 0
+--- plant-proof: token in CANDIDATE tree (expect 0): 0
+--- plant applied; occurrences (expect 2 in one file — test name + throw): 2 in packages/types/src/exports.spec.ts; tree-wide files containing token (expect 1): 1
+ packages/types/src/exports.spec.ts | 6 ++++++
+ 1 file changed, 6 insertions(+)
+--- PLANTED RUN: pnpm test (expect non-zero exit; @verter/types suite FAILS naming the planted test; the root selector is bail-fast so other packages may be killed — the discriminator is the planted test's own FAIL line)
+PLANTED-EXIT: 1
+--- restore
+token after restore (expect 0): 0
+--- RESTORED RUN: pnpm test (expect @verter/types PASSES — 614 tests; overall exit stays non-zero because of the PRE-EXISTING typeinfo/unplugin reds, same as the candidate run)
+RESTORED-EXIT: 1
+0
+
+=== SENTINEL B round 2: selector = pnpm -r --no-bail --parallel run test (identical selection; --no-bail because round 1 proved the canonical bail-fast form kills the planted suite before it reports when ANY unrelated package fails first — recorded as an A1 finding) ===
+DATE: 2026-08-10T06:05:18Z
+tree clean: 0
+--- plant re-applied; occurrences in file (expect 2): 2; tree-wide files (expect 1): 1
+ packages/types/src/exports.spec.ts | 6 ++++++
+ 1 file changed, 6 insertions(+)
+--- PLANTED RUN (no-bail): expect @verter/types 1 failed | 614 passed naming the planted test
+PLANTED-EXIT: 1
+packages/types test:       Tests  615 passed (615)
+--- restore
+token after restore (expect 0): 0
+--- RESTORED RUN (no-bail): expect @verter/types 614 passed, token absent
+RESTORED-EXIT: 1
+packages/types test:  Test Files  18 passed (18)
+packages/types test:       Tests  614 passed (614)
+token occurrences in restored output (expect 0): 0
+
+=== SENTINEL B round 3: TYPE-LEVEL plant (round 2 discovered @verter/types is a typecheck-only suite — vitest.config.ts typecheck.only=true, checker tsc — so test BODIES never execute and a runtime throw is invisible; the suite's discriminable failure class is a TYPE error, so the sentinel plants one) ===
+DATE: 2026-08-10T06:07:05Z
+tree clean: 0
+--- plant applied; occurrences in file (expect 2): 2; tree-wide files (expect 1): 1
+ packages/types/src/exports.spec.ts | 6 ++++++
+ 1 file changed, 6 insertions(+)
+--- PLANTED RUN (no-bail): expect @verter/types FAILS with a TS type error attributed to the planted test
+PLANTED-EXIT: 1
+packages/types test:      × A1_SENTINEL_PLANT_VITEST_b27d41
+packages/types test: ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+packages/types test:       Tests  1 failed | 614 passed (615)
+--- restore
+token after restore (expect 0): 0
+--- RESTORED RUN (no-bail): expect @verter/types 614 passed, token absent
+RESTORED-EXIT: 1
+packages/types test:  Test Files  18 passed (18)
+packages/types test:       Tests  614 passed (614)
+token occurrences in restored output (expect 0): 0

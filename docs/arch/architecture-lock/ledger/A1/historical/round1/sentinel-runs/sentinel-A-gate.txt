@@ -1,0 +1,36 @@
+=== SENTINEL A: canonical selector = node scripts/gate.mjs --timeout 420m (same invocation as candidate row 01) ===
+DATE: 2026-08-10T05:35:26Z
+SENTINEL TREE: b7ea2dc88bda86473de81de3438b7f88ef30adc7 clean=0
+PLANT: insert panic!("A1_SENTINEL_PLANT_GATE_7f3a9c") as first statement of #[test] fn tracked_paths_are_portable_across_platforms() in crates/verter_session/tests/cases/tracked_paths_are_portable.rs
+--- plant-proof (before): token in sentinel tree (expect 0): 0
+--- plant-proof: token in CANDIDATE tree (expect 0): 0
+--- plant applied; token occurrences in sentinel tree (expect 1): 1
+124:    panic!("A1_SENTINEL_PLANT_GATE_7f3a9c");
+--- git diff proof the plant is the ONLY change:
+ crates/verter_session/tests/cases/tracked_paths_are_portable.rs | 1 +
+ 1 file changed, 1 insertion(+)
+--- PLANTED RUN: node scripts/gate.mjs --timeout 420m (expect VERDICT FAIL naming tracked_paths_are_portable_across_platforms; overall exit cannot discriminate because the baseline is already red with 1 pre-existing failure)
+PLANTED-EXIT: 1
+[gate] SURFACE 3: building the shipped-cfg test universe (cargo nextest archive --workspace --cargo-profile no-debug-assertions) …
+[gate] SURFACE 3: shipped-cfg archive lists 78 suites; filterset 'package(verter_session) + package(verter_scheduler)' covers verter_session (lib=1, test=2) + verter_scheduler (2 suites)
+        FAIL [   0.066s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+    test cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms ... FAILED
+        cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+    thread 'cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms' (106828) panicked at crates\verter_session\tests\cases\tracked_paths_are_portable.rs:124:5:
+        FAIL [   0.066s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+[gate] SURFACE 3 done in 107s: 8477 run, 8476 passed, 1 did not pass (1 failed, 0 timed out, 0 exec failed) (1 named, 0 tolerated), 563 skipped; run exit 100
+[gate][error] VERDICT: FAIL — 3 non-tolerated failure(s):
+[gate][error]   [nextest] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+[gate][error]   [libtest:verter_session::main] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+[gate][error]   [shipped-cfg/nextest] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+
+--- RESTORE: git checkout -- crates/verter_session/tests/cases/tracked_paths_are_portable.rs
+token occurrences after restore (expect 0): 0
+sentinel tree clean again: 0 entries
+--- RESTORED RUN: node scripts/gate.mjs --timeout 420m (expect the planted test ABSENT from failures and PASSING; surface summaries returning to the un-planted profile)
+RESTORED-EXIT: 1
+--- restored run verdict + surfaces:
+[gate] SURFACE 1 done in 252s: 24044 run, 24043 passed, 1 did not pass (1 failed, 0 timed out, 0 exec failed) (1 named, 0 tolerated), 582 skipped; run exit 100
+[gate] SURFACE 2 done: 3 suites clean, 0 suites with non-tolerated failures, 0 tolerated test failures
+[gate] SURFACE 3 done in 106s: 8477 run, 8477 passed, 0 did not pass (0 failed, 0 timed out, 0 exec failed) (0 named, 0 tolerated), 563 skipped; run exit 0
+[gate][error] VERDICT: FAIL — 1 non-tolerated failure(s):

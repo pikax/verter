@@ -1,0 +1,70 @@
+cargo :     Finished `bench` profile [optimized] target(s) in 0.29s
+At line:2 char:50
++ ... nce=$false; cargo bench -p verter_semantic --bench completion_facts 2 ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `b...get(s) in 0.29s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running benches\completion_facts.rs (target\release\deps\completion_facts-9e420b7368996423.exe)
+Gnuplot not found, using plotters backend
+A2C_MEASURE shape=completion_flat_1024 allocations=5188 requested_bytes=1646884 skeleton_inline_bytes=168 
+retained_fact_bytes=49272 statement_facts=1025 completion_targets=0
+A2C_QUERY shape=completion_flat_1024 endpoint=Exact(DoesNotContribute) ast_walks=0 allocations=0 requested_bytes=0
+Benchmarking completion_flat_1024
+Benchmarking completion_flat_1024: Warming up for 1.0000 s
+Benchmarking completion_flat_1024: Collecting 20 samples in estimated 2.0884 s (4830 iterations)
+Benchmarking completion_flat_1024: Analyzing
+completion_flat_1024    time:   [395.22 µs 398.18 µs 401.17 µs]
+                        change: [−2.1929% −1.0893% +0.0245%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+A2C_MEASURE shape=completion_nested_256 allocations=4178 requested_bytes=1349908 skeleton_inline_bytes=168 
+retained_fact_bytes=87416 statement_facts=1793 completion_targets=64
+A2C_QUERY shape=completion_nested_256 endpoint=Unknown(ConditionalFlowRequired) ast_walks=0 allocations=0 
+requested_bytes=0
+Benchmarking completion_nested_256
+Benchmarking completion_nested_256: Warming up for 1.0000 s
+Benchmarking completion_nested_256: Collecting 20 samples in estimated 2.0082 s (5880 iterations)
+Benchmarking completion_nested_256: Analyzing
+completion_nested_256   time:   [343.80 µs 345.75 µs 348.56 µs]
+                        change: [−0.0533% +0.7111% +1.4797%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+
+A2C_MEASURE shape=completion_switch_256 allocations=2889 requested_bytes=718240 skeleton_inline_bytes=168 
+retained_fact_bytes=12476 statement_facts=258 completion_targets=1
+A2C_QUERY shape=completion_switch_256 endpoint=Exact(DoesNotContribute) ast_walks=0 allocations=0 requested_bytes=0
+Benchmarking completion_switch_256
+Benchmarking completion_switch_256: Warming up for 1.0000 s
+Benchmarking completion_switch_256: Collecting 20 samples in estimated 2.0281 s (12k iterations)
+Benchmarking completion_switch_256: Analyzing
+completion_switch_256   time:   [172.60 µs 173.42 µs 174.32 µs]
+                        change: [−3.9720% −3.2080% −2.4212%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+A2C_MEASURE shape=completion_targets_64 allocations=182 requested_bytes=99992 skeleton_inline_bytes=168 
+retained_fact_bytes=10616 statement_facts=193 completion_targets=64
+A2C_QUERY shape=completion_targets_64 endpoint=Exact(DoesNotContribute) ast_walks=0 allocations=0 requested_bytes=0
+Benchmarking completion_targets_64
+Benchmarking completion_targets_64: Warming up for 1.0000 s
+Benchmarking completion_targets_64: Collecting 20 samples in estimated 2.0034 s (104k iterations)
+Benchmarking completion_targets_64: Analyzing
+completion_targets_64   time:   [19.153 µs 19.213 µs 19.275 µs]
+                        change: [+0.1129% +0.6305% +1.1168%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+
+A2C_MEASURE shape=completion_targets_65 allocations=186 requested_bytes=103824 skeleton_inline_bytes=168 
+retained_fact_bytes=10760 statement_facts=196 completion_targets=64
+A2C_QUERY shape=completion_targets_65 endpoint=Unknown(TargetCapacityExceeded) ast_walks=0 allocations=0 
+requested_bytes=0
+Benchmarking completion_targets_65
+Benchmarking completion_targets_65: Warming up for 1.0000 s
+Benchmarking completion_targets_65: Collecting 20 samples in estimated 2.0026 s (101k iterations)
+Benchmarking completion_targets_65: Analyzing
+completion_targets_65   time:   [19.665 µs 19.735 µs 19.807 µs]
+                        change: [−0.5431% −0.0566% +0.4462%] (p = 0.82 > 0.05)
+                        No change in performance detected.
+

@@ -1,0 +1,145 @@
+CMD: cargo clippy --workspace --all-targets -- -D warnings
+CWD: <REPO>-wt-a1
+ENV: default features; toolchain 1.97.1 (pinned)
+DATE: 2026-08-10T07:33:13Z
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+    Checking verter_session v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session)
+error: empty line after doc comment
+   --> crates\verter_session\src\semantic_query_memo\relation_memo.rs:263:5
+    |
+263 | /     /// concurrent top-level joiner receives this exact payload and carrier;
+264 | |
+    | |_^
+...
+270 |       pub fn relation_entries_for_tests(
+    |       --------------------------------- the comment documents this function
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#empty_line_after_doc_comments
+    = note: `-D clippy::empty-line-after-doc-comments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::empty_line_after_doc_comments)]`
+    = help: if the empty line is unintentional, remove it
+help: if the documentation should include the empty line include it in the comment
+    |
+264 |     ///
+    |
+
+error: large size difference between variants
+    --> crates\verter_session\src\flow_slice_content.rs:1099:1
+     |
+1099 | /  pub enum SliceObjectEntry {
+1100 | |      /// An entry provisioning exactly one key.
+1101 | |      Member(SliceObjectMember),
+     | |      ------------------------- the largest variant contains at least 416 bytes
+1102 | |      /// A SPREAD (`...source`): every key the source's value carries
+...    |
+1105 | |/     Spread {
+1106 | ||         /// The spread source's lowered value.
+1107 | ||         source: SliceExpr,
+1108 | ||     },
+     | ||_____- the second-largest variant contains at least 152 bytes
+1109 | |  }
+     | |__^ the entire enum is at least 416 bytes
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#large_enum_variant
+     = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+     |
+1101 -     Member(SliceObjectMember),
+1101 +     Member(Box<SliceObjectMember>),
+     |
+
+error: redundant closure
+    --> crates\verter_session\src\flow_slice_content.rs:2568:34
+     |
+2568 |                     .is_some_and(|alternate| contains(alternate));
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `&contains`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#redundant_closure
+     = note: `-D clippy::redundant-closure` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::redundant_closure)]`
+
+error: usage of `contains_key` followed by `insert` on a `HashMap`
+    --> crates\verter_session\src\project_semantic_dispatch\flow_return.rs:3954:13
+     |
+3954 | /             if !state.param_writes.contains_key(&ordinal) {
+3955 | |                 if let Some(node) = self.params.get(ordinal as usize) {
+3956 | |                     state.param_writes.insert(ordinal, *node);
+3957 | |                 }
+3958 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#map_entry
+     = note: `-D clippy::map-entry` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::map_entry)]`
+help: try
+     |
+3954 ~             if let std::collections::hash_map::Entry::Vacant(e) = state.param_writes.entry(ordinal) {
+3955 +                 if let Some(node) = self.params.get(ordinal as usize) {
+3956 +                     e.insert(*node);
+3957 +                 }
+3958 +             }
+     |
+
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> crates\verter_session\src\project_semantic_dispatch\relation.rs:1964:10
+     |
+1964 |       ) -> Result<
+     |  __________^
+1965 | |         (
+1966 | |             Vec<FlowReturnPendingOutcome>,
+1967 | |             Vec<(
+...    |
+1973 | |         crate::semantic_query::ResolveCallFailure,
+1974 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: this `match` expression can be replaced with `?`
+    --> crates\verter_session\src\project_semantic_dispatch\relation.rs:2091:13
+     |
+2091 | /             match self.replay_resolve_call_pending(key, state, replay_substitution) {
+2092 | |                 Ok(replayed) => *state = replayed,
+2093 | |                 Err(failure) => return Err(failure),
+2094 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#question_mark
+     = note: `-D clippy::question-mark` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::question_mark)]`
+help: try instead
+     |
+2091 ~             {
+2092 +                 let replayed = self.replay_resolve_call_pending(key, state, replay_substitution)?;
+2093 +                 *state = replayed
+2094 +             }
+     |
+
+error: match expression looks like `matches!` macro
+   --> crates\verter_session\src\structural_carrier_producer\macro_arg_producer.rs:674:66
+    |
+674 |               let has_index_signature = entries.iter().any(|entry| match entry {
+    |  __________________________________________________________________^
+675 | |                 SurfaceEntry::IndexSignature(_) => true,
+676 | |                 _ => false,
+677 | |             });
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#match_like_matches_macro
+    = note: `-D clippy::match-like-matches-macro` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::match_like_matches_macro)]`
+help: use `matches!` directly
+    |
+674 -             let has_index_signature = entries.iter().any(|entry| match entry {
+675 -                 SurfaceEntry::IndexSignature(_) => true,
+676 -                 _ => false,
+677 -             });
+674 +             let has_index_signature = entries.iter().any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+    |
+
+error: could not compile `verter_session` (lib) due to 7 previous errors
+EXIT: 101
+END-DATE: 2026-08-10T07:33:32Z

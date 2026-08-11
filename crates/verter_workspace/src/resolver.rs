@@ -1901,11 +1901,13 @@ fn match_package_mapping<'a>(
 /// `std::fs::canonicalize()` produces on Windows; this normalizer never touches
 /// disk itself (the `NativeFs` boundary owns all `std::fs::` access).
 pub fn normalize_canonical_id(value: &str) -> String {
+    verter_audit::attribute_n!(NormalizeCanonicalId, value.len());
     crate::canonical_path::canonicalize_path(value)
 }
 
 /// Collapse `.` and `..` segments from a path.
 pub fn collapse_path(value: &str) -> String {
+    verter_audit::attribute_n!(CollapsePath, value.len());
     let normalized = normalize_canonical_id(value);
 
     // UNC paths (`//host/share/...`): the `//host/share` portion is the immutable

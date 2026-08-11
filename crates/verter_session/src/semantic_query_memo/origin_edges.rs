@@ -46,6 +46,7 @@ impl SemanticGraphStore {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: DepSignature,
     ) {
+        verter_audit::attribute_n!(OriginEdgeRecord, sources.len());
         // Diagnosis instrumentation: bracket the entire
         // `record_origin_edge` call with `Instant::now()` deltas so the
         // capture token can attribute per-call wall-clock cost. The

@@ -20,10 +20,12 @@ use std::hash::{Hash, Hasher};
 use crate::types::{CompileProfile, DescriptorMin, Hash16, SliceHashes};
 
 pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
+    verter_audit::attribute_n!(ContentHash, input.len());
     xxhash_rust::xxh3::xxh3_128(input).to_le_bytes()
 }
 
 pub(crate) fn semantic_hash(slices: &SliceHashes, descriptor: &DescriptorMin) -> Hash16 {
+    verter_audit::attribute!(SemanticHash);
     // Build a buffer of all the data to hash, then hash once.
     let mut buf = Vec::with_capacity(128);
     if let Some(script) = slices.script {
@@ -66,6 +68,7 @@ pub(crate) fn semantic_hash(slices: &SliceHashes, descriptor: &DescriptorMin) ->
 /// Uses DefaultHasher which is NOT guaranteed stable across Rust versions —
 /// these hashes must never be persisted or compared across process restarts.
 pub(crate) fn compile_profile_hash(profile: &CompileProfile) -> u64 {
+    verter_audit::attribute!(CompileProfileHash);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     profile.hash(&mut hasher);
     hasher.finish()

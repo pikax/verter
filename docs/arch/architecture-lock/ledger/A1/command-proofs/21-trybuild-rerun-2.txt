@@ -1,0 +1,34 @@
+CMD: cargo test --locked -p verter_language --test main -- compile_fail
+CWD: <REPO>-wt-a1
+ENV: re-run 2/4 of the exact reviewer command, warm target, linked worktree, candidate commit
+DATE: 2026-08-10T07:35:18Z
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests\main.rs (target\debug\deps\main-3e75d94b9b129728.exe)
+
+running 2 tests
+    Checking verter_language-tests v0.0.0 (<REPO>-wt-a1\target\tests\trybuild\verter_language)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+
+
+test [0m[1mtests/compile-fail/registered_snapshot_id_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/registered_snapshot_id_bytes_api.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/registered_snapshot_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/authority_namespace_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/canonical_grammar_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/accepted_source_outside_mint.rs[0m ... [0m[32mok
+[0m
+
+test cases::compile_fail::registered_authority_capabilities_are_not_mintable_outside_their_authorities ... ok
+    Checking verter_language-tests v0.0.0 (<REPO>-wt-a1\target\tests\trybuild\verter_language)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+
+
+test [0m[1mtests/compile-fail/deserialize_live_capabilities.rs[0m ... [0m[32mok
+[0m
+
+test cases::compile_fail::deserialization_cannot_mint_live_authority_capabilities ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.44s
+
+EXIT: 0
+END-DATE: 2026-08-10T07:35:20Z

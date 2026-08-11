@@ -106,6 +106,7 @@ pub(crate) fn parse_sfc(
     delimiters: Option<(&str, &str)>,
     custom_elements: Option<&[String]>,
 ) -> ParsedSfc {
+    verter_audit::attribute_n!(CarrierParse, input.len());
     let bytes = input.as_bytes();
 
     let syntax_options = if let Some(prefixes) = custom_elements {

@@ -21,6 +21,11 @@ hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-al
 # Measurement-only rail for `examples/currency_phase_probe.rs`. Enables the
 # per-site wall-clock/call-count timers on the currency chokepoints.
 currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_probe"]
+# Measurement-only rail for `examples/attribution_baseline.rs`. Turns on the
+# work-attribution counter table and its reader. This is the ONLY edge in the
+# workspace that requests `verter_audit/attribution`; no production binary
+# does, which is what keeps the counters unreadable in a shipped build.
+attribution = ["verter_audit/attribution"]
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler", features = ["bench"] }
@@ -28,6 +33,7 @@ verter_css_syntax = { path = "../verter_css_syntax" }
 verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
+verter_audit = { path = "../verter_audit" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }

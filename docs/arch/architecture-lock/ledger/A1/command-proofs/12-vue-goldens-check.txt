@@ -1,0 +1,13 @@
+CMD: pnpm run gen:vue-goldens:check
+CWD: <REPO>-wt-a1
+ENV: none
+DATE: 2026-08-10T07:36:16Z
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+
+> verter@0.0.1-beta.1 gen:vue-goldens:check <REPO>-wt-a1
+> node packages/vue-conformance-oracle/gen-vue-goldens.mjs --check
+
+vue conformance oracle: vue@3.6.0-rc.1, @vue/compiler-dom@3.6.0-rc.1, @vue/compiler-sfc@3.6.0-rc.1, @vue/compiler-vapor@3.6.0-rc.1, esbuild@0.28.0
+goldens check OK: 286 committed artifacts match a fresh run
+EXIT: 0
+END-DATE: 2026-08-10T07:36:18Z

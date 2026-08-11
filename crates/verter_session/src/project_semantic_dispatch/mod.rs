@@ -2208,6 +2208,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: SemanticQueryKey,
         publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        // THE shared dispatch choke point: both `execute` and `execute_read`
+        // funnel here, so this scope's inclusive time and heap traffic cover
+        // every query-time type resolution in the request.
+        verter_audit::attribute_scope!(SemanticDispatch);
         if let SemanticQueryKey::Relate { .. } = &key {
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
             if !self.relation_raw_key_has_exact_inference_context(&relate) {
@@ -2811,6 +2815,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
         let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
+        // Same cold/warm decision, on the work-attribution rail: the two
+        // sites are mutually exclusive, so `cold + warm` reconstructs the
+        // dispatch total and `cold / total` is the miss rate directly.
+        if is_cold {
+            verter_audit::attribute!(SemanticColdBuild);
+        } else {
+            verter_audit::attribute!(SemanticWarmHit);
+        }
         if let Some(observer) = verter_audit::current_observer() {
             use verter_audit::AuditEvent;
             let event = match &key {

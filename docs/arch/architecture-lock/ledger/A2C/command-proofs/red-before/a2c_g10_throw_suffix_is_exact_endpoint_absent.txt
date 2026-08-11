@@ -1,0 +1,695 @@
+COMMAND: cargo test -p verter_semantic a2c_g10_throw_suffix_is_exact_endpoint_absent
+EXIT: 101
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-wt-a2c\crates\verter_semantic)
+error[E0583]: file not found for module `completion`
+  --> crates\verter_semantic\src\analysis\flow\mod.rs:44:1
+   |
+44 | pub mod completion;
+   | ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: to create the module `completion`, create file "crates\verter_semantic\src\analysis\flow\completion.rs" or "crates\verter_semantic\src\analysis\flow\completion\mod.rs"
+   = note: if there is a `mod completion` elsewhere in the crate already, import it with `use crate::...` instead
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `CompletionTargetId` in this scope
+ --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:6:28
+  |
+6 | fn target(index: usize) -> CompletionTargetId {
+  |                            ^^^^^^^^^^^^^^^^^^ not found in this scope
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:20:36
+   |
+20 |     assert_eq!(std::mem::size_of::<CompletionSet>(), 24);
+   |                                    ^^^^^^^^^^^^^ not found in this scope
+   |
+help: you might be missing a type parameter
+   |
+11 | fn completion_set_is_canonical_and_allocation_free<CompletionSet>() {
+   |                                                   +++++++++++++++
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `completion_capacity_probe` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:116:16
+    |
+116 |         super::completion_capacity_probe(65, false),
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `completion_capacity_probe` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:124:16
+    |
+124 |         super::completion_capacity_probe(65, true),
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `CompletionTargetId` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:131:36
+    |
+131 |     assert_eq!(std::mem::size_of::<CompletionTargetId>(), 1);
+    |                                    ^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+130 | fn completion_transient_layout_is_locked<CompletionTargetId>() {
+    |                                         ++++++++++++++++++++
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `CompletionSet` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:132:36
+    |
+132 |     assert_eq!(std::mem::size_of::<CompletionSet>(), 24);
+    |                                    ^^^^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+130 | fn completion_transient_layout_is_locked<CompletionSet>() {
+    |                                         +++++++++++++++
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:133:36
+    |
+133 |     assert_eq!(std::mem::size_of::<CompletionFact>(), 32);
+    |                                    ^^^^^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+130 | fn completion_transient_layout_is_locked<CompletionFact>() {
+    |                                         ++++++++++++++++
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `ActiveCompletionTarget` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:134:43
+    |
+134 |     assert_eq!(std::mem::size_of::<super::ActiveCompletionTarget<'_>>(), 24);
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find type `SkeletonRegionFlags` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:164:36
+    |
+164 |     assert_eq!(std::mem::size_of::<SkeletonRegionFlags>(), 1);
+    |                                    ^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates\verter_semantic\src\analysis\flow\mod.rs:184:1
+    |
+184 | pub struct SkeletonRegion {
+    | ------------------------- similarly named struct `SkeletonRegion` defined here
+    |
+help: a struct with a similar name exists
+    |
+164 -     assert_eq!(std::mem::size_of::<SkeletonRegionFlags>(), 1);
+164 +     assert_eq!(std::mem::size_of::<SkeletonRegion>(), 1);
+    |
+help: you might be missing a type parameter
+    |
+163 | fn a2c_completion_storage_has_zero_retained_growth<SkeletonRegionFlags>() {
+    |                                                   +++++++++++++++++++++
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `build_function_body_skeleton_with_completion_stats` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:179:37
+    |
+179 |         let (first, stats) = super::build_function_body_skeleton_with_completion_stats(&source);
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `build_function_body_skeleton_with_completion_stats` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:180:34
+    |
+180 |         let (second, _) = super::build_function_body_skeleton_with_completion_stats(&source);
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `completion_allocation_probe` in module `super`
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:197:23
+    |
+197 |     let fact = super::completion_allocation_probe();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `super`
+System.Management.Automation.RemoteException
+warning: unused import: `super::completion::*`
+ --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:4:5
+  |
+4 | use super::completion::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+System.Management.Automation.RemoteException
+For more information about this error, try `rustc --explain E0583`.
+error: could not compile `verter_semantic` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0433]: cannot find type `CompletionTargetId` in this scope
+ --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:7:5
+  |
+7 |     CompletionTargetId::from_index(index).expect("test target fits")
+  |     ^^^^^^^^^^^^^^^^^^ use of undeclared type `CompletionTargetId`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:12:18
+   |
+12 |     let normal = CompletionSet::singleton(CompletionKind::Normal);
+   |                  ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:12:43
+   |
+12 |     let normal = CompletionSet::singleton(CompletionKind::Normal);
+   |                                           ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:13:20
+   |
+13 |     let returned = CompletionSet::singleton(CompletionKind::Return);
+   |                    ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:13:45
+   |
+13 |     let returned = CompletionSet::singleton(CompletionKind::Return);
+   |                                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:14:18
+   |
+14 |     let thrown = CompletionSet::singleton(CompletionKind::Throw);
+   |                  ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:14:43
+   |
+14 |     let thrown = CompletionSet::singleton(CompletionKind::Throw);
+   |                                           ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:16:31
+   |
+16 |     assert!(combined.contains(CompletionKind::Normal));
+   |                               ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:17:31
+   |
+17 |     assert!(combined.contains(CompletionKind::Return));
+   |                               ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:18:31
+   |
+18 |     assert!(combined.contains(CompletionKind::Throw));
+   |                               ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:25:17
+   |
+25 |     let first = CompletionFact::Exact(
+   |                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:26:9
+   |
+26 |         CompletionSet::singleton(CompletionKind::Normal)
+   |         ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:26:34
+   |
+26 |         CompletionSet::singleton(CompletionKind::Normal)
+   |                                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:27:20
+   |
+27 |             .union(CompletionSet::singleton(CompletionKind::Throw)),
+   |                    ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:27:45
+   |
+27 |             .union(CompletionSet::singleton(CompletionKind::Throw)),
+   |                                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:29:18
+   |
+29 |     let second = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:29:40
+   |
+29 |     let second = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:29:65
+   |
+29 |     let second = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:33:9
+   |
+33 |         CompletionFact::Exact(
+   |         ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:34:13
+   |
+34 |             CompletionSet::singleton(CompletionKind::Throw)
+   |             ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:34:38
+   |
+34 |             CompletionSet::singleton(CompletionKind::Throw)
+   |                                      ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:35:24
+   |
+35 |                 .union(CompletionSet::singleton(CompletionKind::Return))
+   |                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:35:49
+   |
+35 |                 .union(CompletionSet::singleton(CompletionKind::Return))
+   |                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:42:20
+   |
+42 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                    ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:42:42
+   |
+42 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                          ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:42:67
+   |
+42 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                                                   ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:43:24
+   |
+43 |     let missing_else = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                        ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:43:46
+   |
+43 |     let missing_else = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                                              ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:43:71
+   |
+43 |     let missing_else = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                                                                       ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:46:9
+   |
+46 |         CompletionFact::Exact(
+   |         ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:47:13
+   |
+47 |             CompletionSet::singleton(CompletionKind::Return)
+   |             ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:47:38
+   |
+47 |             CompletionSet::singleton(CompletionKind::Return)
+   |                                      ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:48:24
+   |
+48 |                 .union(CompletionSet::singleton(CompletionKind::Normal))
+   |                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:48:49
+   |
+48 |                 .union(CompletionSet::singleton(CompletionKind::Normal))
+   |                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:57:18
+   |
+57 |     let routed = CompletionSet::singleton(CompletionKind::Break(own))
+   |                  ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:57:43
+   |
+57 |     let routed = CompletionSet::singleton(CompletionKind::Break(own))
+   |                                           ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:58:16
+   |
+58 |         .union(CompletionSet::singleton(CompletionKind::Break(foreign)))
+   |                ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:58:41
+   |
+58 |         .union(CompletionSet::singleton(CompletionKind::Break(foreign)))
+   |                                         ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:60:29
+   |
+60 |     assert!(routed.contains(CompletionKind::Normal));
+   |                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:61:30
+   |
+61 |     assert!(!routed.contains(CompletionKind::Break(own)));
+   |                              ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:62:29
+   |
+62 |     assert!(routed.contains(CompletionKind::Break(foreign)));
+   |                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:69:18
+   |
+69 |     let routed = CompletionSet::singleton(CompletionKind::Break(switch))
+   |                  ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:69:43
+   |
+69 |     let routed = CompletionSet::singleton(CompletionKind::Break(switch))
+   |                                           ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:70:16
+   |
+70 |         .union(CompletionSet::singleton(CompletionKind::Break(outer)))
+   |                ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:70:41
+   |
+70 |         .union(CompletionSet::singleton(CompletionKind::Break(outer)))
+   |                                         ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:74:9
+   |
+74 |         CompletionSet::singleton(CompletionKind::Normal)
+   |         ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:74:34
+   |
+74 |         CompletionSet::singleton(CompletionKind::Normal)
+   |                                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:75:20
+   |
+75 |             .union(CompletionSet::singleton(CompletionKind::Break(outer)))
+   |                    ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:75:45
+   |
+75 |             .union(CompletionSet::singleton(CompletionKind::Break(outer)))
+   |                                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:81:17
+   |
+81 |     let tried = CompletionFact::Exact(
+   |                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:82:9
+   |
+82 |         CompletionSet::singleton(CompletionKind::Throw)
+   |         ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:82:34
+   |
+82 |         CompletionSet::singleton(CompletionKind::Throw)
+   |                                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:83:20
+   |
+83 |             .union(CompletionSet::singleton(CompletionKind::Return)),
+   |                    ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:83:45
+   |
+83 |             .union(CompletionSet::singleton(CompletionKind::Return)),
+   |                                             ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:85:18
+   |
+85 |     let caught = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:85:40
+   |
+85 |     let caught = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:85:65
+   |
+85 |     let caught = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+   |                                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `catch_completion` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:87:9
+   |
+87 |         catch_completion(tried, caught),
+   |         ^^^^^^^^^^^^^^^^ not found in this scope
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:88:9
+   |
+88 |         CompletionFact::Exact(
+   |         ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:89:13
+   |
+89 |             CompletionSet::singleton(CompletionKind::Return)
+   |             ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:89:38
+   |
+89 |             CompletionSet::singleton(CompletionKind::Return)
+   |                                      ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:90:24
+   |
+90 |                 .union(CompletionSet::singleton(CompletionKind::Normal))
+   |                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:90:49
+   |
+90 |                 .union(CompletionSet::singleton(CompletionKind::Normal))
+   |                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:97:17
+   |
+97 |     let prior = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Throw));
+   |                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:97:39
+   |
+97 |     let prior = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Throw));
+   |                                       ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:97:64
+   |
+97 |     let prior = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Throw));
+   |                                                                ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:98:21
+   |
+98 |     let finalizer = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                     ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:98:43
+   |
+98 |     let finalizer = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                           ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:98:68
+   |
+98 |     let finalizer = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+   |                                                                    ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0425]: cannot find function `finally_runtime` in this scope
+  --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:99:16
+   |
+99 |     assert_eq!(finally_runtime(prior, finalizer), finalizer);
+   |                ^^^^^^^^^^^^^^^ not found in this scope
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:104:19
+    |
+104 |     let unknown = CompletionFact::Unknown(CompletionUnknown::ConditionalFlowRequired);
+    |                   ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionUnknown` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:104:43
+    |
+104 |     let unknown = CompletionFact::Unknown(CompletionUnknown::ConditionalFlowRequired);
+    |                                           ^^^^^^^^^^^^^^^^^ use of undeclared type `CompletionUnknown`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:105:18
+    |
+105 |     let normal = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+    |                  ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:105:40
+    |
+105 |     let normal = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+    |                                        ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:105:65
+    |
+105 |     let normal = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal));
+    |                                                                 ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:106:20
+    |
+106 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+    |                    ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:106:42
+    |
+106 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+    |                                          ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:106:67
+    |
+106 |     let returned = CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Return));
+    |                                                                   ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:117:9
+    |
+117 |         CompletionFact::Unknown(CompletionUnknown::TargetCapacityExceeded)
+    |         ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionUnknown` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:117:33
+    |
+117 |         CompletionFact::Unknown(CompletionUnknown::TargetCapacityExceeded)
+    |                                 ^^^^^^^^^^^^^^^^^ use of undeclared type `CompletionUnknown`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionFact` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:125:9
+    |
+125 |         CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal))
+    |         ^^^^^^^^^^^^^^ use of undeclared type `CompletionFact`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionSet` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:125:31
+    |
+125 |         CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal))
+    |                               ^^^^^^^^^^^^^ use of undeclared type `CompletionSet`
+System.Management.Automation.RemoteException
+error[E0433]: cannot find type `CompletionKind` in this scope
+   --> crates\verter_semantic\src\analysis\flow\completion_tests.rs:125:56
+    |
+125 |         CompletionFact::Exact(CompletionSet::singleton(CompletionKind::Normal))
+    |                                                        ^^^^^^^^^^^^^^ use of undeclared type `CompletionKind`
+System.Management.Automation.RemoteException
+error[E0599]: no method named `endpoint_undefined_disposition` found for struct `flow::FunctionBodySkeleton` in the current scope
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:86:22
+    |
+ 86 |     skeleton(source).endpoint_undefined_disposition()
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `flow::FunctionBodySkeleton`
+    |
+   ::: crates\verter_semantic\src\analysis\flow\mod.rs:567:1
+    |
+567 | pub struct FunctionBodySkeleton {
+    | ------------------------------- method `endpoint_undefined_disposition` not found for this struct
+System.Management.Automation.RemoteException
+error[E0599]: no associated function or constant named `js` found for struct `oxc_span::SourceType` in the current scope
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:149:92
+    |
+149 |     let result = skeleton_with_type("function f(x) { with (x) { return 1 } }", SourceType::js()).endpoint_undefined_disposition();
+    |                                                                                            ^^ associated function or constant not found in `oxc_span::SourceType`
+    |
+note: if you're trying to build a new `oxc_span::SourceType` consider using one of the following associated functions:
+      oxc_span::SourceType::cjs
+      oxc_span::SourceType::mjs
+      oxc_span::SourceType::script
+      oxc_span::SourceType::unambiguous
+      and 6 others
+   --> <HOME>\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\oxc_span-0.126.0\src\source_type.rs:239:5
+    |
+239 |     pub const fn cjs() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+258 |     pub const fn mjs() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+278 |     pub const fn script() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+294 |     pub const fn unambiguous() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `cjs` with a similar name
+    |
+149 |     let result = skeleton_with_type("function f(x) { with (x) { return 1 } }", SourceType::cjs()).endpoint_undefined_disposition();
+    |                                                                                            +
+System.Management.Automation.RemoteException
+error[E0599]: no method named `endpoint_undefined_disposition` found for struct `flow::FunctionBodySkeleton` in the current scope
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:149:98
+    |
+149 |     let result = skeleton_with_type("function f(x) { with (x) { return 1 } }", SourceType::js()).endpoint_undefined_disposition();
+    |                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `flow::FunctionBodySkeleton`
+    |
+   ::: crates\verter_semantic\src\analysis\flow\mod.rs:567:1
+    |
+567 | pub struct FunctionBodySkeleton {
+    | ------------------------------- method `endpoint_undefined_disposition` not found for this struct
+System.Management.Automation.RemoteException
+error[E0599]: no associated function or constant named `endpoint_bits_are_zero` found for struct `flow::SkeletonRegion` in the current scope
+   --> crates\verter_semantic\src\analysis\flow\completion_skeleton_tests.rs:168:62
+    |
+168 |     assert!(built.regions.iter().skip(1).all(SkeletonRegion::endpoint_bits_are_zero));
+    |                                                              ^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `flow::SkeletonRegion`
+    |
+   ::: crates\verter_semantic\src\analysis\flow\mod.rs:184:1
+    |
+184 | pub struct SkeletonRegion {
+    | ------------------------- associated function or constant `endpoint_bits_are_zero` not found for this struct
+System.Management.Automation.RemoteException
+Some errors have detailed explanations: E0425, E0433, E0583, E0599.
+For more information about an error, try `rustc --explain E0425`.
+warning: `verter_semantic` (lib test) generated 1 warning
+error: could not compile `verter_semantic` (lib test) due to 100 previous errors; 1 warning emitted

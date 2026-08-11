@@ -14,6 +14,11 @@
 //!
 //! ## Module layout
 //!
+//! - [`attribution`] — measurement-only work attribution: the closed
+//!   [`attribution::WorkSite`] schema plus, behind the non-default
+//!   `attribution` feature, the counter table and its reader. Nothing
+//!   in a default build can read a counter, so it cannot become a
+//!   semantic authority.
 //! - [`record`] — top-level [`record::RequestAuditRecord`] envelope plus
 //!   [`record::RequestKind`] / [`record::RequestKindPayload`]
 //!   discriminants and the [`record::IncidentalFields`] trait.
@@ -48,6 +53,7 @@
 //!   [`batch::AuditRecordSource`] into a
 //!   [`payloads::BundlerBatchPayload`].
 
+pub mod attribution;
 pub mod audited_result;
 pub mod batch;
 pub mod config;

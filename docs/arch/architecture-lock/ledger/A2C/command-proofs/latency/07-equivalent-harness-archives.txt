@@ -1,0 +1,1 @@
+COMMAND: git archive both exact SHAs; expand; install byte-identical gate harness

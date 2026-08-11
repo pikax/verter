@@ -1,0 +1,188 @@
+CMD: pnpm --filter @verter/dx-harness test:corpus-gate
+CWD: <REPO>-wt-a1
+ENV: VERTER_CORPUS_GATE_DIR=<REDACTED — classified external corpus root; anonymous label 'Corpus A'; content fingerprint recorded in index.md>; VERTER_CORPUS_GATE_LABEL='Corpus A'; VERTER_CORPUS_GATE_RECEIPT=command-proofs/16r-corpus-gate-receipt.json; VERTER_CORPUS_GATE_FILE_DETAIL unset (sampled paths NOT embedded); all other knobs default (routes tsserver,tsgo,shared-tsgo; sample 40; serial; executor unattested)
+DATE: 2026-08-10T07:38:08Z
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/dx-harness@0.0.1 test:corpus-gate <REPO>-wt-a1\packages\dx-harness
+> vitest --run --config vitest.corpus-gate.config.ts
+
+
+ RUN  v4.1.7 <REPO>-wt-a1/packages/dx-harness
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] Corpus A: 290 .vue files discovered, 40 sampled, routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] topology=serial executor=unattested machine=32 cores / 127 GiB
+[corpus-gate] route tsserver: starting bounded session
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsserver] 1/40 files, 36 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsserver] 2/40 files, 71 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsserver] 3/40 files, 108 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsserver] WEDGE — liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route tsserver: done in 190609ms — 115 requests, wedged=true, completed=false
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route tsgo: starting bounded session
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsgo] 1/40 files, 36 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsgo] 2/40 files, 71 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsgo] 3/40 files, 108 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:tsgo] WEDGE — liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route tsgo: done in 127127ms — 109 requests, wedged=true, completed=false
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route shared-tsgo: starting bounded session
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:shared-tsgo] 1/40 files, 36 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:shared-tsgo] 2/40 files, 71 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:shared-tsgo] 3/40 files, 108 requests
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate:shared-tsgo] WEDGE — liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route shared-tsgo: done in 136350ms — 109 requests, wedged=true, completed=false
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] route tsserver: latency GATING (isolated) — sole route session in flight on this executor (observed concurrency 1, topology serial, executor unattested)
+[corpus-gate] route tsgo: latency GATING (isolated) — sole route session in flight on this executor (observed concurrency 1, topology serial, executor unattested)
+[corpus-gate] route shared-tsgo: latency GATING (isolated) — sole route session in flight on this executor (observed concurrency 1, topology serial, executor unattested)
+[corpus-gate] receipt (Corpus A) → <HOME>\AppData\Local\Temp\claude\D--dev-personal-verter\9f04d440-da78-4d9d-b1de-d594036367ef\scratchpad\a1r2\command-proofs\16r-corpus-gate-receipt.json
+[corpus-gate] wall clock 454091ms vs 1200000ms budget (within, reported)
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+[corpus-gate] tsserver: sent=115 answered=111 timedOut=4 abandoned=0 wedged=true latency=GATING (isolated) provider=verified
+[corpus-gate] tsgo: sent=109 answered=108 timedOut=1 abandoned=0 wedged=true latency=GATING (isolated) provider=verified
+[corpus-gate] shared-tsgo: sent=109 answered=107 timedOut=2 abandoned=0 wedged=true latency=GATING (isolated) provider=mismatched
+[corpus-gate] wall clock 454091ms vs 1200000ms budget (within budget)
+[corpus-gate] receipt: <HOME>\AppData\Local\Temp\claude\D--dev-personal-verter\9f04d440-da78-4d9d-b1de-d594036367ef\scratchpad\a1r2\command-proofs\16r-corpus-gate-receipt.json
+
+ ❯ test/corpusGate.lane.ts (1 test | 1 failed) 454151ms
+     × benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo 454150ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsserver, tsgo, shared-tsgo
+AssertionError: corpus-gate acceptance bar failures:
+[tsserver] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+[tsserver] hover p95 15005ms breaches the < 300ms bar
+[tsserver] hover returned 53 unexpected empty result(s)
+[tsserver] definition p95 11504ms breaches the < 500ms bar
+[tsserver] definition returned 20 unexpected empty result(s)
+[tsserver] completion returned 6 unexpected empty result(s)
+[tsserver] references returned 4 unexpected empty result(s)
+[tsgo] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+[tsgo] hover p95 2958ms breaches the < 300ms bar
+[tsgo] hover returned 22 unexpected empty result(s)
+[tsgo] definition p95 5282ms breaches the < 500ms bar
+[tsgo] definition returned 12 unexpected empty result(s)
+[tsgo] completion returned 3 unexpected empty result(s)
+[tsgo] references returned 4 unexpected empty result(s)
+[tsgo] 8 process(es) in the server tree were never sampled (pids 179620, 81188, 143364, 120820, 323448, 230580, 335724, 143580) — their memory is unbounded
+[shared-tsgo] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms
+[shared-tsgo] hover returned 22 unexpected empty result(s)
+[shared-tsgo] definition p95 7371ms breaches the < 500ms bar
+[shared-tsgo] definition returned 12 unexpected empty result(s)
+[shared-tsgo] completion returned 3 unexpected empty result(s)
+[shared-tsgo] references returned 4 unexpected empty result(s)
+[shared-tsgo] provider attribution MISMATCHED: provider pid 60944 (verter-relay-shim.exe) is not a descendant of the spawned server or relay [roots: 312184, 60944] — the sampler is bounding the wrong process
+[shared-tsgo] 12 process(es) in the server tree were never sampled (pids 204056, 326912, 95304, 187384, 148524, 203648, 203768, 108036, 109000, 324708, 12168, 140872) — their memory is unbounded: expected [ …(23) ] to deeply equal []
+
+- Expected
++ Received
+
+- []
++ [
++   "[tsserver] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms",
++   "[tsserver] hover p95 15005ms breaches the < 300ms bar",
++   "[tsserver] hover returned 53 unexpected empty result(s)",
++   "[tsserver] definition p95 11504ms breaches the < 500ms bar",
++   "[tsserver] definition returned 20 unexpected empty result(s)",
++   "[tsserver] completion returned 6 unexpected empty result(s)",
++   "[tsserver] references returned 4 unexpected empty result(s)",
++   "[tsgo] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms",
++   "[tsgo] hover p95 2958ms breaches the < 300ms bar",
++   "[tsgo] hover returned 22 unexpected empty result(s)",
++   "[tsgo] definition p95 5282ms breaches the < 500ms bar",
++   "[tsgo] definition returned 12 unexpected empty result(s)",
++   "[tsgo] completion returned 3 unexpected empty result(s)",
++   "[tsgo] references returned 4 unexpected empty result(s)",
++   "[tsgo] 8 process(es) in the server tree were never sampled (pids 179620, 81188, 143364, 120820, 323448, 230580, 335724, 143580) — their memory is unbounded",
++   "[shared-tsgo] WEDGED: liveness check went dark (after definition timeout): getStatistics failed: verter-lsp request '$/verter/getStatistics' timed out after 10000ms",
++   "[shared-tsgo] hover returned 22 unexpected empty result(s)",
++   "[shared-tsgo] definition p95 7371ms breaches the < 500ms bar",
++   "[shared-tsgo] definition returned 12 unexpected empty result(s)",
++   "[shared-tsgo] completion returned 3 unexpected empty result(s)",
++   "[shared-tsgo] references returned 4 unexpected empty result(s)",
++   "[shared-tsgo] provider attribution MISMATCHED: provider pid 60944 (verter-relay-shim.exe) is not a descendant of the spawned server or relay [roots: 312184, 60944] — the sampler is bounding the wrong process",
++   "[shared-tsgo] 12 process(es) in the server tree were never sampled (pids 204056, 326912, 95304, 187384, 148524, 203648, 203768, 108036, 109000, 324708, 12168, 140872) — their memory is unbounded",
++ ]
+
+ ❯ test/corpusGate.lane.ts:78:9
+     76|         outcome.failures,
+     77|         `corpus-gate acceptance bar failures:\n${outcome.failures.join…
+     78|       ).toEqual([]);
+       |         ^
+     79|     },
+     80|   );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  08:38:09
+   Duration  454.51s (transform 157ms, setup 0ms, import 195ms, tests 454.15s, environment 0ms)
+
+<REPO>-wt-a1\packages\dx-harness:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @verter/dx-harness@0.0.1 test:corpus-gate: `vitest --run --config vitest.corpus-gate.config.ts`
+Exit status 1
+EXIT: 1
+END-DATE: 2026-08-10T07:45:44Z

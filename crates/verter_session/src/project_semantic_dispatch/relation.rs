@@ -866,6 +866,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: &RelateMemoKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        verter_audit::attribute_scope!(RelationDecide);
         let fence = self.project_generation_signature();
         // A raw `SemanticQueryKey::Relate` can enter the family dispatcher
         // without passing through `execute_relate`. Refuse any such key whose

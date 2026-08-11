@@ -1,0 +1,121 @@
+CMD: cargo nextest run -p verter_css_syntax
+CWD: <REPO>-wt-a1
+ENV: targeted receipt converting gate-coverage inference to direct proof for the CSS row
+DATE: 2026-08-10T07:34:56Z
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling oxc_data_structures v0.126.0
+   Compiling syn v2.0.117
+   Compiling oxc_allocator v0.126.0
+   Compiling oxc_str v0.126.0
+   Compiling thiserror-impl v2.0.18
+   Compiling oxc-miette-derive v2.7.1
+   Compiling oxc_ast_macros v0.126.0
+   Compiling serde_derive v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling oxc-miette v2.7.1
+   Compiling oxc_span v0.126.0
+   Compiling serde v1.0.228
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+   Compiling verter_css_syntax v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_css_syntax)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.56s
+────────────
+ Nextest run ID c2abfbfa-555c-45d8-a3cd-99e8f557ad88 with nextest profile: default
+    Starting 94 tests across 2 binaries
+        PASS [   0.027s] ( 1/94) verter_css_syntax::main cases::cst::dialect_variable_declaration_names_retain_trivia_before_colons
+        PASS [   0.027s] ( 2/94) verter_css_syntax::main cases::cst::runtime_sink_shallow_parse_allocates_zero
+        PASS [   0.029s] ( 3/94) verter_css_syntax::main cases::cst::contextual_unicode_ranges_have_one_lossless_event_authority
+        PASS [   0.033s] ( 4/94) verter_css_syntax::main cases::cst::conditional_style_context_does_not_change_rule_list_grammar
+        PASS [   0.035s] ( 5/94) verter_css_syntax style_ir::tests::recovered_pseudo_selector_keeps_disjoint_complete_class_fact
+        PASS [   0.040s] ( 6/94) verter_css_syntax::main cases::cst::css_declaration_names_reject_intervening_non_trivia
+        PASS [   0.048s] ( 7/94) verter_css_syntax::main cases::cst::functional_and_block_custom_property_values_remain_declarations
+        PASS [   0.051s] ( 8/94) verter_css_syntax::main cases::cst::custom_property_like_names_with_rule_blocks_are_nested_selectors
+        PASS [   0.055s] ( 9/94) verter_css_syntax::main cases::cst::custom_properties_allow_mixed_top_level_block_values
+        PASS [   0.059s] (10/94) verter_css_syntax::main cases::cst::custom_property_like_selectors_with_later_colons_remain_qualified_rules
+        PASS [   0.062s] (11/94) verter_css_syntax::main cases::cst::nested_group_at_rules_accept_declarations_and_nested_rules
+        PASS [   0.066s] (12/94) verter_css_syntax::main cases::cst::rule_blocks_own_both_delimiters_at_nonzero_origins
+        PASS [   0.068s] (13/94) verter_css_syntax::main cases::cst::runtime_sink_escaped_custom_property_classification_allocates_zero
+        PASS [   0.072s] (14/94) verter_css_syntax::main cases::cst::root_variable_declarations_reject_intervening_non_trivia_and_css_idents
+        PASS [   0.077s] (15/94) verter_css_syntax::main cases::cst::grammar_version_and_extended_syntax_kinds_are_public_and_total
+        PASS [   0.081s] (16/94) verter_css_syntax::main cases::cst::ordinary_declaration_block_values_reject_mixed_top_level_values
+        PASS [   0.083s] (17/94) verter_css_syntax::main cases::cst::runtime_sink_block_value_admission_allocates_zero
+        PASS [   0.086s] (18/94) verter_css_syntax::main cases::cst::runtime_and_cst_sinks_observe_one_balanced_event_stream
+        PASS [   0.089s] (19/94) verter_css_syntax::main cases::cst::ordinary_declaration_values_allow_sole_block_and_important
+        PASS [   0.092s] (20/94) verter_css_syntax::main cases::cst::escaped_custom_property_names_use_decoded_identifier_semantics
+        PASS [   0.155s] (21/94) verter_css_syntax::main cases::cst::immediate_css_declaration_colons_ignore_whitespace_and_comments
+        PASS [   0.159s] (22/94) verter_css_syntax::main cases::cst::immediate_custom_property_colons_ignore_whitespace_and_comments
+        PASS [   0.163s] (23/94) verter_css_syntax::main cases::cst::custom_properties_remain_balanced_lossless_values
+        PASS [   0.166s] (24/94) verter_css_syntax::main cases::cst::nested_functional_pseudo_selectors_remain_qualified_rules
+        PASS [   0.169s] (25/94) verter_css_syntax::main cases::cst::runtime_sink_escaped_classification_allocates_zero
+        PASS [   0.172s] (26/94) verter_css_syntax::main cases::cst::record_layout_is_12_20_4_bytes
+        PASS [   0.175s] (27/94) verter_css_syntax::main cases::cst::root_dialect_variables_share_declaration_grammar
+        PASS [   0.181s] (28/94) verter_css_syntax::main cases::cst::flat_cst_allocations_stay_within_the_retained_table_budget
+        PASS [   0.183s] (29/94) verter_css_syntax::main cases::cst::runtime_sink_functional_pseudo_disambiguation_allocates_zero
+        PASS [   0.187s] (30/94) verter_css_syntax::main cases::cst::rule_list_qualified_rule_preludes_retain_semicolons
+        PASS [   0.190s] (31/94) verter_css_syntax::main cases::cst::scss_variables_in_group_and_keyframe_rule_lists_resume_following_rules
+        PASS [   0.167s] (32/94) verter_css_syntax::main cases::cst::stylesheet_and_component_value_nodes_are_typed_and_lossless
+        PASS [   0.171s] (33/94) verter_css_syntax::main cases::cst::unknown_at_rule_blocks_are_opaque_balanced_component_values
+        PASS [   0.173s] (34/94) verter_css_syntax::main cases::cst::wpt_inputs_reconstruct_byte_for_byte
+        PASS [   0.175s] (35/94) verter_css_syntax::main cases::dialects::ambiguous_component_values_retain_balanced_v_bind_functions
+        PASS [   0.177s] (36/94) verter_css_syntax::main cases::dialects::ambiguous_sass_forms_never_publish_complete_selector_or_declaration_facts
+        PASS [   0.175s] (37/94) verter_css_syntax::main cases::dialects::braced_pseudo_selectors_remain_rules_in_every_supported_dialect
+        PASS [   0.171s] (38/94) verter_css_syntax::main cases::dialects::closing_brace_indentation_does_not_change_parser_mode
+        PASS [   0.172s] (39/94) verter_css_syntax::main cases::dialects::declaration_classification_never_discards_an_indented_block
+        PASS [   0.172s] (40/94) verter_css_syntax::main cases::dialects::dialect_mixin_function_and_directive_headers_are_contained_not_evaluated
+        PASS [   0.172s] (41/94) verter_css_syntax::main cases::dialects::dynamic_selector_trust_is_typed_and_disjoint_static_classes_survive
+        PASS [   0.172s] (42/94) verter_css_syntax::main cases::dialects::five_dialects_share_one_structural_authority
+        PASS [   0.170s] (43/94) verter_css_syntax::main cases::dialects::functional_pseudo_class_collection_is_per_component
+        PASS [   0.174s] (44/94) verter_css_syntax::main cases::dialects::multiline_declaration_values_remain_one_value_tree
+        PASS [   0.178s] (45/94) verter_css_syntax::main cases::dialects::layout_recovery_preserves_dedented_siblings_and_mid_edit_classes
+        PASS [   0.172s] (46/94) verter_css_syntax::main cases::dialects::stylus_and_old_sass_ambiguity_is_local_and_fail_closed
+        PASS [   0.171s] (47/94) verter_css_syntax::main cases::dialects::stylus_attribute_selectors_with_equals_are_rules
+        PASS [   0.172s] (48/94) verter_css_syntax::main cases::dialects::unexpected_root_indent_is_ambiguous_and_does_not_own_following_lines
+        PASS [   0.172s] (49/94) verter_css_syntax::main cases::ir::style_ir_and_lossless_cst_are_peer_event_sinks
+        PASS [   0.174s] (50/94) verter_css_syntax::main cases::lexer::adjacent_stylus_rule_braces_are_plain_braces
+        PASS [   0.174s] (51/94) verter_css_syntax::main cases::lexer::css_and_dialect_extensions_are_distinct_and_lossless
+        PASS [   0.115s] (52/94) verter_css_syntax::main cases::lexer::css_syntax_wpt_tokenization_is_exact
+        PASS [   0.115s] (53/94) verter_css_syntax::main cases::lexer::direct_lexer_never_enables_unicode_range_tokenization
+        PASS [   0.114s] (54/94) verter_css_syntax::main cases::lexer::escaped_url_heads_bodies_and_nul_preprocessing_are_exact
+        PASS [   0.122s] (55/94) verter_css_syntax::main cases::lexer::every_wpt_fixture_is_manifested_and_executed
+        PASS [   0.119s] (56/94) verter_css_syntax::main cases::lexer::hash_classification_and_default_unicode_range_context_follow_css_decision_order
+        PASS [   0.119s] (57/94) verter_css_syntax::main cases::lexer::identifier_decoding_borrows_when_unescaped
+        PASS [   0.118s] (58/94) verter_css_syntax::main cases::lexer::layout_newlines_and_stylus_interpolation_are_lexical_facts
+        PASS [   0.117s] (59/94) verter_css_syntax::main cases::lexer::less_variable_declaration_comments_have_exact_tokens_events_and_cst
+        PASS [   0.120s] (60/94) verter_css_syntax::main cases::lexer::less_variables_do_not_steal_css_at_rules
+        PASS [   0.118s] (61/94) verter_css_syntax::main cases::lexer::strings_consume_shared_css_escapes_and_escaped_newlines
+        PASS [   0.118s] (62/94) verter_css_syntax::main cases::lexer::stylus_ternary_brace_remains_interpolation
+        PASS [   0.327s] (63/94) verter_css_syntax::main cases::cst::production_dependency_closure_is_framework_neutral
+        PASS [   0.078s] (64/94) verter_css_syntax::main cases::selectors::interpolation_anywhere_in_selector_tree_degrades_trust
+        PASS [   0.170s] (65/94) verter_css_syntax::main cases::recovery::comment_transparent_pseudo_names_accept_identifiers_and_functions
+        PASS [   0.171s] (66/94) verter_css_syntax::main cases::recovery::excessive_nesting_returns_typed_structure_overflow
+        PASS [   0.168s] (67/94) verter_css_syntax::main cases::recovery::lexical_corruption_is_typed_in_strict_and_explicit_in_recover
+        PASS [   0.170s] (68/94) verter_css_syntax::main cases::recovery::malformed_at_rule_stops_at_its_owners_right_brace
+        PASS [   0.170s] (69/94) verter_css_syntax::main cases::recovery::malformed_qualified_rule_stops_at_its_owners_right_brace
+        PASS [   0.169s] (70/94) verter_css_syntax::main cases::recovery::pseudo_element_probe_preserves_owning_right_brace_and_sibling_rule
+        PASS [   0.172s] (71/94) verter_css_syntax::main cases::recovery::pseudo_probe_preserves_owning_right_brace_and_sibling_rule
+        PASS [   0.172s] (72/94) verter_css_syntax::main cases::recovery::pseudo_probe_preserves_semicolon_and_resumes_declarations
+        PASS [   0.170s] (73/94) verter_css_syntax::main cases::recovery::source_domain_overflow_is_typed
+        PASS [   0.171s] (74/94) verter_css_syntax::main cases::recovery::standalone_selector_recovery_consumes_every_byte_and_reaches_eof
+        PASS [   0.174s] (75/94) verter_css_syntax::main cases::recovery::strict_fails_where_recover_emits_explicit_nodes
+        PASS [   0.171s] (76/94) verter_css_syntax::main cases::recovery::syntax_element_index_overflow_is_typed
+        PASS [   0.175s] (77/94) verter_css_syntax::main cases::recovery::unterminated_less_escaped_strings_share_typed_string_recovery
+        PASS [   0.176s] (78/94) verter_css_syntax::main cases::recovery::unterminated_selector_list_pseudo_stops_at_its_owners_right_brace
+        PASS [   0.176s] (79/94) verter_css_syntax::main cases::recovery::url_content_then_whitespace_at_eof_is_typed_as_unterminated_url
+        PASS [   0.177s] (80/94) verter_css_syntax::main cases::selectors::attribute_matchers_require_top_level_comment_transparent_adjacency
+        PASS [   0.182s] (81/94) verter_css_syntax::main cases::selectors::attribute_wildcards_cannot_be_local_names_for_any_matcher
+        PASS [   0.180s] (82/94) verter_css_syntax::main cases::selectors::combinators_are_exact_and_whitespace_is_only_descendant_between_compounds
+        PASS [   0.180s] (83/94) verter_css_syntax::main cases::selectors::comments_are_transparent_for_selector_adjacency_but_whitespace_is_not
+        PASS [   0.178s] (84/94) verter_css_syntax::main cases::selectors::dialect_interpolations_balance_in_selector_grammar
+        PASS [   0.180s] (85/94) verter_css_syntax::main cases::selectors::escaped_n_dimension_units_preserve_nth_formulas_and_of_selectors
+        PASS [   0.267s] (86/94) verter_css_syntax::main cases::lexer::url_whitespace_at_eof_and_before_junk_have_exact_kinds_and_spans
+        PASS [   0.183s] (87/94) verter_css_syntax::main cases::selectors::interpolated_class_is_dynamic_with_positioned_fragments
+        PASS [   0.177s] (88/94) verter_css_syntax::main cases::selectors::nth_child_and_nth_last_child_of_are_structural
+        PASS [   0.177s] (89/94) verter_css_syntax::main cases::selectors::nth_formulas_respect_token_boundaries_signs_comments_and_of_lists
+        PASS [   0.179s] (90/94) verter_css_syntax::main cases::selectors::selector_facts_come_from_canonical_tokens_and_events
+        PASS [   0.175s] (91/94) verter_css_syntax::main cases::selectors::selector_structure_exposes_hierarchical_type_class_and_id_components
+        PASS [   0.174s] (92/94) verter_css_syntax::main cases::selectors::unknown_functional_pseudos_keep_lossless_component_values
+        PASS [   0.174s] (93/94) verter_css_syntax::main cases::selectors::vue_selector_list_pseudos_admit_only_the_exact_alias_spellings
+        PASS [   0.174s] (94/94) verter_css_syntax::main cases::selectors::wpt_selector_structure_and_spans
+────────────
+     Summary [   0.484s] 94 tests run: 94 passed, 0 skipped
+EXIT: 0
+END-DATE: 2026-08-10T07:35:04Z

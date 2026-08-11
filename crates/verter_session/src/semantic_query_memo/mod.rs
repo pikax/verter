@@ -3395,6 +3395,9 @@ impl SemanticGraphStore {
         if self.inflight.lock().contains_key(&prepared) {
             return false;
         }
+        // Past both early-outs: this backfill genuinely clones the broader
+        // result into an empty narrower sibling slot.
+        verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
         let validated_at_generation = ctx.project_type_store().project_generation();

@@ -1,0 +1,77 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "B4_json_guard",
+      "orig": "Some(got) if got == json => {}",
+      "mut": "Some(_) => {} // MUTATED-B4",
+      "expect": [
+        "expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "summary": "Summary [   1.981s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B5_warm_from_cache",
+      "orig": "if !measured.second_from_cache {",
+      "mut": "if false { // MUTATED-B5",
+      "expect": [
+        "expectation_controls::boundary_warm_pair_clauses_fail_individually"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_warm_pair_clauses_fail_individually"
+      ],
+      "summary": "Summary [   1.873s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B6_warm_cold_computes",
+      "orig": "if measured.second_cold_computes != 0 {",
+      "mut": "if false { // MUTATED-B6",
+      "expect": [
+        "expectation_controls::boundary_warm_pair_clauses_fail_individually"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_warm_pair_clauses_fail_individually"
+      ],
+      "summary": "Summary [   2.039s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B7_no_poison",
+      "orig": "} else if measured.second_from_cache {",
+      "mut": "} else if false { // MUTATED-B7",
+      "expect": [
+        "expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "summary": "Summary [   2.030s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

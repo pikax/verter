@@ -1,0 +1,79 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "B8_replay_drift",
+      "orig": "(Some(first), Some(second)) if first == second => {}",
+      "mut": "(Some(_), Some(_)) => {} // MUTATED-B8",
+      "expect": [
+        "expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "summary": "Summary [   1.976s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B9_error_carrier",
+      "orig": "if let Some(error) = &measured.error {",
+      "mut": "if let Some(error) = &None::<String> { // MUTATED-B9",
+      "expect": [
+        "expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "summary": "Summary [   1.963s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "L1_literal_str_eq",
+      "orig": "(Lit::Str(e), LiteralValue::String(g)) => *e == g.as_str(),",
+      "mut": "(Lit::Str(_e), LiteralValue::String(_g)) => true, // MUTATED-L1",
+      "expect": [
+        "expectation_controls::literal_expectation_rejects_a_different_value"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "summary": "Summary [   1.948s] 40 tests run: 37 passed, 3 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "U1_union_len",
+      "orig": "if measured.len() != expected.len() {",
+      "mut": "if false { // MUTATED-U1",
+      "expect": [
+        "expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "summary": "Summary [   2.023s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

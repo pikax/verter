@@ -1,0 +1,55 @@
+CMD: cargo nextest run -p verter_protocol -E test(typeinfo_proto_ts_freshness)
+CWD: <REPO>-wt-a1
+ENV: targeted receipt converting gate-coverage inference to direct proof; buf/oxfmt present via node_modules/.bin
+DATE: 2026-08-10T07:34:22Z
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling smallvec v1.15.1
+   Compiling serde_json v1.0.150
+   Compiling either v1.15.0
+   Compiling phf_macros v0.13.1
+   Compiling prost-derive v0.14.3
+   Compiling prettyplease v0.2.37
+   Compiling serde v1.0.228
+   Compiling quote v1.0.45
+   Compiling rayon v1.12.0
+   Compiling parking_lot_core v0.9.12
+   Compiling syn v2.0.117
+   Compiling parking_lot v0.12.5
+   Compiling dashmap v6.2.1
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+   Compiling oxc_index v4.1.0
+   Compiling phf v0.13.1
+   Compiling oxc_regular_expression v0.126.0
+   Compiling verter_no_typeexpr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_typeexpr)
+   Compiling verter_audit v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_audit)
+   Compiling verter_language v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_language)
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsgo_api)
+   Compiling verter_css_syntax v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_css_syntax)
+   Compiling oxc_syntax v0.126.0
+   Compiling verter_type_expr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr)
+   Compiling prost v0.14.3
+   Compiling prost-types v0.14.3
+   Compiling oxc_ast v0.126.0
+   Compiling prost-build v0.14.3
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_protocol)
+   Compiling oxc_ecmascript v0.126.0
+   Compiling oxc_ast_visit v0.126.0
+   Compiling oxc_parser v0.126.0
+   Compiling verter_scheduler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_scheduler)
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr_oxc)
+   Compiling verter_workspace v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_workspace)
+   Compiling verter_parser v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_parser)
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_semantic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.05s
+────────────
+ Nextest run ID bd82e0a6-2022-4412-8124-7254fb83dfdc with nextest profile: default
+    Starting 5 tests across 2 binaries (74 tests skipped)
+        PASS [   0.026s] (1/5) verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_record_the_proto_file_path
+        PASS [   0.027s] (2/5) verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_facade_schema_version_matches_rust
+        PASS [   0.075s] (3/5) verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_reference_every_proto_message
+        PASS [   2.162s] (4/5) verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide
+        PASS [   2.321s] (5/5) verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output
+────────────
+     Summary [   2.322s] 5 tests run: 5 passed, 74 skipped
+EXIT: 0
+END-DATE: 2026-08-10T07:34:56Z

@@ -1,0 +1,69 @@
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a2\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+────────────
+ Nextest run ID f05a0a6a-15cc-4b01-80f8-16360033ac5f with nextest profile: default
+    Starting 2 tests across 4 binaries (8702 tests skipped)
+        FAIL [   0.021s] (1/2) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent
+  stdout ───
+
+    running 1 test
+    test u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent ... FAILED
+
+    failures:
+
+    failures:
+        u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6199 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent' (221072) panicked at crates\verter_session\src\u6_flow_expect_tests.rs:1445:13:
+    U6_CORPUS_DUMP=1: same_capture_write_cell_is_position_independent EVALUATES NOTHING in this mode (its measurements are the position dump in matrix_cells_hold_their_pins). A dump run is measurement, never evidence — re-run without U6_CORPUS_DUMP for a verdict.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 1 test still running
+        FAIL [   0.159s] (2/2) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins
+  stdout ───
+
+    running 1 test
+    MATRIX let_iife_write_positions [statement] => rendered None  degr None  warm2 false  novalue true
+    MATRIX let_iife_write_positions [declarator_init] => rendered Some("\"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_iife_write_positions [if_test] => rendered Some("\"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_iife_write_positions [sequence_operand] => rendered None  degr None  warm2 false  novalue true
+    MATRIX let_iife_write_positions [call_argument] => rendered None  degr None  warm2 false  novalue true
+    MATRIX let_iife_write_positions [template] => rendered Some("\"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_iife_write_positions [short_circuit] => rendered Some("\"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_iife_write_positions [object_literal] => rendered Some("\"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_write_before_creation => rendered Some("() => \"b\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_write_after_creation => rendered Some("() => \"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_sibling_closure_write => rendered Some("() => \"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX let_deeper_closure_write => rendered Some("() => \"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX var_write_after_creation => rendered Some("() => Union(\"a\" | \"b\")")  degr Some(None)  warm2 true  novalue false
+    MATRIX param_write_after_creation => rendered Some("() => Union(\"a\" | \"b\")")  degr Some(None)  warm2 true  novalue false
+    MATRIX const_capture_never_written => rendered Some("() => \"a\"")  degr Some(None)  warm2 true  novalue false
+    MATRIX typeof_guard_before_creation => rendered Some("Union(() => Union(string | number) | () => \"z\")")  degr Some(None)  warm2 true  novalue false
+    MATRIX iife_write_in_try_finally => rendered None  degr None  warm2 false  novalue true
+    MATRIX iife_write_in_labeled_block => rendered None  degr None  warm2 false  novalue true
+    MATRIX iife_write_in_if_branch => rendered None  degr None  warm2 false  novalue true
+    MATRIX iife_write_in_switch_case => rendered None  degr None  warm2 false  novalue true
+    test u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins ... FAILED
+
+    failures:
+
+    failures:
+        u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6199 filtered out; finished in 0.14s
+
+  stderr ───
+
+    thread 'u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins' (269260) panicked at crates\verter_session\src\u6_flow_expect_tests.rs:1414:13:
+    U6_CORPUS_DUMP=1: measurements dumped above; matrix_cells_hold_their_pins EVALUATED NO PINS in this mode. A dump run is measurement, never evidence — re-run without U6_CORPUS_DUMP for a verdict.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.180s] 2 tests run: 0 passed, 2 failed, 8702 skipped
+        FAIL [   0.021s] (1/2) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent
+        FAIL [   0.159s] (2/2) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins
+error: test run failed

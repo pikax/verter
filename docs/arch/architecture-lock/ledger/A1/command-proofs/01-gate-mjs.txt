@@ -1,0 +1,155 @@
+CMD: node scripts/gate.mjs --timeout 420m
+CWD: <REPO>-wt-a1
+ENV: no VERTER_REQUIRE_TSGO / NEXTEST_PROFILE overrides; default features; --timeout is a documented gate flag (wallclock budget only, does not alter test selection); warm target/gate-runner from the prior evidence round (tree differs only by one docs file)
+DATE: 2026-08-10T07:23:33Z
+[gate][warn] Oversize source advisory: production source files exceed 1500 lines
+without an explicit exemption:
+  crates/verter_compiler/src/code_transform/code_transform.rs (1526 lines)
+  crates/verter_compiler/src/compile/mod.rs (1818 lines)
+  crates/verter_compiler/src/framework_common/registered_carrier_projection.rs (1841 lines)
+  crates/verter_compiler/src/framework_common/vue_bridge.rs (2887 lines)
+  crates/verter_compiler/src/ide/template/props.rs (1641 lines)
+  crates/verter_css_syntax/src/parser.rs (1572 lines)
+  crates/verter_language/src/parse_artifact/carrier_inventory.rs (2015 lines)
+  crates/verter_lsp/src/background_drain.rs (1518 lines)
+  crates/verter_lsp/src/documents/mod.rs (2295 lines)
+  crates/verter_lsp/src/features/cursor_context.rs (1565 lines)
+  crates/verter_lsp/src/server/aux_features.rs (1526 lines)
+  crates/verter_lsp/src/server/lifecycle.rs (1510 lines)
+  crates/verter_lsp/src/server/mod.rs (1632 lines)
+  crates/verter_lsp/src/server_utils.rs (1965 lines)
+  crates/verter_lsp/src/sync_coordinator.rs (1573 lines)
+  crates/verter_lsp/src/test_harness.rs (1692 lines)
+  crates/verter_lsp/src/test_harness_fixture_dependencies.rs (1633 lines)
+  crates/verter_lsp/src/type_provider/mock.rs (1578 lines)
+  crates/verter_lsp/src/type_provider/project_sync.rs (2227 lines)
+  crates/verter_protocol/src/types.rs (1970 lines)
+  crates/verter_semantic/src/analysis/flow/mod.rs (2241 lines)
+  crates/verter_semantic/src/analysis/framework_facts/svelte.rs (1728 lines)
+  crates/verter_semantic/src/analysis/function_program.rs (3618 lines)
+  crates/verter_session/src/block_content.rs (2184 lines)
+  crates/verter_session/src/fact_signature_helpers.rs (1593 lines)
+  crates/verter_session/src/flow_slice_content.rs (4900 lines)
+  crates/verter_session/src/framework/script_facts.rs (1595 lines)
+  crates/verter_session/src/host_manage/fallthrough.rs (1605 lines)
+  crates/verter_session/src/project_semantic_dispatch/call_resolve.rs (2732 lines)
+  crates/verter_session/src/project_semantic_dispatch/carrier.rs (1516 lines)
+  crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs (2169 lines)
+  crates/verter_session/src/project_semantic_dispatch/flow_return.rs (8138 lines)
+  crates/verter_session/src/project_semantic_dispatch/locator_shape.rs (1566 lines)
+  crates/verter_session/src/project_semantic_dispatch/raise/shape_engine/node_domain.rs (1803 lines)
+  crates/verter_session/src/project_semantic_dispatch/relation.rs (6350 lines)
+  crates/verter_session/src/project_semantic_dispatch/semantic_source.rs (1621 lines)
+  crates/verter_session/src/resolver_core/fallthrough_request.rs (1554 lines)
+  crates/verter_session/src/resolver_core/prepared_decl.rs (1509 lines)
+  crates/verter_session/src/resolver_core/resolver_context.rs (1555 lines)
+  crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs (1732 lines)
+  crates/verter_session/src/typeinfo/vue_macro_codegen.rs (1510 lines)
+  crates/verter_type_expr/src/fact_witnesses.rs (1844 lines)
+  crates/verter_type_expr/src/lib.rs (1539 lines)
+  crates/verter_workspace/src/engine.rs (4701 lines)
+  crates/verter_workspace/src/fact_cache.rs (1905 lines)
+  crates/verter_workspace/src/filesystem.rs (2167 lines)
+  crates/verter_workspace/src/resolution_currency.rs (3752 lines)
+
+File size is advisory and does not affect the gate verdict.
+[gate] mutex acquired (token=126088.1786346614322.372895617 lockdir=<HOME>\AppData\Local\Temp\verter-gate.lock.3ac4f7d1cd9a9cce.d)
+[gate] runner target dir: <REPO>-wt-a1\target\gate-runner
+[gate] build-prerequisite preflight: SATISFIED — <REPO>-wt-a1\packages\vue-vscode\node_modules\@verter\typescript-plugin loaded
+[gate] freshness-tooling preflight: already-present — tolerance DISABLED (tools present/installed; a freshness FAIL is a HARD regression)
+[gate] Vue macro oracle: gen:vue-macro-oracle:check …
+Vue macro runtime oracle: 11 case(s) in sync with @vue/compiler-sfc@3.5.34.
+[gate] gen:vue-macro-oracle:check passed in 0s
+[gate] Vue macro oracle: test:vue-macro-oracle …
+✔ the canonical gate owns both Vue macro oracle verification steps (1.2986ms)
+✔ extractRuntimeShape is formatting-insensitive but preserves runtime semantics (6.5815ms)
+✔ oracleDiff discriminates constructor order and skipCheck drift (0.5558ms)
+✔ the pinned compiler generates the complete deterministic fixture matrix (25.8555ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 201.66
+[gate] test:vue-macro-oracle passed in 0s
+[gate] archiving workspace test universe (dev profile) (cargo nextest archive --workspace) …
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling verter_relay_shim v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_relay_shim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.34s
+   Archiving 90 binaries (including 12 non-test binaries; 1 non-test binary filtered out), 3 build script output directories, 2 linked paths, and 1 standard library to <REPO>-wt-a1\target\gate-runner\gate-work\nextest.tar.zst
+    Archived 118 files to <REPO>-wt-a1\target\gate-runner\gate-work\nextest.tar.zst in 3.00s
+[gate] archive [debug] built in 7s -> <REPO>-wt-a1\target\gate-runner\gate-work\nextest.tar.zst
+[gate] listing suites from the [debug] archive (cargo nextest list --message-format json) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract
+   Extracted 118 files to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract in 8.45s
+[gate] restored 1 runtime-required Windows PDB sidecar(s) beside archived tests
+[gate] archive lists 78 suites; build-meta target-directory=<REPO>-wt-a1\target\gate-runner\gate-work\extract\target
+[gate] SURFACE 1: nextest run from the archive (process isolation) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract
+   Extracted 118 files to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract in 8.72s
+────────────
+ Nextest run ID 9d99ef2b-c25f-4b16-980c-af441ff01c71 with nextest profile: default
+    Starting 24044 tests across 78 binaries (582 tests skipped)
+────────────
+     Summary [ 251.049s] 24044 tests run: 24044 passed, 582 skipped
+[gate] SURFACE 1 done in 261s: 24044 run, 24044 passed, 0 did not pass (0 failed, 0 timed out, 0 exec failed) (0 named, 0 tolerated), 582 skipped; run exit 0
+[gate] SURFACE 2: directly executing 3 verter_session libtest binaries (lib=1, test=2) in-process from the SAME archive …
+    Checking verter_session-tests v0.0.0 (<REPO>-wt-a1\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.50s
+
+
+test [0m[1mtests/cases/compile-fail/component_api_projection_contract_not_optional.rs[0m ... [0m[32mok
+[0m
+
+   Compiling verter_session-tests v0.0.0 (<REPO>-wt-a1\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.04s
+
+
+test [0m[1mtests/cases/compile-fail/no_typeexpr_direct_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/no_typeexpr_aliased_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/output_projector_not_impl_outside_crate.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_has_no_payload_escape.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_exact_syntax.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_constructible.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_no_negative_evidence.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_iterable.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_deref.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+    Checking verter_session-tests v0.0.0 (<REPO>-wt-a1\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.75s
+
+
+test [0m[1mtests/cases/compile-fail/no_typeexpr_direct_field.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/no_typeexpr_aliased_field.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/output_projector_not_impl_outside_crate.rs[0m ... [0m[32mok
+[0m
+
+[gate] SURFACE 2 done: 3 suites clean, 0 suites with non-tolerated failures, 0 tolerated test failures
+[gate] SURFACE 3: building the shipped-cfg test universe (cargo nextest archive --workspace --cargo-profile no-debug-assertions) …
+[gate] archiving workspace test universe (no-debug-assertions profile: debug_assertions OFF) (cargo nextest archive --workspace) …
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+    Finished `no-debug-assertions` profile [unoptimized + debuginfo] target(s) in 1.25s
+   Archiving 90 binaries (including 12 non-test binaries; 1 non-test binary filtered out), 3 build script output directories, 2 linked paths, and 1 standard library to <REPO>-wt-a1\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst
+    Archived 118 files to <REPO>-wt-a1\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst in 3.42s
+[gate] archive [shipped-cfg] built in 6s -> <REPO>-wt-a1\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst
+[gate] listing suites from the [shipped-cfg] archive (cargo nextest list --message-format json) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract-no-debug-assertions
+   Extracted 118 files to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract-no-debug-assertions in 9.16s
+[gate] SURFACE 3: shipped-cfg archive lists 78 suites; filterset 'package(verter_session) + package(verter_scheduler)' covers verter_session (lib=1, test=2) + verter_scheduler (2 suites)
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract-no-debug-assertions
+   Extracted 118 files to \\?\<REPO>-wt-a1\target\gate-runner\gate-work\extract-no-debug-assertions in 9.42s
+────────────
+ Nextest run ID 4062da84-5a56-4e6e-a888-d3d910a61678 with nextest profile: default
+    Starting 8477 tests across 6 binaries (563 tests and 72 binaries skipped)
+────────────
+     Summary [ 115.856s] 8477 tests run: 8477 passed, 563 skipped
+[gate] SURFACE 3 done in 126s: 8477 run, 8477 passed, 0 did not pass (0 failed, 0 timed out, 0 exec failed) (0 named, 0 tolerated), 563 skipped; run exit 0
+[gate] VERDICT: PASS (all three surfaces green)
+EXIT: 0
+END-DATE: 2026-08-10T07:32:47Z

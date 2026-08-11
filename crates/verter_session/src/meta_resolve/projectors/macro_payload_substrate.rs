@@ -343,6 +343,7 @@ fn lower_decl_body_to_node(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<SemanticNodeId> {
+    verter_audit::attribute!(DeclBodyLower);
     let handle = dispatch.decl_body_hot_ref(
         canonical_id,
         owner,

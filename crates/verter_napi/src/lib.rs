@@ -47,6 +47,9 @@ use verter_diagnostics::Linter;
 /// Run a closure, converting any panic into a napi::Error.
 /// Prevents Rust panics from crashing the Node.js process.
 fn catch_panic<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T> {
+    // Every `#[napi]` entry body runs inside this wrapper, so one scope here
+    // covers every native boundary crossing without per-entry annotation.
+    verter_audit::attribute_scope!(NapiBoundaryCall);
     std::panic::catch_unwind(f).map_err(|panic_info| {
         let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
             s.to_string()

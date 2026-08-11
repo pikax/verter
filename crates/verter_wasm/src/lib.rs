@@ -156,6 +156,9 @@ struct WasmDependencyResolution {
 /// Prevents Rust panics from crashing the WASM runtime and poisoning
 /// RefCell borrow state.
 fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, JsValue> {
+    // Every `#[wasm_bindgen]` entry body runs inside this wrapper, so one
+    // scope here covers every WASM boundary crossing.
+    verter_audit::attribute_scope!(WasmBoundaryCall);
     std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic_info| {
         let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
             s.to_string()

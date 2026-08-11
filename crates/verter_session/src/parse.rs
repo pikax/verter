@@ -426,6 +426,7 @@ pub(crate) fn capture_synth_script_candidates(
     // Parse the eval-source ONCE under the carrier's resolved script dialect (so
     // a `lang="tsx"` `.svelte` parses as TSX) and capture across the active
     // providers. The eval-source carries both script blocks at raw offsets.
+    verter_audit::attribute_n!(ScriptParse, source.len());
     let alloc = Allocator::new();
     let program = Parser::new(&alloc, source, source_type)
         .with_options(ParseOptions {
@@ -829,6 +830,7 @@ fn build_svelte_snapshot_from_eval_source(
             provenance
                 .non_sfc_snapshot_parses
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            verter_audit::attribute_n!(EvalProgramParse, eval_source.len());
             let alloc = Allocator::new();
             let parser = Parser::new(&alloc, eval_source, source_type).with_options(ParseOptions {
                 parse_regular_expression: false,
@@ -2050,6 +2052,7 @@ fn build_vue_script_outputs(
     provenance
         .vue_script_snapshot_parses
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    verter_audit::attribute_n!(ScriptParse, script_source.len());
     let alloc = Allocator::new();
     let (parse_result, parse_panic_diag) = catch_analysis_panic(
         "script parse",
@@ -2359,6 +2362,7 @@ pub(crate) fn parse_non_sfc_snapshot(
         .non_sfc_snapshot_parses
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let source_type = plain_script_source_type(file_language);
+    verter_audit::attribute_n!(EvalProgramParse, source.len());
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
         parse_regular_expression: false,

@@ -110,6 +110,7 @@ pub fn analyze_style_body(
     source: &str,
     content: Span,
 ) -> Result<AnalyzedStyleBody, StylePlanFailure> {
+    verter_audit::attribute_scope!(StyleAnalysis);
     let mut ast = parse::parse_style_body(source, content).map_err(|err| StylePlanFailure {
         class: StylePlanFailureClass::ParseAnalysis,
         code: err.code,

@@ -1,0 +1,379 @@
+CMD: pnpm run build:native  (= @verter/native: napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml + build:types + copy-windows-artefact)
+CWD: <REPO>-wt-a1
+ENV: default; napi-rs CLI 3.x; release profile
+DATE: 2026-08-10T05:20:51Z
+---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+
+> verter@0.0.1-beta.1 build:native <REPO>-wt-a1
+> pnpm --filter @verter/native build
+
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/native@0.0.1-beta.3 build <REPO>-wt-a1\packages\native
+> pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact
+
+npm/darwin-arm64                         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/native@0.0.1-beta.3 clean:dist <REPO>-wt-a1\packages\native
+> node ./scripts/clean-dist.mjs
+
+   Compiling cfg-if v1.0.4
+   Compiling itoa v1.0.17
+   Compiling serde_core v1.0.228
+   Compiling rustc-hash v2.1.2
+   Compiling allocator-api2 v0.2.21
+   Compiling windows-link v0.2.1
+   Compiling unicode-linebreak v0.1.5
+   Compiling smawk v0.3.2
+   Compiling unicode-width v0.2.2
+   Compiling unicode-segmentation v1.12.0
+   Compiling static_assertions v1.1.0
+   Compiling oxc_data_structures v0.126.0
+   Compiling ryu v1.0.23
+   Compiling oxc_estree v0.126.0
+   Compiling memchr v2.8.0
+   Compiling smallvec v1.15.1
+   Compiling siphasher v1.0.2
+   Compiling once_cell v1.21.4
+   Compiling percent-encoding v2.3.2
+   Compiling bitflags v2.11.0
+   Compiling serde v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling owo-colors v4.3.0
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling unicode-id-start v1.4.0
+   Compiling cow-utils v0.1.3
+   Compiling castaway v0.2.4
+   Compiling parking_lot_core v0.9.12
+   Compiling dragonbox_ecma v0.1.12
+   Compiling crossbeam-utils v0.8.21
+   Compiling typenum v1.20.0
+   Compiling nonmax v0.5.5
+   Compiling scopeguard v1.2.0
+   Compiling getrandom v0.2.17
+   Compiling zerofrom v0.1.6
+   Compiling num-traits v0.2.19
+   Compiling stable_deref_trait v1.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell_polyfill v1.70.2
+   Compiling compact_str v0.9.0
+   Compiling windows-sys v0.61.2
+   Compiling textwrap v0.16.2
+   Compiling phf_shared v0.13.1
+   Compiling anstyle v1.0.13
+   Compiling hashbrown v0.17.1
+   Compiling lock_api v0.4.14
+   Compiling either v1.15.0
+   Compiling yoke v0.8.1
+   Compiling utf8parse v0.2.2
+   Compiling verter_no_storedspan v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_storedspan)
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling bytes v1.11.1
+   Compiling colorchoice v1.0.4
+   Compiling rayon-core v1.13.0
+   Compiling hashbrown v0.14.5
+   Compiling verter_ecma v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_ecma)
+   Compiling clap_lex v1.0.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling strsim v0.11.1
+   Compiling arc-swap v1.9.1
+   Compiling ts-rs v12.0.1
+   Compiling tracing-core v0.1.36
+   Compiling litemap v0.8.1
+   Compiling anstyle-parse v1.0.0
+   Compiling base64 v0.22.1
+   Compiling const-oid v0.10.2
+   Compiling rand_core v0.6.4
+   Compiling parking_lot v0.12.5
+   Compiling writeable v0.6.2
+   Compiling im v15.1.0
+   Compiling phf v0.13.1
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling crossbeam-channel v0.5.15
+   Compiling lazy_static v1.5.0
+   Compiling cpufeatures v0.3.0
+   Compiling rand_xoshiro v0.6.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling icu_normalizer_data v2.1.1
+   Compiling icu_properties_data v2.1.2
+   Compiling ahash v0.7.8
+   Compiling phf_shared v0.11.3
+   Compiling xxhash-rust v0.8.15
+   Compiling dtoa v1.0.11
+   Compiling glob v0.3.3
+   Compiling hex v0.4.3
+   Compiling bumpalo v3.20.3
+   Compiling allocator-api2 v0.4.0
+   Compiling zerocopy v0.8.42
+   Compiling tracing v0.1.44
+   Compiling phf v0.11.3
+   Compiling dtoa-short v0.3.5
+   Compiling oxc-miette v2.7.1
+   Compiling oxc_allocator v0.126.0
+   Compiling hybrid-array v0.4.12
+   Compiling bitmaps v2.1.0
+   Compiling getrandom v0.3.4
+   Compiling outref v0.1.0
+   Compiling equivalent v1.0.2
+   Compiling rkyv v0.7.46
+   Compiling dashmap v6.2.1
+   Compiling simd-abstraction v0.7.1
+   Compiling cssparser v0.33.0
+   Compiling hashbrown v0.12.3
+   Compiling ptr_meta v0.1.4
+   Compiling getrandom v0.4.2
+   Compiling matches v0.1.10
+   Compiling outref v0.5.2
+   Compiling num-integer v0.1.46
+   Compiling vsimd v0.8.0
+   Compiling seahash v4.1.0
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling data-url v0.1.1
+   Compiling radium v0.7.0
+   Compiling base64-simd v0.7.0
+   Compiling ahash v0.8.12
+   Compiling parcel_selectors v0.28.2
+   Compiling data-encoding v2.10.0
+   Compiling futures-core v0.3.32
+   Compiling precomputed-hash v0.1.1
+   Compiling vlq v0.5.1
+   Compiling icu_collections v2.1.1
+   Compiling oxc_str v0.126.0
+   Compiling rayon v1.12.0
+   Compiling icu_locale_core v2.1.1
+   Compiling sized-chunks v0.6.5
+   Compiling tap v1.0.1
+   Compiling log v0.4.29
+   Compiling utf8_iter v1.0.4
+   Compiling futures-sink v0.3.32
+   Compiling uuid v1.23.1
+   Compiling oxc_sourcemap v7.0.0
+   Compiling num-bigint v0.4.6
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.0
+   Compiling wyz v0.5.1
+   Compiling futures-channel v0.3.32
+   Compiling const-str v0.3.2
+   Compiling dashmap v5.5.3
+   Compiling itertools v0.14.0
+   Compiling itertools v0.10.5
+   Compiling form_urlencoded v1.2.2
+   Compiling json-escape-simd v3.0.1
+   Compiling oxc_span v0.126.0
+   Compiling oxc_diagnostics v0.126.0
+   Compiling base64-simd v0.8.0
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.32
+   Compiling foldhash v0.1.5
+   Compiling funty v2.0.0
+   Compiling cssparser-color v0.1.0
+   Compiling pathdiff v0.2.3
+   Compiling self_cell v1.2.2
+   Compiling futures-io v0.3.32
+   Compiling oxc_regular_expression v0.126.0
+   Compiling hashbrown v0.15.5
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_protocol)
+   Compiling prost v0.14.3
+   Compiling if_chain v1.0.3
+   Compiling libloading v0.9.0
+   Compiling similar v3.1.1
+   Compiling futures-util v0.3.32
+   Compiling napi v3.9.0
+   Compiling ctor v1.0.6
+   Compiling nohash-hasher v0.2.0
+   Compiling rustc-demangle v0.1.27
+   Compiling verter_napi v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_napi)
+   Compiling bitvec v1.0.1
+   Compiling icu_provider v2.1.1
+   Compiling digest v0.11.3
+   Compiling napi-sys v3.2.1
+   Compiling sha2 v0.11.0
+   Compiling icu_properties v2.1.2
+   Compiling icu_normalizer v2.1.1
+   Compiling backtrace v0.3.76
+   Compiling indexmap v2.14.0
+   Compiling anstyle-wincon v3.0.11
+   Compiling anstyle-query v1.1.5
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling winapi-util v0.1.11
+   Compiling anstream v1.0.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+   Compiling oxc_index v4.1.0
+   Compiling serde-content v0.1.2
+   Compiling debugid v0.8.0
+   Compiling tokio v1.52.3
+   Compiling clap_builder v4.6.0
+   Compiling idna_adapter v1.2.1
+   Compiling verter_no_typeexpr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_typeexpr)
+   Compiling verter_language v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_language)
+   Compiling verter_css_syntax v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_css_syntax)
+   Compiling parcel_sourcemap v2.1.1
+   Compiling idna v1.1.0
+   Compiling oxc_syntax v0.126.0
+   Compiling verter_type_expr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr)
+   Compiling verter_macro_dto v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_macro_dto)
+   Compiling url v2.5.8
+   Compiling oxc_ast v0.126.0
+   Compiling sourcemap v9.3.2
+   Compiling futures-executor v0.3.32
+   Compiling futures v0.3.32
+   Compiling half v2.7.1
+   Compiling lightningcss v1.0.0-alpha.71
+   Compiling clap v4.6.1
+   Compiling verter_audit v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_audit)
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsgo_api)
+   Compiling oxc_ecmascript v0.126.0
+   Compiling oxc_ast_visit v0.126.0
+   Compiling verter_session_query v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session_query)
+   Compiling verter_type_runtime v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_runtime)
+   Compiling oxc_parser v0.126.0
+   Compiling oxc_semantic v0.126.0
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr_oxc)
+   Compiling verter_parser v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_parser)
+   Compiling verter_scheduler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_scheduler)
+   Compiling verter_workspace v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_workspace)
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_semantic)
+   Compiling verter_compiler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_compiler)
+   Compiling verter_diagnostics v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_diagnostics)
+   Compiling verter_actions v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_actions)
+   Compiling verter_session v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session)
+   Compiling verter_ffi v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_ffi)
+    Finished `release` profile [optimized] target(s) in 5m 21s
+npm/darwin-arm64                         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/native@0.0.1-beta.3 build:types <REPO>-wt-a1\packages\native
+> pnpm exec tsc --ignoreConfig --declaration --emitDeclarationOnly --outDir dist index.ts
+
+npm/darwin-arm64                         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/darwin-arm64                         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/native@0.0.1-beta.3 copy-windows-artefact <REPO>-wt-a1\packages\native
+> node ./scripts/copy-windows-artefact.mjs
+
+target already present: <REPO>-wt-a1\packages\native\dist\verter-native.win32-x64-msvc.node
+EXIT: 0
+END-DATE: 2026-08-10T05:26:18Z
+--- artifact inventory:
+-rwxr-xr-x 1 david 197609 33612800 Aug 10 06:26 packages/native/dist/verter-native.win32-x64-msvc.node

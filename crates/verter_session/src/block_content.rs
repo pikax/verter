@@ -168,6 +168,8 @@ impl BlockContentState {
             .saturating_add(artifact.retained_bytes());
         self.supplied_order.push_back(key.clone());
         self.supplied.insert(key, artifact);
+        // High-water mark of the store's live retained footprint.
+        verter_audit::attribute_max!(StoreRetainedBytes, self.supplied_bytes);
 
         while self.supplied.len() > MAX_SUPPLIED_ARTIFACTS
             || self.supplied_bytes > MAX_SUPPLIED_TOTAL_BYTES

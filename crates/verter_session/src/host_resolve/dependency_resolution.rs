@@ -322,6 +322,7 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
+        verter_audit::attribute_scope!(ImportRouteResolve);
         self.resolve_type_dependency_canonical(owner_canonical, import_source)
     }
 

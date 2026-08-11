@@ -1,0 +1,6 @@
+CMD: node scripts/gen-svelte-name-parity-corpus.mjs --check  (ci.yml 'Svelte name-parity corpus in sync with pinned compiler', Svelte Oracle job)
+CWD: <REPO>-wt-a1
+DATE: 2026-08-10T05:01:52Z
+---
+gen-svelte-name-parity-corpus --check: 80 row(s) in sync with svelte@5.56.3.
+EXIT: 0

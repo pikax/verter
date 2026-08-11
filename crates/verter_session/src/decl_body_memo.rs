@@ -1096,6 +1096,9 @@ impl DeclBodyMemo {
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let owner_table = Arc::clone(&self.owner_table);
         let Some(mut env) = service.run_leased(&self.key, move |program| {
+            // Charged on the WORKER, where the lowering actually runs — the
+            // caller thread is blocked in the rendezvous, not doing this work.
+            verter_audit::attribute_scope!(EvalEnvBuild);
             program
                 .map(|p| {
                     verter_semantic::analysis::type_eval_build::build_eval_env_with_owners(

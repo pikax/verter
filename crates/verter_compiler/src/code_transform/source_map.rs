@@ -89,6 +89,7 @@ impl<'a> CodeTransform<'a> {
         &self,
         options: SourceMapOptions,
     ) -> (SourceMap<'static>, Option<(u32, u32)>) {
+        verter_audit::attribute_n!(SourceMapBuild, self.chunks.len());
         let preamble = self.helper_preamble_content();
         // Generated-TSX position immediately after the helper-import preamble insertion, captured
         // when the walk advances past its chunk. Pointer identity (start + len) is exact: the same

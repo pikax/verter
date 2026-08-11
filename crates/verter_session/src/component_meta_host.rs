@@ -339,9 +339,32 @@ impl ComponentMetaSession {
         ComponentMetaHostError,
     > {
         component_meta_trace_custom!("component_meta_session_query", canonical_or_alias);
-        self.inner
+        let result = self
+            .inner
             .get_component_meta(canonical_or_alias)
-            .map_err(ComponentMetaHostError::from)
+            .map_err(ComponentMetaHostError::from);
+        // Determinism digest over the published surface's CARDINALITIES. Two
+        // runs over the same inputs must agree; a differing digest means the
+        // published surface changed shape between runs, which is the failure
+        // this rail exists to catch. Cardinalities only — folding member
+        // contents here would re-walk the surface at measurement time.
+        verter_audit::attribute_digest!(
+            ComponentMetaDigest,
+            result
+                .as_ref()
+                .ok()
+                .and_then(|slot| slot.as_ref())
+                .map_or(0u64, |meta| {
+                    (meta.props.len() as u64).wrapping_mul(0x1000_0001)
+                        ^ (meta.events.len() as u64).wrapping_mul(0x1000_0003)
+                        ^ (meta.slots.len() as u64).wrapping_mul(0x1000_0007)
+                        ^ (meta.models.len() as u64).wrapping_mul(0x1000_000d)
+                        ^ (meta.exposed.len() as u64).wrapping_mul(0x1000_0013)
+                        ^ (meta.accepted_props.len() as u64).wrapping_mul(0x1000_0019)
+                        ^ (meta.accepted_events.len() as u64).wrapping_mul(0x1000_001f)
+                })
+        );
+        result
     }
 
     /// Batch surface for [`Self::get_component_meta`]: compute metadata

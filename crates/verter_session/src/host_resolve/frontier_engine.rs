@@ -77,6 +77,7 @@ impl VerterHost {
         owner_canonical: &str,
         source_specifier: &str,
     ) -> Option<String> {
+        verter_audit::attribute!(FrontierResolve);
         // Resolve the edge through the single shared route-edge policy
         // (`resolve_route_edge_canonical`), then layer the route-traversal-only
         // side effects (carrier store-view gate, `ensure_loaded`) on top. The

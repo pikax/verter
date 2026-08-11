@@ -285,6 +285,9 @@ impl DedupJoinerEvent {
     /// after the DAG lock has been released — the callback may re-enter
     /// the scheduler.
     pub fn fire(self) {
+        // One fired event == one request that joined an in-flight winner
+        // instead of doing the work itself.
+        verter_audit::attribute!(TaskDedupJoin);
         self.joiner_context.0.on_dedup_joiner(
             self.canonical,
             self.winner_request_id,

@@ -1,0 +1,21 @@
+=== FMT NEGATIVE CONTROL (supplementary, not one of the three mandated sentinels) ===
+DATE: 2026-08-10T05:06:11Z
+SENTINEL TREE: b7ea2dc88bda86473de81de3438b7f88ef30adc7 clean=0
+--- plant-proof (before plant): token occurrences in sentinel tree (expect 0):
+0
+--- plant-proof: token occurrences in CANDIDATE tree (expect 0):
+0
+--- plant applied to crates/verter_span/src/lib.rs; occurrences now (expect 1):
+1
+631:fn  a1_sentinel_plant_fmt_93d1( ) ->i32{  1 }
+--- PLANTED RUN: cargo fmt --all --check (expect NON-ZERO exit, verter_span named)
+PLANTED-EXIT: 1
+1
+Diff in \\?\<REPO>-a1-sentinel\crates\verter_span\src\lib.rs:628:
+--- restore
+token occurrences after restore (expect 0): 0
+--- RESTORED RUN: cargo fmt --all --check (expect 0)
+RESTORED-EXIT: 0
+299 /tmp/fmt-planted.out
+  0 /tmp/fmt-restored.out
+299 total

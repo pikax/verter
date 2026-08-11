@@ -76,6 +76,7 @@ const SEP: u8 = 0u8;
 /// Invariant under cosmetic edits; changes under decl-shape edits.
 #[must_use]
 pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
+    verter_audit::attribute!(ParseStableHash);
     let shallow = &indexed.shallow_state;
 
     let mut buf: Vec<u8> = Vec::with_capacity(256);

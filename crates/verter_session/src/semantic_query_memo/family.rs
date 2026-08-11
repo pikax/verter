@@ -797,6 +797,9 @@ pub(super) fn select_eviction_victim(
     candidates: &CandidateList,
     ctx: &dyn crate::resolver_core::ResolverContext,
 ) -> EvictionVictim {
+    // Reached only when the slot is at its family cap and a publish must
+    // displace a candidate, so this counts genuine cap pressure.
+    verter_audit::attribute!(FamilyCandidateEvict);
     candidates
         .iter()
         .find(|candidate| !candidate.validate(ctx))

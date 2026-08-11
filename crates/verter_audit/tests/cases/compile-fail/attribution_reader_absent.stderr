@@ -1,0 +1,72 @@
+error[E0425]: cannot find function `snapshot` in module `verter_audit::attribution`
+  --> tests/cases/compile-fail/attribution_reader_absent.rs:14:43
+   |
+14 |     let rows = verter_audit::attribution::snapshot();
+   |                                           ^^^^^^^^ not found in `verter_audit::attribution`
+   |
+note: found an item that was configured out
+  --> src/attribution/mod.rs
+   |
+   | #[cfg(feature = "attribution")]
+   |       ----------------------- the item is gated behind the `attribution` feature
+   | pub use table::{
+   |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
+   |                                                                           ^^^^^^^^
+
+error[E0425]: cannot find function `snapshot_all` in module `verter_audit::attribution`
+  --> tests/cases/compile-fail/attribution_reader_absent.rs:15:42
+   |
+15 |     let all = verter_audit::attribution::snapshot_all();
+   |                                          ^^^^^^^^^^^^ not found in `verter_audit::attribution`
+   |
+note: found an item that was configured out
+  --> src/attribution/mod.rs
+   |
+   | #[cfg(feature = "attribution")]
+   |       ----------------------- the item is gated behind the `attribution` feature
+   | pub use table::{
+   |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
+   |                                                                                     ^^^^^^^^^^^^
+
+error[E0425]: cannot find function `read` in module `verter_audit::attribution`
+  --> tests/cases/compile-fail/attribution_reader_absent.rs:16:42
+   |
+16 |     let one = verter_audit::attribution::read(verter_audit::attribution::WorkSite::ContentHash);
+   |                                          ^^^^ not found in `verter_audit::attribution`
+   |
+note: found an item that was configured out
+  --> src/attribution/mod.rs
+   |
+   | #[cfg(feature = "attribution")]
+   |       ----------------------- the item is gated behind the `attribution` feature
+   | pub use table::{
+   |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
+   |     ^^^^
+help: consider importing one of these functions
+   |
+12 + use std::fs::read;
+   |
+12 + use std::ptr::read;
+   |
+12 + use core::ptr::read;
+   |
+help: if you import `read`, refer to it directly
+   |
+16 -     let one = verter_audit::attribution::read(verter_audit::attribution::WorkSite::ContentHash);
+16 +     let one = read(verter_audit::attribution::WorkSite::ContentHash);
+   |
+
+error[E0425]: cannot find function `reset` in module `verter_audit::attribution`
+  --> tests/cases/compile-fail/attribution_reader_absent.rs:17:32
+   |
+17 |     verter_audit::attribution::reset();
+   |                                ^^^^^ not found in `verter_audit::attribution`
+   |
+note: found an item that was configured out
+  --> src/attribution/mod.rs
+   |
+   | #[cfg(feature = "attribution")]
+   |       ----------------------- the item is gated behind the `attribution` feature
+   | pub use table::{
+   |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
+   |                                                                    ^^^^^

@@ -1,0 +1,7 @@
+CMD: node scripts/gen-svelte-goldens.mjs --check
+CWD: <REPO>-wt-a1
+ENV: none
+DATE: 2026-08-10T07:36:18Z
+gen-svelte-goldens --check: 1066 golden(s) in sync with svelte@5.56.3.
+EXIT: 0
+END-DATE: 2026-08-10T07:36:19Z

@@ -1,0 +1,78 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "O1_object_len",
+      "orig": "if members.len() != exp.len() {",
+      "mut": "if false { // MUTATED-O1",
+      "expect": [
+        "expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "summary": "Summary [   2.040s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "O2_object_key",
+      "orig": "|| member.key.as_string() != Some(*name)",
+      "mut": "|| false // MUTATED-O2",
+      "expect": [
+        "expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "summary": "Summary [   2.025s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "O3_object_value",
+      "orig": "|| !node_matches(dispatch, member.value, value, depth + 1)",
+      "mut": "|| false // MUTATED-O3",
+      "expect": [
+        "expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "summary": "Summary [   2.021s] 40 tests run: 38 passed, 2 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "O4_object_injective",
+      "orig": "if used[slot]",
+      "mut": "if false // MUTATED-O4",
+      "expect": [
+        "expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "summary": "Summary [   1.939s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

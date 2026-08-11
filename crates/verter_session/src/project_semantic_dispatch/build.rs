@@ -318,6 +318,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: &ResolveDeclKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute_scope!(ResolveDecl);
         // Self-version rooting: observe the scope canonical.s
         // `IndexedReady` ONCE through `ensure_indexed_ready_serve` — the
         // overlay-aware host accessor (a `SessionResolverContext`
@@ -2583,6 +2584,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         instantiate_context: crate::semantic_query::InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute_scope!(Instantiate);
+        verter_audit::attribute_n!(Substitute, args.len());
         // The key carries an `InstantiateContext` (embedded
         // projection-reduction identity + the `resolve_env_hash` env dim).
         // Destructure into the embedded `ProjectionReductionContext` so the
@@ -7097,6 +7100,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         path: &Arc<[PathSegment]>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute_n!(MacroMemberWalk, path.len());
         // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
         // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
         // Member projection (`.foo`) is a distinct surface left to the walker.
@@ -8782,6 +8786,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute_scope!(ConditionalReduce);
         // Fast-reject (runs BEFORE the distributive-`Union` distribution,
         // the `infer`-binding paths, and `shallow_relation_check`): `error
         // extends T` ⇒ `error` (carrier dominates), `any extends T ? X : Y` ⇒
@@ -9406,6 +9411,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute!(NormalizeUnion);
         // §22 fast-reject: `X|any=any`, `X|never=X`, `X|unknown=unknown`,
         // `X|error=error`. Runs BEFORE structural normalization.
         if let Some(absorbed) = self.absorb_union(members) {
@@ -9442,6 +9448,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        verter_audit::attribute!(NormalizeIntersection);
         // §22 fast-reject: `X&never=never`, `X&any=any`, `X&unknown=X`,
         // `X&error=error`. Runs BEFORE structural normalization.
         if let Some(absorbed) = self.absorb_intersection(members) {

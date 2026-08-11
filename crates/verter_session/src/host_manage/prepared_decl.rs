@@ -1812,6 +1812,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
         verter_workspace::probe_scope!(ENSURE_INDEXED_READY);
+        verter_audit::attribute_scope!(IndexedReadyBuild);
         let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id);
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +

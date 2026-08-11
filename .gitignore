@@ -35,6 +35,9 @@ nul
 .claude/settings.local.json
 .claude/*.md
 .feedback/
+# Per-run agent orchestration scaffolding (briefs, structured reports).
+# Never a deliverable, and briefs carry absolute machine paths.
+.agent-run/
 .claude/worktrees/
 
 # Benchmark results (generated artifacts)

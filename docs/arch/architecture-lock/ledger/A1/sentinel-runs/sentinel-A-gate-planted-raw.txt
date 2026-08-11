@@ -1,0 +1,1051 @@
+CMD: node scripts/gate.mjs --timeout 420m
+CWD: <REPO>-a1-sentinel
+ENV: PLANTED (panic!(A1_SENTINEL_PLANT_GATE_R2_4b7e1d) first statement of a test that executes on all three gate surfaces)
+DATE: 2026-08-10T07:55:51Z
+[gate][warn] Oversize source advisory: production source files exceed 1500 lines
+without an explicit exemption:
+  crates/verter_compiler/src/code_transform/code_transform.rs (1526 lines)
+  crates/verter_compiler/src/compile/mod.rs (1818 lines)
+  crates/verter_compiler/src/framework_common/registered_carrier_projection.rs (1841 lines)
+  crates/verter_compiler/src/framework_common/vue_bridge.rs (2887 lines)
+  crates/verter_compiler/src/ide/template/props.rs (1641 lines)
+  crates/verter_css_syntax/src/parser.rs (1572 lines)
+  crates/verter_language/src/parse_artifact/carrier_inventory.rs (2015 lines)
+  crates/verter_lsp/src/background_drain.rs (1518 lines)
+  crates/verter_lsp/src/documents/mod.rs (2295 lines)
+  crates/verter_lsp/src/features/cursor_context.rs (1565 lines)
+  crates/verter_lsp/src/server/aux_features.rs (1526 lines)
+  crates/verter_lsp/src/server/lifecycle.rs (1510 lines)
+  crates/verter_lsp/src/server/mod.rs (1632 lines)
+  crates/verter_lsp/src/server_utils.rs (1965 lines)
+  crates/verter_lsp/src/sync_coordinator.rs (1573 lines)
+  crates/verter_lsp/src/test_harness.rs (1692 lines)
+  crates/verter_lsp/src/test_harness_fixture_dependencies.rs (1633 lines)
+  crates/verter_lsp/src/type_provider/mock.rs (1578 lines)
+  crates/verter_lsp/src/type_provider/project_sync.rs (2227 lines)
+  crates/verter_protocol/src/types.rs (1970 lines)
+  crates/verter_semantic/src/analysis/flow/mod.rs (2241 lines)
+  crates/verter_semantic/src/analysis/framework_facts/svelte.rs (1728 lines)
+  crates/verter_semantic/src/analysis/function_program.rs (3618 lines)
+  crates/verter_session/src/block_content.rs (2184 lines)
+  crates/verter_session/src/fact_signature_helpers.rs (1593 lines)
+  crates/verter_session/src/flow_slice_content.rs (4900 lines)
+  crates/verter_session/src/framework/script_facts.rs (1595 lines)
+  crates/verter_session/src/host_manage/fallthrough.rs (1605 lines)
+  crates/verter_session/src/project_semantic_dispatch/call_resolve.rs (2732 lines)
+  crates/verter_session/src/project_semantic_dispatch/carrier.rs (1516 lines)
+  crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs (2169 lines)
+  crates/verter_session/src/project_semantic_dispatch/flow_return.rs (8138 lines)
+  crates/verter_session/src/project_semantic_dispatch/locator_shape.rs (1566 lines)
+  crates/verter_session/src/project_semantic_dispatch/raise/shape_engine/node_domain.rs (1803 lines)
+  crates/verter_session/src/project_semantic_dispatch/relation.rs (6350 lines)
+  crates/verter_session/src/project_semantic_dispatch/semantic_source.rs (1621 lines)
+  crates/verter_session/src/resolver_core/fallthrough_request.rs (1554 lines)
+  crates/verter_session/src/resolver_core/prepared_decl.rs (1509 lines)
+  crates/verter_session/src/resolver_core/resolver_context.rs (1555 lines)
+  crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs (1732 lines)
+  crates/verter_session/src/typeinfo/vue_macro_codegen.rs (1510 lines)
+  crates/verter_type_expr/src/fact_witnesses.rs (1844 lines)
+  crates/verter_type_expr/src/lib.rs (1539 lines)
+  crates/verter_workspace/src/engine.rs (4701 lines)
+  crates/verter_workspace/src/fact_cache.rs (1905 lines)
+  crates/verter_workspace/src/filesystem.rs (2167 lines)
+  crates/verter_workspace/src/resolution_currency.rs (3752 lines)
+
+File size is advisory and does not affect the gate verdict.
+[gate] mutex acquired (token=271672.1786348551534.170357822 lockdir=<HOME>\AppData\Local\Temp\verter-gate.lock.3d4f13009cd5e8f7.d)
+[gate] runner target dir: <REPO>-a1-sentinel\target\gate-runner
+[gate] build-prerequisite preflight: SATISFIED — <REPO>-a1-sentinel\packages\vue-vscode\node_modules\@verter\typescript-plugin loaded
+[gate] freshness-tooling preflight: already-present — tolerance DISABLED (tools present/installed; a freshness FAIL is a HARD regression)
+[gate] Vue macro oracle: gen:vue-macro-oracle:check …
+Vue macro runtime oracle: 11 case(s) in sync with @vue/compiler-sfc@3.5.34.
+[gate] gen:vue-macro-oracle:check passed in 0s
+[gate] Vue macro oracle: test:vue-macro-oracle …
+✔ the canonical gate owns both Vue macro oracle verification steps (0.8721ms)
+✔ extractRuntimeShape is formatting-insensitive but preserves runtime semantics (7.143ms)
+✔ oracleDiff discriminates constructor order and skipCheck drift (0.3359ms)
+✔ the pinned compiler generates the complete deterministic fixture matrix (27.915ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 190.3548
+[gate] test:vue-macro-oracle passed in 0s
+[gate] archiving workspace test universe (dev profile) (cargo nextest archive --workspace) …
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling unicode-ident v1.0.24
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling itoa v1.0.17
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.0
+   Compiling siphasher v1.0.2
+   Compiling zmij v1.0.21
+   Compiling rustversion v1.0.22
+   Compiling equivalent v1.0.2
+   Compiling serde_json v1.0.150
+   Compiling unicode-segmentation v1.12.0
+   Compiling rustc-hash v2.1.2
+   Compiling allocator-api2 v0.2.21
+   Compiling windows-link v0.2.1
+   Compiling thiserror v2.0.18
+   Compiling foldhash v0.2.0
+   Compiling ryu v1.0.23
+   Compiling owo-colors v4.3.0
+   Compiling unicode-width v0.2.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling smawk v0.3.2
+   Compiling static_assertions v1.1.0
+   Compiling oxc_data_structures v0.126.0
+   Compiling oxc_estree v0.126.0
+   Compiling smallvec v1.15.1
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling bytes v1.11.1
+   Compiling windows-sys v0.61.2
+   Compiling fastrand v2.3.0
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling percent-encoding v2.3.2
+   Compiling bitflags v2.11.0
+   Compiling phf_shared v0.13.1
+   Compiling lock_api v0.4.14
+   Compiling getrandom v0.2.17
+   Compiling either v1.15.0
+   Compiling unicode-id-start v1.4.0
+   Compiling cow-utils v0.1.3
+   Compiling dragonbox_ecma v0.1.12
+   Compiling verter_ecma v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_ecma)
+   Compiling nonmax v0.5.5
+   Compiling textwrap v0.16.2
+   Compiling strsim v0.11.1
+   Compiling base64 v0.22.1
+   Compiling phf v0.13.1
+   Compiling phf_generator v0.13.1
+   Compiling hashbrown v0.17.1
+   Compiling log v0.4.29
+   Compiling heck v0.5.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling utf8parse v0.2.2
+   Compiling once_cell_polyfill v1.70.2
+   Compiling anstyle v1.0.13
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.4
+   Compiling num-traits v0.2.19
+   Compiling tracing-core v0.1.36
+   Compiling clap_lex v1.0.0
+   Compiling seq-macro v0.3.6
+   Compiling version_check v0.9.5
+   Compiling anstyle-parse v1.0.0
+   Compiling rand_core v0.6.4
+   Compiling typenum v1.20.0
+   Compiling rayon-core v1.13.0
+   Compiling cpufeatures v0.3.0
+   Compiling hashbrown v0.14.5
+   Compiling glob v0.3.3
+   Compiling lazy_static v1.5.0
+   Compiling const-oid v0.10.2
+   Compiling xxhash-rust v0.8.15
+   Compiling hex v0.4.3
+   Compiling bumpalo v3.20.3
+   Compiling rand_xoshiro v0.6.0
+   Compiling parking_lot v0.12.5
+   Compiling allocator-api2 v0.4.0
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.10.0
+   Compiling itertools v0.14.0
+   Compiling syn v1.0.109
+   Compiling zerocopy v0.8.42
+   Compiling rand v0.8.5
+   Compiling phf_shared v0.11.3
+   Compiling im v15.1.0
+   Compiling ahash v0.7.8
+   Compiling dtoa v1.0.11
+   Compiling rkyv v0.7.46
+   Compiling outref v0.1.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling getrandom v0.3.4
+   Compiling ahash v0.8.12
+   Compiling dtoa-short v0.3.5
+   Compiling oxc_allocator v0.126.0
+   Compiling vsimd v0.8.0
+   Compiling simd-abstraction v0.7.1
+   Compiling outref v0.5.2
+   Compiling seahash v4.1.0
+   Compiling matches v0.1.10
+   Compiling anyhow v1.0.102
+   Compiling convert_case v0.6.0
+   Compiling castaway v0.2.4
+   Compiling syn v2.0.117
+   Compiling arc-swap v1.9.1
+   Compiling data-url v0.1.1
+   Compiling precomputed-hash v0.1.1
+   Compiling vlq v0.5.1
+   Compiling self_cell v1.2.2
+   Compiling phf_generator v0.11.3
+   Compiling oxc_sourcemap v7.0.0
+   Compiling compact_str v0.9.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling dashmap v6.2.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling base64-simd v0.7.0
+   Compiling data-encoding v2.10.0
+   Compiling dashmap v5.5.3
+   Compiling itertools v0.10.5
+   Compiling json-escape-simd v3.0.1
+   Compiling pathdiff v0.2.3
+   Compiling pastey v0.1.1
+   Compiling phf_codegen v0.11.3
+   Compiling winapi-util v0.1.11
+   Compiling hashbrown v0.12.3
+   Compiling foldhash v0.1.5
+   Compiling regex-syntax v0.8.10
+   Compiling prettyplease v0.2.37
+   Compiling base64-simd v0.8.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling parcel_selectors v0.28.2
+   Compiling termcolor v1.4.1
+   Compiling hybrid-array v0.4.12
+   Compiling bitmaps v2.1.0
+   Compiling hashbrown v0.15.5
+   Compiling fixedbitset v0.5.7
+   Compiling writeable v0.6.2
+   Compiling oxc_str v0.126.0
+   Compiling litemap v0.8.1
+   Compiling protoc-bin-vendored-macos-aarch_64 v3.2.0
+   Compiling protoc-bin-vendored-macos-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-ppcle_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_64 v3.2.0
+   Compiling multimap v0.10.1
+   Compiling icu_properties_data v2.1.2
+   Compiling protoc-bin-vendored-win32 v3.2.0
+   Compiling tempfile v3.27.0
+   Compiling icu_normalizer_data v2.1.1
+   Compiling protoc-bin-vendored-linux-s390_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_32 v3.2.0
+   Compiling protoc-bin-vendored-linux-aarch_64 v3.2.0
+   Compiling form_urlencoded v1.2.2
+   Compiling radium v0.7.0
+   Compiling uuid v1.23.1
+   Compiling utf8_iter v1.0.4
+   Compiling indexmap v2.14.0
+   Compiling tap v1.0.1
+   Compiling funty v2.0.0
+   Compiling if_chain v1.0.3
+   Compiling similar v3.1.1
+   Compiling aho-corasick v1.1.4
+   Compiling rayon v1.12.0
+   Compiling protoc-bin-vendored v3.2.0
+   Compiling wyz v0.5.1
+   Compiling futures-core v0.3.32
+   Compiling futures-sink v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling slab v0.4.12
+   Compiling sized-chunks v0.6.5
+   Compiling num-integer v0.1.46
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling futures-channel v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling cast v0.3.0
+   Compiling oorandom v11.1.5
+   Compiling winapi v0.3.9
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling itertools v0.13.0
+   Compiling winnow v1.0.2
+   Compiling anes v0.1.6
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling tracing-log v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.9
+   Compiling ref-cast v1.0.25
+   Compiling num-bigint v0.4.6
+   Compiling tower-service v0.3.3
+   Compiling httparse v1.10.1
+   Compiling plotters-svg v0.3.7
+   Compiling tower-layer v0.3.3
+   Compiling sync_wrapper v1.0.2
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle-wincon v3.0.11
+   Compiling regex-automata v0.4.14
+   Compiling petgraph v0.8.3
+   Compiling bitvec v1.0.1
+   Compiling cc v1.2.56
+   Compiling nu-ansi-term v0.50.3
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling anstream v1.0.0
+   Compiling digest v0.11.3
+   Compiling plotters v0.3.7
+   Compiling same-file v1.0.6
+   Compiling serde_spanned v1.1.1
+   Compiling walkdir v2.5.0
+   Compiling sha2 v0.11.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling dyn-clone v1.0.20
+   Compiling http v1.4.0
+   Compiling arrayvec v0.7.6
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling wasm-bindgen-shared v0.2.122
+   Compiling clap_builder v4.6.0
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling target-triple v1.0.0
+   Compiling ident_case v1.0.1
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling pin-utils v0.1.0
+   Compiling wasm-bindgen v0.2.122
+   Compiling chacha20 v0.10.0
+   Compiling rmcp v1.7.0
+   Compiling mime v0.3.17
+   Compiling page_size v0.6.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling pastey v0.2.1
+   Compiling borrow-or-share v0.2.4
+   Compiling matchit v0.8.4
+   Compiling rustc-demangle v0.1.27
+   Compiling verter-editor-client v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter-editor-client)
+   Compiling verter_lsp v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_lsp)
+   Compiling criterion-plot v0.8.2
+   Compiling napi-build v2.3.2
+   Compiling rand v0.10.0
+   Compiling http-body v1.0.1
+   Compiling lru v0.18.0
+   Compiling paste v1.0.15
+   Compiling convert_case v0.11.0
+   Compiling libloading v0.9.0
+   Compiling mintex v0.1.4
+   Compiling alloca v0.4.0
+   Compiling regex v1.12.3
+   Compiling blake3 v1.8.5
+   Compiling http-body-util v0.1.3
+   Compiling backtrace v0.3.76
+   Compiling napi v3.9.0
+   Compiling semver v1.0.27
+   Compiling ctor v1.0.6
+   Compiling thousands v0.2.0
+   Compiling rustc-hash v1.1.0
+   Compiling verter_napi v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_napi)
+   Compiling napi-sys v3.2.1
+   Compiling nohash-hasher v0.2.0
+   Compiling wasm-bindgen-test-shared v0.2.122
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling darling_core v0.23.0
+   Compiling wasm-bindgen-macro-support v0.2.122
+   Compiling napi-derive-backend v5.0.4
+   Compiling ptr_meta_derive v0.1.4
+   Compiling rkyv_derive v0.7.46
+   Compiling const-str-proc-macro v0.3.2
+   Compiling lightningcss-derive v1.0.0-alpha.43
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling oxc-miette-derive v2.7.1
+   Compiling oxc_ast_macros v0.126.0
+   Compiling tokio-macros v2.7.0
+   Compiling verter_no_storedspan_derive v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_storedspan_derive)
+   Compiling verter_no_typeexpr_derive v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_typeexpr_derive)
+   Compiling phf_macros v0.13.1
+   Compiling tracing-attributes v0.1.31
+   Compiling clap_derive v4.6.1
+   Compiling ts-rs-macros v12.0.1
+   Compiling serde_repr v0.1.20
+   Compiling zerocopy-derive v0.8.42
+   Compiling zerofrom-derive v0.1.6
+   Compiling phf_macros v0.11.3
+   Compiling yoke-derive v0.8.1
+   Compiling cssparser-macros v0.6.1
+   Compiling ptr_meta v0.1.4
+   Compiling zerovec-derive v0.11.2
+   Compiling const-str v0.3.2
+   Compiling displaydoc v0.2.5
+   Compiling prost-derive v0.14.3
+   Compiling futures-macro v0.3.32
+   Compiling ref-cast-impl v1.0.25
+   Compiling schemars_derive v1.2.1
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling serial_test_derive v3.5.0
+   Compiling phf v0.11.3
+   Compiling verter_no_storedspan v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_storedspan)
+   Compiling tracing-test-macro v0.2.6
+   Compiling verter_session_oracle_macro v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session_oracle_macro)
+   Compiling cssparser v0.33.0
+   Compiling wasm-bindgen-test-macro v0.3.72
+   Compiling fluent-uri v0.4.1
+   Compiling futures-util v0.3.32
+   Compiling zerofrom v0.1.6
+   Compiling tracing v0.1.44
+   Compiling oxc-miette v2.7.1
+   Compiling matchers v0.2.0
+   Compiling yoke v0.8.1
+   Compiling ts-rs v12.0.1
+   Compiling cssparser-color v0.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling axum-core v0.5.6
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling napi-derive v3.5.6
+   Compiling darling_macro v0.23.0
+   Compiling prost v0.14.3
+   Compiling clap v4.6.1
+   Compiling oxc_span v0.126.0
+   Compiling oxc_diagnostics v0.126.0
+   Compiling prost-types v0.14.3
+   Compiling darling v0.23.0
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling wasm-bindgen-macro v0.2.122
+   Compiling rmcp-macros v1.7.0
+   Compiling icu_collections v2.1.1
+   Compiling oxc_regular_expression v0.126.0
+   Compiling icu_locale_core v2.1.1
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_span)
+   Compiling oxc_index v4.1.0
+   Compiling serde-content v0.1.2
+   Compiling debugid v0.8.0
+   Compiling tinytemplate v1.2.1
+   Compiling chrono v0.4.44
+   Compiling trybuild v1.0.116
+   Compiling serde_urlencoded v0.7.1
+   Compiling ls-types v0.0.6
+   Compiling verter_svelte_conformance v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_svelte_conformance)
+   Compiling dhat v0.3.3
+   Compiling verter_analysis_inputs v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_analysis_inputs)
+   Compiling xtask v0.0.1-beta.3 (<REPO>-a1-sentinel\xtask)
+   Compiling tracing-test v0.2.6
+   Compiling prost-build v0.14.3
+   Compiling verter_no_typeexpr v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_typeexpr)
+   Compiling oxc_syntax v0.126.0
+   Compiling verter_language v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_language)
+   Compiling verter_audit v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_audit)
+   Compiling verter_css_syntax v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_css_syntax)
+   Compiling icu_provider v2.1.1
+   Compiling parcel_sourcemap v2.1.1
+   Compiling verter_type_expr v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_expr)
+   Compiling verter_macro_dto v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_macro_dto)
+   Compiling icu_normalizer v2.1.1
+   Compiling icu_properties v2.1.2
+   Compiling schemars v1.2.1
+   Compiling futures-executor v0.3.32
+   Compiling sse-stream v0.2.1
+   Compiling oxc_ast v0.126.0
+   Compiling futures v0.3.32
+   Compiling serial_test v3.5.0
+   Compiling js-sys v0.3.99
+   Compiling console_error_panic_hook v0.1.7
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_protocol)
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsgo_api)
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling hyper v1.8.1
+   Compiling tokio-stream v0.1.18
+   Compiling url v2.5.8
+   Compiling half v2.7.1
+   Compiling lightningcss v1.0.0-alpha.71
+   Compiling sourcemap v9.3.2
+   Compiling hyper-util v0.1.20
+   Compiling ciborium-ll v0.2.2
+   Compiling axum v0.8.9
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.8.2
+   Compiling verter_type_runtime v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_runtime)
+   Compiling verter_relay_shim v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_relay_shim)
+   Compiling oxc_ecmascript v0.126.0
+   Compiling oxc_ast_visit v0.126.0
+   Compiling serde-wasm-bindgen v0.6.5
+   Compiling wasm-bindgen-futures v0.4.72
+   Compiling wasm-bindgen-test v0.3.72
+   Compiling verter_session_query v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session_query)
+   Compiling oxc_parser v0.126.0
+   Compiling oxc_semantic v0.126.0
+   Compiling verter_scheduler v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_scheduler)
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_expr_oxc)
+   Compiling verter_vue_conformance v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_vue_conformance)
+   Compiling verter_workspace v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_workspace)
+   Compiling verter_parser v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_parser)
+   Compiling tower-lsp-server v0.23.0
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_semantic)
+   Compiling verter_compiler v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_compiler)
+   Compiling verter_diagnostics v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_diagnostics)
+   Compiling verter_actions v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_actions)
+   Compiling verter_session v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session)
+   Compiling verter_bench v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_bench)
+   Compiling verter_ffi v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_ffi)
+   Compiling verter_mcp v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_mcp)
+   Compiling verter_wasm v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_wasm)
+   Compiling verter_mcp_server v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_mcp_server)
+   Compiling verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc)
+   Compiling verter_dx_baseline v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_dx_baseline)
+warning: unreachable statement
+   --> crates\verter_session\tests\cases\tracked_paths_are_portable.rs:125:5
+    |
+124 |     panic!("A1_SENTINEL_PLANT_GATE_R2_4b7e1d");
+    |     ------------------------------------------ any code following this expression is unreachable
+125 |     let paths = tracked_paths();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `verter_session` (test "main") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 14s
+   Archiving 90 binaries (including 12 non-test binaries; 1 non-test binary filtered out), 3 build script output directories, 2 linked paths, and 1 standard library to <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest.tar.zst
+    Archived 118 files to <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest.tar.zst in 2.02s
+[gate] archive [debug] built in 198s -> <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest.tar.zst
+[gate] listing suites from the [debug] archive (cargo nextest list --message-format json) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract
+   Extracted 118 files to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract in 8.82s
+[gate] restored 1 runtime-required Windows PDB sidecar(s) beside archived tests
+[gate] archive lists 78 suites; build-meta target-directory=<REPO>-a1-sentinel\target\gate-runner\gate-work\extract\target
+[gate] SURFACE 1: nextest run from the archive (process isolation) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract
+   Extracted 118 files to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract in 22.09s
+────────────
+ Nextest run ID d07a4b87-4412-4c6d-a541-3218a27aad89 with nextest profile: default
+    Starting 24044 tests across 78 binaries (582 tests skipped)
+        FAIL [   0.120s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+  stdout ───
+
+    running 1 test
+    test cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms ... FAILED
+
+    failures:
+
+    failures:
+        cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2494 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms' (329992) panicked at crates\verter_session\tests\cases\tracked_paths_are_portable.rs:124:5:
+    A1_SENTINEL_PLANT_GATE_R2_4b7e1d
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 480.081s] 24044 tests run: 24043 passed (3 slow), 1 failed, 582 skipped
+        FAIL [   0.120s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+error: test run failed
+[gate] SURFACE 1 done in 503s: 24044 run, 24043 passed, 1 did not pass (1 failed, 0 timed out, 0 exec failed) (1 named, 0 tolerated), 582 skipped; run exit 100
+[gate] SURFACE 2: directly executing 3 verter_session libtest binaries (lib=1, test=2) in-process from the SAME archive …
+   Compiling verter_session-tests v0.0.0 (<REPO>-a1-sentinel\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.77s
+
+
+test [0m[1mtests/cases/compile-fail/no_typeexpr_direct_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/no_typeexpr_aliased_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/output_projector_not_impl_outside_crate.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_has_no_payload_escape.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_exact_syntax.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_constructible.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_no_negative_evidence.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_iterable.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_deref.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+    Checking verter_session-tests v0.0.0 (<REPO>-a1-sentinel\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.73s
+
+
+test [0m[1mtests/cases/compile-fail/component_api_projection_contract_not_optional.rs[0m ... [0m[32mok
+[0m
+
+    Checking verter_session-tests v0.0.0 (<REPO>-a1-sentinel\target\gate-runner\tests\trybuild\verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+
+
+test [0m[1mtests/cases/compile-fail/no_typeexpr_direct_field.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/no_typeexpr_aliased_field.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/output_projector_not_impl_outside_crate.rs[0m ... [0m[32mok
+[0m
+
+[gate] SURFACE 2 done: 2 suites clean, 1 suites with non-tolerated failures, 0 tolerated test failures
+[gate] SURFACE 3: building the shipped-cfg test universe (cargo nextest archive --workspace --cargo-profile no-debug-assertions) …
+[gate] archiving workspace test universe (no-debug-assertions profile: debug_assertions OFF) (cargo nextest archive --workspace) …
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling unicode-ident v1.0.24
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling itoa v1.0.17
+   Compiling serde_core v1.0.228
+   Compiling memchr v2.8.0
+   Compiling serde v1.0.228
+   Compiling siphasher v1.0.2
+   Compiling rustversion v1.0.22
+   Compiling zmij v1.0.21
+   Compiling equivalent v1.0.2
+   Compiling serde_json v1.0.150
+   Compiling rustc-hash v2.1.2
+   Compiling unicode-segmentation v1.12.0
+   Compiling windows-link v0.2.1
+   Compiling allocator-api2 v0.2.21
+   Compiling thiserror v2.0.18
+   Compiling foldhash v0.2.0
+   Compiling owo-colors v4.3.0
+   Compiling ryu v1.0.23
+   Compiling smawk v0.3.2
+   Compiling unicode-width v0.2.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling static_assertions v1.1.0
+   Compiling oxc_data_structures v0.126.0
+   Compiling oxc_estree v0.126.0
+   Compiling smallvec v1.15.1
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling bytes v1.11.1
+   Compiling fastrand v2.3.0
+   Compiling percent-encoding v2.3.2
+   Compiling phf_shared v0.13.1
+   Compiling windows-sys v0.61.2
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling bitflags v2.11.0
+   Compiling getrandom v0.2.17
+   Compiling cow-utils v0.1.3
+   Compiling dragonbox_ecma v0.1.12
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.17.1
+   Compiling unicode-id-start v1.4.0
+   Compiling either v1.15.0
+   Compiling nonmax v0.5.5
+   Compiling textwrap v0.16.2
+   Compiling verter_ecma v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_ecma)
+   Compiling strsim v0.11.1
+   Compiling log v0.4.29
+   Compiling base64 v0.22.1
+   Compiling heck v0.5.0
+   Compiling phf v0.13.1
+   Compiling phf_generator v0.13.1
+   Compiling anstyle v1.0.13
+   Compiling once_cell_polyfill v1.70.2
+   Compiling utf8parse v0.2.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.4
+   Compiling tracing-core v0.1.36
+   Compiling rand_core v0.6.4
+   Compiling num-traits v0.2.19
+   Compiling clap_lex v1.0.0
+   Compiling anstyle-parse v1.0.0
+   Compiling version_check v0.9.5
+   Compiling seq-macro v0.3.6
+   Compiling typenum v1.20.0
+   Compiling rayon-core v1.13.0
+   Compiling hashbrown v0.14.5
+   Compiling cpufeatures v0.3.0
+   Compiling glob v0.3.3
+   Compiling lazy_static v1.5.0
+   Compiling const-oid v0.10.2
+   Compiling rand_xoshiro v0.6.0
+   Compiling xxhash-rust v0.8.15
+   Compiling hex v0.4.3
+   Compiling allocator-api2 v0.4.0
+   Compiling bumpalo v3.20.3
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling itertools v0.14.0
+   Compiling zerocopy v0.8.42
+   Compiling oxc_allocator v0.126.0
+   Compiling syn v1.0.109
+   Compiling rand v0.8.5
+   Compiling phf_shared v0.11.3
+   Compiling im v15.1.0
+   Compiling ahash v0.7.8
+   Compiling dtoa v1.0.11
+   Compiling stable_deref_trait v1.2.1
+   Compiling outref v0.1.0
+   Compiling rkyv v0.7.46
+   Compiling getrandom v0.3.4
+   Compiling castaway v0.2.4
+   Compiling arc-swap v1.9.1
+   Compiling ahash v0.8.12
+   Compiling dtoa-short v0.3.5
+   Compiling simd-abstraction v0.7.1
+   Compiling anyhow v1.0.102
+   Compiling outref v0.5.2
+   Compiling matches v0.1.10
+   Compiling compact_str v0.9.0
+   Compiling seahash v4.1.0
+   Compiling vsimd v0.8.0
+   Compiling convert_case v0.6.0
+   Compiling self_cell v1.2.2
+   Compiling data-encoding v2.10.0
+   Compiling data-url v0.1.1
+   Compiling precomputed-hash v0.1.1
+   Compiling syn v2.0.117
+   Compiling crossbeam-epoch v0.9.18
+   Compiling dashmap v6.2.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling winapi-util v0.1.11
+   Compiling base64-simd v0.7.0
+   Compiling vlq v0.5.1
+   Compiling oxc_sourcemap v7.0.0
+   Compiling dashmap v5.5.3
+   Compiling itertools v0.10.5
+   Compiling phf_generator v0.11.3
+   Compiling pastey v0.1.1
+   Compiling pathdiff v0.2.3
+   Compiling json-escape-simd v3.0.1
+   Compiling foldhash v0.1.5
+   Compiling regex-syntax v0.8.10
+   Compiling termcolor v1.4.1
+   Compiling oxc_str v0.126.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling hybrid-array v0.4.12
+   Compiling bitmaps v2.1.0
+   Compiling phf_codegen v0.11.3
+   Compiling hashbrown v0.12.3
+   Compiling base64-simd v0.8.0
+   Compiling prettyplease v0.2.37
+   Compiling hashbrown v0.15.5
+   Compiling litemap v0.8.1
+   Compiling writeable v0.6.2
+   Compiling fixedbitset v0.5.7
+   Compiling protoc-bin-vendored-linux-s390_64 v3.2.0
+   Compiling parcel_selectors v0.28.2
+   Compiling protoc-bin-vendored-linux-ppcle_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_32 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-win32 v3.2.0
+   Compiling multimap v0.10.1
+   Compiling protoc-bin-vendored-macos-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-macos-aarch_64 v3.2.0
+   Compiling icu_normalizer_data v2.1.1
+   Compiling icu_properties_data v2.1.2
+   Compiling protoc-bin-vendored-linux-aarch_64 v3.2.0
+   Compiling form_urlencoded v1.2.2
+   Compiling radium v0.7.0
+   Compiling uuid v1.23.1
+   Compiling utf8_iter v1.0.4
+   Compiling tap v1.0.1
+   Compiling funty v2.0.0
+   Compiling if_chain v1.0.3
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.2
+   Compiling similar v3.1.1
+   Compiling sized-chunks v0.6.5
+   Compiling tempfile v3.27.0
+   Compiling aho-corasick v1.1.4
+   Compiling futures-core v0.3.32
+   Compiling futures-sink v0.3.32
+   Compiling num-integer v0.1.46
+   Compiling rayon v1.12.0
+   Compiling indexmap v2.14.0
+   Compiling protoc-bin-vendored v3.2.0
+   Compiling wyz v0.5.1
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling futures-channel v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling cast v0.3.0
+   Compiling oorandom v11.1.5
+   Compiling winapi v0.3.9
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling num-bigint v0.4.6
+   Compiling itertools v0.13.0
+   Compiling winnow v1.0.2
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling anes v0.1.6
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling anstyle-wincon v3.0.11
+   Compiling anstyle-query v1.1.5
+   Compiling digest v0.11.3
+   Compiling regex-automata v0.4.14
+   Compiling cc v1.2.56
+   Compiling bitvec v1.0.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling plotters-svg v0.3.7
+   Compiling tracing-log v0.2.0
+   Compiling anstream v1.0.0
+   Compiling petgraph v0.8.3
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling thread_local v1.1.9
+   Compiling ref-cast v1.0.25
+   Compiling same-file v1.0.6
+   Compiling sha2 v0.11.0
+   Compiling httparse v1.10.1
+   Compiling tower-service v0.3.3
+   Compiling tower-layer v0.3.3
+   Compiling sync_wrapper v1.0.2
+   Compiling plotters v0.3.7
+   Compiling dyn-clone v1.0.20
+   Compiling http v1.4.0
+   Compiling constant_time_eq v0.4.2
+   Compiling clap_builder v4.6.0
+   Compiling walkdir v2.5.0
+   Compiling arrayref v0.3.9
+   Compiling arrayvec v0.7.6
+   Compiling wasm-bindgen-shared v0.2.122
+   Compiling target-triple v1.0.0
+   Compiling ident_case v1.0.1
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling httpdate v1.0.3
+   Compiling pin-utils v0.1.0
+   Compiling atomic-waker v1.1.2
+   Compiling wasm-bindgen v0.2.122
+   Compiling criterion-plot v0.8.2
+   Compiling chacha20 v0.10.0
+   Compiling rmcp v1.7.0
+   Compiling mime v0.3.17
+   Compiling http-body v1.0.1
+   Compiling serde_path_to_error v0.1.20
+   Compiling regex v1.12.3
+   Compiling page_size v0.6.0
+   Compiling pastey v0.2.1
+   Compiling http-body-util v0.1.3
+   Compiling borrow-or-share v0.2.4
+   Compiling matchit v0.8.4
+   Compiling rustc-demangle v0.1.27
+   Compiling verter-editor-client v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter-editor-client)
+   Compiling alloca v0.4.0
+   Compiling blake3 v1.8.5
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling darling_core v0.23.0
+   Compiling wasm-bindgen-macro-support v0.2.122
+   Compiling rand v0.10.0
+   Compiling napi-build v2.3.2
+   Compiling verter_lsp v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_lsp)
+   Compiling lru v0.18.0
+   Compiling paste v1.0.15
+   Compiling convert_case v0.11.0
+   Compiling libloading v0.9.0
+   Compiling rustc-hash v1.1.0
+   Compiling mintex v0.1.4
+   Compiling backtrace v0.3.76
+   Compiling ctor v1.0.6
+   Compiling semver v1.0.27
+   Compiling thousands v0.2.0
+   Compiling wasm-bindgen-test-shared v0.2.122
+   Compiling napi-sys v3.2.1
+   Compiling nohash-hasher v0.2.0
+   Compiling napi v3.9.0
+   Compiling verter_napi v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_napi)
+   Compiling napi-derive-backend v5.0.4
+   Compiling ptr_meta_derive v0.1.4
+   Compiling rkyv_derive v0.7.46
+   Compiling const-str-proc-macro v0.3.2
+   Compiling lightningcss-derive v1.0.0-alpha.43
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling oxc-miette-derive v2.7.1
+   Compiling oxc_ast_macros v0.126.0
+   Compiling tokio-macros v2.7.0
+   Compiling verter_no_storedspan_derive v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_storedspan_derive)
+   Compiling verter_no_typeexpr_derive v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_typeexpr_derive)
+   Compiling phf_macros v0.13.1
+   Compiling tracing-attributes v0.1.31
+   Compiling clap_derive v4.6.1
+   Compiling ts-rs-macros v12.0.1
+   Compiling serde_repr v0.1.20
+   Compiling zerocopy-derive v0.8.42
+   Compiling zerofrom-derive v0.1.6
+   Compiling phf_macros v0.11.3
+   Compiling cssparser-macros v0.6.1
+   Compiling yoke-derive v0.8.1
+   Compiling zerovec-derive v0.11.2
+   Compiling displaydoc v0.2.5
+   Compiling prost-derive v0.14.3
+   Compiling ptr_meta v0.1.4
+   Compiling const-str v0.3.2
+   Compiling futures-macro v0.3.32
+   Compiling ref-cast-impl v1.0.25
+   Compiling schemars_derive v1.2.1
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling phf v0.11.3
+   Compiling serial_test_derive v3.5.0
+   Compiling verter_session_oracle_macro v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session_oracle_macro)
+   Compiling tracing-test-macro v0.2.6
+   Compiling cssparser v0.33.0
+   Compiling verter_no_storedspan v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_storedspan)
+   Compiling wasm-bindgen-test-macro v0.3.72
+   Compiling fluent-uri v0.4.1
+   Compiling zerofrom v0.1.6
+   Compiling futures-util v0.3.32
+   Compiling oxc-miette v2.7.1
+   Compiling yoke v0.8.1
+   Compiling tracing v0.1.44
+   Compiling matchers v0.2.0
+   Compiling cssparser-color v0.1.0
+   Compiling ts-rs v12.0.1
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling axum-core v0.5.6
+   Compiling darling_macro v0.23.0
+   Compiling prost v0.14.3
+   Compiling clap v4.6.1
+   Compiling napi-derive v3.5.6
+   Compiling oxc_span v0.126.0
+   Compiling oxc_diagnostics v0.126.0
+   Compiling prost-types v0.14.3
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling wasm-bindgen-macro v0.2.122
+   Compiling icu_collections v2.1.1
+   Compiling oxc_regular_expression v0.126.0
+   Compiling darling v0.23.0
+   Compiling icu_locale_core v2.1.1
+   Compiling rmcp-macros v1.7.0
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_span)
+   Compiling oxc_index v4.1.0
+   Compiling serde-content v0.1.2
+   Compiling debugid v0.8.0
+   Compiling tinytemplate v1.2.1
+   Compiling chrono v0.4.44
+   Compiling trybuild v1.0.116
+   Compiling serde_urlencoded v0.7.1
+   Compiling ls-types v0.0.6
+   Compiling verter_svelte_conformance v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_svelte_conformance)
+   Compiling dhat v0.3.3
+   Compiling verter_analysis_inputs v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_analysis_inputs)
+   Compiling xtask v0.0.1-beta.3 (<REPO>-a1-sentinel\xtask)
+   Compiling prost-build v0.14.3
+   Compiling icu_provider v2.1.1
+   Compiling tracing-test v0.2.6
+   Compiling verter_no_typeexpr v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_no_typeexpr)
+   Compiling verter_language v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_language)
+   Compiling oxc_syntax v0.126.0
+   Compiling verter_audit v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_audit)
+   Compiling verter_css_syntax v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_css_syntax)
+   Compiling parcel_sourcemap v2.1.1
+   Compiling icu_normalizer v2.1.1
+   Compiling icu_properties v2.1.2
+   Compiling verter_type_expr v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_expr)
+   Compiling verter_macro_dto v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_macro_dto)
+   Compiling futures-executor v0.3.32
+   Compiling sse-stream v0.2.1
+   Compiling futures v0.3.32
+   Compiling serial_test v3.5.0
+   Compiling js-sys v0.3.99
+   Compiling console_error_panic_hook v0.1.7
+   Compiling schemars v1.2.1
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_protocol)
+   Compiling oxc_ast v0.126.0
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsgo_api)
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling hyper v1.8.1
+   Compiling tokio-stream v0.1.18
+   Compiling url v2.5.8
+   Compiling sourcemap v9.3.2
+   Compiling half v2.7.1
+   Compiling hyper-util v0.1.20
+   Compiling lightningcss v1.0.0-alpha.71
+   Compiling ciborium-ll v0.2.2
+   Compiling axum v0.8.9
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.8.2
+   Compiling verter_type_runtime v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_runtime)
+   Compiling verter_relay_shim v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_relay_shim)
+   Compiling oxc_ecmascript v0.126.0
+   Compiling oxc_ast_visit v0.126.0
+   Compiling serde-wasm-bindgen v0.6.5
+   Compiling wasm-bindgen-futures v0.4.72
+   Compiling wasm-bindgen-test v0.3.72
+   Compiling oxc_parser v0.126.0
+   Compiling verter_session_query v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session_query)
+   Compiling oxc_semantic v0.126.0
+   Compiling verter_scheduler v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_scheduler)
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_type_expr_oxc)
+   Compiling verter_vue_conformance v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_vue_conformance)
+   Compiling verter_parser v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_parser)
+   Compiling verter_workspace v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_workspace)
+   Compiling tower-lsp-server v0.23.0
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_semantic)
+   Compiling verter_compiler v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_compiler)
+   Compiling verter_diagnostics v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_diagnostics)
+   Compiling verter_actions v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_actions)
+   Compiling verter_session v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_session)
+   Compiling verter_bench v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_bench)
+   Compiling verter_ffi v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_ffi)
+   Compiling verter_mcp v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_mcp)
+   Compiling verter_wasm v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_wasm)
+   Compiling verter_tsc v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_tsc)
+   Compiling verter_mcp_server v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_mcp_server)
+   Compiling verter_dx_baseline v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_dx_baseline)
+warning: unreachable statement
+   --> crates\verter_session\tests\cases\tracked_paths_are_portable.rs:125:5
+    |
+124 |     panic!("A1_SENTINEL_PLANT_GATE_R2_4b7e1d");
+    |     ------------------------------------------ any code following this expression is unreachable
+125 |     let paths = tracked_paths();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `verter_session` (test "main") generated 1 warning
+    Finished `no-debug-assertions` profile [unoptimized + debuginfo] target(s) in 3m 37s
+   Archiving 90 binaries (including 12 non-test binaries; 1 non-test binary filtered out), 3 build script output directories, 2 linked paths, and 1 standard library to <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst
+    Archived 118 files to <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst in 12.65s
+[gate] archive [shipped-cfg] built in 231s -> <REPO>-a1-sentinel\target\gate-runner\gate-work\nextest-no-debug-assertions.tar.zst
+[gate] listing suites from the [shipped-cfg] archive (cargo nextest list --message-format json) …
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract-no-debug-assertions
+   Extracted 118 files to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract-no-debug-assertions in 8.90s
+[gate] SURFACE 3: shipped-cfg archive lists 78 suites; filterset 'package(verter_session) + package(verter_scheduler)' covers verter_session (lib=1, test=2) + verter_scheduler (2 suites)
+  Extracting 90 binaries (including 12 non-test binaries), 3 build script output directories, and 2 linked paths to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract-no-debug-assertions
+   Extracted 118 files to \\?\<REPO>-a1-sentinel\target\gate-runner\gate-work\extract-no-debug-assertions in 8.94s
+────────────
+ Nextest run ID c5ae304d-6784-46c7-af32-66dc354e70a1 with nextest profile: default
+    Starting 8477 tests across 6 binaries (563 tests and 72 binaries skipped)
+        FAIL [   0.056s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+  stdout ───
+
+    running 1 test
+    test cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms ... FAILED
+
+    failures:
+
+    failures:
+        cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2494 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms' (94080) panicked at crates\verter_session\tests\cases\tracked_paths_are_portable.rs:124:5:
+    A1_SENTINEL_PLANT_GATE_R2_4b7e1d
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 109.478s] 8477 tests run: 8476 passed, 1 failed, 563 skipped
+        FAIL [   0.056s] verter_session::main cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+error: test run failed
+[gate] SURFACE 3 done in 119s: 8477 run, 8476 passed, 1 did not pass (1 failed, 0 timed out, 0 exec failed) (1 named, 0 tolerated), 563 skipped; run exit 100
+[gate][error] VERDICT: FAIL — 3 non-tolerated failure(s):
+[gate][error]   [nextest] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+[gate][error]   [libtest:verter_session::main] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+[gate][error]   [shipped-cfg/nextest] cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms
+EXIT: 1
+END-DATE: 2026-08-10T08:15:47Z
