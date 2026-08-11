@@ -1,0 +1,123 @@
+BLOB_BEFORE=44f572eb7fe61411a2734ab3d013125ebdb1ee63
+PLANT_PROVEN=true
+NEEDLE=(Lit::Str(e), LiteralValue::String(g)) => *e == g.as_str(),
+REPL=(Lit::Str(_e), LiteralValue::String(_g)) => true,
+CONTROL=literal_expectation_rejects_a_different_value
+
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a2\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+   Compiling verter_session v0.0.1-beta.3 (<REPO>-wt-a2\crates\verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.52s
+────────────
+ Nextest run ID 534bf40b-c332-4ce3-bdbf-da21fc61442c with nextest profile: default
+    Starting 51 tests across 4 binaries (8664 tests skipped)
+        PASS [   0.026s] ( 1/51) verter_session u6_flow_shape_corpus_tests::oracle::every_row_records_the_checkers_answer
+        PASS [   0.029s] ( 2/51) verter_session u6_flow_shape_corpus_tests::conformance::corpus_conformance_by_owner
+        PASS [   0.041s] ( 3/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_ids_are_unique_and_well_formed
+        PASS [   0.042s] ( 4/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::reference_identity_trio_is_distinct
+        PASS [   0.047s] ( 5/51) verter_session u6_flow_shape_corpus_tests::conformance::unassigned_parked_rows_are_named
+        PASS [   0.053s] ( 6/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm
+        PASS [   0.077s] ( 7/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_warm_pair_clauses_fail_individually
+        PASS [   0.093s] ( 8/51) verter_session u6_flow_shape_corpus_tests::programme_ledgers::the_framework_only_worklist_is_pinned
+        PASS [   0.101s] ( 9/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::opaque_unmodeled_position_marker_is_discriminating
+        PASS [   0.104s] (10/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically
+        PASS [   0.105s] (11/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members
+        FAIL [   0.131s] (12/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value
+  stdout ───
+
+    running 1 test
+    test u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value ... FAILED
+
+    failures:
+
+    failures:
+        u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6210 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value' (40128) panicked at crates\verter_session\src\u6_flow_expect_tests.rs:2786:17:
+    an expectation that cannot reject a DIFFERENT literal is a stub
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.140s] (13/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_expect_and_boundary_lane
+        PASS [   0.145s] (14/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_probe_programs
+        PASS [   0.154s] (15/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::construct_signature_is_distinct_from_call_signature
+        PASS [   0.154s] (16/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions
+        PASS [   0.155s] (17/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::depth_and_absent_node_guards_fail_closed
+        PASS [   0.155s] (18/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::checker_syntax_structural_clauses_fail_closed
+        PASS [   0.158s] (19/51) verter_session u6_flow_shape_corpus_tests::oracle::the_probe_discriminates_in_both_directions
+        PASS [   0.167s] (20/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace
+        PASS [   0.181s] (21/51) verter_session u6_flow_shape_corpus_tests::programme_ledgers::narrowing_rows_are_owned_by_a_narrow_block
+        PASS [   0.183s] (22/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_cold_replay_requires_actual_cold_work
+        PASS [   0.186s] (23/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::bare_ref_expectation_rejects_a_wrong_name
+        PASS [   0.196s] (24/51) verter_session u6_flow_shape_corpus_tests::programme_ledgers::every_typescript_row_asserts_the_semantic_answer
+        PASS [   0.243s] (25/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_drift_and_no_value_clauses_fail
+        PASS [   0.259s] (26/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_class_and_degradation_drift_fail
+        PASS [   0.246s] (27/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually
+        PASS [   0.271s] (28/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict
+        PASS [   0.299s] (29/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::checker_column_cross_validates_against_live_rendering
+        PASS [   0.271s] (30/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::stamps_match_the_pinned_oracle_and_profile
+        FAIL [   0.284s] (31/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return
+  stdout ───
+
+    running 1 test
+    test u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return ... FAILED
+
+    failures:
+
+    failures:
+        u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6210 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return' (100632) panicked at crates\verter_session\src\u6_flow_expect_tests.rs:2941:17:
+    exactly ONE of `() => "a"` / `() => "b"` may match (measured () => "a") — a matcher satisfied by both distinguishes nothing
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.278s] (32/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_params_and_arity_reject_wrong_shapes
+        PASS [   0.286s] (33/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::type_param_expectation_rejects_a_wrong_name
+        PASS [   0.284s] (34/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::type_param_identity_is_distinct_from_references
+        FAIL [   0.270s] (35/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset
+  stdout ───
+
+    running 1 test
+    test u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset ... FAILED
+
+    failures:
+
+    failures:
+        u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6210 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset' (48948) panicked at crates\verter_session\src\u6_flow_expect_tests.rs:3336:17:
+    a swapped member must fail
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.265s] (36/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_no_value_arm_rejects_a_cached_refusal
+        PASS [   0.236s] (37/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::agreeing_fixed_cells_bind_checker_to_their_pin
+        PASS [   0.266s] (38/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_arm_rejects_a_warm_first_call
+        PASS [   0.269s] (39/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_outcome_class_clauses_reject_the_opposite_class
+        PASS [   0.240s] (40/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::no_value_cells_record_their_gap
+        PASS [   0.237s] (41/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::position_dependent_pins_record_a_real_divergence
+        PASS [   0.251s] (42/51) verter_session u6_flow_shape_corpus_tests::verdict_consistency::every_verdict_is_corroborated_by_the_row_it_labels
+        PASS [   0.308s] (43/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin
+        PASS [   0.258s] (44/51) verter_session u6_flow_shape_corpus_tests::verdict_consistency::the_open_debt_ledger_is_pinned
+        PASS [   0.259s] (45/51) verter_session u6_flow_shape_corpus_tests::verdict_consistency::value_indistinct_rows_carry_deep_pins_or_are_named_shallow
+        PASS [   0.333s] (46/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::same_capture_write_cell_is_position_independent
+        PASS [   0.444s] (47/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_suite::matrix_cells_hold_their_pins
+        PASS [   1.715s] (48/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_svelte_twins
+        PASS [   1.932s] (49/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_flow_lane
+        PASS [   2.044s] (50/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_runtime_lane
+        PASS [   2.070s] (51/51) verter_session u6_flow_shape_corpus_tests::corpus_suite::corpus_tsx_lane
+────────────
+     Summary [   2.084s] 51 tests run: 48 passed, 3 failed, 8664 skipped
+        FAIL [   0.131s] (12/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value
+        FAIL [   0.284s] (31/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return
+        FAIL [   0.270s] (35/51) verter_session u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset
+error: test run failed
