@@ -1,0 +1,129 @@
+
+running 1 test
+test u6_flow_shape_corpus_tests::corpus_suite::corpus_expect_and_boundary_lane ... FAILED
+
+failures:
+
+---- u6_flow_shape_corpus_tests::corpus_suite::corpus_expect_and_boundary_lane stdout ----
+
+thread 'u6_flow_shape_corpus_tests::corpus_suite::corpus_expect_and_boundary_lane' (154616) panicked at crates\verter_session\src\u6_flow_shape_corpus_tests.rs:1670:9:
+
+┌── N25_impossible_predicate_statement_omits_dead_contributor  [recursive expectation on `makeProps`'s return]
+│ WHAT     the recursive graph-node expectation did not match. This lane is what distinguishes `() => "a"` from `() => "b"` — re-measure with the dump before re-pinning.
+│ SHAPE    type A = { kind: "a"; a: number }; type B = { kind: "b"; b: number }  ⏎  function isA(x: A | B): x is A { return x.kind === "a" }  ⏎  function isB(x: A | B): x is B { return x.kind === "b" }  ⏎  function makeProps(x: A | B) { return { v: (() => { if (isA(x)) { if (isB(x)) return x; return "ok" as const } return "no" as const })() } }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  { v: "no" | "ok"; }
+│ EXPECTED expected Object([("v", Union([Literal(Str("no")), Literal(Str("ok"))]))])
+           measured { v: Union(DeclRef(A) | DeclRef(B) | "ok" | "no") }
+           [oracle: tsgo 7.0.0-dev.20260526.1 --noEmit --strict --ignoreConfig --pretty false (checker only)]
+           [profile: VerterHost standalone { analysis_level: Full, audit_enabled: true, footprint_capture: false, scheduler cpu_threads: 1 }; demand = ReturnProjectionDemand::whole_return(); rail = body-derived FlowReturn via VerterHost::get_flow_return_type_with_audit]
+│ ACTUAL   { v: Union(DeclRef(A) | DeclRef(B) | "ok" | "no") }
+│ VERDICT  MatchesChecker
+│ OWNER    U6.NARROW_LATTICE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep N25_impossible_predicate_statement_omits_dead_contributor
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── N25_impossible_predicate_statement_omits_dead_contributor  [public cold/warm boundary on `makeProps`]
+│ WHAT     get_flow_return_type_with_audit, invoked twice: call 1 must be cold with the pinned typed degradation and EXACT projected JSON; call 2's cache-replay state is pinned in both directions.
+│ SHAPE    type A = { kind: "a"; a: number }; type B = { kind: "b"; b: number }  ⏎  function isA(x: A | B): x is A { return x.kind === "a" }  ⏎  function isB(x: A | B): x is B { return x.kind === "b" }  ⏎  function makeProps(x: A | B) { return { v: (() => { if (isA(x)) { if (isB(x)) return x; return "ok" as const } return "no" as const })() } }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  { v: "no" | "ok"; }
+│ EXPECTED projected JSON of call 1: expected EXACTLY
+  MEASURE-ME
+measured
+  {"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"ref","name":"A","typeArguments":[]},{"kind":"ref","name":"B","typeArguments":[]},{"kind":"literal","literalKind":"string","value":"ok"},{"kind":"literal","literalKind":"string","value":"no"}]}}]}
+│ ACTUAL   see the clause above
+│ VERDICT  MatchesChecker
+│ OWNER    U6.NARROW_LATTICE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep N25_impossible_predicate_statement_omits_dead_contributor
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── N26_structurally_possible_predicate_intersection_survives  [recursive expectation on `makeProps`'s return]
+│ WHAT     the recursive graph-node expectation did not match. This lane is what distinguishes `() => "a"` from `() => "b"` — re-measure with the dump before re-pinning.
+│ SHAPE    type A = { a: number }; type B = { b: number }  ⏎  function isA(x: A | B): x is A { return "a" in x }  ⏎  function isB(x: A | B): x is B { return "b" in x }  ⏎  function makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : "ok") : "no" } }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  { v: string | (A & B); }
+│ EXPECTED expected Object([("v", Union([Primitive(String), Intersection([BareRef { name: "A" }, BareRef { name: "B" }])]))])
+           measured { v: Union(Intersection(DeclRef(A) & DeclRef(B)) | string) }
+           [oracle: tsgo 7.0.0-dev.20260526.1 --noEmit --strict --ignoreConfig --pretty false (checker only)]
+           [profile: VerterHost standalone { analysis_level: Full, audit_enabled: true, footprint_capture: false, scheduler cpu_threads: 1 }; demand = ReturnProjectionDemand::whole_return(); rail = body-derived FlowReturn via VerterHost::get_flow_return_type_with_audit]
+│ ACTUAL   { v: Union(Intersection(DeclRef(A) & DeclRef(B)) | string) }
+│ VERDICT  MatchesChecker
+│ OWNER    U6.NARROW_LATTICE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep N26_structurally_possible_predicate_intersection_survives
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── N26_structurally_possible_predicate_intersection_survives  [public cold/warm boundary on `makeProps`]
+│ WHAT     get_flow_return_type_with_audit, invoked twice: call 1 must be cold with the pinned typed degradation and EXACT projected JSON; call 2's cache-replay state is pinned in both directions.
+│ SHAPE    type A = { a: number }; type B = { b: number }  ⏎  function isA(x: A | B): x is A { return "a" in x }  ⏎  function isB(x: A | B): x is B { return "b" in x }  ⏎  function makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : "ok") : "no" } }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  { v: string | (A & B); }
+│ EXPECTED projected JSON of call 1: expected EXACTLY
+  MEASURE-ME
+measured
+  {"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"intersection","types":[{"kind":"ref","name":"A","typeArguments":[]},{"kind":"ref","name":"B","typeArguments":[]}]},{"kind":"primitive","name":"string"}]}}]}
+│ ACTUAL   see the clause above
+│ VERDICT  MatchesChecker
+│ OWNER    U6.NARROW_LATTICE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep N26_structurally_possible_predicate_intersection_survives
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── X85_nested_closure_write_updates_captured_binding  [public cold/warm boundary on `makeProps`]
+│ WHAT     get_flow_return_type_with_audit, invoked twice: call 1 must be cold with the pinned typed degradation and EXACT projected JSON; call 2's cache-replay state is pinned in both directions.
+│ SHAPE    function makeProps() { let x: "a" | "b" = "a"; return () => { x = "b"; return x } }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  () => "b"
+│ EXPECTED projected JSON of call 1: expected EXACTLY
+  MEASURE-ME
+measured
+  {"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"b"}}
+│ ACTUAL   see the clause above
+│ VERDICT  MatchesChecker
+│ OWNER    U6.VALUE_INFERENCE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep X85_nested_closure_write_updates_captured_binding
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── X87_read_only_let_capture_keeps_reaching_literal  [public cold/warm boundary on `makeProps`]
+│ WHAT     get_flow_return_type_with_audit, invoked twice: call 1 must be cold with the pinned typed degradation and EXACT projected JSON; call 2's cache-replay state is pinned in both directions.
+│ SHAPE    function makeProps() { let x: "a" | "b" = "a"; return () => x }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  () => "a"
+│ EXPECTED projected JSON of call 1: expected EXACTLY
+  MEASURE-ME
+measured
+  {"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"a"}}
+│ ACTUAL   see the clause above
+│ VERDICT  MatchesChecker
+│ OWNER    U6.VALUE_INFERENCE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep X87_read_only_let_capture_keeps_reaching_literal
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+
+┌── X88_nested_label_inherits_enclosing_suffix_return  [public cold/warm boundary on `makeProps`]
+│ WHAT     get_flow_return_type_with_audit, invoked twice: call 1 must be cold with the pinned typed degradation and EXACT projected JSON; call 2's cache-replay state is pinned in both directions.
+│ SHAPE    function makeProps() { OUT: INNER: { try { break INNER } finally { return "a" as const } } return "b" as const }
+│ MACRO    defineProps<ReturnType<typeof makeProps>>()
+│ CHECKER  "a" | "b"
+│ EXPECTED projected JSON of call 1: expected EXACTLY
+  MEASURE-ME
+measured
+  {"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"a"},{"kind":"literal","literalKind":"string","value":"b"}]}
+│ ACTUAL   see the clause above
+│ VERDICT  MatchesChecker
+│ OWNER    U6.FLOW_RETURN_SUBSTRATE
+└── re-measure this ONE row with:
+      U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus -- --nocapture --test-threads=1 2>&1 | grep X88_nested_label_inherits_enclosing_suffix_return
+    then re-pin the row (and, if a debt CLOSED, drop its id from OPEN_DEBTS).
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    u6_flow_shape_corpus_tests::corpus_suite::corpus_expect_and_boundary_lane
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6186 filtered out; finished in 0.05s
+

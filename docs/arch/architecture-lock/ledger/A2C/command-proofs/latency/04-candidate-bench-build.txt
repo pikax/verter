@@ -1,0 +1,22 @@
+COMMAND: cargo bench -p verter_semantic --bench completion_facts --no-run
+HEAD: 04048a9471f1c13e81cda075fa27a6c35b59a842
+TREE: 5ca44c8e58d79cf040bbd066a25c44323cf0e10c
+PORCELAIN-BEGIN
+git : warning: unable to access '<HOME>/.config/git/ignore': Permission denied
+At line:9 char:2
++  git status --porcelain
++  ~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unable...rmission denied:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unable to access '<HOME>/.config/git/ignore': Permission denied
+PORCELAIN-END
+cargo :     Finished `bench` profile [optimized] target(s) in 0.32s
+At line:11 char:2
++  cargo bench -p verter_semantic --bench completion_facts --no-run
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `b...get(s) in 0.32s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  Executable benches\completion_facts.rs (target\release\deps\completion_facts-9e420b7368996423.exe)
+EXIT: 0

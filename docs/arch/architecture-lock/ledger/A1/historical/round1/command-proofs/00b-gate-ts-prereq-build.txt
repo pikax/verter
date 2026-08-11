@@ -1,0 +1,35 @@
+CMD: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build (gate build-prerequisite, mirrors ci.yml 'Build the Rust gate's TypeScript prerequisites')
+CWD: <REPO>-wt-a1
+DATE: 2026-08-10T04:49:34Z
+---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+Scope: 2 of 54 workspace projects
+packages/language-shared build$ tsc -b
+packages/language-shared build: Done
+packages/typescript-plugin build$ tsc -b
+packages/typescript-plugin build: Done
+EXIT: 0

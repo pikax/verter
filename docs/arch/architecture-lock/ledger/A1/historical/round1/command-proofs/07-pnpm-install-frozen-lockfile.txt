@@ -1,0 +1,104 @@
+CMD: pnpm install --frozen-lockfile
+CWD: <REPO>-wt-a1
+DATE: 2026-08-10T04:47:06Z
+---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+Scope: all 54 workspace projects
+Lockfile is up to date, resolution step is skipped
+Progress: resolved 1, reused 0, downloaded 0, added 0
+Packages: +1923
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 1923, reused 905, downloaded 0, added 0
+Progress: resolved 1923, reused 906, downloaded 0, added 0
+Progress: resolved 1923, reused 1716, downloaded 0, added 0
+
+   ╭──────────────────────────────────────────╮
+   │                                          │
+   │   Update available! 10.22.0 → 11.21.0.   │
+   │   Changelog: https://pnpm.io/v/11.21.0   │
+   │     To update, run: pnpm self-update     │
+   │                                          │
+   ╰──────────────────────────────────────────╯
+
+Progress: resolved 1923, reused 1903, downloaded 0, added 5
+Progress: resolved 1923, reused 1907, downloaded 0, added 71
+Progress: resolved 1923, reused 1907, downloaded 0, added 122
+Progress: resolved 1923, reused 1907, downloaded 0, added 231
+Progress: resolved 1923, reused 1907, downloaded 0, added 287
+Progress: resolved 1923, reused 1907, downloaded 0, added 372
+Progress: resolved 1923, reused 1907, downloaded 0, added 447
+Progress: resolved 1923, reused 1907, downloaded 0, added 490
+Progress: resolved 1923, reused 1907, downloaded 0, added 540
+Progress: resolved 1923, reused 1907, downloaded 0, added 687
+Progress: resolved 1923, reused 1907, downloaded 0, added 874
+Progress: resolved 1923, reused 1907, downloaded 0, added 974
+Progress: resolved 1923, reused 1907, downloaded 0, added 1061
+Progress: resolved 1923, reused 1907, downloaded 0, added 1164
+Progress: resolved 1923, reused 1907, downloaded 0, added 1256
+Progress: resolved 1923, reused 1907, downloaded 0, added 1464
+Progress: resolved 1923, reused 1907, downloaded 0, added 1559
+Progress: resolved 1923, reused 1907, downloaded 0, added 1744
+Progress: resolved 1923, reused 1907, downloaded 0, added 1891
+Progress: resolved 1923, reused 1907, downloaded 0, added 1918
+Progress: resolved 1923, reused 1907, downloaded 0, added 1919
+Progress: resolved 1923, reused 1907, downloaded 0, added 1922
+Progress: resolved 1923, reused 1907, downloaded 0, added 1923, done
+
+dependencies:
++ @vue/compiler-core 3.5.34
++ @vue/compiler-sfc 3.5.34
++ oxfmt 0.52.0
+
+devDependencies:
++ @bufbuild/buf 1.70.0
++ @bufbuild/protoc-gen-es 2.12.0
++ @hyrious/esbuild-plugin-commonjs 0.2.6
++ @vscode/vsce 3.9.1
++ esbuild 0.28.0
++ esbuild-plugin-alias 0.2.1
++ esbuild-plugin-alias-path 2.0.2
++ glob 13.0.6
++ husky 9.1.7
++ json-diff 1.0.6
++ shx 0.4.0
++ svelte 5.56.3
++ typescript 7.0.2
++ vitest 4.1.7
++ vue 3.5.34
+
+╭ Warning ─────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│   Ignored build scripts: @bufbuild/buf, @parcel/watcher, core-js.            │
+│   Run "pnpm approve-builds" to pick which dependencies should be allowed     │
+│   to run scripts.                                                            │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+. prepare$ husky
+. prepare: Done
+Done in 29.1s using pnpm v10.22.0
+EXIT: 0

@@ -1,0 +1,668 @@
+{
+  "aborted": false,
+  "results": [
+    {
+      "id": "L1_lit_str_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "literal_expectation_rejects_a_different_value"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.135s] 47 tests run: 44 passed, 3 failed, 8664 skipped"
+    },
+    {
+      "id": "L2_lit_num_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "literal_expectation_rejects_a_different_value"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::literal_expectation_rejects_a_different_value"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.133s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "P1_primitive_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "object_expectation_rejects_wrong_missing_extra_and_duplicate_members",
+        "signature_params_and_arity_reject_wrong_shapes"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_params_and_arity_reject_wrong_shapes",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.034s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "U1_union_len",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "union_set_equality_rejects_subset_and_superset"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.087s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "U2_union_assign",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "union_set_equality_rejects_subset_and_superset"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.995s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "I1_intersection_len",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.021s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "I2_intersection_order",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.054s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "S1_signature_arity",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "signature_params_and_arity_reject_wrong_shapes"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_params_and_arity_reject_wrong_shapes"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.202s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "S2_signature_params",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "signature_params_and_arity_reject_wrong_shapes"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_params_and_arity_reject_wrong_shapes"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.019s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "S3_signature_ret",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "signature_expectation_rejects_a_different_return"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.027s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "O1_object_len",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.073s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "O2_object_key",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.077s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "O3_object_value",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.012s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "O4_object_injective",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::object_expectation_rejects_wrong_missing_extra_and_duplicate_members"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.031s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "T1_type_param_name",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "type_param_expectation_rejects_a_wrong_name"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::type_param_expectation_rejects_a_wrong_name"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.126s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "R1_decl_ref_name",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.193s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "BR1_bare_ref_name",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "bare_ref_expectation_rejects_a_wrong_name"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::bare_ref_expectation_rejects_a_wrong_name"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.024s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "OP1_opaque_broaden",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.989s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "B1_first_from_cache",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.998s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "B2_first_cold_computes",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.089s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "B3_degradation_pin",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cache_replay_assertion_fails_in_both_directions"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.026s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "B4_json_pin",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cache_replay_assertion_fails_in_both_directions"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.063s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "B12_no_value_carrier",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.098s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "RC1_replay_class_drift",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_replay_class_and_degradation_drift_fail"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_class_and_degradation_drift_fail"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.228s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "RC2_replay_degr_drift",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_replay_class_and_degradation_drift_fail"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_class_and_degradation_drift_fail"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.038s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "RC3_warm_from_cache",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_warm_pair_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_warm_pair_clauses_fail_individually",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.169s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "RC4_warm_zero_cold",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_warm_pair_clauses_fail_individually",
+        "cache_replay_assertion_fails_in_both_directions"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_warm_pair_clauses_fail_individually",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.054s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "RC5_cold_no_poison",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cache_replay_assertion_fails_in_both_directions",
+        "cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.085s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "RC6_cold_recompute",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_cold_replay_requires_actual_cold_work"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_cold_replay_requires_actual_cold_work",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.993s] 47 tests run: 44 passed, 3 failed, 8664 skipped"
+    },
+    {
+      "id": "RC7_json_drift",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_replay_drift_and_no_value_clauses_fail"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.068s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "F1_refusal_value_first",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.162s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "F2_refusal_first_warm",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.161s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "F3_refusal_first_cold",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.026s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "F4_refusal_second_class",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.065s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "F5_refusal_non_admission",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually",
+        "cell_no_value_arm_rejects_a_cached_refusal"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually",
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_no_value_arm_rejects_a_cached_refusal"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.117s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    },
+    {
+      "id": "F6_refusal_recompute",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "refusal_comparator_clauses_fail_individually"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::refusal_comparator_clauses_fail_individually"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.974s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C1_cell_novalue_class",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_outcome_class_clauses_reject_the_opposite_class"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_outcome_class_clauses_reject_the_opposite_class"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.037s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C2_cell_value_class",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_outcome_class_clauses_reject_the_opposite_class"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_outcome_class_clauses_reject_the_opposite_class"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.100s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C3_cell_rendered",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.097s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C4_cell_degradation",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.178s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C5_cell_replay_delegation",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.986s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "C6_cell_refusal_delegation",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "cell_no_value_arm_rejects_a_cached_refusal"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_no_value_arm_rejects_a_cached_refusal"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.070s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K1_checker_string_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.021s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K2_checker_union_assign",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.030s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K3_checker_intersection_order",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.110s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K4_checker_ref_name",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.079s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K5_checker_primitive_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.041s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K6_checker_object_key",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.181s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K7_checker_fn_arity",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   1.999s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K8_checker_fn_params",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.016s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K9_checker_fn_ret",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.056s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "K10_checker_number_eq",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_mutations_are_rejected_semantically"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.027s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "X85MOVE_bogus_incomparable",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "checker_column_cross_validates_against_live_rendering"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_cross_validates_against_live_rendering"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.089s] 47 tests run: 46 passed, 1 failed, 8664 skipped"
+    },
+    {
+      "id": "N26CHK_wrong_intersection_arm",
+      "verdict": "CAUGHT-BY-NAMED-CONTROL",
+      "expected": [
+        "deep_pinned_rows_semantic_equality_follows_their_verdict"
+      ],
+      "failing": [
+        "u6_flow_shape_corpus_tests::corpus_suite::checker_column_mutations_are_rejected_semantically",
+        "u6_flow_shape_corpus_tests::corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict"
+      ],
+      "missed": [],
+      "summary": "Summary [   2.153s] 47 tests run: 45 passed, 2 failed, 8664 skipped"
+    }
+  ]
+}

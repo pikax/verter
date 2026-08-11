@@ -1,0 +1,9 @@
+cargo :    Compiling verter_semantic v0.0.1-beta.3 (<REPO>-wt-a2c\crates\verter_semantic)
+At line:2 char:135
++ ... ision.txt'; cargo bench -p verter_semantic --bench completion_facts - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ve...erter_semantic):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `bench` profile [optimized] target(s) in 30.21s
+  Executable benches\completion_facts.rs (target\release\deps\completion_facts-9e420b7368996423.exe)

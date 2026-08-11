@@ -1,0 +1,81 @@
+CMD: pnpm run test:scripts
+CWD: <REPO>-wt-a1
+DATE: 2026-08-10T04:51:07Z
+---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+
+> verter@0.0.1-beta.1 test:scripts <REPO>-wt-a1
+> vitest run scripts/sccache-env.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs && node --test scripts/validate-program-state.test.mjs
+
+
+ RUN  v4.1.7 <REPO>-wt-a1
+
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  05:51:08
+   Duration  1.91s (transform 27ms, setup 0ms, import 42ms, tests 1.69s, environment 0ms)
+
+✔ derived npm set equals the expected product closure minus marketplace-only (14.7044ms)
+✔ every binary family's platform dirs are in the platform publish set (8.4009ms)
+✔ every runtime workspace dependency of every published package is itself published (23.7585ms)
+✔ verter-vscode is not in the npm set (7.2443ms)
+✔ a private package in the closure throws (3.453ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 161.3569
+✔ the committed transcripts really are ANSI-coloured and really differ (1.5712ms)
+✔ ci.yml: an all-pass suite is accepted (469.7454ms)
+✔ ci.yml: a failing suite is rejected via the runner token (405.7363ms)
+✔ ci.yml: a failing suite is rejected on the coloured counter alone (354.1011ms)
+✔ release.yml: an all-pass suite is accepted (425.5086ms)
+✔ release.yml: a failing suite is rejected via the runner token (420.4877ms)
+✔ release.yml: a failing suite is rejected on the coloured counter alone (362.5099ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2555.8546
+✔ template mode: template-shaped state with REQUIRED_ placeholders passes (101.8442ms)
+✔ live mode: fully-resolved state with a legal ACCEPTED predecessor and IN_PROGRESS block passes (112.6824ms)
+✔ sequencing invariant: IN_PROGRESS with an unaccepted predecessor is rejected (116.7796ms)
+✔ stacked-work exception: a bare stack_id with no established stack is REJECTED (96.3273ms)
+✔ status gate: ACCEPTED with PENDING mandates and no accepted identity is rejected (97.456ms)
+✔ strict TOML reader: unbalanced quoting is a loud parse failure, never a silent mis-read (200.9509ms)
+✔ block-set mismatch: state missing a DAG block and carrying an extra one is rejected with the symmetric difference (102.256ms)
+✔ zero blocks validated is a FAILURE, not a pass (101.7572ms)
+✔ mandate class gate: NOT_REQUIRED on a foundational-class block is rejected (93.5617ms)
+✔ sequencing invariant: a stackless READY block with an unaccepted predecessor is rejected (95.482ms)
+✔ stacked-work exception: a predecessor citing a DIFFERENT stack snapshot digest is rejected (110.3256ms)
+✔ live mode: an empty program_dag_digest is a violation, not a silent skip (99.6253ms)
+✔ landing equivalence: ACCEPTED with a diverged accepted identity and no landing_equivalence_digest is rejected (94.564ms)
+✔ private checkpoint: a PROVEN checkpoint over accepted predecessors passes (no fail-closed false positive) (91.6043ms)
+✔ private checkpoint: a PREMATURE checkpoint (unaccepted predecessor) is rejected (85.3213ms)
+✔ private checkpoint: an UNPROVEN checkpoint (PENDING mandates, empty identities) is rejected (90.2663ms)
+✔ private checkpoint: the status on a WRONG-CLASS block is rejected (87.6468ms)
+✔ live mode: a non-ACTIVE top-level status is rejected (88.407ms)
+✔ stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes (82.7102ms)
+✔ stacked-work exception: an equal (non-lower) predecessor stack_layer is rejected (104.1128ms)
+✔ stacked-work exception: a TERMINATED (ABORTED) predecessor inside the claimed stack is rejected (84.9009ms)
+✔ mandate class gate: architecture_review NOT_REQUIRED on a subsystem-class block passes (86.9628ms)
+✔ entry lock: the DAG root block ACCEPTED with an EMPTY or MISSING entry_lock_digest is rejected (182.3482ms)
+✔ entry lock: the DAG root block in REVIEW requires the digest; a bound digest passes (183.2374ms)
+✔ private-checkpoint predecessor: a STACKLESS REVIEW successor over a PRIVATE_CHECKPOINT predecessor is rejected with the fail-closed stack-window message (146.9576ms)
+✔ private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT stack fields over a PRIVATE_CHECKPOINT predecessor is still rejected (97.8907ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2972.5264
+EXIT: 0

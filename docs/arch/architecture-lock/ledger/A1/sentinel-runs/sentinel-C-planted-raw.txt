@@ -1,0 +1,17 @@
+CMD: pnpm run gen:vue-goldens:check
+CWD: <REPO>-a1-sentinel
+ENV: PLANTED (A1_SENTINEL_PLANT_GOLDEN_R2_77aa02 appended to crates/verter_vue_conformance/corpus/goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js)
+DATE: 2026-08-10T07:46:33Z
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+
+> verter@0.0.1-beta.1 gen:vue-goldens:check <REPO>-a1-sentinel
+> node packages/vue-conformance-oracle/gen-vue-goldens.mjs --check
+
+vue conformance oracle: vue@3.6.0-rc.1, @vue/compiler-dom@3.6.0-rc.1, @vue/compiler-sfc@3.6.0-rc.1, @vue/compiler-vapor@3.6.0-rc.1, esbuild@0.28.0
+DRIFTED (bytes differ): crates/verter_vue_conformance/corpus/goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js
+Error: goldens check failed: 0 missing, 1 drifted, 0 stale — regenerate with `pnpm gen:vue-goldens` and commit the result
+    at checkMode (file:///<REPO>-a1-sentinel/packages/vue-conformance-oracle/gen-vue-goldens.mjs:856:11)
+    at async main (file:///<REPO>-a1-sentinel/packages/vue-conformance-oracle/gen-vue-goldens.mjs:872:5)
+ ELIFECYCLE  Command failed with exit code 1.
+EXIT: 1
+END-DATE: 2026-08-10T07:46:35Z

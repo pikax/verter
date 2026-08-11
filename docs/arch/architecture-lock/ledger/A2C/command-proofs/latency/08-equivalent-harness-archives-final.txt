@@ -1,0 +1,1 @@
+COMMAND: tar extract both exact-SHA archives; install byte-identical gate harness

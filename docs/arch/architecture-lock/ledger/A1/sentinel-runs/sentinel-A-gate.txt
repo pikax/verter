@@ -1,0 +1,9 @@
+SENTINEL A driver log — Rust gate
+BEFORE: clone=0, worktree=0
+PLANT-PROOF token=A1_SENTINEL_PLANT_GATE_R2_4b7e1d file=crates/verter_session/tests/cases/tracked_paths_are_portable.rs
+  occurrences(clone crates+packages+scripts, files): 1+0+0
+  occurrences(candidate worktree crates+packages+scripts, files): 0+0+0
+  git -C clone diff --stat:
+ crates/verter_session/tests/cases/tracked_paths_are_portable.rs | 1 +
+ 1 file changed, 1 insertion(+)
+AFTER RESTORE: clone=0

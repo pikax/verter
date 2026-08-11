@@ -1,0 +1,7 @@
+CMD: cargo check --workspace --release
+CWD: <REPO>-wt-a1
+ENV: default features; real release profile (opt-level 3 + fat LTO); negative control for this row: sentinel E in ../sentinel-verification.md
+DATE: 2026-08-10T07:33:32Z
+    Finished `release` profile [optimized] target(s) in 1.03s
+EXIT: 0
+END-DATE: 2026-08-10T07:33:33Z

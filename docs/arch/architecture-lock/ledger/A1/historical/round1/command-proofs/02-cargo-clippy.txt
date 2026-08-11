@@ -1,0 +1,539 @@
+CMD: cargo clippy --workspace --all-targets -- -D warnings
+CWD: <REPO>-wt-a1
+ENV: default features; toolchain 1.97.1 (pinned)
+DATE: 2026-08-10T05:09:24Z
+---
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+    Checking cfg-if v1.0.4
+    Checking itoa v1.0.17
+   Compiling serde_core v1.0.228
+    Checking memchr v2.8.0
+   Compiling serde_json v1.0.150
+    Checking rustc-hash v2.1.2
+    Checking equivalent v1.0.2
+    Checking allocator-api2 v0.2.21
+    Checking windows-link v0.2.1
+    Checking foldhash v0.2.0
+    Checking ryu v1.0.23
+    Checking unicode-width v0.2.2
+    Checking unicode-linebreak v0.1.5
+    Checking smawk v0.3.2
+    Checking unicode-segmentation v1.12.0
+    Checking oxc_data_structures v0.126.0
+    Checking static_assertions v1.1.0
+    Checking oxc_estree v0.126.0
+    Checking smallvec v1.15.1
+    Checking scopeguard v1.2.0
+    Checking pin-project-lite v0.2.17
+    Checking once_cell v1.21.4
+    Checking bytes v1.11.1
+    Checking zmij v1.0.21
+    Checking owo-colors v4.3.0
+    Checking siphasher v1.0.2
+    Checking percent-encoding v2.3.2
+   Compiling libm v0.2.16
+   Compiling syn v2.0.117
+    Checking castaway v0.2.4
+   Compiling fastrand v2.3.0
+   Compiling num-traits v0.2.19
+    Checking bitflags v2.11.0
+    Checking getrandom v0.2.17
+    Checking unicode-id-start v1.4.0
+    Checking cow-utils v0.1.3
+    Checking windows-sys v0.61.2
+    Checking arc-swap v1.9.1
+    Checking nonmax v0.5.5
+    Checking lock_api v0.4.14
+    Checking dragonbox_ecma v0.1.12
+    Checking log v0.4.29
+    Checking base64 v0.22.1
+    Checking utf8parse v0.2.2
+    Checking compact_str v0.9.0
+    Checking once_cell_polyfill v1.70.2
+    Checking verter_ecma v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_ecma)
+    Checking anstyle v1.0.13
+    Checking crossbeam-utils v0.8.21
+    Checking parking_lot_core v0.9.12
+    Checking either v1.15.0
+    Checking tracing-core v0.1.36
+    Checking phf_shared v0.13.1
+    Checking is_terminal_polyfill v1.70.2
+    Checking colorchoice v1.0.4
+    Checking anstyle-parse v1.0.0
+   Compiling phf_generator v0.13.1
+    Checking textwrap v0.16.2
+    Checking strsim v0.11.1
+    Checking typenum v1.20.0
+    Checking clap_lex v1.0.0
+    Checking hashbrown v0.14.5
+    Checking cpufeatures v0.3.0
+    Checking glob v0.3.3
+    Checking lazy_static v1.5.0
+    Checking hashbrown v0.17.1
+    Checking const-oid v0.10.2
+    Checking rand_core v0.6.4
+    Checking hex v0.4.3
+    Checking xxhash-rust v0.8.15
+    Checking bumpalo v3.20.3
+    Checking rand_core v0.10.0
+   Compiling getrandom v0.4.2
+    Checking allocator-api2 v0.4.0
+    Checking parking_lot v0.12.5
+    Checking stable_deref_trait v1.2.1
+    Checking phf_shared v0.11.3
+    Checking dtoa v1.0.11
+    Checking ahash v0.7.8
+    Checking outref v0.1.0
+    Checking rand_xoshiro v0.6.0
+   Compiling getrandom v0.3.4
+   Compiling anyhow v1.0.102
+    Checking ptr_meta v0.1.4
+    Checking seahash v4.1.0
+    Checking crossbeam-epoch v0.9.18
+    Checking crossbeam-channel v0.5.15
+    Checking matches v0.1.10
+    Checking outref v0.5.2
+    Checking vsimd v0.8.0
+    Checking itertools v0.14.0
+    Checking data-encoding v2.10.0
+    Checking precomputed-hash v0.1.1
+    Checking vlq v0.5.1
+    Checking self_cell v1.2.2
+    Checking dashmap v6.2.1
+    Checking simd-abstraction v0.7.1
+    Checking dashmap v5.5.3
+    Checking data-url v0.1.1
+    Checking const-str v0.3.2
+    Checking itertools v0.10.5
+    Checking dtoa-short v0.3.5
+    Checking json-escape-simd v3.0.1
+    Checking oxc_allocator v0.126.0
+    Checking pathdiff v0.2.3
+    Checking hashbrown v0.12.3
+   Compiling foldhash v0.1.5
+   Compiling prettyplease v0.2.37
+    Checking litemap v0.8.1
+   Compiling regex-syntax v0.8.10
+    Checking crossbeam-deque v0.8.6
+    Checking writeable v0.6.2
+   Compiling hashbrown v0.15.5
+   Compiling fixedbitset v0.5.7
+    Checking base64-simd v0.7.0
+   Compiling icu_normalizer_data v2.1.1
+   Compiling icu_properties_data v2.1.2
+   Compiling protoc-bin-vendored-linux-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-macos-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-win32 v3.2.0
+   Compiling protoc-bin-vendored-linux-aarch_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_32 v3.2.0
+   Compiling protoc-bin-vendored-linux-s390_64 v3.2.0
+   Compiling protoc-bin-vendored-macos-aarch_64 v3.2.0
+    Checking rayon-core v1.13.0
+    Checking base64-simd v0.8.0
+    Checking hybrid-array v0.4.12
+    Checking bitmaps v2.1.0
+   Compiling protoc-bin-vendored-linux-ppcle_64 v3.2.0
+   Compiling multimap v0.10.1
+    Checking form_urlencoded v1.2.2
+   Compiling radium v0.7.0
+    Checking uuid v1.23.1
+    Checking tap v1.0.1
+    Checking utf8_iter v1.0.4
+    Checking funty v2.0.0
+    Checking oxc_str v0.126.0
+    Checking rkyv v0.7.46
+    Checking if_chain v1.0.3
+   Compiling protoc-bin-vendored v3.2.0
+    Checking similar v3.1.1
+    Checking aho-corasick v1.1.4
+    Checking wyz v0.5.1
+   Compiling tempfile v3.27.0
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling indexmap v2.14.0
+    Checking cast v0.3.0
+   Compiling winapi v0.3.9
+    Checking oorandom v11.1.5
+    Checking futures-core v0.3.32
+    Checking rayon v1.12.0
+    Checking plotters-backend v0.3.7
+    Checking ciborium-io v0.2.2
+    Checking itertools v0.13.0
+    Checking anes v0.1.6
+    Checking futures-sink v0.3.32
+    Checking slab v0.4.12
+    Checking futures-io v0.3.32
+    Checking futures-task v0.3.32
+    Checking unicode-ident v1.0.24
+    Checking winnow v1.0.2
+    Checking toml_writer v1.1.1+spec-1.1.0
+    Checking tracing-log v0.2.0
+    Checking sharded-slab v0.1.7
+    Checking plotters-svg v0.3.7
+    Checking futures-channel v0.3.32
+    Checking sized-chunks v0.6.5
+    Checking thread_local v1.1.9
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.0
+    Checking proc-macro2 v1.0.106
+   Compiling ref-cast v1.0.25
+   Compiling httparse v1.10.1
+   Compiling cc v1.2.56
+    Checking tower-service v0.3.3
+    Checking bitvec v1.0.1
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking http v1.4.0
+    Checking dyn-clone v1.0.20
+    Checking constant_time_eq v0.4.2
+    Checking arrayref v0.3.9
+    Checking arrayvec v0.7.6
+   Compiling wasm-bindgen-shared v0.2.122
+   Compiling ident_case v1.0.1
+    Checking im v15.1.0
+   Compiling target-triple v1.0.0
+    Checking pin-utils v0.1.0
+    Checking httpdate v1.0.3
+    Checking toml_parser v1.1.2+spec-1.1.0
+    Checking atomic-waker v1.1.2
+   Compiling petgraph v0.8.3
+    Checking chacha20 v0.10.0
+   Compiling wasm-bindgen v0.2.122
+   Compiling rmcp v1.7.0
+    Checking quote v1.0.45
+    Checking mime v0.3.17
+    Checking matchit v0.8.4
+    Checking borrow-or-share v0.2.4
+   Compiling pastey v0.2.1
+   Compiling napi-build v2.3.2
+    Checking num-integer v0.1.46
+   Compiling regex-automata v0.4.14
+    Checking plotters v0.3.7
+    Checking digest v0.11.3
+   Compiling verter_lsp v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_lsp)
+    Checking rustc-demangle v0.1.27
+    Checking rand v0.10.0
+    Checking lru v0.18.0
+   Compiling paste v1.0.15
+   Compiling napi v3.9.0
+    Checking sha2 v0.11.0
+    Checking num-bigint v0.4.6
+   Compiling convert_case v0.11.0
+    Checking http-body v1.0.1
+    Checking backtrace v0.3.76
+    Checking libloading v0.9.0
+    Checking http-body-util v0.1.3
+   Compiling semver v1.0.27
+    Checking thousands v0.2.0
+    Checking rustc-hash v1.1.0
+    Checking mintex v0.1.4
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking anstyle-wincon v3.0.11
+    Checking anstyle-query v1.1.5
+    Checking winapi-util v0.1.11
+    Checking criterion-plot v0.8.2
+    Checking nu-ansi-term v0.50.3
+    Checking napi-sys v3.2.1
+   Compiling verter_napi v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_napi)
+    Checking serde_spanned v1.1.1
+    Checking toml_datetime v1.1.1+spec-1.1.0
+    Checking serde_path_to_error v0.1.20
+    Checking page_size v0.6.0
+    Checking anstream v1.0.0
+    Checking wasm-bindgen-test-shared v0.2.122
+    Checking same-file v1.0.6
+    Checking termcolor v1.4.1
+   Compiling ctor v1.0.6
+    Checking nohash-hasher v0.2.0
+    Checking toml v1.1.2+spec-1.1.0
+    Checking walkdir v2.5.0
+   Compiling alloca v0.4.0
+   Compiling blake3 v1.8.5
+    Checking clap_builder v4.6.0
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling darling_core v0.23.0
+   Compiling wasm-bindgen-macro-support v0.2.122
+   Compiling napi-derive-backend v5.0.4
+    Checking verter-editor-client v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter-editor-client)
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling oxc-miette-derive v2.7.1
+   Compiling oxc_ast_macros v0.126.0
+   Compiling tokio-macros v2.7.0
+   Compiling phf_macros v0.13.1
+   Compiling verter_no_storedspan_derive v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_storedspan_derive)
+   Compiling verter_no_typeexpr_derive v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_typeexpr_derive)
+   Compiling tracing-attributes v0.1.31
+   Compiling clap_derive v4.6.1
+   Compiling ts-rs-macros v12.0.1
+   Compiling serde_repr v0.1.20
+   Compiling zerocopy-derive v0.8.42
+   Compiling zerofrom-derive v0.1.6
+   Compiling yoke-derive v0.8.1
+   Compiling phf_macros v0.11.3
+   Compiling zerovec-derive v0.11.2
+   Compiling cssparser-macros v0.6.1
+   Compiling displaydoc v0.2.5
+   Compiling prost-derive v0.14.3
+   Compiling futures-macro v0.3.32
+   Compiling ref-cast-impl v1.0.25
+   Compiling schemars_derive v1.2.1
+   Compiling async-trait v0.1.89
+   Compiling tracing-test-macro v0.2.6
+   Compiling serial_test_derive v3.5.0
+    Checking tokio v1.52.3
+    Checking phf v0.11.3
+   Compiling verter_session_oracle_macro v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session_oracle_macro)
+    Checking phf v0.13.1
+   Compiling wasm-bindgen-test-macro v0.3.72
+    Checking cssparser v0.33.0
+    Checking verter_no_storedspan v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_storedspan)
+    Checking fluent-uri v0.4.1
+    Checking futures-util v0.3.32
+    Checking zerofrom v0.1.6
+    Checking tracing v0.1.44
+    Checking thiserror v2.0.18
+    Checking oxc-miette v2.7.1
+    Checking yoke v0.8.1
+    Checking cssparser-color v0.1.0
+    Checking parcel_selectors v0.28.2
+    Checking zerocopy v0.8.42
+    Checking matchers v0.2.0
+   Compiling darling_macro v0.23.0
+    Checking ts-rs v12.0.1
+   Compiling napi-derive v3.5.6
+   Compiling prost v0.14.3
+    Checking axum-core v0.5.6
+    Checking tracing-subscriber v0.3.23
+    Checking zerovec v0.11.5
+    Checking zerotrie v0.2.3
+    Checking clap v4.6.1
+   Compiling prost-types v0.14.3
+   Compiling darling v0.23.0
+    Checking oxc_span v0.126.0
+    Checking oxc_diagnostics v0.126.0
+   Compiling rmcp-macros v1.7.0
+   Compiling wasm-bindgen-macro v0.2.122
+    Checking tinystr v0.8.2
+    Checking potential_utf v0.1.4
+    Checking oxc_regular_expression v0.126.0
+    Checking icu_collections v2.1.1
+    Checking icu_locale_core v2.1.1
+    Checking serde v1.0.228
+    Checking tracing-test v0.2.6
+   Compiling prost-build v0.14.3
+    Checking verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+    Checking oxc_index v4.1.0
+    Checking serde-content v0.1.2
+    Checking parcel_sourcemap v2.1.1
+    Checking oxc_sourcemap v7.0.0
+    Checking debugid v0.8.0
+    Checking tinytemplate v1.2.1
+    Checking chrono v0.4.44
+    Checking trybuild v1.0.116
+    Checking serde_urlencoded v0.7.1
+    Checking ls-types v0.0.6
+    Checking dhat v0.3.3
+    Checking verter_svelte_conformance v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_svelte_conformance)
+    Checking verter_analysis_inputs v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_analysis_inputs)
+    Checking xtask v0.0.1-beta.3 (<REPO>-wt-a1\xtask)
+    Checking icu_provider v2.1.1
+    Checking verter_no_typeexpr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_no_typeexpr)
+    Checking verter_language v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_language)
+    Checking verter_audit v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_audit)
+    Checking verter_css_syntax v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_css_syntax)
+    Checking oxc_syntax v0.126.0
+    Checking icu_normalizer v2.1.1
+    Checking icu_properties v2.1.2
+    Checking verter_type_expr v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr)
+    Checking verter_macro_dto v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_macro_dto)
+    Checking futures-executor v0.3.32
+    Checking sse-stream v0.2.1
+    Checking futures v0.3.32
+    Checking serial_test v3.5.0
+    Checking js-sys v0.3.99
+    Checking console_error_panic_hook v0.1.7
+    Checking schemars v1.2.1
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_protocol)
+    Checking oxc_ast v0.126.0
+    Checking verter_tsgo_api v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsgo_api)
+    Checking tower v0.5.3
+    Checking tokio-util v0.7.18
+    Checking hyper v1.8.1
+    Checking tokio-stream v0.1.18
+    Checking idna_adapter v1.2.1
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking hyper-util v0.1.20
+    Checking sourcemap v9.3.2
+    Checking half v2.7.1
+    Checking ahash v0.8.12
+    Checking axum v0.8.9
+    Checking lightningcss v1.0.0-alpha.71
+    Checking ciborium-ll v0.2.2
+    Checking ciborium v0.2.2
+    Checking criterion v0.8.2
+    Checking verter_type_runtime v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_runtime)
+    Checking verter_relay_shim v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_relay_shim)
+    Checking oxc_ecmascript v0.126.0
+    Checking oxc_ast_visit v0.126.0
+    Checking serde-wasm-bindgen v0.6.5
+    Checking wasm-bindgen-futures v0.4.72
+    Checking wasm-bindgen-test v0.3.72
+    Checking verter_session_query v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session_query)
+    Checking oxc_parser v0.126.0
+    Checking oxc_semantic v0.126.0
+    Checking verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr_oxc)
+    Checking verter_vue_conformance v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_vue_conformance)
+    Checking verter_scheduler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_scheduler)
+    Checking verter_parser v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_parser)
+    Checking tower-lsp-server v0.23.0
+    Checking verter_workspace v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_workspace)
+    Checking verter_semantic v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_semantic)
+    Checking verter_compiler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_compiler)
+    Checking verter_diagnostics v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_diagnostics)
+    Checking verter_actions v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_actions)
+    Checking verter_session v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session)
+error: empty line after doc comment
+   --> crates\verter_session\src\semantic_query_memo\relation_memo.rs:263:5
+    |
+263 | /     /// concurrent top-level joiner receives this exact payload and carrier;
+264 | |
+    | |_^
+...
+270 |       pub fn relation_entries_for_tests(
+    |       --------------------------------- the comment documents this function
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#empty_line_after_doc_comments
+    = note: `-D clippy::empty-line-after-doc-comments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::empty_line_after_doc_comments)]`
+    = help: if the empty line is unintentional, remove it
+help: if the documentation should include the empty line include it in the comment
+    |
+264 |     ///
+    |
+
+error: large size difference between variants
+    --> crates\verter_session\src\flow_slice_content.rs:1099:1
+     |
+1099 | /  pub enum SliceObjectEntry {
+1100 | |      /// An entry provisioning exactly one key.
+1101 | |      Member(SliceObjectMember),
+     | |      ------------------------- the largest variant contains at least 416 bytes
+1102 | |      /// A SPREAD (`...source`): every key the source's value carries
+...    |
+1105 | |/     Spread {
+1106 | ||         /// The spread source's lowered value.
+1107 | ||         source: SliceExpr,
+1108 | ||     },
+     | ||_____- the second-largest variant contains at least 152 bytes
+1109 | |  }
+     | |__^ the entire enum is at least 416 bytes
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#large_enum_variant
+     = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+     |
+1101 -     Member(SliceObjectMember),
+1101 +     Member(Box<SliceObjectMember>),
+     |
+
+error: redundant closure
+    --> crates\verter_session\src\flow_slice_content.rs:2568:34
+     |
+2568 |                     .is_some_and(|alternate| contains(alternate));
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `&contains`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#redundant_closure
+     = note: `-D clippy::redundant-closure` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::redundant_closure)]`
+
+error: usage of `contains_key` followed by `insert` on a `HashMap`
+    --> crates\verter_session\src\project_semantic_dispatch\flow_return.rs:3954:13
+     |
+3954 | /             if !state.param_writes.contains_key(&ordinal) {
+3955 | |                 if let Some(node) = self.params.get(ordinal as usize) {
+3956 | |                     state.param_writes.insert(ordinal, *node);
+3957 | |                 }
+3958 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#map_entry
+     = note: `-D clippy::map-entry` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::map_entry)]`
+help: try
+     |
+3954 ~             if let std::collections::hash_map::Entry::Vacant(e) = state.param_writes.entry(ordinal) {
+3955 +                 if let Some(node) = self.params.get(ordinal as usize) {
+3956 +                     e.insert(*node);
+3957 +                 }
+3958 +             }
+     |
+
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> crates\verter_session\src\project_semantic_dispatch\relation.rs:1964:10
+     |
+1964 |       ) -> Result<
+     |  __________^
+1965 | |         (
+1966 | |             Vec<FlowReturnPendingOutcome>,
+1967 | |             Vec<(
+...    |
+1973 | |         crate::semantic_query::ResolveCallFailure,
+1974 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: this `match` expression can be replaced with `?`
+    --> crates\verter_session\src\project_semantic_dispatch\relation.rs:2091:13
+     |
+2091 | /             match self.replay_resolve_call_pending(key, state, replay_substitution) {
+2092 | |                 Ok(replayed) => *state = replayed,
+2093 | |                 Err(failure) => return Err(failure),
+2094 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#question_mark
+     = note: `-D clippy::question-mark` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::question_mark)]`
+help: try instead
+     |
+2091 ~             {
+2092 +                 let replayed = self.replay_resolve_call_pending(key, state, replay_substitution)?;
+2093 +                 *state = replayed
+2094 +             }
+     |
+
+error: match expression looks like `matches!` macro
+   --> crates\verter_session\src\structural_carrier_producer\macro_arg_producer.rs:674:66
+    |
+674 |               let has_index_signature = entries.iter().any(|entry| match entry {
+    |  __________________________________________________________________^
+675 | |                 SurfaceEntry::IndexSignature(_) => true,
+676 | |                 _ => false,
+677 | |             });
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#match_like_matches_macro
+    = note: `-D clippy::match-like-matches-macro` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::match_like_matches_macro)]`
+help: use `matches!` directly
+    |
+674 -             let has_index_signature = entries.iter().any(|entry| match entry {
+675 -                 SurfaceEntry::IndexSignature(_) => true,
+676 -                 _ => false,
+677 -             });
+674 +             let has_index_signature = entries.iter().any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+    |
+
+error: could not compile `verter_session` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+EXIT: 101
+END-DATE: 2026-08-10T05:10:23Z

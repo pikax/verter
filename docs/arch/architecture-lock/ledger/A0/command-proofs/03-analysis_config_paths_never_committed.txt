@@ -1,0 +1,13 @@
+warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-rev11-docs\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+────────────
+ Nextest run ID 38575f03-71b3-4f37-861f-baae18315f27 with nextest profile: default
+    Starting 6 tests across 2 binaries (28 tests skipped)
+        PASS [   0.021s] (1/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::leak_predicate_flags_planted_leaks_and_passes_clean_artifacts
+        PASS [   0.023s] (2/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::is_shape_scanned_artifact_discriminates
+        PASS [   0.032s] (3/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::path_level_rule_helpers_discriminate
+        PASS [   0.064s] (4/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::changelog_is_token_clean_and_regeneration_stays_clean
+        PASS [   0.064s] (5/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::gitignore_ignores_the_analysis_directory
+        PASS [   3.829s] (6/6) verter_analysis_inputs::main cases::analysis_config_paths_never_committed::analysis_inputs_never_leak_into_tracked_artifacts
+────────────
+     Summary [   3.830s] 6 tests run: 6 passed, 28 skipped

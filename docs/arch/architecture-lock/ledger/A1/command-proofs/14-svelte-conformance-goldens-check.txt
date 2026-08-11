@@ -1,0 +1,7 @@
+CMD: node scripts/gen-svelte-goldens.mjs --conformance --check
+CWD: <REPO>-wt-a1
+ENV: none
+DATE: 2026-08-10T07:36:20Z
+gen-svelte-goldens --conformance --check: 1218 golden(s) in sync with the emit-plan (manifest fnv1a64-8faa9143878b8848) and svelte@5.56.3.
+EXIT: 0
+END-DATE: 2026-08-10T07:36:24Z

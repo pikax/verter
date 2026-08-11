@@ -1,0 +1,34 @@
+✔ template mode: template-shaped state with REQUIRED_ placeholders passes (74.9295ms)
+✔ live mode: fully-resolved state with a legal ACCEPTED predecessor and IN_PROGRESS block passes (72.8331ms)
+✔ sequencing invariant: IN_PROGRESS with an unaccepted predecessor is rejected (73.5718ms)
+✔ stacked-work exception: a bare stack_id with no established stack is REJECTED (69.3219ms)
+✔ status gate: ACCEPTED with PENDING mandates and no accepted identity is rejected (71.1384ms)
+✔ strict TOML reader: unbalanced quoting is a loud parse failure, never a silent mis-read (140.3285ms)
+✔ block-set mismatch: state missing a DAG block and carrying an extra one is rejected with the symmetric difference (73.5201ms)
+✔ zero blocks validated is a FAILURE, not a pass (70.694ms)
+✔ mandate class gate: NOT_REQUIRED on a foundational-class block is rejected (76.8448ms)
+✔ sequencing invariant: a stackless READY block with an unaccepted predecessor is rejected (74.9872ms)
+✔ stacked-work exception: a predecessor citing a DIFFERENT stack snapshot digest is rejected (72.0696ms)
+✔ live mode: an empty program_dag_digest is a violation, not a silent skip (72.0406ms)
+✔ landing equivalence: ACCEPTED with a diverged accepted identity and no landing_equivalence_digest is rejected (123.5231ms)
+✔ private checkpoint: a PROVEN checkpoint over accepted predecessors passes (no fail-closed false positive) (73.9163ms)
+✔ private checkpoint: a PREMATURE checkpoint (unaccepted predecessor) is rejected (77.5364ms)
+✔ private checkpoint: an UNPROVEN checkpoint (PENDING mandates, empty identities) is rejected (75.1984ms)
+✔ private checkpoint: the status on a WRONG-CLASS block is rejected (75.567ms)
+✔ live mode: a non-ACTIVE top-level status is rejected (72.0731ms)
+✔ stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes (71.6869ms)
+✔ stacked-work exception: an equal (non-lower) predecessor stack_layer is rejected (70.3175ms)
+✔ stacked-work exception: a TERMINATED (ABORTED) predecessor inside the claimed stack is rejected (71.5338ms)
+✔ mandate class gate: architecture_review NOT_REQUIRED on a subsystem-class block passes (73.7766ms)
+✔ entry lock: the DAG root block ACCEPTED with an EMPTY or MISSING entry_lock_digest is rejected (145.8484ms)
+✔ entry lock: the DAG root block in REVIEW requires the digest; a bound digest passes (144.5531ms)
+✔ private-checkpoint predecessor: a STACKLESS REVIEW successor over a PRIVATE_CHECKPOINT predecessor is rejected with the fail-closed stack-window message (71.0523ms)
+✔ private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT stack fields over a PRIVATE_CHECKPOINT predecessor is still rejected (72.6376ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2258.5497

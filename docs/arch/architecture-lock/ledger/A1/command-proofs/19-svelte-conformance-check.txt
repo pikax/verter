@@ -1,0 +1,9 @@
+CMD: cargo run -p verter_svelte_conformance -- check
+CWD: <REPO>-wt-a1
+ENV: default
+DATE: 2026-08-10T07:36:27Z
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target\debug\verter_svelte_conformance.exe check`
+the conformance corpus matches the manifest
+EXIT: 0
+END-DATE: 2026-08-10T07:36:30Z

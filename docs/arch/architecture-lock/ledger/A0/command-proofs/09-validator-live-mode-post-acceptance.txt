@@ -1,0 +1,1 @@
+OK: program-state.toml (<EVIDENCE>/program-state.toml) — validated 50 blocks (non-zero work asserted) against docs/arch/refactor/rev11/program-dag.toml in mode live

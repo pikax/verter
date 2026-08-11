@@ -1,0 +1,54 @@
+CMD: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline -p verter_mcp  (prerequisite build, mirrors ci.yml 'Build verter-lsp, relay shim, DX baseline and MCP server (debug)')
+CWD: <REPO>-wt-a1
+DATE: 2026-08-10T05:15:06Z
+---
+   Compiling getrandom v0.4.2
+   Compiling tokio v1.52.3
+   Compiling ahash v0.8.12
+   Compiling oxc_ecmascript v0.126.0
+   Compiling verter_scheduler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_scheduler)
+   Compiling regex-syntax v0.8.10
+   Compiling chrono v0.4.44
+   Compiling verter_lsp v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_lsp)
+   Compiling lightningcss v1.0.0-alpha.71
+   Compiling uuid v1.23.1
+   Compiling rand v0.10.0
+   Compiling tempfile v3.27.0
+   Compiling debugid v0.8.0
+   Compiling oxc_parser v0.126.0
+   Compiling oxc_semantic v0.126.0
+   Compiling sourcemap v9.3.2
+   Compiling schemars v1.2.1
+   Compiling regex-automata v0.4.14
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_expr_oxc)
+   Compiling matchers v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling verter_parser v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_parser)
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_tsgo_api)
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling hyper v1.8.1
+   Compiling tokio-stream v0.1.18
+   Compiling rmcp v1.7.0
+   Compiling tower-lsp-server v0.23.0
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.8.9
+   Compiling verter_workspace v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_workspace)
+   Compiling verter_type_runtime v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_type_runtime)
+   Compiling verter_relay_shim v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_relay_shim)
+   Compiling verter_semantic v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_semantic)
+   Compiling verter_protocol v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_protocol)
+   Compiling verter_compiler v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_compiler)
+   Compiling verter_diagnostics v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_diagnostics)
+   Compiling verter_actions v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_actions)
+   Compiling verter_session v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_session)
+   Compiling verter_ffi v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_ffi)
+   Compiling verter_mcp v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_mcp)
+   Compiling verter_dx_baseline v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_dx_baseline)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 17s
+EXIT: 0
+END-DATE: 2026-08-10T05:16:24Z
+-rwxr-xr-x 2 david 197609 53158400 Aug 10 06:16 target/debug/verter-dx-baseline.exe
+-rwxr-xr-x 2 david 197609 75975680 Aug 10 06:16 target/debug/verter-lsp.exe
+-rwxr-xr-x 2 david 197609 60572672 Aug 10 06:16 target/debug/verter-mcp.exe
+-rwxr-xr-x 2 david 197609  2590720 Aug 10 06:15 target/debug/verter-relay-shim.exe

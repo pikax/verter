@@ -1,0 +1,8 @@
+a2c-completion-facts-baseline.exe : Gnuplot not found, using plotters backend
+At line:2 char:673
++ ... 56 -LiteralPath $dest; $env:A2C_SAMPLE_ONCE='1'; & $dest 2>&1 | Tee-O ...
++                                                      ~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Gnuplot not fou...lotters backend:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+A2C_SAMPLE control_ns=241.003 flat_1024_ns=773239.844 nested_256_ns=561485.938 switch_256_ns=246310.938 targets_64_live_ns=2019.238 targets_65_live_ns=2001.343

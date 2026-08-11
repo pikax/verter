@@ -1,0 +1,77 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "U2_union_member",
+      "orig": "if !used[slot] && node_matches(dispatch, *candidate, &expected[index], depth) {",
+      "mut": "if !used[slot] { // MUTATED-U2",
+      "expect": [
+        "expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::union_set_equality_rejects_subset_and_superset"
+      ],
+      "summary": "Summary [   1.963s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "I1_intersection_len",
+      "orig": "members.len() == exp.len()",
+      "mut": "true // MUTATED-I1",
+      "expect": [
+        "expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "summary": "Summary [   1.920s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "I2_intersection_arm",
+      "orig": ".all(|(member, arm)| node_matches(dispatch, *member, arm, depth + 1))",
+      "mut": ".all(|(_member, _arm)| true) // MUTATED-I2",
+      "expect": [
+        "expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "summary": "Summary [   1.951s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "S2_signature_ret",
+      "orig": "&& node_matches(dispatch, *return_type, ret, depth + 1)",
+      "mut": "&& true // MUTATED-S2",
+      "expect": [
+        "expectation_controls::signature_expectation_rejects_a_different_return"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::signature_expectation_rejects_a_different_return"
+      ],
+      "summary": "Summary [   2.036s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

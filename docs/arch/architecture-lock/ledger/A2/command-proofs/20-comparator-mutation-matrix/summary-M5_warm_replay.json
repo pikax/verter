@@ -1,0 +1,77 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "M5_warm_replay",
+      "orig": "if second_from_cache != *warm_replay {",
+      "mut": "if false { // MUTATED-M5",
+      "expect": [
+        "matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::matrix_outcome_controls::cell_value_clauses_each_reject_a_wrong_pin"
+      ],
+      "summary": "Summary [   2.020s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B1_first_from_cache",
+      "orig": "if measured.first_from_cache {",
+      "mut": "if false { // MUTATED-B1",
+      "expect": [
+        "expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "summary": "Summary [   2.009s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B2_first_cold_computes",
+      "orig": "if measured.first_cold_computes == 0 {",
+      "mut": "if false { // MUTATED-B2",
+      "expect": [
+        "expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::boundary_first_call_cold_clauses_fail_against_a_warm_first_trace"
+      ],
+      "summary": "Summary [   1.963s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "B3_degradation_guard",
+      "orig": "Some(got) if got == degradation => {}",
+      "mut": "Some(_) => {} // MUTATED-B3",
+      "expect": [
+        "expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::cache_replay_assertion_fails_in_both_directions"
+      ],
+      "summary": "Summary [   1.952s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

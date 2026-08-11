@@ -1,0 +1,103 @@
+CMD: pnpm --filter @verter/dx-harness test:corpus-gate
+CWD: <REPO>-a1-sentinel
+ENV: PLANTED (A1_SENTINEL_PLANT_CORPUS_R2_d41c8f breaks the spawner's verter-lsp binary resolution); VERTER_CORPUS_GATE_DIR=<REDACTED classified corpus root, same corpus + fingerprint as candidate row 16>; LABEL=Corpus A; SAMPLE=8; ROUTES=tsgo; FILE_DETAIL unset
+DATE: 2026-08-10T07:52:38Z
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.onlyBuiltDependencies". See https://pnpm.io/settings for the new home of each setting.
+packages/native/npm/darwin-arm64         |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
+
+> @verter/dx-harness@0.0.1 test:corpus-gate <REPO>-a1-sentinel\packages\dx-harness
+> vitest --run --config vitest.corpus-gate.config.ts
+
+
+ RUN  v4.1.7 <REPO>-a1-sentinel/packages/dx-harness
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+[corpus-gate] Corpus A: 290 .vue files discovered, 8 sampled, routes: tsgo
+[corpus-gate] topology=serial executor=unattested machine=32 cores / 127 GiB
+[corpus-gate] route tsgo: starting bounded session
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+[corpus-gate:tsgo] spawn failed: verter-lsp binary is required and must be a file: <REPO>-a1-sentinel\target\debug\verter-lsp-A1_SENTINEL_PLANT_CORPUS_R2_d41c8f.exe
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+[corpus-gate] route tsgo: done in 0ms — 0 requests, wedged=false, completed=false
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+[corpus-gate] route tsgo: latency GATING (isolated) — sole route session in flight on this executor (observed concurrency 1, topology serial, executor unattested)
+[corpus-gate] receipt (Corpus A) → <HOME>\AppData\Local\Temp\verter-corpus-gate-receipt-1786348360615.json
+[corpus-gate] wall clock 2ms vs 1200000ms budget (within, reported)
+
+stdout | test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+[corpus-gate] tsgo: sent=0 answered=0 timedOut=0 abandoned=0 wedged=false latency=GATING (isolated) provider=missing
+[corpus-gate] wall clock 2ms vs 1200000ms budget (within budget)
+[corpus-gate] receipt: <HOME>\AppData\Local\Temp\verter-corpus-gate-receipt-1786348360615.json
+
+ ❯ test/corpusGate.lane.ts (1 test | 1 failed) 54ms
+     × benchmarks Corpus A on routes: tsgo 53ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/corpusGate.lane.ts > corpus gate (all-route benchmark) > benchmarks Corpus A on routes: tsgo
+AssertionError: corpus-gate acceptance bar failures:
+[tsgo] fatal route error: verter-lsp binary is required and must be a file: <REPO>-a1-sentinel\target\debug\verter-lsp-A1_SENTINEL_PLANT_CORPUS_R2_d41c8f.exe
+[tsgo] vacuous run: zero requests were fired
+[tsgo] vacuous run: zero sampled files were opened
+[tsgo] vacuous run: zero authored probes were mined
+[tsgo] vacuous outcome: zero requests were answered (sent=0, errored=0, timedOut=0, abandoned=0): expected [ …(5) ] to deeply equal []
+
+- Expected
++ Received
+
+- []
++ [
++   "[tsgo] fatal route error: verter-lsp binary is required and must be a file: D:\\dev\\personal\\verter-a1-sentinel\\target\\debug\\verter-lsp-A1_SENTINEL_PLANT_CORPUS_R2_d41c8f.exe",
++   "[tsgo] vacuous run: zero requests were fired",
++   "[tsgo] vacuous run: zero sampled files were opened",
++   "[tsgo] vacuous run: zero authored probes were mined",
++   "[tsgo] vacuous outcome: zero requests were answered (sent=0, errored=0, timedOut=0, abandoned=0)",
++ ]
+
+ ❯ test/corpusGate.lane.ts:78:9
+     76|         outcome.failures,
+     77|         `corpus-gate acceptance bar failures:\n${outcome.failures.join…
+     78|       ).toEqual([]);
+       |         ^
+     79|     },
+     80|   );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  08:52:40
+   Duration  399ms (transform 150ms, setup 0ms, import 188ms, tests 54ms, environment 0ms)
+
+<REPO>-a1-sentinel\packages\dx-harness:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @verter/dx-harness@0.0.1 test:corpus-gate: `vitest --run --config vitest.corpus-gate.config.ts`
+Exit status 1
+EXIT: 1
+END-DATE: 2026-08-10T07:52:40Z

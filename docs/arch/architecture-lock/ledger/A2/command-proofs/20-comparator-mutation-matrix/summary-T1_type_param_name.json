@@ -1,0 +1,77 @@
+{
+  "candidate_file_blob": "d9aac889c11f312d7476bdda4b0a0a793c32374a",
+  "results": [
+    {
+      "id": "T1_type_param_name",
+      "orig": "&**display_name == *name",
+      "mut": "true // MUTATED-T1",
+      "expect": [
+        "expectation_controls::type_param_expectation_rejects_a_wrong_name"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::type_param_expectation_rejects_a_wrong_name"
+      ],
+      "summary": "Summary [   2.026s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "R1_decl_ref_name",
+      "orig": "&*identity.decl_name == *name",
+      "mut": "true // MUTATED-R1",
+      "expect": [
+        "expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::intersection_expectation_rejects_a_wrong_arm"
+      ],
+      "summary": "Summary [   2.065s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "BR1_bare_ref_name",
+      "orig": "data.bare_ref_head().is_some_and(|(got, _)| &**got == *name)",
+      "mut": "true // MUTATED-BR1",
+      "expect": [
+        "expectation_controls::bare_ref_expectation_rejects_a_wrong_name"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::bare_ref_expectation_rejects_a_wrong_name"
+      ],
+      "summary": "Summary [   1.913s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    },
+    {
+      "id": "OP1_opaque_broaden",
+      "orig": "SemanticNodeData::Opaque(QueryError::UnmodeledPosition),",
+      "mut": "SemanticNodeData::Opaque(_), // MUTATED-OP1",
+      "expect": [
+        "expectation_controls::opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "plant_proved": true,
+      "exit": 100,
+      "failing": [
+        "u6_flow_shape_corpus_tests::u6_flow_expect_tests::expectation_controls::opaque_unmodeled_position_marker_is_discriminating"
+      ],
+      "summary": "Summary [   2.015s] 40 tests run: 39 passed, 1 failed, 8664 skipped",
+      "compile_error": false,
+      "caught": true,
+      "expected_control_failed": true,
+      "restored": true
+    }
+  ]
+}

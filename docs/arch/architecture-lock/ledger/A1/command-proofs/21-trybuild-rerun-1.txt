@@ -1,0 +1,81 @@
+CMD: cargo test --locked -p verter_language --test main -- compile_fail
+CWD: <REPO>-wt-a1
+ENV: re-run 1/4 of the exact reviewer command, warm target, linked worktree, candidate commit
+DATE: 2026-08-10T07:35:05Z
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling serde_json v1.0.150
+   Compiling serde v1.0.228
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+   Compiling verter_language v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_language)
+   Compiling trybuild v1.0.116
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.41s
+     Running tests\main.rs (target\debug\deps\main-3e75d94b9b129728.exe)
+
+running 2 tests
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling rustversion v1.0.22
+    Checking cfg-if v1.0.4
+   Compiling owo-colors v4.3.0
+   Compiling siphasher v1.0.2
+   Compiling thiserror v2.0.18
+    Checking allocator-api2 v0.2.21
+    Checking itoa v1.0.17
+    Checking smawk v0.3.2
+    Checking unicode-linebreak v0.1.5
+    Checking oxc_data_structures v0.126.0
+    Checking rustc-hash v2.1.2
+    Checking ryu v1.0.23
+    Checking static_assertions v1.1.0
+    Checking unicode-width v0.2.2
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+    Checking unicode-segmentation v1.12.0
+    Checking oxc_estree v0.126.0
+    Checking getrandom v0.2.17
+   Compiling phf_shared v0.13.1
+    Checking textwrap v0.16.2
+    Checking hashbrown v0.17.1
+   Compiling phf v0.13.1
+    Checking oxc_allocator v0.126.0
+    Checking castaway v0.2.4
+    Checking compact_str v0.9.0
+   Compiling syn v2.0.117
+    Checking oxc_str v0.126.0
+   Compiling thiserror-impl v2.0.18
+   Compiling oxc-miette-derive v2.7.1
+   Compiling oxc_ast_macros v0.126.0
+   Compiling serde_derive v1.0.228
+    Checking oxc-miette v2.7.1
+    Checking oxc_span v0.126.0
+    Checking verter_span v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_span)
+    Checking verter_language v0.0.1-beta.3 (<REPO>-wt-a1\crates\verter_language)
+    Checking verter_language-tests v0.0.0 (<REPO>-wt-a1\target\tests\trybuild\verter_language)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.90s
+
+
+test [0m[1mtests/compile-fail/deserialize_live_capabilities.rs[0m ... [0m[32mok
+[0m
+
+test cases::compile_fail::deserialization_cannot_mint_live_authority_capabilities ... ok
+    Checking verter_language-tests v0.0.0 (<REPO>-wt-a1\target\tests\trybuild\verter_language)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+
+
+test [0m[1mtests/compile-fail/registered_snapshot_id_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/registered_snapshot_id_bytes_api.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/registered_snapshot_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/authority_namespace_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/canonical_grammar_outside_mint.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/compile-fail/accepted_source_outside_mint.rs[0m ... [0m[32mok
+[0m
+
+test cases::compile_fail::registered_authority_capabilities_are_not_mintable_outside_their_authorities ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 10.87s
+
+EXIT: 0
+END-DATE: 2026-08-10T07:35:18Z
