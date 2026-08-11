@@ -10,8 +10,8 @@ ab971a4d96eeeaa1642354a78159227d1a9e86c55e0afa07317fa3f84feced81 *../context-pac
 eb3e0376fe677465391681ea0da969aef944946e6e110dda02cc82fd6d32f794 *../latency-benchmark-record.md
 93bbfdf2ab26ef21960dfe8ac623a970ef5dd9dfdf3ef5b597ef4be76bdfa7ef *../LATENCY-GATE-STOP-FINDING.md
 50f0fa9878d968a5766bef067aa105d1f481a8a8ffb70c7786b7ed87b77365ca *../LAYOUT-LOCK-STOP-FINDING.md
-2d9511536adc445ce75e661c2454cc413e573243f875fd9b5ce96fbc2382d2b6 *../layout-stop-digests.sha256
-e90949edf63294e0fa31713435c3ef3ef2c6d67f708867aad39b209ce442f6d5 *../performance-stop-digests.sha256
+3f2becb209b22ade85ba71ff40f359f5983f7f6aa8c98b32fd5f0cc118610051 *../layout-stop-digests.sha256
+35073c130a6ab4603eb17459d2937e70a8f207877c8003ecd1f4908ada8d736a *../performance-stop-digests.sha256
 7c8f12938d0e3300d786da8c0f9078bcb9309491f98ad26e45560bb54a77f4d6 *../remaining-evidence-not-run.md
 d0558ed7569b94bce371c058bdf22a64d144a06f37e4f6d674983693d211ddc7 *../STOP-FINDING.md
 9898b20c5b1201fb4ef125e0a0ca6e8bd12fd80b7218edc306c2f34fe3033363 *./a2c-stop-restore.patch
