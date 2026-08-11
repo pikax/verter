@@ -53,7 +53,7 @@ this directory and that external ledger to continue the program.
 
 ## Registered amendments
 
-Amendments normally record deltas without editing the verbatim-reconstructed authority files. AMD-002 is the maintainer-ratified exception because predecessor authority must be materialized in the machine-readable DAG and exact-state template. The published consolidated and release artifacts remain immutable historical originals; for execution, AMD-002 and the amended live split files supersede their A2-to-A3 lineage.
+Amendments normally record deltas without editing the verbatim-reconstructed authority files. AMD-002 and AMD-003 are maintainer-ratified exceptions: predecessor authority is materialized in the machine-readable DAG and exact-state template, while the corrected completion-graph ownership and performance instrument are materialized in the live split files. The published consolidated and release artifacts remain immutable historical originals; for execution, AMD-002 as superseded by AMD-003 and the amended live split files govern the A2-to-A3 lineage.
 
 Amendments live in [`amendments/`](amendments/) and bind the program:
 
@@ -66,9 +66,13 @@ Amendments live in [`amendments/`](amendments/) and bind the program:
   delivery, never simply deleted.
 - **AMD-002 — A2C completion-model predecessor for A3:**
   [`amendments/AMD-002-a2c-completion-predecessor.md`](amendments/AMD-002-a2c-completion-predecessor.md)
-  inserts `A2C` between `A2` and `A3`, makes accepted content-free completion facts
-  A3's sole G10 discriminator, and requires D6 / `U6.LOOP_CLOSURE` to consume the
-  same completion algebra rather than rebuild it.
+  inserts `A2C` between `A2` and `A3`; its points 2 through 4 are superseded by
+  AMD-003, while point 1 and point 5 onward remain in force.
+- **AMD-003 — A2C completion-graph authority recalibration:**
+  [`amendments/AMD-003-a2c-completion-graph-authority.md`](amendments/AMD-003-a2c-completion-graph-authority.md)
+  supersedes AMD-002 points 2 through 4 while retaining `A2 → A2C → A3`, delivers
+  D6's sole completion graph early through A2C, restricts A3 to typed-gap
+  retraction/non-admission, and recalibrates the performance acceptance cells.
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.

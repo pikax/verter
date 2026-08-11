@@ -12,7 +12,7 @@ The program is a DAG of bounded clean cutovers. A block may start when every pre
 
 A pull-request stack is transport only. Bounded stack windows may linearize one short dependency path for review, but they do not create semantic predecessor authority. A program-wide mega-stack is prohibited. Atomic private layers land only through their final atomic candidate.
 
-Before `A6`, only Gate 0 work is legal. `A2C` may add only content-free completion facts and must not change public semantic results. `A3` may change behavior solely to retract a known wrong-complete result to a typed non-admissible outcome. Neither block may choose a disputed final flow owner.
+Before `A6`, only Gate 0 work is legal. `A2C` may add only canonical content-free control topology/events and the demanded completion reduction as an early structural slice of D6's sole flow-graph authority. `A3` may change behavior solely to retract a known wrong-complete result to a typed non-admissible outcome in response to `FlowGap::AbruptCompletion`. Neither block may create a second graph/classifier or assume D5, D8, or later D6 responsibilities.
 
 # 2. Critical path
 
@@ -82,21 +82,21 @@ Add exact recursive expectations, negative controls, oracle/profile stamps, cros
 
 **Exit:** known defect rows discriminate the actual semantic difference and cache behavior.
 
-## A2C — Abrupt-completion facts for G10 safety discrimination
+## A2C — Completion topology and G10 safety verdict
 
 **Predecessors:** `A2`.
 
-Add one content-free, exact-or-typed-unknown completion model to `FunctionBodySkeleton`: canonical completion sets for normal, return, throw, labeled/unlabeled break and continue; compositional label/switch/loop/try/catch/finally transformation; structural authored-return membership; and endpoint-`undefined` disposition. It changes no public result, adds no graph edge or flow-state solver, and supplies the sole facts A3 may use to discriminate G10.
+Extend the canonical function skeleton with the minimum content-free control topology and source-ordered completion events required by the sole `FunctionFlowGraph`. During the existing demanded graph build, resolve events to dense control identities, emit normal/return/throw/catch/break/continue/switch/finally edges, derive exact-or-typed-unknown root completion coverage on the graph, and produce `FlowGap::AbruptCompletion` when the producer's endpoint contribution contradicts or cannot be proved by that verdict. This is an early structural delivery of D6's sole completion/flow-graph authority.
 
-**Exit:** G10 and its labeled/switch/catch siblings are distinguished from X68/X80/X88 by accepted skeleton facts; missing knowledge is typed unknown; public cold/warm results are unchanged; no query-time AST rewalk, second completion classifier, capture summary, effect transfer, graph edge, or fixed point is introduced.
+**Exit:** G10, X05, X68, X80, X88, and labeled/switch/catch/malformed/deep-target siblings are distinguished by the sole graph authority; missing knowledge yields typed abrupt-completion degradation; no AST retention/rewalk, completion memo, second graph/classifier, target-indexed completion set, or fixed target ceiling exists. The representative-corpus skeleton index, public cold request, linear-work, 64/65-target, retained-byte, and zero-completion-allocation performance cells pass limits frozen before implementation.
 
 ## A3 — Retract known wrong-complete results
 
 **Predecessors:** `A2C`.
 
-Any exposed path that skips an unmodelled obligation returns typed `Partial`, `FlowGap`, or `NoValue` and is not warm-admitted. Authored `any` remains distinct. This is the only pre-`A6` semantic behavior change permitted.
+Any exposed path that skips an unmodelled obligation returns typed `Partial`, `FlowGap`, or `NoValue` and is not warm-admitted. For G10, A3 consumes only the typed abrupt-completion degradation produced by the sole D6 graph authority; it does not read statement syntax, skeleton regions, completion events, graph edges, or an endpoint accessor. Authored `any` remains distinct. This is the only pre-`A6` semantic behavior change permitted.
 
-**Exit:** every A2-catalogued known wrong-and-warm result, including G10 as discriminated by accepted A2C completion facts, returns typed `Partial`, `FlowGap`, or `NoValue` and is refused warm admission; authored `any` and the named checker-correct clean controls remain complete and warm.
+**Exit:** every A2-catalogued known wrong-and-warm result, including G10 as reported through `FlowGap::AbruptCompletion`, returns typed `Partial`, `FlowGap`, or `NoValue` and is refused warm admission; authored `any` and the named checker-correct clean controls remain complete and warm.
 
 ## A4 — Install measurement-only attribution and capture the baseline
 
@@ -264,11 +264,11 @@ Implement supported narrowing/invalidation/predicate/substitution mechanisms. Ev
 
 Retain direct/transitive reads and writes, escape summaries, creation-time frontier/freshness, profile-compatible invalidation, and one effect mechanism across expression positions.
 
-## D6 — Loop fixed points and completion algebra
+## D6 — Loop fixed points and completion graph
 
 **Predecessors:** `D3`.
 
-Consume A2C's content-free completion facts as the sole structural completion classifier; integrate them into the sole graph solver with deterministic selected-frontier loop convergence, loop-summary and `try`/`finally`-override edges, and state routing for labels, switch, loops, try/catch/finally, return, throw, break, and continue. Do not rebuild or fork the completion classifier.
+Extend the completion topology, events, edges, and coverage delivered early through A2C on the sole `FunctionFlowGraph`; add deterministic selected-frontier loop convergence, loop-summary edges, state routing, and final clean semantics on that same graph. Do not reconstruct completion meaning from syntax or create another graph/classifier.
 
 ## D7 — `this`, sequence, call/context, and value surfaces
 

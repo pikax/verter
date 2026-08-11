@@ -1,39 +1,59 @@
-# A2C — Abrupt-completion facts for G10 safety discrimination
+# A2C — Completion topology and G10 safety verdict
 
-**Status:** PREPARED; begins only after A2 acceptance and ratification of AMD-002.  
-**Class:** Foundational safety.  
-**Predecessors:** A2.  
-**Gate 0 lineage SHA:** `UNSET`; record the exact accepted A2-based candidate for this evidence block.
+**Class:** Foundational safety; early structural slice of D6’s sole flow-graph authority.  
+**Predecessors:** A2.
 
 ## Objective
 
-Provide one content-free, exact-or-typed-unknown completion model sufficient for A3 to distinguish G10 from checker-correct clean results, without changing public semantic results or implementing the later sole flow solver.
+Extend the canonical function skeleton with the minimum content-free control topology required by the sole `FunctionFlowGraph`, then derive abrupt-completion coverage during the existing demanded graph build. Supply A3 with a typed `FlowGap::AbruptCompletion` when the current producer’s endpoint contribution contradicts the graph verdict or the verdict is unknown.
 
 ## In scope
 
-- canonical completion kinds `Normal`, `Return`, `Throw`, `Break(target)`, and `Continue(target)`;
-- compositional completion-set transformation for blocks, `if`, labels, `switch`, loops, `try`, `catch`, and `finally`, limited to syntax-complete facts and typed unknown where final loop/flow semantics are required;
-- structural authored-return membership and exact endpoint-`undefined` disposition;
-- compact arena-free completion facts stored on `FunctionBodySkeleton`, computed once during skeleton construction and reusable without a query-time AST rewalk;
-- an exact statement/suffix fact permitting A3 to identify the G10 abrupt-completion hazard without another syntax allowlist;
-- discriminating fact-level tests for G10, labeled/switch/catch siblings, and the named checker-correct controls X68, X80, and X88.
+- Canonical control-construct identities and parent/group relationships for labels, switch, loops, try, catch, and finally.
+- Source-ordered content-free completion events for return, throw, labeled/unlabeled break, and labeled/unlabeled continue.
+- Direct graph edges for normal continuation, return, throw-to-catch, break/continue destination, switch exit, and finally preservation/override.
+- Structural authored-return membership.
+- One exact-or-typed-unknown root completion-coverage verdict stored on `FunctionFlowGraph`, not `FunctionBodySkeleton`.
+- A typed `FlowGap::AbruptCompletion` emitted by the flow producer when its endpoint-undefined claim disagrees with that verdict or coverage is unknown.
+- Exact G10, X05, X68, X80, X88, switch/catch sibling, malformed-target, deep-target, and non-interference evidence.
 
 ## Out of scope
 
-- public result retraction or any other semantic behavior change; A3 owns that behavior;
-- closure reads/writes, capture summaries, escape/freshness analysis, or position-independent effect transfer; D5 owns those mechanisms;
-- closure-escape, loop-summary, or `try`/`finally`-override graph edges, loop fixed points, slot transfer, or flow-state joins; D6 and `U6.LOOP_CLOSURE` own those mechanisms;
-- proof-carrying complete-result construction, final obligation discharge, or warm-admission closure; D8 owns those mechanisms;
-- a second syntax-shaped evaluator, a second control graph, cache admission, compatibility repair, or speculative services.
+- Value typing, capture/effect transfer, freshness, or escape; D5 remains owner.
+- Loop fixed points, slot-state transfer, narrowing, or final flow joins; later D6 work remains owner.
+- Proof-carrying complete-result construction and cache-admission closure; D8 remains owner.
+- AST retention, query-time AST rewalk, a completion memo, a second syntax evaluator, target-indexed completion sets, or a fixed target-count ceiling.
 
-## Required evidence
+## Construction contract
 
-Exact completion-set tests and pinned-checker discrimination for G10 plus labeled/switch/catch siblings; X68/X80/X88 remain exact clean controls; missing or unsupported facts produce typed unknown and never a guessed exact fact; construction is deterministic and linear, facts are `NoTypeExpr`, retained size is measured, and no query-time AST rewalk occurs; mutation recipes independently break label routing, throw-to-catch routing, and `finally` override and make the named tests fail.
+Skeleton construction performs one syntax walk and records only canonical structural topology/events. It does not compute or retain `EndpointUndefinedFact`, `CompletionSet`, statement completion sets, suffix completion sets, or active-target bitsets.
+
+`build_function_flow_graph(&FunctionBodySkeleton)` is the sole completion reducer. It resolves completion events to dense control identities, emits completion edges on the existing graph, and computes `CompletionCoverage`. No other production component interprets label, switch, loop, try/catch/finally, break, continue, throw, or return composition.
+
+## A3 contract
+
+A3 consumes only the producer’s typed degradation:
+
+```rust
+match flow_result.degradation() {
+    Some(FlowGap::AbruptCompletion { .. }) => {
+        // Partial/FlowGap/NoValue; suppress warm admission.
+    }
+    _ => {}
+}
+```
+
+A3 must not read statement syntax, skeleton regions, completion events, graph edges, or an endpoint accessor.
+
+## Required performance evidence
+
+- Representative-corpus aggregate skeleton-index construction passes the frozen 3%/noise gate.
+- Public cold flow requests pass the frozen relative gate and a predeclared absolute SLO.
+- Work is linear in indexed control constructs, completion events, and emitted completion edges.
+- No fixed target-capacity discontinuity; 64 and 65 live targets are ordinary exact inputs.
+- Retained bytes are attributed solely to canonical D6-required topology; no A3-only retained payload exists.
+- No completion-owned allocation occurs for functions containing no completion-relevant control/event beyond data already required by the skeleton.
 
 ## Abort/rescope
 
-Stop if G10 discrimination requires value typing, capture/effect transfer, loop fixed-point state, graph-edge ownership, a second flow representation, or a public semantic change. Stop if a completion fact cannot be exact and fail-closed without guessing. Amend the charter rather than absorbing D5, D6, D8, or `U6.LOOP_CLOSURE`.
-
-## Review
-
-Exact-SHA conformance, architecture, and adversarial/performance mandates apply according to `governance.md`. `A2C` is accepted only when its evidence is attached to one unchanged candidate/evidence SHA and proves both exact G10 discrimination and non-interference with public results.
+Stop if exact discrimination requires value typing, D5 effects, loop fixed points, D8 proof minting, AST retention/rewalk, a second graph, or a second completion classifier.

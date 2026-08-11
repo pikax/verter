@@ -31,8 +31,12 @@ that order should read `package-README.md` as the package README (the landed
 
 AMD-002 subsequently amended the live split files `program-dag.toml`, `program.md`,
 `charters/A3.md`, and `templates/program-state.template.toml`, and added
-`charters/A2C.md`. The current bytes of those amended or added files are execution
-authority under AMD-002; they are not covered by the historical 67/67 byte-verbatim
+`charters/A2C.md`. AMD-003 then superseded AMD-002 points 2 through 4 and amended the
+live split files `program.md`, `charters/A2C.md`, and `charters/A3.md` to materialize
+the corrected completion-graph authority; it also amended the associated
+`docs/arch/u6-flow-return-gaps-and-target.md` architecture note. The current bytes of
+the amended or added Revision 11 split files are execution authority under AMD-002 as
+superseded by AMD-003; they are not covered by the historical 67/67 byte-verbatim
 claim. The pinned consolidated master remains the immutable source from which the
 originally reconstructed bytes are recoverable.
 
@@ -52,8 +56,8 @@ and the `amendments/` records (none of which are package files) and EXCLUDES the
 consolidated canonical master. **Amendments live OUTSIDE the historical verbatim
 set:** files under `amendments/` are repository-local program records, not
 reconstructions of package content. Their inclusion in this aggregate does not alter
-the historical 67/67 attestation. AMD-002 is the disclosed exception that subsequently
-edited the named live split files above. Each exclusion has a reason:
+the historical 67/67 attestation. AMD-002 and AMD-003 are the disclosed exceptions
+that subsequently edited the named live split files above. Each exclusion has a reason:
 
 - `consolidated/` — the single-file canonical master is already pinned individually by
   its own SHA-256 row above (digest-matched to the published validation report);
@@ -75,8 +79,8 @@ differs. Files must be checked out with their committed LF line endings (this
 repository uses `core.autocrlf=false`; a CRLF-translating checkout changes the bytes
 and therefore the digest).
 
-- File count: 72
-- Aggregate digest: `5385b92113affe07db54cadb799c514e6fa3883c0f17255fc2a217a1cba5b014`
+- File count: 73
+- Aggregate digest: `4bfc008ca833b5b08875b37ee1df01426efceb89fec0430bd844d34120067cd1`
 
 (The historical aggregate reconstruction digest
 `4ab1523c4fc769cc02da61d017d7e447adf62652189350c947a3f642128d8e5c` was published
