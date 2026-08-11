@@ -170,7 +170,7 @@ use super::{degr_of, upsert, Degr};
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
+    FlowGap, FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
     ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SignatureKind,
 };
 use crate::types::HostConfig;
@@ -1599,13 +1599,6 @@ pub(crate) mod matrix {
     pub(crate) enum CellExpectation {
         /// Every covered position must measure EXACTLY this outcome.
         Uniform(CellOutcome),
-        /// CURRENT behaviour is position-dependent: each position's
-        /// outcome is pinned individually. This is a recorded,
-        /// deliberately visible expected-versus-actual gap — the checker
-        /// types every position identically (`checker`), so the moment an
-        /// owner makes the effect position-independent every divergent
-        /// pin here fails and forces a re-pin to `Uniform`.
-        PositionDependent(&'static [(ExprPosition, CellOutcome)], &'static str),
     }
 
     /// A single-program cell (the non-position axes).
@@ -1852,72 +1845,9 @@ mod matrix_suite {
         container: Container::None,
         positions: COVERED_POSITIONS,
         checker: "\"b\"",
-        expectation: CellExpectation::PositionDependent(
-            &[
-                (
-                    ExprPosition::Statement,
-                    CellOutcome::NoValue {
-                        error: IIFE_EFFECT_REFUSAL,
-                    },
-                ),
-                (
-                    ExprPosition::DeclaratorInit,
-                    CellOutcome::Value {
-                        rendered: "\"a\"",
-                        degradation: Degr::None,
-                        warm_replay: true,
-                    },
-                ),
-                (
-                    ExprPosition::IfTest,
-                    CellOutcome::Value {
-                        rendered: "\"a\"",
-                        degradation: Degr::None,
-                        warm_replay: true,
-                    },
-                ),
-                (
-                    ExprPosition::SequenceOperand,
-                    CellOutcome::NoValue {
-                        error: IIFE_EFFECT_REFUSAL,
-                    },
-                ),
-                (
-                    ExprPosition::CallArgument,
-                    CellOutcome::NoValue {
-                        error: IIFE_EFFECT_REFUSAL,
-                    },
-                ),
-                (
-                    ExprPosition::Template,
-                    CellOutcome::Value {
-                        rendered: "\"a\"",
-                        degradation: Degr::None,
-                        warm_replay: true,
-                    },
-                ),
-                (
-                    ExprPosition::ShortCircuit,
-                    CellOutcome::Value {
-                        rendered: "\"a\"",
-                        degradation: Degr::None,
-                        warm_replay: true,
-                    },
-                ),
-                (
-                    ExprPosition::ObjectLiteral,
-                    CellOutcome::Value {
-                        rendered: "\"a\"",
-                        degradation: Degr::None,
-                        warm_replay: true,
-                    },
-                ),
-            ],
-            "checker types EVERY position \"b\"; current tree refuses at statement / \
-             sequence-operand / call-argument positions and publishes the stale pre-write \
-             \"a\" CLEAN AND WARM at the five other positions — the G4/G5 wrong-and-warm \
-             class, owner U6.LOOP_CLOSURE",
-        ),
+        expectation: CellExpectation::Uniform(CellOutcome::NoValue {
+            error: IIFE_EFFECT_REFUSAL,
+        }),
     };
 
     /// The non-position cells: write timing × binding kind × guard ×
@@ -1950,8 +1880,8 @@ mod matrix_suite {
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
                 rendered: "() => \"a\"",
-                degradation: Degr::None,
-                warm_replay: true,
+                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
+                warm_replay: false,
             },
             gap: "the write AFTER closure creation is not joined into the captured read — the \
                   G6 class, wrong-and-warm; owner U6.LOOP_CLOSURE",
@@ -1967,8 +1897,8 @@ mod matrix_suite {
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
                 rendered: "() => \"a\"",
-                degradation: Degr::None,
-                warm_replay: true,
+                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
+                warm_replay: false,
             },
             gap: "the SIBLING-closure write never invalidates the captured read — the G7 \
                   class, wrong-and-warm; owner U6.LOOP_CLOSURE",
@@ -1984,11 +1914,27 @@ mod matrix_suite {
             checker: "() => \"a\" | \"b\"",
             outcome: CellOutcome::Value {
                 rendered: "() => \"a\"",
-                degradation: Degr::None,
-                warm_replay: true,
+                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
+                warm_replay: false,
             },
             gap: "the DEEPER-closure (depth 2) write never invalidates the captured read — \
                   the G7 class, wrong-and-warm; owner U6.LOOP_CLOSURE",
+        },
+        FixedCell {
+            id: "let_same_closure_unannotated_write",
+            binding: BindingKind::Let,
+            timing: WriteTiming::InsideReturnedClosure,
+            depth: 1,
+            guard: GuardKind::None,
+            container: Container::None,
+            script: "function makeProps() { let x = \"a\"; return () => { x = \"b\"; return x } }",
+            checker: "() => string",
+            outcome: CellOutcome::Value {
+                rendered: "() => string",
+                degradation: Degr::None,
+                warm_replay: true,
+            },
+            gap: "",
         },
         FixedCell {
             id: "var_write_after_creation",
@@ -2049,8 +1995,8 @@ mod matrix_suite {
             checker: "() => string",
             outcome: CellOutcome::Value {
                 rendered: "Union(() => Union(string | number) | () => \"z\")",
-                degradation: Degr::None,
-                warm_replay: true,
+                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
+                warm_replay: false,
             },
             gap: "the typeof guard established BEFORE closure creation does not narrow the \
                   captured read (`string | number` where the checker preserves `string`), and \
@@ -2150,28 +2096,6 @@ mod matrix_suite {
                     outcome,
                     &mut failures,
                 ),
-                CellExpectation::PositionDependent(pins, _note) => {
-                    let pinned = pins
-                        .iter()
-                        .find(|(pos, _)| pos == position)
-                        .map(|(_, outcome)| outcome)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "matrix cell {}: position {} has no pinned outcome",
-                                IIFE_POSITION_CELL.id,
-                                position.id()
-                            )
-                        });
-                    check_cell_outcome(
-                        IIFE_POSITION_CELL.id,
-                        &IIFE_POSITION_CELL.coords(),
-                        Some(*position),
-                        &script,
-                        IIFE_POSITION_CELL.checker,
-                        pinned,
-                        &mut failures,
-                    );
-                }
             }
         }
         for cell in FIXED_CELLS {
@@ -2223,21 +2147,9 @@ mod matrix_suite {
     /// for a given cell REGARDLESS of expression position, measured LIVE
     /// and independently of the per-position pin comparisons above.
     ///
-    /// Two arms, both discriminating:
-    ///
-    /// * a cell pinned `Uniform` asserts every position's live outcome is
-    ///   pairwise IDENTICAL — the unconditional §7 property; once the
-    ///   `U6.LOOP_CLOSURE` owner repairs the position dependence and the
-    ///   cell is re-pinned `Uniform`, a position-specific effect hook can
-    ///   never be reintroduced without failing here;
-    /// * a cell pinned `PositionDependent` (today's RECORDED gap) asserts
-    ///   the live outcomes are identical WITHIN each pinned-outcome group
-    ///   AND still DIVERGE between groups — so a fix landing at one
-    ///   position but not its siblings, a regression at one position, or
-    ///   the full fix landing without a re-pin, each fails loudly. The
-    ///   divergence is asserted from the LIVE tree, so this arm also
-    ///   fails if the pins were edited into divergence the tree does not
-    ///   actually have.
+    /// The uniform pin asserts every position's live outcome is pairwise
+    /// identical, so a position-specific effect hook cannot be introduced
+    /// without failing here.
     #[test]
     fn same_capture_write_cell_is_position_independent() {
         if dump_mode() {
@@ -2265,13 +2177,6 @@ mod matrix_suite {
                 ),
             ));
         }
-        let live_of = |position: ExprPosition| -> &String {
-            &live
-                .iter()
-                .find(|(pos, _)| *pos == position)
-                .expect("every covered position was measured")
-                .1
-        };
         match &IIFE_POSITION_CELL.expectation {
             CellExpectation::Uniform(_) => {
                 let first = &live[0].1;
@@ -2290,52 +2195,6 @@ mod matrix_suite {
                     live[0].0.id(),
                     first,
                     divergent.join("\n"),
-                    ORACLE_STAMP,
-                    PROFILE_STAMP
-                );
-            }
-            CellExpectation::PositionDependent(pins, note) => {
-                // (a) WITHIN a pinned-outcome group the live outcomes must
-                // be identical — a position-local movement inside a group
-                // fails here.
-                for (position, pinned) in *pins {
-                    let group_baseline = pins
-                        .iter()
-                        .find(|(_, other)| other == pinned)
-                        .expect("the group contains its own member");
-                    let baseline_live = live_of(group_baseline.0);
-                    assert_eq!(
-                        live_of(*position),
-                        baseline_live,
-                        "cell {}: positions `{}` and `{}` are pinned to the SAME outcome but \
-                         measure DIFFERENTLY live — a position-local movement; re-measure and \
-                         re-pin (note: {note})\n[oracle: {}]\n[profile: {}]",
-                        IIFE_POSITION_CELL.id,
-                        position.id(),
-                        group_baseline.0.id(),
-                        ORACLE_STAMP,
-                        PROFILE_STAMP
-                    );
-                }
-                // (b) BETWEEN differently-pinned groups the live outcomes
-                // must still diverge — the recorded gap must be REAL in
-                // the tree. When the owner repairs position dependence,
-                // this fires and forces the re-pin to `Uniform`.
-                let (first_position, first_pin) = &pins[0];
-                let counter = pins
-                    .iter()
-                    .find(|(_, pinned)| pinned != first_pin)
-                    .expect("position_dependent_pins_record_a_real_divergence guards this");
-                assert_ne!(
-                    live_of(*first_position),
-                    live_of(counter.0),
-                    "cell {}: the recorded position-dependence is GONE — `{}` and `{}` now \
-                     measure identically. This failure is the INTENDED signal: the owner made \
-                     the capture-write effect position-independent; re-pin the cell as \
-                     `Uniform` (note: {note})\n[oracle: {}]\n[profile: {}]",
-                    IIFE_POSITION_CELL.id,
-                    first_position.id(),
-                    counter.0.id(),
                     ORACLE_STAMP,
                     PROFILE_STAMP
                 );
@@ -2417,26 +2276,29 @@ mod matrix_suite {
         );
     }
 
-    /// A PositionDependent pin must record a REAL divergence; if every
-    /// pinned outcome is equal the cell must be re-pinned as `Uniform`.
     #[test]
-    fn position_dependent_pins_record_a_real_divergence() {
-        let cells: &[&PositionCell] = &[&IIFE_POSITION_CELL];
-        for cell in cells {
-            if let CellExpectation::PositionDependent(pins, note) = &cell.expectation {
-                assert!(
-                    pins.len() >= 2,
-                    "matrix cell {}: a PositionDependent pin needs at least two positions",
-                    cell.id
-                );
-                let first = &pins[0].1;
-                assert!(
-                    pins.iter().any(|(_, outcome)| outcome != first),
-                    "matrix cell {}: every PositionDependent pin is IDENTICAL — the recorded \
-                     gap is not a gap; re-pin the cell as Uniform (note: {note})",
-                    cell.id
-                );
-            }
+    fn uniform_iife_effect_refusal_covers_every_position() {
+        assert_eq!(IIFE_POSITION_CELL.positions, COVERED_POSITIONS);
+        let CellExpectation::Uniform(CellOutcome::NoValue { error }) =
+            IIFE_POSITION_CELL.expectation
+        else {
+            panic!("the invoked-closure position cell must be uniformly refused");
+        };
+        assert_eq!(error, IIFE_EFFECT_REFUSAL);
+        for position in IIFE_POSITION_CELL.positions {
+            let measured = measure_cell(
+                &format!("uniform_iife__{}", position.id()),
+                &iife_position_program(*position),
+            );
+            assert_eq!(measured.boundary.error_kind, Some(IIFE_EFFECT_REFUSAL));
+            assert_eq!(
+                measured.boundary.second_error_kind,
+                Some(IIFE_EFFECT_REFUSAL)
+            );
+            assert!(!measured.boundary.first_from_cache);
+            assert!(!measured.boundary.second_from_cache);
+            assert!(measured.boundary.first_cold_computes >= 1);
+            assert!(measured.boundary.second_cold_computes >= 1);
         }
     }
 }

@@ -544,22 +544,21 @@ fn flow_return_return_bearing_loop_stays_degraded_switch_and_try_resolve() {
     with_dispatch(&host, |dispatch| {
         // A return-bearing LOOP stays the unmodelled control surface:
         // typed miss, nothing admitted — a repeat demand runs cold again.
-        for name in ["subLoopReturn"] {
-            assert!(
-                flow_is_miss(
-                    dispatch,
-                    flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
-                ),
-                "{name} must stay degraded"
-            );
-            assert!(
-                flow_is_miss(
-                    dispatch,
-                    flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
-                ),
-                "{name} must not admit a warm entry"
-            );
-        }
+        let name = "subLoopReturn";
+        assert!(
+            flow_is_miss(
+                dispatch,
+                flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
+            ),
+            "{name} must stay degraded"
+        );
+        assert!(
+            flow_is_miss(
+                dispatch,
+                flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
+            ),
+            "{name} must not admit a warm entry"
+        );
         // A `switch` joins its arms' returns; both fresh literals stay
         // pinned (the multi-contributor join widens nothing). tsgo
         // 7.0.0-dev.20260526.1: `"a" | "b"`.
@@ -4421,8 +4420,9 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
         string_literal("a")
     );
 
-    expect_refused_flow(
+    expect_refused_flow_as(
         "function makeProps(x: string | number) { do { (() => { if (typeof x !== \"string\") throw 0 })() } while (false); return { v: x } }",
+        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
     expect_refused_flow_as(
@@ -4432,8 +4432,9 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
 
     // Negative controls: a directly invoked write, a same-path write, and a
     // reachable write all remain effectful and fail closed.
-    expect_refused_flow(
+    expect_refused_flow_as(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
+        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
     expect_refused_flow(
         "function makeProps() { let o: { y: \"a\" | \"b\" } = { y: \"a\" }; do { o.y = \"b\" } while (false); return o.y }",
@@ -4455,12 +4456,11 @@ fn flow_return_sequence_wrapped_iife_effect_fails_closed() {
 fn flow_return_impossible_predicate_edges_contribute_no_return_value() {
     let expected =
         verter_type_expr::TypeExpr::union(vec![string_literal("ok"), string_literal("no")]);
-    for script in [
-        "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }",
-        "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { if (isA(x)) { if (isB(x)) return x; return \"ok\" as const } return \"no\" as const }",
-    ] {
-        assert_eq!(expect_clean_flow_value(script), expected);
-    }
+    let ternary = "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }";
+    assert_eq!(expect_clean_flow_value(ternary), expected);
+
+    let statements = "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { if (isA(x)) { if (isB(x)) return x; return \"ok\" as const } return \"no\" as const }";
+    assert_eq!(expect_clean_flow_value(statements), expected);
 }
 
 #[test]

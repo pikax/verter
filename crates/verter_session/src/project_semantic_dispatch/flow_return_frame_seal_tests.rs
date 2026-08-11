@@ -223,7 +223,20 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 #[test]
 fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
     let host = make_seal_host();
-    for name in ["q1LocalHelperBare", "q1LocalHelperArray", "q1IifeArray"] {
+    for (name, degradation) in [
+        (
+            "q1LocalHelperBare",
+            FlowReturnDegradation::UnmodeledPosition,
+        ),
+        (
+            "q1LocalHelperArray",
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
+        ),
+        (
+            "q1IifeArray",
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
+        ),
+    ] {
         let outcome =
             evaluate(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
         with_dispatch(&host, |dispatch| {
@@ -232,7 +245,7 @@ fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
         });
         assert_eq!(
             outcome.degradation,
-            Some(FlowReturnDegradation::UnmodeledPosition),
+            Some(degradation),
             "{name} carries the positional degradation reason"
         );
         assert_eq!(
@@ -388,7 +401,9 @@ fn an_unmodeled_array_element_collapses_the_array_and_is_owed() {
     // The half that is NOT owed: no wrong answer, and nothing warms.
     assert_eq!(
         outcome.degradation,
-        Some(FlowReturnDegradation::UnmodeledPosition)
+        Some(FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::UnmodeledExpression
+        ))
     );
     assert_eq!(outcome.candidates, 0);
 }

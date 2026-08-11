@@ -148,8 +148,8 @@ use std::sync::Arc;
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind, QueryError,
-    SemanticNodeData, SemanticQueryKey,
+    FlowGap, FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind,
+    QueryError, SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::{FileLanguage, VerterHost};
@@ -161,6 +161,9 @@ use verter_compiler::compile::CompileTarget;
 // corpus and its strengthening travel as one unit.
 #[path = "u6_flow_expect_tests.rs"]
 pub(crate) mod u6_flow_expect_tests;
+
+#[path = "flow_gap_retraction_tests.rs"]
+mod flow_gap_retraction_tests;
 use self::u6_flow_expect_tests::{Boundary, Expect, ExpectedNode, Lit};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -245,6 +248,7 @@ pub(crate) enum NodeShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Degr {
     None,
+    FlowGap(crate::semantic_query::FlowGap),
     UnmodeledPosition,
     UnappliedWriteEffect,
     ConditionalVarDefinition,
@@ -842,6 +846,7 @@ fn node_shape(data: Option<&SemanticNodeData>) -> NodeShape {
 pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
     match reason {
         None => Degr::None,
+        Some(FlowReturnDegradation::FlowGap(gap)) => Degr::FlowGap(gap),
         Some(FlowReturnDegradation::UnmodeledPosition) => Degr::UnmodeledPosition,
         Some(FlowReturnDegradation::UnappliedWriteEffect) => Degr::UnappliedWriteEffect,
         Some(FlowReturnDegradation::ConditionalVarDefinition) => Degr::ConditionalVarDefinition,
@@ -1110,6 +1115,633 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
 
 include!("u6_flow_shape_corpus_rows_tests.rs");
 
+/// Locked baseline rows that were checker-correct, complete, and singly admitted.
+///
+/// The cohort is derived mechanically from commit
+/// `80a7d9c328842f1457e866fb8588687e9f1d3118`. Each SHA-256 fingerprint is
+/// length-delimited over `(script, probe, checker)`, so changing the authored
+/// fixture, its probe, or its recorded checker answer cannot be hidden by
+/// re-pinning the remaining row fields.
+#[cfg(test)]
+const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
+    (
+        "A01_spread_call_key",
+        "d8a8f42a671509c0a02b379c89644b21c3a8e7ce69d381354571b93ef980b9d0",
+    ),
+    (
+        "A02_spread_only",
+        "3db59c6b2c9592e6a8a1041d23e48f2e5fdf79196abab0ce27bb6f05ef5fd13b",
+    ),
+    (
+        "A03_two_spreads",
+        "9af5cffc5b6b0400b9a53c15bb9c9e77be8a199eaab433dbefd81cfc614e14f2",
+    ),
+    (
+        "A04_arrow_const_spread",
+        "da669a75623648178a4f480ece639a38443df2106dc793d5531cb74f205b5c63",
+    ),
+    (
+        "A05_module_const_spread",
+        "af512e90ff6055e5c4a7939d3e3a2dc452357f6ec20c43409fc4a54ff7b21915",
+    ),
+    (
+        "A06_plain_literal",
+        "fb9b47c475cb7fc34202495244b5977f052c0b1492e73aa6e64dc95ce327aca8",
+    ),
+    (
+        "A07_nested_spread",
+        "c2fd98aeec489ba74b458087297f0f996710d6684f0d3f6a103ebe4a4183be2a",
+    ),
+    (
+        "A08_cross_file_spread",
+        "533076313fdd168c37330b38653fa493c0218345b0dd9c0d9d40c927a558fd6e",
+    ),
+    (
+        "A09_iife_spread",
+        "97c7ece5646952510cd0146c87c1027e4e07fdb2632d1cc4e50107a1f5d2e591",
+    ),
+    (
+        "A10_spread_literal_arm",
+        "9c0678cd03271901dbeeffa34cafc7d6af28de0f1cc0adf56198bb37c91a6c7c",
+    ),
+    (
+        "A11_spread_empty_literal",
+        "8be9ffc55188501ce69b7c974844f585aca770f1393593829441077bdfa02671",
+    ),
+    (
+        "A12_override_after",
+        "9f434e83799fa2b4fc007d3ad03bac21f4b8f864038d68e1c49b990e86f442e5",
+    ),
+    (
+        "A13_override_before",
+        "1d0e8abde00b7d47b3eb9441adad5432489eaa2360fa1c5620230f8208676ef1",
+    ),
+    (
+        "A14_two_spreads_same_key",
+        "f68536b0c2aa99c0077c48134c4463ea9d6f6d22a35f2a451495ca998c564188",
+    ),
+    (
+        "A15_method_member",
+        "381ab854ba91fb50f549b3d2ed07a1a1906151f87700fc808a66336761532b91",
+    ),
+    (
+        "A16_getter_member",
+        "6c3185695d8ccd9789fc11d44e6282cbc6e659f9dc22d0f41a296a72ec7ea058",
+    ),
+    (
+        "A17_param_spread",
+        "12954be31af7288278350482eba3af6f0a6244790a26ca8d0064e026aef4c598",
+    ),
+    (
+        "A18_local_const_spread",
+        "3f29d883b4a7de5c07fad9d6d791af628eb09a132d4b3fa11af050416b1d8836",
+    ),
+    (
+        "B01_computed_after_call",
+        "7c4f3b03b93cf8db633f72902e5678d40ad3d088c5073d25f1a2eef588a4f8b2",
+    ),
+    (
+        "B02_numeric_key_after_call",
+        "3ad9839b4051425accfd869e7414c75a56b798c9a9e66901fca444583151b9cb",
+    ),
+    (
+        "B03_as_const_call",
+        "0c6c96908cd1fd03ecde940f14c1d72ef317a12842f2a0d11d5411e8db90eebf",
+    ),
+    (
+        "B04_as_const_spread_only",
+        "e56087c67a873bbeed1842b47bc7fda4189bed7d5d327447084d73a24a4b430b",
+    ),
+    (
+        "B05_satisfies_object",
+        "ce1fe7fb18011f8f6b005f043d99849dd54574c7e743b943280db5346919c674",
+    ),
+    (
+        "B06_two_calls_computed",
+        "2d14d9d50752005536401531e44041f51515cc0a34e03c3f4633048175fa5c68",
+    ),
+    (
+        "B07_computed_after_ident",
+        "624488652a1357ec6e87efb5f150ef7a473aee633984f33ff1c3aa834f4e22e5",
+    ),
+    (
+        "B08_computed_before_ident",
+        "90e82531c179c5bb427a92b39d83631e56faaa7814510a6bf1ad764a222b74c1",
+    ),
+    (
+        "B09_numeric_key_ident",
+        "11944c4c0aaa48a63a2c6828de3b8f5b924dda5229f16550138529221680b94d",
+    ),
+    (
+        "B10_as_const_ident",
+        "c6bf05a6989852f0195adc0c13a71f73964a60c0d7cbb9f601936785c9b99275",
+    ),
+    (
+        "C01_intersection_clean",
+        "da6864ff976a6791bbd413e38dec200f534fb266699920567265b838a0000397",
+    ),
+    (
+        "C03_emits_intersection_clean",
+        "e5275f5110a60b2b581c4fd8160e9554239dccb3a06ff2f7a25056dbd3a37183",
+    ),
+    (
+        "C05_withdefaults_intersection_clean",
+        "f48a7cd3aa9458c025578349aa3e4fea122d949e67fa13d3de24593937471663",
+    ),
+    (
+        "C07_heritage_extends_clean",
+        "868308ec5bb4cba373e9a81e6a2fa933ff01ab45e7ba11a9dd8f92cc9b9f0d63",
+    ),
+    (
+        "C09_heritage_members_clean",
+        "e7391ffa9791e9064fca070d4494f2d00c8169ddbaeff0109cc8dcd4343194db",
+    ),
+    (
+        "C13_emits_heritage_clean",
+        "5a47b2cfe65c26e6a913289e4805974dfc8ed125dfcc6bd2f1f134a23f3cf249",
+    ),
+    (
+        "CC03_as_const_plain_return",
+        "7e730b8d0bcbb37eaf8a7f46630d08e828afdf5a14fc9da5574f39821b02820e",
+    ),
+    (
+        "CC04_as_const_member",
+        "f11f2a1f10757ad8334def70c1b21f6e961b8419ad07f9734448143ff170fc09",
+    ),
+    (
+        "CC05_satisfies_literal_union",
+        "aec83bc5654ab8d03e5f552cf3cfed3abc9dd886b94387da9e303faf644def53",
+    ),
+    (
+        "CC07_annotated_spread_source",
+        "c93c1afc2a56465c8bdde1ace16813094845a6e6bc8c9dffad1c8e4dfaa14283",
+    ),
+    (
+        "CC08_contextual_through_call_return",
+        "42820c30d07fe3a6bbe4cb033e24a35b4f38f3d53fbf462613c5b55f89c4b7d2",
+    ),
+    (
+        "D02_param_reassign",
+        "45dd83b6d25a0dcc47846814ce8928b9cdec12407cb2b0f6f56d9d5bbf711e93",
+    ),
+    (
+        "D03_conditional_var",
+        "f0a4b2404ecf8a8ea5ff231d890ad27965aeff526559511b08e6c342db2403a0",
+    ),
+    (
+        "D04_destructured_param_write",
+        "f4709dba61ebaac5df4635e845cfa81deda2487ddc9d3c1a91e85b7001bac666",
+    ),
+    (
+        "D06_switch_return",
+        "976de41e15c20e6bb63f258b0effe6bc96bb8cb4d168200fa4b91e73c8e011cb",
+    ),
+    (
+        "D07_try_return",
+        "d1caa663e0eac5cb7345193d7867e0495a85cea0527091e8463cc3536b0b4201",
+    ),
+    (
+        "D08_overloaded_callee",
+        "094addee6d5b49b37da84c00789b93f9bf2199ae708427f46814ba089fa2a407",
+    ),
+    (
+        "E05_empty_literal",
+        "954bd988d8bcf4862f58c7d2cf598d8debda29850d2e60ac6d1b031d09dc4d08",
+    ),
+    (
+        "E06_write_then_empty",
+        "1606cf6d9258d8e6b5e3cb14cc33ba85f109af469fa2f75b5c70bfd94509868b",
+    ),
+    (
+        "F02_definemodel",
+        "3d16614f0879fd7c0cf36f66368850b40c1c5ffc8159fc23dba25e6f8e57c2a0",
+    ),
+    (
+        "F03_defineslots",
+        "c8fe73525c50bcd0cf5e0044700bf79dd03920e1fb9146f4eb17dad713b7f007",
+    ),
+    (
+        "F05_defineoptions_runtime_spread",
+        "7b114f4e64129b071588adb16e0d01b5eab126bcafd32d60ccc49cbb2395f3ee",
+    ),
+    (
+        "F06_path_projection",
+        "392b4ebcc37d56e2ddb274272115b3647d21bdedbce94860136bdef5c6bf137b",
+    ),
+    (
+        "G01_emits_spread_key",
+        "a1912bcbdac07cbebc17a874b9ff767aebbdee5ab4719b5c13dbc8669b5be321",
+    ),
+    (
+        "G02_emits_spread_only",
+        "eff356446acfa776011b696977f11fe5c09bfe4c68ca04523f0031707d7441a2",
+    ),
+    (
+        "G04_emits_cross_file",
+        "241b26f80d2d9e3c1df1738f0000448ec029eb7940fc092229300378b57e4bcc",
+    ),
+    (
+        "G05_emits_empty",
+        "74331175227c26a42cd6f39a81328c0bb436ad1f7d94915fd3023a2cd60c5d6b",
+    ),
+    (
+        "G06_emits_plain",
+        "b35a15d3c017d4cefca5999425981c107abd2771ad6bdc2dd275e6547135d823",
+    ),
+    (
+        "H01_generic_callee_spread",
+        "4d9180489cf02f0db202f9358ee0fa74542d53590c7c58dad23630d5f5e80f15",
+    ),
+    (
+        "H02_union_spread_source",
+        "06297105fab2f3af96383561d9afc77910297d9a90af842aeeb2417919fe26a2",
+    ),
+    (
+        "H03_self_recursive_helper",
+        "bb7d08c4ab86ccca6c0e74cb096cf76eda456abf6ca2653d7fa517741729444f",
+    ),
+    (
+        "N01_typeof_guard_ternary",
+        "9aa50ec0801ec0520c07105ed551abc0ff6181599ab52cdb3302f193dbbbd8d8",
+    ),
+    (
+        "N02_typeof_guard_block",
+        "c8f823e583e1044fcb64dc553bd25f1750aa79e0261debeece73bdabc4085329",
+    ),
+    (
+        "N03_truthiness_guard",
+        "5373413a8a2857e17878d39974cbdc78d32996815af11e02ba8de115995bd16f",
+    ),
+    (
+        "N04_discriminated_union",
+        "bfd4550b08587ce5947f4e1f67f85dc9b0671895997963caeb5cb30bbf187db7",
+    ),
+    (
+        "N05_in_operator_guard",
+        "719576721133ad069f6b50e4f76f4bb6fd524ec0455eae1cda6f90ba02ba5fb8",
+    ),
+    (
+        "N06_instanceof_guard",
+        "813bb79b3bca159438343b49f636614830e943475d1961a5cddddb3f1844be9a",
+    ),
+    (
+        "N07_branch_join_widens",
+        "ffebd8822e84d0f6f963bd5a06380795d235d5f8ce925aa28458b7c8fc366693",
+    ),
+    (
+        "N08_predicate_across_call",
+        "1fe3e8096ef87dc97ebe90f4de989557ad3fb7541df369b6a578bc3ed78e8eac",
+    ),
+    (
+        "N10_assertion_signature",
+        "d5df30bcdb839bddeedd0fa447035ff14a4f6f14c7bd4975a64f12850c1a858c",
+    ),
+    (
+        "N11_narrow_survives_call",
+        "a4bed3076db8008d6231b32050c88106291cfbcb475c1dc36c38dca12bdf42a2",
+    ),
+    (
+        "N12_literal_union_narrow",
+        "396d3492770b69c3dc2dd6a5c56b1def66dc34b93fd10f606cb6480862fc8651",
+    ),
+    (
+        "N13_nested_property_guard",
+        "984f7aeccd7334c9e70a0e5fdf35018a32beb912847e256f8c88f2b45e788611",
+    ),
+    (
+        "N14_negated_typeof_guard",
+        "490f4549969280b64337a8811b694c94e91f07f61b4950b068209b9dc24333b2",
+    ),
+    (
+        "N15_terminating_typeof_guard_negated_edge",
+        "b665e479092ed2a3b77bb3d127cce5dcf36c9251af262c1a0d49b68c9856961a",
+    ),
+    (
+        "N16_terminating_predicate_guard_negated_edge",
+        "f40a64b5596b2bda505284e25cc6572b0ed4a12cc6990ee30afcf86c0679404b",
+    ),
+    (
+        "N17_targetless_asserts_drops_falsy_arm",
+        "05db4eb3de4a0f72f036cc1520062aff7f4862c8d34d73efe556c18d32da761c",
+    ),
+    (
+        "N18_logical_and_opaque_false_edge_keeps_union",
+        "ce4c6d7b35763aeb7d45ad206507d60bf4aac043f09f44d8bd68a13dc9eb66c0",
+    ),
+    (
+        "N19_logical_or_opaque_false_edge_negates_modelled",
+        "eff2c2e2e5d8b35ac4eb0ff9761d90f6979d01a945ce1cd02a3d2eaf7c98256c",
+    ),
+    (
+        "N20_negated_conjunction_recovers_predicate",
+        "625279b5457dc903accb6322989a447461fddd25cbc766b55324556e4432f836",
+    ),
+    (
+        "N21_guard_union_uses_final_alternative_overlay",
+        "c439f2566c473af6c3b8b029b6c63f1e915d388fa53ffa8dee17a9c94cf07a34",
+    ),
+    (
+        "N22_double_negated_guard_union_uses_final_alternative_overlay",
+        "ecdd6ca1f3441f10c6f649b2e256b25b34664d506c0aabdd29d1bec34ccf6694",
+    ),
+    (
+        "N23_impossible_conjunction_drops_dead_disjunction_alternative",
+        "6912ee53c2ff8f51576c96c1ed4a9979040af88a277a7058e85e928d21d19761",
+    ),
+    (
+        "N24_impossible_predicate_ternary_omits_dead_contributor",
+        "dc9516ff00fb032afd1c7e4fc9844b95e3b18a681381bbcb015ab675cace97a3",
+    ),
+    (
+        "N26_structurally_possible_predicate_intersection_survives",
+        "ca413199ab0bff1dde03fc9e6c7a418890599f4325a608716909e5c50cac0c68",
+    ),
+    (
+        "X01_spread_narrow_arm_source",
+        "affeead1e071a2ba50875d5bfcfd86a842b79d4139751a55b03a172d5a33a25f",
+    ),
+    (
+        "X02_spread_with_narrow_member",
+        "41a2489e8207b86373c98f2c2f54fe2d90537696304075bcefb00295f2d1316d",
+    ),
+    (
+        "X03_narrow_member_spread_sibling",
+        "fc0690148d35b4798acc4ee0014ebe2c5787b88df0ee7edf281a82b5117e7bf6",
+    ),
+    (
+        "X04_try_catch_join",
+        "0077a76ce1f41b30f530e5d2d6bd6e693294f87fe00c0b3ac8cd2309e17e203d",
+    ),
+    (
+        "X05_catch_return_fallthrough",
+        "4cfa3405c9157f1e18ca5b6440146f993e40e978375229443acd4a051e8203d3",
+    ),
+    (
+        "X06_iife_return",
+        "cc0b45c70f68f733f8b6a45b4e472d57b356a94df697894b3e02e7425586e71b",
+    ),
+    (
+        "X07_local_arrow_return",
+        "d7e4b747ae06c9a98501eb2bfc02cbe7f1c39b514793a1838d557af9a0f3b5c5",
+    ),
+    (
+        "X08_generic_two_instantiations",
+        "80566aa919d692de9f5e5e7df4e0b8ac82ed9097532b92bc1173689aeba7a6bb",
+    ),
+    (
+        "X09_generic_wrap_return",
+        "338375339d6dcdedd10c9764ecdcac896b9ca3700c5f5f8e472b92e3dd142a6b",
+    ),
+    (
+        "X10_destructured_default_conditional",
+        "0287338e681f2a3272daa33188661401def01c8e02ad17bd1b71fa2b5d95f2eb",
+    ),
+    (
+        "X11_class_static_method_return",
+        "062c14da3e3b4da3b0a3df5dd891a821ccaca1dc35f47a032ee002892a36b084",
+    ),
+    (
+        "X13_proto_entry",
+        "cb01ba30111e946baf65f4464db509350d8d20b324e41d0417ad447fdccde942",
+    ),
+    (
+        "X15_labelled_block_return",
+        "8e2e1c8361cd81914345df51e2bca7ab7504ae3679c5a0d3f95d6d0e506382aa",
+    ),
+    (
+        "X16_switch_fallthrough",
+        "da6e096ca75e743743cf48d63f121f803c598115fec9705b8472acde93f03aab",
+    ),
+    (
+        "X20_as_const_spread_source",
+        "8d96e558b8acd65d989e885644bc0821703409eaac8bdbf38bf4704fe22ba549",
+    ),
+    (
+        "X22_switch_break_case_entry",
+        "c76dfe56935d20c486ad3695ee27b779e464d342d25d67178c8c7b892636f6be",
+    ),
+    (
+        "X25_try_assertion_catch_scope",
+        "095993c48c8f8979211c6c00984ccb8b4a8516d601f2e1fea448eafaaffb6ad8",
+    ),
+    (
+        "X26_switch_assertion_case_scope",
+        "a035d5a7ca9ff3106f1057ae8678e7f3b9c5a5ca1c4f8e84574b9c40c33d82c4",
+    ),
+    (
+        "X27_finally_fallthrough_break_override",
+        "d2288851e3a19b88563f2253ed7722f95191df0682650547e190f8dd3b58013c",
+    ),
+    (
+        "X28_destructured_default_undefined",
+        "78d7fad70e8c43d76373c2a0f5071eb22b510e93a09999dd11e562d5be1b6ffd",
+    ),
+    (
+        "X29_write_annotated_union_write_widens",
+        "f218f5f4b7e5b1d0aa5712ca5e5faecb89d88de617e5fa4f654f9013fffadc58",
+    ),
+    (
+        "X30_switch_terminating_arm_write_fallthrough",
+        "dad8c18d9ca02b4cd7734af7d8a517198f03e8f5efe3b5182e59dfed346c262c",
+    ),
+    (
+        "X31_switch_default_break_state",
+        "7c9a1e226b3220d42b762835dfc7e4b6cdc2c558bce1589915e5b1902e8b52f2",
+    ),
+    (
+        "X32_switch_exhaustive_single_case",
+        "8059dbe313344addd581530cd3151e0549212d73565c061ffc75f4a20c282088",
+    ),
+    (
+        "X33_switch_case_narrows_discriminant",
+        "edbc739e7f7d079a4ccbea1f708c8237307e2ae2efdb9b167a4c8746d89b030e",
+    ),
+    (
+        "X34_switch_exhaustive_union_no_implicit_undefined",
+        "afbcc9b359791620e69a38bba8509b03f0c0aa0aba7164717bf7e162d391d0f6",
+    ),
+    (
+        "X35_labeled_break_carries_write_state",
+        "2dd449fce9efd3e5cc8118b1e9095c288579fd996f47d9bf466e3085cb397242",
+    ),
+    (
+        "X36_labeled_break_drops_arm_assertion",
+        "176de2cc44dab4a016e1f959c08b3dab3c2b42367d0b7a34e99bec80d37aa69b",
+    ),
+    (
+        "X37_labeled_conditional_break_write",
+        "6d60cab979362bebab7da91d67f85471c25d0d69f8294d22653128a6e89b9f2d",
+    ),
+    (
+        "X38_switch_conditional_break_write",
+        "1829d8babb7153432c4f63a983ba1f92f6e12ec4247e7f76888efb677d470e5b",
+    ),
+    (
+        "X39_try_catch_throw_point_join",
+        "c4ba93be6a64d0623e1611185e9b9b4993857d1ed313948755c78173fb0fc283",
+    ),
+    (
+        "X40_finally_write_to_outer_let",
+        "04ae6d2e3017acb7e1c16195e4e79bc4676e76b2159061d9ea695ba8ef75201a",
+    ),
+    (
+        "X41_try_write_survives_finally",
+        "3efdc46cbc6161b6aa463e25e5e9a7134c25529bb4e8a5227256797b7a6f6b23",
+    ),
+    (
+        "X42_destructured_default_alias_undefined",
+        "c43b3adc4eee73bdfe04010e2ddad65425791a5ac62e935ddba6eff1fa52954b",
+    ),
+    (
+        "X43_plain_block_write_survives",
+        "2865d6d01d95b78a56d9c7a9541ccf86a519ebb7d482916b181165dbaf535811",
+    ),
+    (
+        "X44_switch_exhaustive_boolean",
+        "34a9b1a6c4c4d5beece191a0befbe3c1e3bbe6c52176d154fe8869f06c72da1a",
+    ),
+    (
+        "X45_switch_fallthrough_case_narrows_by_chain_tests",
+        "fa98bb8cfe211a8b9222f5fc78b6f14203a8063351d1f6dbbb6573dfa528dd91",
+    ),
+    (
+        "X46_try_catch_template_throw_point",
+        "356ac397793235f19291f2b8c753351922d2ff62e096b696237ad5a9012c6641",
+    ),
+    (
+        "X47_try_catch_sequence_throw_point",
+        "45c888d2b714c93bd1c10a23f1846e8b01c5bf43223139bf6d857b923267570a",
+    ),
+    (
+        "X48_try_catch_if_guard_throw_point",
+        "04aae8b579f541b7921161c25dbf1a221058f0c9615cfc7dbaf04998197ee35f",
+    ),
+    (
+        "X49_try_catch_new_callee_throw_point",
+        "d246294ba4212cb5b8d6798941e6ed7207fcb5257074a11e0b719d78b1042a2a",
+    ),
+    (
+        "X50_switch_break_exit_closes_crossed_scope",
+        "b4f88a4c10802e517d8273751c23123168dc82d85b4bb1c947745fc05ad1bfe9",
+    ),
+    (
+        "X51_finally_write_not_on_abrupt_edge",
+        "7788f7e8640c12051a56378d1636e025ab5d0a52341929e9fcb8e6901128ce17",
+    ),
+    (
+        "X53_terminated_if_arm_contributes_nothing",
+        "96e5c602603d248508f332c76865a42f6d10283be4c666571925b26ad8e6035f",
+    ),
+    (
+        "X54_switch_live_fallthrough_reaches_default",
+        "8cbaee0ee56f97419445580fcf503d33040fe46e45d7f68eb3424994f8318cc8",
+    ),
+    (
+        "X55_finally_entry_joins_pending_return",
+        "a6df0726392860562e15dc03905b422d7c33bca188bb8375a4165b69421fcb4d",
+    ),
+    (
+        "X56_finally_return_preserves_try_return",
+        "149610904ebc89a0d10914f76044acd8db25ea734b139425095ad4d4b1768b7b",
+    ),
+    (
+        "X57_if_arm_closes_lexical_shadow",
+        "a4fd3c1f7a89d38b66d1ae4c22994f939b2ea656dcad6089000125fd4722ad43",
+    ),
+    (
+        "X61_finally_break_preserves_own_exit",
+        "d3ead9f133fafd4379a26ec537f64f88f15bc01866a6404a422e6e8a928ed86e",
+    ),
+    (
+        "X63_hoisted_var_no_init_preserves_write",
+        "18baab1bafad589daac5f3395adbc41f41c1b83801d3852efe9de4ba2f1d5c4d",
+    ),
+    (
+        "X64_inert_arithmetic_loop_stays_transparent",
+        "eb9f486ba8a0951c662246b67e5e7ec796ed0225e3e3062a3bb84746f694785c",
+    ),
+    (
+        "X65_object_assignment_declared_union_selects_matching_arm",
+        "45a75dc56bb6bc90b1af0b566df25e3969eede7a6c7e2f6f4b8473b4867af487",
+    ),
+    (
+        "X66_hoisted_annotated_var_authority_serves_forward_read",
+        "e8bfcb32b5183ec851d366e4912ce939b84011e121df973c622c521573374f78",
+    ),
+    (
+        "X67_destructured_parameter_authority_precedes_writes",
+        "be3bd8c02927656eb820d725ab99382412f84525beb21ec15dc176156e683726",
+    ),
+    (
+        "X68_finally_return_over_labelled_break_keeps_undefined",
+        "5c368cf5703cf131c0edf3176d4b9f65927d51ef16f890ebbed359e57dccfac3",
+    ),
+    (
+        "X69_overlapping_object_union_assignment_selects_narrow_arm",
+        "352e71421171ceb0fc69ca5ea7afdc6d25073b7684a23db0255d3d958ba2d7fc",
+    ),
+    (
+        "X70_loop_callback_argument_is_not_invoked_closure",
+        "466661520fde20758c2ee1ed81e343651d1f790ff7ba034879ed8511d44e8793",
+    ),
+    (
+        "X71_loop_member_write_compares_full_selected_path",
+        "b787466e01699546f873ec83c4e126bed767d2a32323e1872ab540fb7cc5f6e5",
+    ),
+    (
+        "X72_loop_unreachable_write_does_not_trigger_refusal",
+        "fda9dd71faba9e328f21ef18061121951626801c9d34655d41ad6639a71889b0",
+    ),
+    (
+        "X75_fresh_object_assignment_selects_optional_member_arm",
+        "aa43bf8c938a971ea596b817b45a63d353b5adc2b3f074f8e698590ba5b327be",
+    ),
+    (
+        "X76_fresh_computed_object_assignment_selects_optional_member_arm",
+        "c53d678a5dd9dcbce5f0af0aeab12c1b6ea354dbaf54e59f7fbc5616cc67749a",
+    ),
+    (
+        "X77_spread_object_assignment_preserves_declared_union",
+        "d000c6c704fd9dc15616e02997ccec819e82d27158ee541f14588a616a51817a",
+    ),
+    (
+        "X78_mutable_var_capture_uses_declared_authority",
+        "ba51ed57ebbd9515212c8ce00374ef64c5c25178873b153436fe9c92aabf848f",
+    ),
+    (
+        "X79_forward_let_capture_uses_declared_authority",
+        "b5c55f6a6d8e1a9b1e4849598400054ec392eefbe11d7af43966c8306eb20993",
+    ),
+    (
+        "X80_wrapped_labelled_try_finally_keeps_undefined",
+        "423a15e43f1c9b598cc706b8c4d58f5764e2c44aca16e23eaa3bce09067c1233",
+    ),
+    (
+        "X81_while_false_body_write_is_inert",
+        "c1c61c4d0855907ba23fa8b3ef7400f20c4e8d441229274144c189535d8e2851",
+    ),
+    (
+        "X84_required_property_assignment_preserves_optional_union_arm",
+        "195e600cceaf21a1ecce17c510bf0f9ee43d46ba4a48521c7e7fd0c7682aa9be",
+    ),
+    (
+        "X85_nested_closure_write_updates_captured_binding",
+        "481ba4c6ad6475ca2b6b34c0986751479c9010a1d23c40c347ec6e72ddbd09e0",
+    ),
+    (
+        "X86_destructured_parameter_capture_retains_declared_union",
+        "c1f61c49cd5893520ada185cf82a2d09398f24acd6131495ea90850a23813f13",
+    ),
+    (
+        "X87_read_only_let_capture_keeps_reaching_literal",
+        "95300d65ae6acc0d45ec9d604731000ba1907e187c1aa12fbcf366e3d1c026f3",
+    ),
+    (
+        "X88_nested_label_inherits_enclosing_suffix_return",
+        "76fa69e05ef1bc843a3d649da249b426144ad4a8f37a93c8265d4be987b3a66d",
+    ),
+];
+
 // ─────────────────────────────────────────────────────────────────────────
 // The suite
 // ─────────────────────────────────────────────────────────────────────────
@@ -1230,6 +1862,258 @@ mod corpus_suite {
              deleting measured coverage, not refactoring it (got {})",
             CORPUS.len()
         );
+    }
+
+    #[test]
+    fn flow_gap_retraction_preserves_clean_checker_matches() {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
+        use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+
+        fn fingerprint(row: &Row) -> String {
+            use std::fmt::Write;
+
+            let mut hasher = Sha256::new();
+            for field in [row.script, row.probe, row.checker] {
+                hasher.update((field.len() as u64).to_le_bytes());
+                hasher.update(field.as_bytes());
+            }
+            let mut encoded = String::with_capacity(64);
+            for byte in hasher.finalize() {
+                write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            encoded
+        }
+
+        fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
+            FlowFunctionReturnIdentity {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from(symbol),
+                    space: LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            }
+        }
+
+        fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> usize {
+            use crate::semantic_query::{FlowInputContext, FlowReturnKey, ReturnProjectionDemand};
+
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(canonical),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(function),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(canonical),
+                demand: ReturnProjectionDemand::whole_return(),
+                input: FlowInputContext::empty(),
+            };
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+        }
+
+        let locked: BTreeMap<&str, &str> = CLEAN_CHECKER_MATCH_PRESERVATION_COHORT
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            locked.len(),
+            CLEAN_CHECKER_MATCH_PRESERVATION_COHORT.len(),
+            "the locked baseline preservation cohort contains a duplicate row id"
+        );
+
+        let mut current = BTreeMap::new();
+        for row in CORPUS.iter().filter(|row| {
+            matches!(row.verdict, Verdict::MatchesChecker)
+                && matches!(
+                    row.flow,
+                    Flow::Result {
+                        degradation: Degr::None,
+                        candidates: 1,
+                        ..
+                    }
+                )
+        }) {
+            assert!(
+                current.insert(row.id, fingerprint(row)).is_none(),
+                "duplicate current cohort row id `{}`",
+                row.id
+            );
+        }
+
+        let locked_ids: Vec<_> = locked.keys().copied().collect();
+        let current_ids: Vec<_> = current.keys().copied().collect();
+        assert_eq!(
+            locked_ids, current_ids,
+            "locked baseline clean checker-match cohort changed; locked={locked_ids:?}, current={current:?}"
+        );
+
+        for (id, locked_fingerprint) in locked {
+            let row = CORPUS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("locked baseline row `{id}` is missing"));
+            assert_eq!(
+                current.get(id).map(String::as_str),
+                Some(locked_fingerprint),
+                "locked row `{id}` changed script, probe, or checker fingerprint"
+            );
+            let (function, expected_node, expected_members) = match row.flow {
+                Flow::Result {
+                    function,
+                    node,
+                    members,
+                    degradation: Degr::None,
+                    candidates: 1,
+                } if matches!(row.verdict, Verdict::MatchesChecker) => (function, node, members),
+                _ => panic!(
+                    "locked row `{id}` must remain MatchesChecker with Degr::None and one candidate"
+                ),
+            };
+
+            let host = u6_flow_expect_tests::make_audit_host();
+            let dir = "/flow-gap-preservation";
+            if !row.aux.is_empty() {
+                upsert(
+                    &host,
+                    &format!("{dir}/{id}__aux.ts"),
+                    row.aux,
+                    FileLanguage::script_ts(),
+                );
+            }
+            let canonical = format!("{dir}/{id}.ts");
+            upsert(&host, &canonical, row.script, FileLanguage::script_ts());
+            let ident = identity(&canonical, function);
+
+            let first = host.get_flow_return_type_with_audit(
+                &ident,
+                crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            );
+            let first_audit = first.audit();
+            let first_payload = first_audit
+                .flow_return_inference_payload()
+                .expect("first public call carries flow audit payload");
+            let first_result = first
+                .as_result()
+                .unwrap_or_else(|error| panic!("locked row `{id}` first call refused: {error:?}"));
+            assert_eq!(
+                first_result.degradation(),
+                None,
+                "locked row `{id}` first call degraded"
+            );
+            assert!(
+                !first_audit.from_cache,
+                "locked row `{id}` first call must be cold"
+            );
+            assert!(
+                first_payload.cold_computes >= 1,
+                "locked row `{id}` first call must perform cold work"
+            );
+            assert_eq!(
+                candidate_count(&host, &canonical, function),
+                1,
+                "locked row `{id}` first call must admit exactly one candidate"
+            );
+
+            let first_node = first_result.return_type();
+            let first_json = host
+                .project_node_to_type_expr_json_bytes(first_node)
+                .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8"));
+            {
+                let store_view = host.resolver_store_view_read().into_owned_view();
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                assert_eq!(
+                    node_shape(dispatch.graph().node_data(first_node).as_deref()),
+                    expected_node,
+                    "locked row `{id}` root node pin changed"
+                );
+                assert_eq!(
+                    member_shapes(&dispatch, first_node),
+                    expected_members
+                        .iter()
+                        .map(|(name, shape)| ((*name).to_owned(), *shape))
+                        .collect::<Vec<_>>(),
+                    "locked row `{id}` member-shape pins changed"
+                );
+                if let Expect::Node(expected) = row.expect {
+                    let failures =
+                        u6_flow_expect_tests::check_node(&dispatch, first_node, expected);
+                    assert!(
+                        failures.is_empty(),
+                        "locked row `{id}` recursive semantic pin failed: {failures:?}"
+                    );
+                }
+            }
+
+            let second = host.get_flow_return_type_with_audit(
+                &ident,
+                crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            );
+            let second_audit = second.audit();
+            let second_payload = second_audit
+                .flow_return_inference_payload()
+                .expect("second public call carries flow audit payload");
+            let second_result = second
+                .as_result()
+                .unwrap_or_else(|error| panic!("locked row `{id}` second call refused: {error:?}"));
+            assert_eq!(
+                second_result.degradation(),
+                None,
+                "locked row `{id}` second call degraded"
+            );
+            assert!(
+                second_audit.from_cache,
+                "locked row `{id}` second call must be warm"
+            );
+            assert_eq!(
+                second_payload.cold_computes, 0,
+                "locked row `{id}` second call must perform no cold work"
+            );
+            assert_eq!(
+                candidate_count(&host, &canonical, function),
+                1,
+                "locked row `{id}` second call must retain exactly one candidate"
+            );
+            let second_json = host
+                .project_node_to_type_expr_json_bytes(second_result.return_type())
+                .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8"));
+            assert_eq!(
+                second_json, first_json,
+                "locked row `{id}` warm output changed"
+            );
+
+            match row.boundary {
+                Boundary::Audit {
+                    json,
+                    degradation: Degr::None,
+                    warm_replay: true,
+                } => assert_eq!(
+                    first_json.as_deref(),
+                    Some(json),
+                    "locked row `{id}` exact public output pin changed"
+                ),
+                Boundary::Skip => {}
+                other => {
+                    panic!("locked row `{id}` carries an incompatible boundary pin: {other:?}")
+                }
+            }
+        }
     }
 
     #[test]

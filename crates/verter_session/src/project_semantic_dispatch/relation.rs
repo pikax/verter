@@ -329,6 +329,17 @@ pub(super) struct DrainedFlowReturnMember {
     pub(super) fresh_seed: bool,
 }
 
+type DrainedCallResult = (
+    crate::semantic_query::ResolveCallKey,
+    ResolveCallPendingState,
+    crate::semantic_query::ResolvedCallResult,
+);
+
+type MixedDischargeResult = Result<
+    (Vec<FlowReturnPendingOutcome>, Vec<DrainedCallResult>),
+    crate::semantic_query::ResolveCallFailure,
+>;
+
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
 pub(super) struct RelationDischargeOutcome {
     /// The machinery relation root's family payload (its build output).
@@ -1961,17 +1972,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ResolveCallPendingState,
         )],
         replay_substitution: &ProvisionalSubstitution,
-    ) -> Result<
-        (
-            Vec<FlowReturnPendingOutcome>,
-            Vec<(
-                crate::semantic_query::ResolveCallKey,
-                ResolveCallPendingState,
-                crate::semantic_query::ResolvedCallResult,
-            )>,
-        ),
-        crate::semantic_query::ResolveCallFailure,
-    > {
+    ) -> MixedDischargeResult {
         let mut call_result_map: rustc_hash::FxHashMap<
             crate::semantic_query::ResolveCallKey,
             SemanticNodeId,
@@ -2073,14 +2074,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeId,
         >,
         replay_substitution: &ProvisionalSubstitution,
-    ) -> Result<
-        Vec<(
-            crate::semantic_query::ResolveCallKey,
-            ResolveCallPendingState,
-            crate::semantic_query::ResolvedCallResult,
-        )>,
-        crate::semantic_query::ResolveCallFailure,
-    > {
+    ) -> Result<Vec<DrainedCallResult>, crate::semantic_query::ResolveCallFailure> {
         if call_members.is_empty() {
             return Ok(Vec::new());
         }
@@ -2088,10 +2082,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if !state.replay_applicability {
                 continue;
             }
-            match self.replay_resolve_call_pending(key, state, replay_substitution) {
-                Ok(replayed) => *state = replayed,
-                Err(failure) => return Err(failure),
-            }
+            *state = self.replay_resolve_call_pending(key, state, replay_substitution)?;
         }
         let equation: Vec<super::dispatch_txn::ReturnEquationMember> = call_members
             .iter()

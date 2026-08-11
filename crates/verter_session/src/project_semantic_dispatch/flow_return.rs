@@ -175,6 +175,7 @@ const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO
 /// write effects rather than beside it.
 fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
     match degradation {
+        FlowReturnDegradation::FlowGap(_) => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
         FlowReturnDegradation::UnmodeledPosition
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
@@ -2287,6 +2288,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     signature_position_unmodeled
                         .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
                 }),
+            pending_statement_gap: None,
             degraded_locals: rustc_hash::FxHashSet::default(),
             var_degraded_locals: rustc_hash::FxHashSet::default(),
             var_conditional_locals: rustc_hash::FxHashSet::default(),
@@ -2310,6 +2312,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
+            evaluator.promote_pending_statement_gap();
             holds = std::mem::take(&mut evaluator.holds);
             degradation = evaluator.degradation;
             bare_return_seen = evaluator.bare_return_seen;
@@ -2608,6 +2611,7 @@ fn collect_assignment_spans(
                 collect_assignment_spans(body, out);
             }
             crate::flow_slice_content::SliceStatement::Return { .. }
+            | crate::flow_slice_content::SliceStatement::Gap(_)
             | crate::flow_slice_content::SliceStatement::Binding { .. }
             | crate::flow_slice_content::SliceStatement::Assertion { .. }
             | crate::flow_slice_content::SliceStatement::Break { .. }
@@ -2802,6 +2806,121 @@ enum GuardNarrowing {
     Impossible,
 }
 
+#[derive(Default)]
+struct NodeDisjointness {
+    provably_disjoint: bool,
+    nominal_identity_missing: bool,
+}
+
+fn slice_expr_is_exact_subject_read(
+    expr: &crate::flow_slice_content::SliceExpr,
+    subject: &crate::flow_slice_content::SliceNarrowSubject,
+) -> bool {
+    if !subject.path.is_empty() {
+        return false;
+    }
+    match (expr, &subject.root) {
+        (
+            crate::flow_slice_content::SliceExpr::Param { ordinal },
+            crate::flow_slice_content::SliceNarrowRoot::Param(subject_ordinal),
+        ) => ordinal == subject_ordinal,
+        (
+            crate::flow_slice_content::SliceExpr::Local { name, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Local(subject_name),
+        ) => name == subject_name,
+        _ => false,
+    }
+}
+
+fn guard_has_subject_matching(
+    guard: &crate::flow_slice_content::SliceGuard,
+    predicate: &impl Fn(&crate::flow_slice_content::SliceNarrowSubject) -> bool,
+) -> bool {
+    use crate::flow_slice_content::SliceGuard;
+    match guard {
+        SliceGuard::None => false,
+        SliceGuard::Typeof { subject, .. }
+        | SliceGuard::Truthy { subject, .. }
+        | SliceGuard::EqLiteral { subject, .. }
+        | SliceGuard::Instanceof { subject, .. }
+        | SliceGuard::TypePredicate { subject, .. } => predicate(subject),
+        SliceGuard::In { subject, .. } => predicate(subject),
+        SliceGuard::And(parts) | SliceGuard::Or(parts) => parts
+            .iter()
+            .any(|part| guard_has_subject_matching(part, predicate)),
+    }
+}
+
+fn slice_expr_is_exact_guard_subject_read(
+    expr: &crate::flow_slice_content::SliceExpr,
+    guard: &crate::flow_slice_content::SliceGuard,
+) -> bool {
+    guard_has_subject_matching(guard, &|subject| {
+        slice_expr_is_exact_subject_read(expr, subject)
+    })
+}
+
+fn slice_region_has_non_subject_return(
+    region: &crate::flow_slice_content::SliceRegion,
+    is_exact_subject_read: &impl Fn(&crate::flow_slice_content::SliceExpr) -> bool,
+) -> bool {
+    slice_statements_have_non_subject_return(region.statements.iter(), is_exact_subject_read)
+}
+
+fn slice_statements_have_non_subject_return<'a>(
+    statements: impl Iterator<Item = &'a crate::flow_slice_content::SliceStatement>,
+    is_exact_subject_read: &impl Fn(&crate::flow_slice_content::SliceExpr) -> bool,
+) -> bool {
+    use crate::flow_slice_content::SliceStatement;
+    statements.into_iter().any(|statement| match statement {
+        SliceStatement::Return { argument, .. } => argument
+            .as_ref()
+            .is_none_or(|expr| !is_exact_subject_read(expr)),
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            slice_region_has_non_subject_return(consequent, is_exact_subject_read)
+                || alternate.as_deref().is_some_and(|alternate| {
+                    slice_region_has_non_subject_return(alternate, is_exact_subject_read)
+                })
+        }
+        SliceStatement::Block(region) => {
+            slice_region_has_non_subject_return(region, is_exact_subject_read)
+        }
+        SliceStatement::Labeled { body, .. } => {
+            slice_region_has_non_subject_return(body, is_exact_subject_read)
+        }
+        SliceStatement::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| slice_region_has_non_subject_return(&case.region, is_exact_subject_read)),
+        SliceStatement::Try {
+            block,
+            catch,
+            finally,
+            ..
+        } => {
+            slice_region_has_non_subject_return(block, is_exact_subject_read)
+                || catch.as_deref().is_some_and(|catch| {
+                    slice_region_has_non_subject_return(&catch.region, is_exact_subject_read)
+                })
+                || finally.as_deref().is_some_and(|finally| {
+                    slice_region_has_non_subject_return(finally, is_exact_subject_read)
+                })
+        }
+        SliceStatement::Gap(_)
+        | SliceStatement::Assignment { .. }
+        | SliceStatement::Assertion { .. }
+        | SliceStatement::Break { .. }
+        | SliceStatement::Throw
+        | SliceStatement::ThrowPoint
+        | SliceStatement::Binding { .. }
+        | SliceStatement::TransparentLoop
+        | SliceStatement::Unsupported(_) => false,
+    })
+}
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
@@ -2871,6 +2990,11 @@ struct FlowEvaluator<'d, 'b> {
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// The first statement-level gap observed in source order. A statement
+    /// gap is a fallback diagnosis; a concrete degradation found during the
+    /// evaluation takes precedence. Expression gaps remain immediate because
+    /// they identify the unmodelled value position itself.
+    pending_statement_gap: Option<crate::semantic_query::FlowGap>,
     /// Names bound to `any` because their initializer FAILED with a
     /// typed flow failure. Observing such a binding is the
     /// `FailedBindingInitializer` degradation; an unobserved failed
@@ -3073,6 +3197,16 @@ enum Positional<T> {
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
+    /// Promote the first statement-level gap only when evaluation found no
+    /// concrete degradation.
+    fn promote_pending_statement_gap(&mut self) {
+        if self.degradation.is_none() {
+            self.degradation = self
+                .pending_statement_gap
+                .map(crate::semantic_query::FlowReturnDegradation::FlowGap);
+        }
+    }
+
     /// Record a typed degradation (first-observed reason wins,
     /// deterministic in source order).
     /// Contribute the typed unresolved MARKER at a position whose
@@ -3951,9 +4085,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn complete_param_writes(&self, state: &mut FlowLayerState) {
         for ordinal in 0..self.params.len() {
             let ordinal = ordinal as u32;
-            if !state.param_writes.contains_key(&ordinal) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                state.param_writes.entry(ordinal)
+            {
                 if let Some(node) = self.params.get(ordinal as usize) {
-                    state.param_writes.insert(ordinal, *node);
+                    entry.insert(*node);
                 }
             }
         }
@@ -4707,8 +4843,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// or two structural surfaces with the same required member carrying
     /// conflicting concrete tags. Different object key sets can overlap and
     /// therefore are never declared disjoint here.
-    fn nodes_provably_disjoint(&self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
-        fn tag_disjoint(left: &SemanticNodeData, right: &SemanticNodeData) -> bool {
+    fn nodes_provably_disjoint(
+        &self,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> NodeDisjointness {
+        fn tag_disjoint(left: &SemanticNodeData, right: &SemanticNodeData) -> NodeDisjointness {
             fn literal_base(value: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
                 match value {
                     crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
@@ -4723,7 +4863,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
                 )
             }
-            match (left, right) {
+            let nominal_identity_missing = matches!(
+                (left, right),
+                (SemanticNodeData::Primitive(PrimitiveKind::Symbol), _)
+                    | (_, SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+            );
+            let provably_disjoint = match (left, right) {
                 (SemanticNodeData::Primitive(a), SemanticNodeData::Primitive(b)) => {
                     let widening_pair = matches!(
                         (*a, *b),
@@ -4738,14 +4883,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     concrete(*primitive) && literal_base(literal) != *primitive
                 }
                 _ => false,
+            };
+            NodeDisjointness {
+                provably_disjoint,
+                nominal_identity_missing,
             }
         }
 
         let graph = self.dispatch.graph();
         if let (Some(left_data), Some(right_data)) = (graph.node_data(left), graph.node_data(right))
         {
-            if tag_disjoint(&left_data, &right_data) {
-                return true;
+            let relation = tag_disjoint(&left_data, &right_data);
+            if relation.provably_disjoint || relation.nominal_identity_missing {
+                return relation;
             }
         }
         let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
@@ -4753,31 +4903,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.dispatch.resolve_typeinfo_surface_view(left, context),
             self.dispatch.resolve_typeinfo_surface_view(right, context),
         ) else {
-            return false;
+            return NodeDisjointness::default();
         };
-        left_view.positive_members().iter().any(|left_member| {
+        let mut relation = NodeDisjointness::default();
+        for left_member in left_view.positive_members() {
             if left_member.optional {
-                return false;
+                continue;
             }
             let Some(key) = left_member.key.cloned_known() else {
-                return false;
+                continue;
             };
             let crate::semantic_query::SurfaceKeyProjection::Exact(right_member) =
                 right_view.project_known_key(&key)
             else {
-                return false;
+                continue;
             };
             if right_member.optional {
-                return false;
+                continue;
             }
-            match (
+            let member_relation = match (
                 graph.node_data(left_member.value),
                 graph.node_data(right_member.value),
             ) {
                 (Some(left_data), Some(right_data)) => tag_disjoint(&left_data, &right_data),
-                _ => false,
+                _ => NodeDisjointness::default(),
+            };
+            relation.nominal_identity_missing |= member_relation.nominal_identity_missing;
+            if member_relation.provably_disjoint {
+                relation.provably_disjoint = true;
+                break;
             }
-        })
+        }
+        relation
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -5399,7 +5556,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if self.assignable(target_node, current) == Some(true) {
                 return GuardNarrowing::Narrowed(subject.clone(), target_node);
             }
-            if !self.nodes_provably_disjoint(current, target_node) {
+            let relation = self.nodes_provably_disjoint(current, target_node);
+            if relation.nominal_identity_missing {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::NominalRelation,
+                ));
+            }
+            if !relation.provably_disjoint {
                 let intersection = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&[current, target_node], false);
@@ -5578,11 +5741,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = true;
-        for statement in region.statements.iter() {
+        for (statement_index, statement) in region.statements.iter().enumerate() {
             if !path_alive {
                 break;
             }
             match statement {
+                crate::flow_slice_content::SliceStatement::Gap(gap) => {
+                    self.pending_statement_gap.get_or_insert(*gap);
+                }
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
                     widening_literal,
@@ -5686,6 +5852,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let throw_base = self.throw_points.len();
                     self.conditional_arm_nesting += 1;
                     let consequent_possible = self.apply_guard_scoped(guard, true);
+                    if !consequent_possible
+                        && slice_region_has_non_subject_return(consequent, &|expr| {
+                            slice_expr_is_exact_guard_subject_read(expr, guard)
+                        })
+                    {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::GuardNarrowing,
+                        ));
+                    }
                     let (consequent_result, consequent_falls) = if consequent_possible {
                         self.eval_region(consequent)
                     } else {
@@ -5727,6 +5902,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let return_base = self.return_edges.len();
                         let throw_base = self.throw_points.len();
                         let alternate_possible = self.apply_guard_scoped(guard, false);
+                        if !alternate_possible
+                            && slice_region_has_non_subject_return(alternate, &|expr| {
+                                slice_expr_is_exact_guard_subject_read(expr, guard)
+                            })
+                        {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(
+                                crate::semantic_query::FlowGap::GuardNarrowing,
+                            ));
+                        }
                         let (alternate_result, alternate_falls) = if alternate_possible {
                             self.eval_region(alternate)
                         } else {
@@ -5812,6 +5996,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         true
                     };
                     path_alive = (consequent_falls || alternate_falls) && surviving_edge_possible;
+                    if !surviving_edge_possible
+                        && slice_statements_have_non_subject_return(
+                            region.statements.iter().skip(statement_index + 1),
+                            &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
+                        )
+                    {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::GuardNarrowing,
+                        ));
+                    }
                 }
                 crate::flow_slice_content::SliceStatement::Switch {
                     discriminant,
@@ -5881,7 +6075,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             node,
                                         );
                                     }
-                                    GuardNarrowing::Impossible => dead_dispatch = true,
+                                    GuardNarrowing::Impossible => {
+                                        dead_dispatch = true;
+                                    }
                                     GuardNarrowing::Unchanged => {}
                                 },
                                 // The default clause's dispatch edge: the
@@ -5924,6 +6120,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // component, never that live chain edge.
                             (true, Some(end)) => end.clone(),
                             (true, None) => {
+                                if let Some(subject) = discriminant {
+                                    if slice_region_has_non_subject_return(&case.region, &|expr| {
+                                        slice_expr_is_exact_subject_read(expr, subject)
+                                    }) {
+                                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                                            crate::semantic_query::FlowGap::GuardNarrowing,
+                                        ));
+                                    }
+                                }
                                 last_end = None;
                                 last_falls = false;
                                 continue;
@@ -6577,7 +6782,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         GuardNarrowing::Narrowed(subject, node) => {
                             self.narrowings.push((subject, node));
                         }
-                        GuardNarrowing::Impossible => path_alive = false,
+                        GuardNarrowing::Impossible => {
+                            if slice_statements_have_non_subject_return(
+                                region.statements.iter().skip(statement_index + 1),
+                                &|expr| slice_expr_is_exact_subject_read(expr, subject),
+                            ) {
+                                self.record_degradation(FlowReturnDegradation::FlowGap(
+                                    crate::semantic_query::FlowGap::GuardNarrowing,
+                                ));
+                            }
+                            path_alive = false;
+                        }
                         GuardNarrowing::Unchanged => {}
                     }
                 }
@@ -6916,6 +7131,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 member_filter: None,
                 holds: Vec::new(),
                 degradation: None,
+                pending_statement_gap: None,
                 degraded_locals: self.degraded_locals.clone(),
                 var_degraded_locals: self.var_degraded_locals.clone(),
                 var_conditional_locals: self.var_conditional_locals.clone(),
@@ -6939,6 +7155,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
+            nested_evaluator.promote_pending_statement_gap();
             nested_holds = nested_evaluator.holds.clone();
             nested_degradation = nested_evaluator.degradation;
             nested_bare_return_seen = nested_evaluator.bare_return_seen;
@@ -7225,6 +7442,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     None => Positional::Unmodeled,
                 }
             }
+            crate::flow_slice_content::SliceExpr::OptionalAnyChain { root } => {
+                match self.eval_expr(root) {
+                    Positional::Value(node) if self.node_is_semantic_any(node) => {
+                        Positional::Value(
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+                        )
+                    }
+                    Positional::Value(_) => {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ));
+                        Positional::Unmodeled
+                    }
+                    Positional::Hold => Positional::Hold,
+                    Positional::Unmodeled => Positional::Unmodeled,
+                }
+            }
             crate::flow_slice_content::SliceExpr::Local {
                 name,
                 param,
@@ -7254,19 +7488,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // same-frame implicit-`any` nor a file-scope name, so
                     // the POSITION carries the marker.
                     None if *captured => Positional::Unmodeled,
-                    None => Positional::Value(
-                        param
-                            .and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                            .unwrap_or_else(|| {
-                                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                            }),
-                    ),
+                    None => {
+                        match param.and_then(|ordinal| self.params.get(ordinal as usize).copied()) {
+                            Some(node) => Positional::Value(node),
+                            None => {
+                                self.record_degradation(FlowReturnDegradation::FlowGap(
+                                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                                ));
+                                Positional::Unmodeled
+                            }
+                        }
+                    }
                 }
             }
             crate::flow_slice_content::SliceExpr::Object { entries } => {
                 self.eval_object_literal(entries, false)
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
+                gap,
                 params: nested_params,
                 type_parameters,
                 mutable_capture_authorities,
@@ -7274,6 +7513,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 body,
                 can_fall_through,
             } => {
+                if let Some(gap) = gap {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
+                }
                 // The nested function's signature: a DECLARED return
                 // annotation decides it outright; a body-derived return
                 // evaluates through the same flow machinery in a FRESH
@@ -7304,9 +7546,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceExpr::Any => Positional::Value(
+            crate::flow_slice_content::SliceExpr::SemanticAny => Positional::Value(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
+            crate::flow_slice_content::SliceExpr::Gap(gap) => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
+                Positional::Unmodeled
+            }
             // A name the frame's lexical authority resolved to a
             // function-local binding the content half does not model
             // (a destructuring element, a local `class` / `enum` /
@@ -7336,6 +7582,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let holds_before = self.holds.len();
                     let narrow_len = self.narrowings.len();
                     let possible = self.apply_guard_scoped(guard, index == 0);
+                    if !possible
+                        && !guard_has_subject_matching(guard, &|subject| {
+                            slice_expr_is_exact_subject_read(arm, subject)
+                        })
+                    {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::GuardNarrowing,
+                        ));
+                    }
                     let outcome = possible.then(|| self.eval_expr(arm));
                     self.narrowings.truncate(narrow_len);
                     if let Some(outcome) = outcome {
@@ -7360,6 +7615,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // never the enclosing structure.
             crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
         }
+    }
+
+    fn node_is_semantic_any(&self, root: SemanticNodeId) -> bool {
+        let graph = self.dispatch.graph();
+        let mut pending = vec![root];
+        let mut seen = Vec::new();
+        while let Some(node) = pending.pop() {
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => return true,
+                Some(SemanticNodeData::Alias(target)) => pending.push(*target),
+                Some(SemanticNodeData::Union(arms))
+                | Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Evaluate one argument of an authored call IN THIS FRAME: a bare

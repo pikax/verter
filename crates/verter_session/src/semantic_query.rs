@@ -1544,14 +1544,26 @@ pub struct FlowReturnKey {
     pub input: FlowInputContext,
 }
 
-/// A typed degradation reason riding a USABLE [`FlowReturnResult`] — the
-/// evaluation completed but substituted `any` for a value it could not
-/// model. NEVER a failure substitute: a no-value outcome is a
-/// [`FlowReturnFailure`], and a degraded success cannot be represented
-/// there (it has a value). First-observed reason wins (deterministic in
-/// source order).
+/// A detected flow-model gap whose final semantic owner remains external to
+/// the flow-return substrate.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowGap {
+    GuardNarrowing,
+    NominalRelation,
+    ClosureCapture,
+    AbruptCompletion,
+    UnmodeledExpression,
+}
+
+/// A typed degradation reason riding a usable but incomplete
+/// [`FlowReturnResult`]. It is never a failure substitute: a no-value outcome
+/// is a [`FlowReturnFailure`], while a degraded success still has a value.
+/// First-observed reason wins deterministically in source order. Every
+/// degraded result is return-only and warm-inadmissible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowReturnDegradation {
+    FlowGap(FlowGap),
     /// A call on a binding whose value is neither callable nor `any`
     /// evaluated to `any`.
     NonCallableBinding,

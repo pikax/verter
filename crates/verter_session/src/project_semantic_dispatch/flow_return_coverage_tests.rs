@@ -3134,16 +3134,21 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
     // An IIFE still resolves through the nested-function arm (its lone
     // fresh literal contributor widens, exactly as a plain body's does).
     assert_clean_warm(&host, GEO, "geoIifeInside", string());
-    // An optional MEMBER read is not a call position: it still takes the
-    // leaf lowering (whose own answer is the shallow pass's `any` — the
-    // separately-owned fallback row, not this gate's business).
+    // A typed optional MEMBER read is not a call position, but its
+    // optionality/member projection is still unmodelled by the leaf
+    // lowerer. It therefore takes the expression-gap rail, not the
+    // optional-call refusal and not a fabricated warm `any`.
     assert_eq!(
         eval(&host, CALLS, "callOptionalMemberRead"),
         Outcome::Value {
-            ty: TypeExpr::Primitive(PrimitiveName::Any),
-            degradation: None,
-            candidates: 1,
+            ty: TypeExpr::Unknown(verter_type_expr::UnknownValue::compatibility_projection(
+                "unmodeledPosition",
+            )),
+            degradation: Some(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            )),
+            candidates: 0,
         },
-        "`a?.b` is a member read, not a call position"
+        "the degraded optional-member result keeps its published value pin",
     );
 }

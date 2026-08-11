@@ -176,6 +176,7 @@ Mapping the gaps onto their owners:
 | debt ID | disposition | debt | durable owner | resolution gate | acceptance ID |
 |---|---|---|---|---|---|
 | `FR-D8` | `DEFER` under `AMD-004` | Exact structural completion and G10 discrimination; the current producer can still publish the G10 wrong-and-warm result. | D6 / `U6.LOOP_CLOSURE` | Must close before D6 enters `REVIEW`. Heavy implementation may begin only after the D6 lock contains a closed, code-first carrier inventory. The demanded `FunctionFlowGraph` must be the sole completion reducer; G10 must match the pinned checker, X05/X68/X80/X88 must remain checker-correct clean/warm, and no syntax-only classifier or second completion authority may exist. | `d6_structural_completion_closes_g10_without_false_refusals` |
+| `FR-D9` | `DEFER` | A wrong-complete flow-return result whose dropped return contributor lies in an enclosing region is not retracted; the detector scans only the current region's statement suffix. | D6 / `U6.LOOP_CLOSURE` | Must close before D6 enters `REVIEW`. | `d6_retracts_dropped_enclosing_region_return_contributors` |
 
 The `this` half of G11 is already specified — `u6-flow-call-resolution-design.md` §C6 states
 that this block owes "the content-free `this` source/identity/locator facts plus the
