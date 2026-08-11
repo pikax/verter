@@ -25,6 +25,12 @@ class = "foundational"
 predecessors = ["A0", "A1"]
 
 [[block]]
+id = "A2C"
+name = "Retired completion predecessor; deferred to D6"
+class = "foundational-safety"
+predecessors = ["A2"]
+
+[[block]]
 id = "A3"
 name = "Immediate wrong-complete safety retraction"
 class = "foundational-safety"

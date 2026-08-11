@@ -1,5 +1,17 @@
 # Verter
 
+> **SUPERSEDED WHERE IT CONFLICTS — an architecture program is in flight.**
+>
+> The ratified Revision 11 architecture program lives at [`docs/arch/refactor/rev11/`](docs/arch/refactor/rev11/); its normative entry point is [`ORCHESTRATOR.md`](docs/arch/refactor/rev11/ORCHESTRATOR.md).
+>
+> **Precedence:** where this file and the Revision 11 plan disagree, **the plan wins**. The plan was designed to replace parts of this document, and the maintainer has ratified that precedence — see ruling R-3 in [`evidence/maintainer-rulings.md`](docs/arch/refactor/rev11/evidence/maintainer-rulings.md), which quotes both sides of the known conflicts.
+>
+> **How to read this file while the program runs:** treat it as an accurate description of how the code behaves **today**, and as authority for day-to-day operational matters — build and test commands, commit conventions, testing requirements, review discipline. Do **not** treat its architecture sections as authority over the program's target design; several describe structures the plan intends to change or remove. A rule here is not grounds to refuse a change the plan mandates.
+>
+> **If you are implementing a program block:** the plan's charters, contracts and ownership tables bind you. Follow them to the letter. Where implementing the plan appears impossible, record a deviation for maintainer ratification rather than substituting a local decision — an unrecorded deviation is far more expensive to unwind than a delay.
+>
+> This banner is removed when the program completes and the target architecture is described here directly.
+
 Verter = a Vue compiler + Language Server Protocol (LSP) implementation. Converts Vue Single File Components (SFCs) to valid TSX (TypeScript type-checks them) and compiles templates to optimized render functions. Unlike Volar, Verter generates real valid TSX, not virtual files.
 
 Hybrid Rust + TypeScript monorepo: Rust crates own carrier parsing, runtime and IDE code generation, the shared semantic session, and the LSP server (`verter_lsp` binary, stdio); TypeScript packages provide editor integration, TypeScript-provider adapters, protocol bindings, and bundler orchestration.
@@ -598,6 +610,13 @@ Types: `feat` (new feature), `fix` (bug fix), `perf` (performance), `refactor` (
 Scopes: `core` (verter_compiler), `napi` (verter_napi / @verter/native), `wasm` (verter_wasm / @verter/wasm), `play` (playground), `unplugin` (@verter/unplugin), `lsp` (language-server), `types` (@verter/types), `meta` (@verter/component-meta), `ci` (CI/CD workflows), `*` (multiple areas).
 
 Example: `feat(core): add v-memo directive support`
+
+**No program vocabulary in commit messages or source.** A commit message describes the change on
+its own terms: it must not name the architecture program, its revision, or any of its block
+identifiers. A commit that lands plan text says what the text decides, not which block decided it.
+The same prohibition applies to source under `crates/`, `packages/` and `scripts/` — see "No phase
+archaeology in production code". The program's own document tree and this file are exempt while the
+program runs; this file carries the program banner and may cite blocks by identifier.
 
 ## CI/CD
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// validate-program-state.mjs — Revision 11 program-state validator (Node/ESM).
+// validate-program-state.mjs — program-state validator (Node/ESM).
 //
 // This is a NEW ratified implementation, not a port: the plan's original
 // `tools/validate_program_state.py` was never available on this machine
 // (docs/arch/refactor/rev11/PROVENANCE.md "Not recoverable / absent"), and the
 // maintainer ruled the validators are reimplemented in Node
 // (docs/arch/refactor/rev11/evidence/maintainer-rulings.md R-4). Every check below is
-// derived from the Revision 11 tree's own text; each rule cites its source.
+// derived from the program tree's own text; each rule cites its source.
 //
 // Mandate: docs/arch/refactor/rev11/governance.md:181 — the program-state validator
 // "must pass after every transition and before a block starts, enters review, is
@@ -21,7 +21,7 @@
 //             2 = usage / unreadable input.
 //
 // No dependencies beyond node:fs / node:path / node:process. TOML is read by a
-// small purpose-written reader restricted to the shapes the Revision 11 files
+// small purpose-written reader restricted to the shapes the program files
 // actually use; anything it cannot parse is a LOUD failure, never a silent skip.
 
 import { readFileSync } from "node:fs";
@@ -70,7 +70,10 @@ function parseToml(text, label) {
         // mis-read the value (and bypass the live-mode REQUIRED_ scan). Loud
         // failure, per this file's header promise.
         if (rest.includes('"')) {
-          fail(lineNo, `trailing comment after string contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`);
+          fail(
+            lineNo,
+            `trailing comment after string contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`,
+          );
         }
       }
       return body;
@@ -85,7 +88,10 @@ function parseToml(text, label) {
           fail(lineNo, `trailing content after array: ${JSON.stringify(rest)}`);
         }
         if (rest.includes('"')) {
-          fail(lineNo, `trailing comment after array contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`);
+          fail(
+            lineNo,
+            `trailing comment after array contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`,
+          );
         }
       }
       const inner = s.slice(1, end).trim();
@@ -154,7 +160,7 @@ function parseToml(text, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Rule constants, each derived from the Revision 11 tree.
+// Rule constants, each derived from the program tree.
 // ---------------------------------------------------------------------------
 
 // templates/program-state.template.toml:44-45 — the declared block-status enum.
@@ -246,7 +252,8 @@ function parseArgs(argv) {
     if (value === undefined) usageFail(`missing value for ${flag}`);
     opts[flag.slice(2)] = value;
   }
-  if (!opts.dag || !opts.state || !opts.mode) usageFail("--dag, --state, and --mode are all required");
+  if (!opts.dag || !opts.state || !opts.mode)
+    usageFail("--dag, --state, and --mode are all required");
   if (opts.mode !== "template" && opts.mode !== "live") {
     usageFail(`--mode must be "template" or "live", got ${JSON.stringify(opts.mode)}`);
   }
@@ -387,7 +394,9 @@ function main() {
   {
     const roots = dagRoots;
     if (roots.length !== 1) {
-      v(`DAG must have exactly one root block (predecessors = []); found ${roots.length}: [${roots.join(", ")}]`);
+      v(
+        `DAG must have exactly one root block (predecessors = []); found ${roots.length}: [${roots.join(", ")}]`,
+      );
     } else {
       const successors = new Map(dagIds.map((id) => [id, []]));
       for (const b of dagById.values()) {
@@ -447,7 +456,9 @@ function main() {
     // templates/program-state.template.toml:46 — closed review enum.
     for (const field of REVIEW_FIELDS) {
       if (field in b && !REVIEW_ENUM.has(b[field])) {
-        v(`state block ${id} has ${field} ${JSON.stringify(b[field])} outside the declared review enum`);
+        v(
+          `state block ${id} has ${field} ${JSON.stringify(b[field])} outside the declared review enum`,
+        );
       }
     }
   }
@@ -514,7 +525,9 @@ function main() {
       //      (predecessor.stack_layer < block.stack_layer).
       // Anything that cannot be established REJECTS the exception.
       const problems = [];
-      if (!(typeof b.stack_snapshot_digest === "string" && DIGEST_RE.test(b.stack_snapshot_digest))) {
+      if (
+        !(typeof b.stack_snapshot_digest === "string" && DIGEST_RE.test(b.stack_snapshot_digest))
+      ) {
         problems.push(
           `stack_snapshot_digest ${JSON.stringify(b.stack_snapshot_digest ?? "")} is not a 64-char lowercase SHA-256, so no validated immutable stack snapshot is bound`,
         );
@@ -546,7 +559,13 @@ function main() {
             `unaccepted predecessor ${p} is ${JSON.stringify(ps.status ?? "")} — a predecessor that has not begun (or has terminated) cannot be a lower layer of the same validated stack snapshot`,
           );
         }
-        if (!(Number.isInteger(ps.stack_layer) && Number.isInteger(b.stack_layer) && ps.stack_layer < b.stack_layer)) {
+        if (
+          !(
+            Number.isInteger(ps.stack_layer) &&
+            Number.isInteger(b.stack_layer) &&
+            ps.stack_layer < b.stack_layer
+          )
+        ) {
           problems.push(
             `unaccepted predecessor ${p} stack_layer ${JSON.stringify(ps.stack_layer ?? "")} is not below block ${id} stack_layer ${JSON.stringify(b.stack_layer ?? "")}`,
           );
@@ -616,7 +635,12 @@ function main() {
   //                                governance.md:283,
   //                                contracts/stacked-prs.md:140).
   {
-    const EVIDENCE_BOUND = new Set(["REVIEW", "ACCEPTANCE_RECOMMENDED", "ACCEPTED", "PRIVATE_CHECKPOINT"]);
+    const EVIDENCE_BOUND = new Set([
+      "REVIEW",
+      "ACCEPTANCE_RECOMMENDED",
+      "ACCEPTED",
+      "PRIVATE_CHECKPOINT",
+    ]);
     for (const [id, b] of stateById) {
       if (typeof b.status !== "string" || !EVIDENCE_BOUND.has(b.status)) continue;
       const requireSha = (field) => {
@@ -678,7 +702,11 @@ function main() {
           );
         }
       }
-      if (b.status === "ACCEPTANCE_RECOMMENDED" || b.status === "ACCEPTED" || b.status === "PRIVATE_CHECKPOINT") {
+      if (
+        b.status === "ACCEPTANCE_RECOMMENDED" ||
+        b.status === "ACCEPTED" ||
+        b.status === "PRIVATE_CHECKPOINT"
+      ) {
         // The DAG's `class` column decides whether NOT_REQUIRED is even legal:
         // governance.md §2.2 permits skipping ONLY architecture review, ONLY on
         // a subsystem-class block; every foundational* class requires all three
@@ -690,7 +718,10 @@ function main() {
             v(
               `state block ${id} is ${b.status} but ${field} is ${val === undefined ? "missing" : JSON.stringify(val)} — every mandatory review mandate must be PASS before acceptance recommendation, acceptance, or a private checkpoint (governance.md:181, §9; program.md §7 — checkpoint REVIEW APPROVAL, not pending review)`,
             );
-          } else if (val === "NOT_REQUIRED" && !(field === "architecture_review" && blockClass === "subsystem")) {
+          } else if (
+            val === "NOT_REQUIRED" &&
+            !(field === "architecture_review" && blockClass === "subsystem")
+          ) {
             v(
               `state block ${id} is ${b.status} but ${field} is NOT_REQUIRED and DAG class ${JSON.stringify(blockClass)} does not permit it — NOT_REQUIRED is permitted only for architecture_review on a subsystem-class block (governance.md §2.2); a foundational* block requires all three review mandates PASS on one exact candidate SHA/tree (governance.md:106,277)`,
             );
@@ -711,7 +742,10 @@ function main() {
         const diverged = b.accepted_sha !== b.candidate_sha || b.accepted_tree !== b.candidate_tree;
         if (
           diverged &&
-          !(typeof b.landing_equivalence_digest === "string" && DIGEST_RE.test(b.landing_equivalence_digest))
+          !(
+            typeof b.landing_equivalence_digest === "string" &&
+            DIGEST_RE.test(b.landing_equivalence_digest)
+          )
         ) {
           v(
             `state block ${id} is ACCEPTED with an accepted identity diverging from the reviewed candidate identity but landing_equivalence_digest ${JSON.stringify(b.landing_equivalence_digest ?? "")} is not a 64-char lowercase SHA-256 — a differing accepted identity is legal only with a repository-validated landing-equivalence artifact (governance.md:283, contracts/stacked-prs.md:140)`,
@@ -745,7 +779,9 @@ function main() {
       }
       for (const b of inProgress) {
         if (b.id !== state.current_block) {
-          v(`block ${b.id} is IN_PROGRESS but current_block is ${JSON.stringify(state.current_block)}`);
+          v(
+            `block ${b.id} is IN_PROGRESS but current_block is ${JSON.stringify(state.current_block)}`,
+          );
         }
       }
     } else {
@@ -768,7 +804,9 @@ function main() {
         } else if (Array.isArray(value)) {
           value.forEach((el, idx) => {
             if (typeof el === "string" && el.startsWith("REQUIRED_")) {
-              v(`live state still carries template placeholder ${where}[${idx}] = ${JSON.stringify(el)}`);
+              v(
+                `live state still carries template placeholder ${where}[${idx}] = ${JSON.stringify(el)}`,
+              );
             } else if (el && typeof el === "object") {
               scanPlaceholders(el, `${where}[${el.id ?? idx}]`);
             }
@@ -790,10 +828,14 @@ function main() {
         const where = prefix ? `${prefix}.${key}` : key;
         if (typeof value === "string") {
           if (/_(sha|tree)$/.test(key) && value !== "" && !SHA_RE.test(value)) {
-            v(`live state field ${where} is not a 40-char lowercase hex object id or empty: ${JSON.stringify(value)}`);
+            v(
+              `live state field ${where} is not a 40-char lowercase hex object id or empty: ${JSON.stringify(value)}`,
+            );
           }
           if (/_digest$/.test(key) && value !== "" && !DIGEST_RE.test(value)) {
-            v(`live state field ${where} is not a 64-char lowercase hex digest or empty: ${JSON.stringify(value)}`);
+            v(
+              `live state field ${where} is not a 64-char lowercase hex digest or empty: ${JSON.stringify(value)}`,
+            );
           }
         } else if (Array.isArray(value)) {
           value.forEach((el, idx) => {

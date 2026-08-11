@@ -290,7 +290,7 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         ),
         (
             "arrayWithUnmodeledCall",
-            FlowReturnDegradation::UnmodeledPosition,
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
         (
             "assignmentCallPosition",
@@ -298,13 +298,16 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         ),
         (
             "computedMemberOffCall",
-            FlowReturnDegradation::UnmodeledPosition,
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
         (
             "optionalCallMemberRead",
-            FlowReturnDegradation::UnmodeledPosition,
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
-        ("binaryOverCall", FlowReturnDegradation::UnmodeledPosition),
+        (
+            "binaryOverCall",
+            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
+        ),
     ] {
         let outcome = evaluate(&host, POS_CANONICAL, name)
             .unwrap_or_else(|| panic!("{name} must produce a value"));

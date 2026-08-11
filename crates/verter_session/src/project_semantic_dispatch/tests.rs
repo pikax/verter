@@ -28200,16 +28200,13 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         .positive_members()
         .iter()
         .map(|m| {
-            let kind = format!(
-                "{}",
-                match graph.node_data(m.value).as_deref() {
-                    Some(SemanticNodeData::Primitive(_)) => "primitive".to_string(),
-                    Some(SemanticNodeData::Opaque(
-                        crate::semantic_query::QueryError::UnmodeledPosition,
-                    )) => "unmodelled-marker".to_string(),
-                    other => format!("other:{other:?}"),
-                }
-            );
+            let kind = match graph.node_data(m.value).as_deref() {
+                Some(SemanticNodeData::Primitive(_)) => "primitive".to_string(),
+                Some(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::UnmodeledPosition,
+                )) => "unmodelled-marker".to_string(),
+                other => format!("other:{other:?}"),
+            };
             (m.string_name().unwrap_or("?").to_string(), kind)
         })
         .collect();

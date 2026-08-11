@@ -671,6 +671,11 @@ fn lower_node(
                     }
                 }
             }
+            // The macro expansion-surface architecture guard requires this
+            // producer module to contain no production bang macros. Keep the
+            // predicate de-sugared even though Clippy normally prefers
+            // `matches!`: a macro could expand to module-private builders.
+            #[allow(clippy::match_like_matches_macro)]
             let has_index_signature = entries.iter().any(|entry| match entry {
                 SurfaceEntry::IndexSignature(_) => true,
                 _ => false,

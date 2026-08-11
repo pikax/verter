@@ -32,7 +32,7 @@ fn object_members(entries: &[SliceObjectEntry]) -> Vec<&SliceObjectMember> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            SliceObjectEntry::Member(member) => Some(member),
+            SliceObjectEntry::Member(member) => Some(member.as_ref()),
             SliceObjectEntry::Spread { .. } => None,
         })
         .collect()
@@ -103,6 +103,96 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
 
 fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
     content_for_path(source, name, &[])
+}
+
+#[test]
+fn optional_chain_after_active_type_predicate_lowers_to_gap() {
+    let node = content_for(
+        "type T = { length: number };\n\
+         function isT(x: any): x is T { return true }\n\
+         function makeProps(x: any) { if (isT(x)) return x?.length; return 0 }",
+        "makeProps",
+    );
+    let consequent = node
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::If { consequent, .. } => Some(consequent),
+            _ => None,
+        })
+        .expect("the body must contain the guarded arm");
+    assert!(
+        matches!(
+            &consequent.statements[0],
+            SliceStatement::Return {
+                argument: Some(SliceExpr::Gap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression
+                )),
+                ..
+            }
+        ),
+        "an optional chain rooted at an actively narrowed `any` must not be lowered as OptionalAnyChain"
+    );
+}
+
+#[test]
+fn optional_chain_with_effectful_call_argument_lowers_to_gap() {
+    let node = content_for(
+        "function makeProps(a: any, x: string | number) { return a?.b(x = \"s\") }",
+        "makeProps",
+    );
+    assert!(matches!(
+        &node.body.statements[0],
+        SliceStatement::Return {
+            argument: Some(SliceExpr::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression
+            )),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn optional_chain_with_effectful_computed_key_lowers_to_gap() {
+    let node = content_for(
+        "function makeProps(a: any, x: string | number) { return a?.[x = 2] }",
+        "makeProps",
+    );
+    assert!(matches!(
+        &node.body.statements[0],
+        SliceStatement::Return {
+            argument: Some(SliceExpr::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression
+            )),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn optional_chain_with_nested_syntactic_effect_lowers_to_gap() {
+    for source in [
+        "function makeProps(a: any, x: number) { return a?.b(1 + (x = 2)) }",
+        "function makeProps(a: any, x: number) { return a?.[x++] }",
+        "function makeProps(a: any, x: { p?: number }) { return a?.b(delete x.p) }",
+        "async function makeProps(a: any, x: Promise<number>) { return a?.b(await x) }",
+        "function* makeProps(a: any) { return a?.b(yield 1) }",
+    ] {
+        let node = content_for(source, "makeProps");
+        assert!(
+            matches!(
+                &node.body.statements[0],
+                SliceStatement::Return {
+                    argument: Some(SliceExpr::Gap(
+                        crate::semantic_query::FlowGap::UnmodeledExpression
+                    )),
+                    ..
+                }
+            ),
+            "discarding a nested assignment/update/delete/await/yield must fail closed: {source}"
+        );
+    }
 }
 
 /// @ai-generated - block-bodied function with if/else returns: region tree + no fall-through
@@ -239,7 +329,6 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
         "function makeProps(x: \"s\" | 0) { while (typeof x === \"string\") { } return x }",
         "declare function assertNumber(v: unknown): asserts v is number\nfunction makeProps(x: string | number) { do { assertNumber(x); break } while (true); return x }",
         "function makeProps(x: \"a\" | \"b\") { exit: while (true) { if (x === \"a\") break exit; throw 0 } return x }",
-        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
     ] {
         let node = content_for(source, "makeProps");
         let unsupported = node.body.statements.iter().any(|statement| match statement {
@@ -255,6 +344,15 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
             "a loop transfer involving the selected return binding must refuse: {source}"
         );
     }
+
+    let invoked = content_for(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
+        "makeProps",
+    );
+    assert!(invoked.body.statements.iter().any(|statement| matches!(
+        statement,
+        SliceStatement::Unsupported(SliceUnsupported::InvokedClosureEffect)
+    )));
 
     let inert = content_for(
         "declare function opaque(): boolean\nfunction makeProps(x: string | number) { while (opaque()) { } return x }",
@@ -840,10 +938,12 @@ fn arrow_expression_body_is_single_return() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
-            argument: Some(SliceExpr::Any),
+            argument: Some(SliceExpr::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression
+            )),
             widening_literal: false,
         }],
-        "a binary expression is the leaf lowering's any fallback"
+        "a binary expression is an unmodelled leaf, not semantic any"
     );
 }
 

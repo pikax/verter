@@ -113,6 +113,27 @@ maintainer_decision = "PENDING"
 notes = ""
 
 [[block]]
+id = "A2C"
+status = "LOCKED"
+charter_digest = ""
+context_packet_digest = ""
+base_sha = ""
+candidate_sha = ""
+candidate_tree = ""
+accepted_sha = ""
+accepted_tree = ""
+landing_equivalence_digest = ""
+evidence_digest = ""
+stack_id = ""
+stack_snapshot_digest = ""
+stack_layer = 0
+conformance_review = "PENDING"
+architecture_review = "PENDING"
+adversarial_review = "PENDING"
+maintainer_decision = "PENDING"
+notes = ""
+
+[[block]]
 id = "A3"
 status = "LOCKED"
 charter_digest = ""

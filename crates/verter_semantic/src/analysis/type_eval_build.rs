@@ -3841,12 +3841,14 @@ type InferenceResult<T> = Result<T, InferenceUnavailableReason>;
 #[derive(Debug)]
 struct InferenceBudget {
     remaining_work: usize,
+    used_unmodeled_fallback: bool,
 }
 
 impl Default for InferenceBudget {
     fn default() -> Self {
         Self {
             remaining_work: MAX_SEMANTIC_INFERENCE_WORK,
+            used_unmodeled_fallback: false,
         }
     }
 }
@@ -3958,6 +3960,35 @@ pub fn infer_declaration_expression_type(
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpressionInferenceCompleteness {
+    Complete,
+    Unmodeled,
+}
+
+pub struct DeclarationExpressionInference {
+    pub ty: TypeExpr,
+    pub completeness: ExpressionInferenceCompleteness,
+}
+
+pub fn infer_declaration_expression_type_with_completeness(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: TopLevelLiteralPolicy,
+) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
+    let mut budget = InferenceBudget::default();
+    let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)?;
+    Ok(DeclarationExpressionInference {
+        ty,
+        completeness: if budget.used_unmodeled_fallback {
+            ExpressionInferenceCompleteness::Unmodeled
+        } else {
+            ExpressionInferenceCompleteness::Complete
+        },
+    })
 }
 
 fn infer_declaration_expression_type_with_budget(
@@ -4320,6 +4351,20 @@ fn infer_expression_type_ctx(
                 Ok(asserted)
             }
         }
+        Expression::TSTypeAssertion(assertion) => {
+            let asserted = lower_ts_type(&assertion.type_annotation, source);
+            if is_const_assertion_type_expr(&asserted) {
+                infer_expression_type_ctx(
+                    &assertion.expression,
+                    source,
+                    MemberLiteralPolicy::ConstAssert,
+                    budget,
+                    depth + 1,
+                )
+            } else {
+                Ok(asserted)
+            }
+        }
         Expression::TSSatisfiesExpression(sat) => {
             // const x = value satisfies SomeType → infer from the underlying
             // value expression, not the annotation. `satisfies` validates but
@@ -4338,6 +4383,7 @@ fn infer_expression_type_ctx(
             let mut path = Vec::new();
             collect_static_member_path_with_budget(member, &mut path, budget, depth + 1)?;
             if path.is_empty() {
+                budget.used_unmodeled_fallback = true;
                 Ok(TypeExpr::Primitive(PrimitiveName::Any))
             } else {
                 Ok(TypeExpr::TypeOf(ValueRef {
@@ -4356,7 +4402,10 @@ fn infer_expression_type_ctx(
                 Ok(call_return_carrier(callee_type))
             }
         }
-        _ => Ok(TypeExpr::Primitive(PrimitiveName::Any)),
+        _ => {
+            budget.used_unmodeled_fallback = true;
+            Ok(TypeExpr::Primitive(PrimitiveName::Any))
+        }
     }
 }
 

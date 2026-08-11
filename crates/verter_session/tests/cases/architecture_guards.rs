@@ -11231,6 +11231,14 @@ fn phase_archaeology_test_files_count_zero() {
     );
 }
 
+#[test]
+fn flow_gap_retraction_test_module_uses_final_state_filename() {
+    let source = workspace_root().join("crates/verter_session/src");
+    let forbidden = ["u", "6", "_flow_gap_retraction_tests.rs"].concat();
+    assert!(source.join("flow_gap_retraction_tests.rs").is_file());
+    assert!(!source.join(forbidden).exists());
+}
+
 mod general_test_archaeology {
     use walkdir::WalkDir;
 

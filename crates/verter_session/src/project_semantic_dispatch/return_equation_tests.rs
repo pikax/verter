@@ -163,7 +163,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
-                &dispatch.graph(),
+                dispatch.graph(),
                 number,
                 false,
                 None,
@@ -424,7 +424,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
     let step = dispatch.flow_frame_close_for_tests(
         idx,
         FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
-            &dispatch.graph(),
+            dispatch.graph(),
             number,
             false,
             None,
@@ -505,7 +505,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
-                &dispatch.graph(),
+                dispatch.graph(),
                 number,
                 false,
                 None,
@@ -579,7 +579,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
-                &dispatch.graph(),
+                dispatch.graph(),
                 number,
                 false,
                 None,

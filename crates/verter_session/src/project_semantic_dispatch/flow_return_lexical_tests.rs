@@ -3818,21 +3818,20 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
     // bare literal today (its freshness does not yet reach the join) —
     // the un-widened literal of the checker's `string`, never the
     // callee's binder either way.
-    for name in ["gcDeclInferred"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                assert_eq!(
-                    node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::String),
-                    "{name} must instantiate the callee's own type parameter, \
-                     never publish the callee's binder"
-                );
-            },
-        );
-    }
+    let name = "gcDeclInferred";
+    r5_node(
+        &host,
+        name,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "{name} must instantiate the callee's own type parameter, \
+                 never publish the callee's binder"
+            );
+        },
+    );
 
     // A bare-`T` return with nothing to infer from keeps `unknown` — the
     // checker's own answer for this shape.
@@ -4416,21 +4415,20 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
 fn flow_return_resolved_overload_never_publishes_a_fabricated_any() {
     let host = make_r5_host();
 
-    for name in ["ovXCall"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                assert_eq!(
-                    node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::String),
-                    "{name} resolves to the first applicable overload's own \
-                     return — never a fabricated `any`"
-                );
-            },
-        );
-    }
+    let name = "ovXCall";
+    r5_node(
+        &host,
+        name,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "{name} resolves to the first applicable overload's own \
+                 return — never a fabricated `any`"
+            );
+        },
+    );
 
     // CONTROL — a LONE signature resolves identically.
     r5_node(
@@ -4839,34 +4837,33 @@ fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
 
     // The IIFE route: same body, same answer — and this callee DOES
     // warm-admit.
-    for name in ["nbIife"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                let shapes: Vec<NodeShape> = union_members(dispatch, node)
-                    .iter()
-                    .map(|arm| node_shape(dispatch, *arm))
-                    .collect();
-                assert!(
-                    shapes.contains(&decl_ref("NB")),
-                    "{name}: the callee's body-derived arm is the file-scope \
-                     interface `NB`, a symbol the callee's own clause never \
-                     shadows — got {shapes:?}"
-                );
-                assert!(
-                    shapes.contains(&NodeShape::Primitive(PrimitiveKind::Null)),
-                    "{name}: the `null` arm survives — got {shapes:?}"
-                );
-                assert!(
-                    !shapes.contains(&NodeShape::Primitive(PrimitiveKind::Unknown)),
-                    "{name}: nothing in this answer is the instantiation interim \
-                     — got {shapes:?}"
-                );
-            },
-        );
-    }
+    let name = "nbIife";
+    r5_node(
+        &host,
+        name,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                .iter()
+                .map(|arm| node_shape(dispatch, *arm))
+                .collect();
+            assert!(
+                shapes.contains(&decl_ref("NB")),
+                "{name}: the callee's body-derived arm is the file-scope \
+                 interface `NB`, a symbol the callee's own clause never \
+                 shadows — got {shapes:?}"
+            );
+            assert!(
+                shapes.contains(&NodeShape::Primitive(PrimitiveKind::Null)),
+                "{name}: the `null` arm survives — got {shapes:?}"
+            );
+            assert!(
+                !shapes.contains(&NodeShape::Primitive(PrimitiveKind::Unknown)),
+                "{name}: nothing in this answer is the instantiation interim \
+                 — got {shapes:?}"
+            );
+        },
+    );
 }
 
 /// An AMBIENT overload group resolves exactly like a bodied one.
@@ -6652,7 +6649,7 @@ fn flow_return_break_exit_replays_the_crossed_scope_close() {
             .iter()
             .find_map(|member| match member {
                 verter_type_expr::ObjectMember::Property(prop)
-                    if prop.key.as_string().as_deref() == Some(name) =>
+                    if prop.key.as_string() == Some(name) =>
                 {
                     Some(prop.ty.clone())
                 }

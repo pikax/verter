@@ -12,7 +12,7 @@ The program is a DAG of bounded clean cutovers. A block may start when every pre
 
 A pull-request stack is transport only. Bounded stack windows may linearize one short dependency path for review, but they do not create semantic predecessor authority. A program-wide mega-stack is prohibited. Atomic private layers land only through their final atomic candidate.
 
-Before `A6`, only Gate 0 work is legal. `A3` may change behavior solely to retract a known wrong-complete result to a typed non-admissible outcome. It may not choose a disputed final owner.
+Before `A6`, only Gate 0 work is legal. `A2C` is not executable. `A3` may change behavior solely to retract a non-G10 A2-catalogued wrong-complete result through the existing typed degradation/non-admission rails; it has no structural-completion or G10 obligation. Exact structural completion and G10 discrimination remain debt `FR-D8`, owned by D6. No Gate 0 block may create a syntax-only completion detector, second graph/classifier, or false refusal of a checker-correct clean/warm result.
 
 # 2. Critical path
 
@@ -82,13 +82,21 @@ Add exact recursive expectations, negative controls, oracle/profile stamps, cros
 
 **Exit:** known defect rows discriminate the actual semantic difference and cache behavior.
 
+## A2C — Retired completion predecessor
+
+**Predecessors:** `A2`.
+
+A2C is not executable. Its reachable DAG row is retained as terminal historical state with status `SUPERSEDED`. The rejected completion candidates and incomplete implementation remain unlanded historical evidence and transfer no correctness, performance, mutation, or test result.
+
+**Exit:** none. Exact structural completion and G10 discrimination are debt `FR-D8`, owned by D6 / `U6.LOOP_CLOSURE`; heavy work resumes only after D6 has a closed, code-first carrier inventory. The demanded `FunctionFlowGraph` remains the sole completion reducer, and no syntax-only classifier or second completion authority may be introduced.
+
 ## A3 — Retract known wrong-complete results
 
 **Predecessors:** `A2`.
 
-Any exposed path that skips an unmodelled obligation returns typed `Partial`, `FlowGap`, or `NoValue` and is not warm-admitted. Authored `any` remains distinct. This is the only pre-`A6` semantic behavior change permitted.
+Every non-G10 A2-catalogued wrong-complete path returns a typed degraded usable result or existing typed `NoValue` and is not warm-admitted. Authored or otherwise legitimate semantic `any` remains distinct, and every member of the 154-row checker-correct clean/warm preservation cohort remains complete and warm. A3 has no G10 or structural-completion obligation and must not inspect completion syntax, skeleton regions, events, graph edges, or an endpoint accessor.
 
-**Exit:** no known wrong-and-warm result masquerades as complete.
+**Exit:** every A2-catalogued known wrong-and-warm result except G10 returns a typed degraded usable result or typed `NoValue` and is refused warm admission; authored `any`, the 154-row preservation cohort, and X05/X68/X80/X88 remain checker-correct, clean, and warm. No syntax-only G10 detector exists. G10 remains open debt `FR-D8`, owned by D6.
 
 ## A4 — Install measurement-only attribution and capture the baseline
 
@@ -256,11 +264,11 @@ Implement supported narrowing/invalidation/predicate/substitution mechanisms. Ev
 
 Retain direct/transitive reads and writes, escape summaries, creation-time frontier/freshness, profile-compatible invalidation, and one effect mechanism across expression positions.
 
-## D6 — Loop fixed points and completion algebra
+## D6 — Loop fixed points and completion graph
 
 **Predecessors:** `D3`.
 
-Implement deterministic selected-frontier loop convergence and one completion algebra for labels, switch, loops, try/catch/finally, return, throw, break, and continue.
+Close debt `FR-D8` by deriving exact structural completion and G10 discrimination on the sole demanded `FunctionFlowGraph`, then add deterministic selected-frontier loop convergence, loop-summary edges, state routing, and final clean semantics on that same graph. Heavy completion work may begin only after the D6 lock contains a closed, code-first carrier inventory. Do not reconstruct completion meaning from syntax or create another graph/classifier.
 
 ## D7 — `this`, sequence, call/context, and value surfaces
 

@@ -261,7 +261,6 @@ impl SemanticGraphStore {
     /// Publish a decided inline relation member through the same store-owned
     /// admission fence as an ordinary family cold winner. On success any
     /// concurrent top-level joiner receives this exact payload and carrier;
-
     /// Test-support enumeration of every published `Relate` family entry as
     /// `(key, outcome)` (freshest candidate per slot). Lets relation tests
     /// assert over the ACTUAL published set instead of probing guessed keys.

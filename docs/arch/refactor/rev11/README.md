@@ -53,10 +53,9 @@ this directory and that external ledger to continue the program.
 
 ## Registered amendments
 
-Amendments record deltas to the execution plan WITHOUT editing the
-verbatim-reconstructed authority files (editing those would void the fidelity
-attestation — see [`PROVENANCE.md`](PROVENANCE.md)). They live in
-[`amendments/`](amendments/) and bind the program:
+Amendments normally record deltas without editing the verbatim-reconstructed authority files. AMD-002, AMD-003, and AMD-004 are maintainer-ratified exceptions: predecessor authority is materialized in the machine-readable DAG and exact-state template, while the amended completion ownership, debt, and retraction exit are materialized in the live split files. The published consolidated and release artifacts remain immutable historical originals; for execution, AMD-004 and the amended live split files govern the A2-to-A3 lineage.
+
+Amendments live in [`amendments/`](amendments/) and bind the program:
 
 - [`amendments/AMD-001-stack-window-validator-prerequisite.md`](amendments/AMD-001-stack-window-validator-prerequisite.md)
   — the program-state validator fails closed on every begun successor of a
@@ -65,6 +64,21 @@ attestation — see [`PROVENANCE.md`](PROVENANCE.md)). They live in
   Node stack-window validator, composite program-state cross-validation, CI wiring,
   and a discriminating D1/D2 transition test. The refusal is superseded by that
   delivery, never simply deleted.
+- **AMD-002 — A2C completion-model predecessor for A3:**
+  [`amendments/AMD-002-a2c-completion-predecessor.md`](amendments/AMD-002-a2c-completion-predecessor.md)
+  inserted `A2C` between `A2` and `A3`; AMD-004 supersedes point 1 where it makes
+  A2C the predecessor of A3, points 2 through 4 remain superseded by AMD-003, and
+  point 5 remains in force.
+- **AMD-003 — A2C completion-graph authority recalibration:**
+  [`amendments/AMD-003-a2c-completion-graph-authority.md`](amendments/AMD-003-a2c-completion-graph-authority.md)
+  supersedes AMD-002 points 2 through 4 while retaining `A2 → A2C → A3`, delivers
+  D6's sole completion graph early through A2C, restricts A3 to typed-gap
+  retraction/non-admission, and recalibrates the performance acceptance cells.
+- **AMD-004 — Defer structural completion to D6 and reduce A3:**
+  [`amendments/AMD-004-defer-completion-to-d6.md`](amendments/AMD-004-defer-completion-to-d6.md)
+  supersedes the A2C predecessor and reduces A3 to non-G10 wrong-complete retractions,
+  while leaving exact structural completion and G10 discrimination as debt `FR-D8`,
+  owned by D6 / `U6.LOOP_CLOSURE`.
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.

@@ -7,8 +7,9 @@ the way it does. A future agent continuing the program reads this file together 
 `evidence/A0-summary.md` (the committed, identity-free description of the A0
 landing; live A0 state lives in the external ledger).
 
-**Maintainer:** Carlos Rodrigues (GitHub `pikax`). All rulings were made and recorded on
-**2026-08-09**.
+**Maintainer:** Carlos Rodrigues (GitHub `pikax`). Rulings R-1 through R-8 were made
+and recorded on **2026-08-09**; R-9 was made and recorded on **2026-08-10**; R-10
+was made and recorded on **2026-08-11**.
 
 ## R-1 — Maintainer designation
 
@@ -110,11 +111,59 @@ and landing is a local fast-forward of `main` — nothing is pushed to `origin`,
 `origin/main` is frozen until this work lands. No GitHub action of any kind is taken
 as part of this program work.
 
+## R-9 — Ratify A2C completion-model predecessor for A3
+
+The maintainer ratifies **AMD-002 — A2C completion-model predecessor for A3**. `A2C`
+is inserted directly after `A2` and directly before `A3`; `A3` now depends on `A2C`,
+and no other predecessor list changes. `A2C` owns only content-free,
+exact-or-typed-unknown completion facts and does not change public semantic results.
+`A3` must consume those accepted facts as its sole G10 discriminator, while `D6` /
+`U6.LOOP_CLOSURE` must consume the same completion algebra for final graph and flow
+semantics rather than create a second classifier. The published consolidated master,
+release artifacts, `_EXTRACTION_INDEX.md`, and historical readiness reviews remain
+immutable historical originals; for execution, AMD-002 and the amended live split
+files supersede their `A0 → A1 → A2 → A3` lineage.
+
+## R-10 — Ratify A2C completion-graph authority recalibration
+
+The maintainer ratifies all four distinct items in **AMD-003 — A2C completion-graph
+authority recalibration**:
+
+1. Reopen AMD-002 and supersede its points 2 through 4. Retain the DAG lineage
+   `A2 → A2C → A3`, while redefining A2C as an early structural delivery of D6's
+   sole completion/flow-graph authority. AMD-002 point 1 and point 5 onward remain
+   in force.
+2. Move structural G10 discrimination from an independent A2C skeleton-fact owner
+   to D6's completion graph. A3 owns only retraction and non-admission in response
+   to typed `FlowGap::AbruptCompletion`.
+3. Recalibrate the performance cells: the five per-shape skeleton-relative cells
+   remain diagnostics only; successor acceptance uses aggregate universal-index,
+   public cold-request, linear-work, 64/65-target, retained-topology, and
+   zero-completion-allocation cells. All numeric absolute limits must be frozen in
+   plan text before successor implementation. The recalibration states no numeric
+   absolute cold-request SLO or numeric work/byte bounds, so the architecture
+   authority must set them as open items before that work begins.
+4. Invalidate candidate `04048a…` while preserving it and its digest-verified bundle
+   as failed historical evidence. Implementation restarts from `70ea4c…`; no
+   approval, mutation result, or latency result transfers.
+
+## R-11 — Ratify completion rescope and reduced retraction exit
+
+Maintainer decision (verbatim): **ACCEPTED IN FULL**.
+
+The maintainer ratifies **AMD-004 — Defer structural completion to D6 and reduce A3**.
+A2C is terminally superseded as an executable predecessor while its reachable DAG and
+ledger row remain. A3 depends directly on A2 and retracts only non-G10 wrong-complete
+results. Exact structural completion and G10 discrimination remain open debt `FR-D8`,
+owned by D6 / `U6.LOOP_CLOSURE`, with the sole demanded `FunctionFlowGraph` as completion
+authority and no syntax-only fallback or second classifier.
+
 ## Registered amendments
 
-Amendments record deltas to the execution plan without editing the
-verbatim-reconstructed authority files (which would void the fidelity attestation —
-see `PROVENANCE.md`). Registry:
+Amendments normally record deltas without editing the verbatim-reconstructed authority
+files. AMD-002, AMD-003, and AMD-004 are the maintainer-ratified exceptions described by
+R-9, R-10, and R-11; the historical fidelity boundary is stated in `PROVENANCE.md`.
+Registry:
 
 - **AMD-001** — [`../amendments/AMD-001-stack-window-validator-prerequisite.md`](../amendments/AMD-001-stack-window-validator-prerequisite.md):
   the program-state validator's fail-closed rejection of begun successors of a
@@ -125,3 +174,18 @@ see `PROVENANCE.md`). Registry:
   composite validator accepts `D2` only when `D1` is the declared private checkpoint
   in the same validated `ATOMIC_REVIEW` snapshot with `D2` as its acceptance block;
   the refusal is superseded by that delivery, never simply deleted.
+- **AMD-002 — A2C completion-model predecessor for A3** —
+  [`../amendments/AMD-002-a2c-completion-predecessor.md`](../amendments/AMD-002-a2c-completion-predecessor.md):
+  inserts `A2C` between `A2` and `A3`; its points 2 through 4 are superseded by
+  AMD-003, while point 1 and point 5 onward remain in force.
+- **AMD-003 — A2C completion-graph authority recalibration** —
+  [`../amendments/AMD-003-a2c-completion-graph-authority.md`](../amendments/AMD-003-a2c-completion-graph-authority.md):
+  supersedes AMD-002 points 2 through 4, retains `A2 → A2C → A3`, makes A2C an
+  early structural delivery of D6's sole completion graph, limits A3 to typed-gap
+  retraction/non-admission, and replaces the acceptance instrument while leaving
+  the rejected candidate's evidence intact.
+- **AMD-004 — Defer structural completion to D6 and reduce A3** —
+  [`../amendments/AMD-004-defer-completion-to-d6.md`](../amendments/AMD-004-defer-completion-to-d6.md):
+  supersedes the A2C predecessor and reduces A3 to non-G10 wrong-complete retractions
+  while leaving exact structural completion and G10 discrimination as debt `FR-D8`,
+  owned by D6 / `U6.LOOP_CLOSURE`.
