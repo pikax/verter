@@ -166,10 +166,16 @@ Mapping the gaps onto their owners:
 | G3 | shared relation authority | nominal `unique symbol` identity + tri-state comparability |
 | G4, G5 | `U6.LOOP_CLOSURE` | closure-escape edges + one position-independent effect transfer |
 | G6–G9 | `U6.LOOP_CLOSURE` | closure-escape edges + capture summaries |
-| G10 | D6's sole completion graph, delivered early through `A2C`; `A3` owns only retraction/non-admission | canonical control topology/events, completion edges and root coverage on `FunctionFlowGraph`; typed `FlowGap::AbruptCompletion` for A3 |
+| G10 | D6 / `U6.LOOP_CLOSURE`; A3 has no G10 obligation under AMD-004 | debt `FR-D8`: demanded completion reduction, completion edges, root coverage, and final clean semantics on the sole `FunctionFlowGraph`; no syntax-only fallback or second classifier |
 | G11 (`this`) | `U6.FLOW_RETURN_SUBSTRATE` | content-free `this` facts + `This`/`Capture` IR carriers |
 | G11 (sequence) | `U6.FLOW_RETURN_SUBSTRATE` | a pass-through disposition in the shared value classifier |
 | `ClassExpression` | recorded ledger entry | executable-region kind for field initializers |
+
+### Recorded completion debt
+
+| debt ID | disposition | debt | durable owner | resolution gate | acceptance ID |
+|---|---|---|---|---|---|
+| `FR-D8` | `DEFER` under `AMD-004` | Exact structural completion and G10 discrimination; the current producer can still publish the G10 wrong-and-warm result. | D6 / `U6.LOOP_CLOSURE` | Must close before D6 enters `REVIEW`. Heavy implementation may begin only after the D6 lock contains a closed, code-first carrier inventory. The demanded `FunctionFlowGraph` must be the sole completion reducer; G10 must match the pinned checker, X05/X68/X80/X88 must remain checker-correct clean/warm, and no syntax-only classifier or second completion authority may exist. | `d6_structural_completion_closes_g10_without_false_refusals` |
 
 The `this` half of G11 is already specified — `u6-flow-call-resolution-design.md` §C6 states
 that this block owes "the content-free `this` source/identity/locator facts plus the
@@ -242,7 +248,14 @@ loops are represented in that same topology. Delete `statement_guarantees_curren
 the pending-break booleans, target-indexed completion sets, and the per-syntax suffix flags.
 G10's three cases and their unsampled siblings (`switch`, `catch`) close together.
 
-Revision 11 staging: `A2C` delivers the canonical content-free control topology/events and demanded completion reduction as an early structural slice of D6's sole completion/flow-graph authority. Structural G10 discrimination belongs to that graph. A3 consumes only its typed `FlowGap::AbruptCompletion` to retract and suppress admission; it does not read syntax, skeleton regions, events, edges, or an endpoint accessor. Later D6 / `U6.LOOP_CLOSURE` work extends the same graph with loop fixed points, state routing, and final clean semantics. No second graph or completion classifier is permitted.
+Revision 11 staging under AMD-004: exact structural completion and G10 discrimination
+are deferred from the A2–A6 critical path and recorded as debt `FR-D8`, owned by D6 /
+`U6.LOOP_CLOSURE`. A3 retracts only non-G10 wrong-complete results through typed
+degradation and existing non-admission rails. It has no syntax-only G10 detector and
+must preserve checker-correct clean/warm cases, including X05, X68, X80, and X88.
+When completion work resumes, the skeleton remains content-free topology, the demanded
+`FunctionFlowGraph` is the sole completion reducer, and no second graph or completion
+classifier is permitted.
 
 ### 4.4 Bindings as lattice state, not name maps
 

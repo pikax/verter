@@ -26,7 +26,7 @@ predecessors = ["A0", "A1"]
 
 [[block]]
 id = "A2C"
-name = "Abrupt-completion facts for G10 safety discrimination"
+name = "Retired completion predecessor; deferred to D6"
 class = "foundational-safety"
 predecessors = ["A2"]
 
@@ -34,7 +34,7 @@ predecessors = ["A2"]
 id = "A3"
 name = "Immediate wrong-complete safety retraction"
 class = "foundational-safety"
-predecessors = ["A2C"]
+predecessors = ["A2"]
 
 [[block]]
 id = "A4"

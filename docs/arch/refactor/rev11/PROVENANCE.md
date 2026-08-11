@@ -34,11 +34,13 @@ AMD-002 subsequently amended the live split files `program-dag.toml`, `program.m
 `charters/A2C.md`. AMD-003 then superseded AMD-002 points 2 through 4 and amended the
 live split files `program.md`, `charters/A2C.md`, and `charters/A3.md` to materialize
 the corrected completion-graph authority; it also amended the associated
-`docs/arch/u6-flow-return-gaps-and-target.md` architecture note. The current bytes of
-the amended or added Revision 11 split files are execution authority under AMD-002 as
-superseded by AMD-003; they are not covered by the historical 67/67 byte-verbatim
-claim. The pinned consolidated master remains the immutable source from which the
-originally reconstructed bytes are recoverable.
+`docs/arch/u6-flow-return-gaps-and-target.md` architecture note. AMD-004 then superseded
+the A2C predecessor, reduced A3 to non-G10 retractions, and recorded structural
+completion and G10 discrimination as D6 debt in the live DAG, program, charters, and
+architecture note. The current bytes of the amended or added Revision 11 split files
+are execution authority under AMD-004; they are not covered by the historical 67/67
+byte-verbatim claim. The pinned consolidated master remains the immutable source from
+which the originally reconstructed bytes are recoverable.
 
 ## Aggregate digest of the landed split-package tree (including the repository-local index files)
 
@@ -56,8 +58,9 @@ and the `amendments/` records (none of which are package files) and EXCLUDES the
 consolidated canonical master. **Amendments live OUTSIDE the historical verbatim
 set:** files under `amendments/` are repository-local program records, not
 reconstructions of package content. Their inclusion in this aggregate does not alter
-the historical 67/67 attestation. AMD-002 and AMD-003 are the disclosed exceptions
-that subsequently edited the named live split files above. Each exclusion has a reason:
+the historical 67/67 attestation. AMD-002, AMD-003, and AMD-004 are the disclosed
+exceptions that subsequently edited the named live split files above. Each exclusion
+has a reason:
 
 - `consolidated/` — the single-file canonical master is already pinned individually by
   its own SHA-256 row above (digest-matched to the published validation report);
@@ -79,8 +82,8 @@ differs. Files must be checked out with their committed LF line endings (this
 repository uses `core.autocrlf=false`; a CRLF-translating checkout changes the bytes
 and therefore the digest).
 
-- File count: 73
-- Aggregate digest: `4bfc008ca833b5b08875b37ee1df01426efceb89fec0430bd844d34120067cd1`
+- File count: 74
+- Aggregate digest: `ff49cddeb8f6577144dcf85cb9d026cba0d14e7164e7b3825c4a59b215c8148b`
 
 (The historical aggregate reconstruction digest
 `4ab1523c4fc769cc02da61d017d7e447adf62652189350c947a3f642128d8e5c` was published

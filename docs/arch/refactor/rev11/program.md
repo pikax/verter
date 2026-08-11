@@ -12,7 +12,7 @@ The program is a DAG of bounded clean cutovers. A block may start when every pre
 
 A pull-request stack is transport only. Bounded stack windows may linearize one short dependency path for review, but they do not create semantic predecessor authority. A program-wide mega-stack is prohibited. Atomic private layers land only through their final atomic candidate.
 
-Before `A6`, only Gate 0 work is legal. `A2C` may add only canonical content-free control topology/events and the demanded completion reduction as an early structural slice of D6's sole flow-graph authority. `A3` may change behavior solely to retract a known wrong-complete result to a typed non-admissible outcome in response to `FlowGap::AbruptCompletion`. Neither block may create a second graph/classifier or assume D5, D8, or later D6 responsibilities.
+Before `A6`, only Gate 0 work is legal. `A2C` is not executable. `A3` may change behavior solely to retract a non-G10 A2-catalogued wrong-complete result through the existing typed degradation/non-admission rails; it has no structural-completion or G10 obligation. Exact structural completion and G10 discrimination remain debt `FR-D8`, owned by D6. No Gate 0 block may create a syntax-only completion detector, second graph/classifier, or false refusal of a checker-correct clean/warm result.
 
 # 2. Critical path
 
@@ -82,21 +82,21 @@ Add exact recursive expectations, negative controls, oracle/profile stamps, cros
 
 **Exit:** known defect rows discriminate the actual semantic difference and cache behavior.
 
-## A2C — Completion topology and G10 safety verdict
+## A2C — Retired completion predecessor
 
 **Predecessors:** `A2`.
 
-Extend the canonical function skeleton with the minimum content-free control topology and source-ordered completion events required by the sole `FunctionFlowGraph`. During the existing demanded graph build, resolve events to dense control identities, emit normal/return/throw/catch/break/continue/switch/finally edges, derive exact-or-typed-unknown root completion coverage on the graph, and produce `FlowGap::AbruptCompletion` when the producer's endpoint contribution contradicts or cannot be proved by that verdict. This is an early structural delivery of D6's sole completion/flow-graph authority.
+A2C is not executable. Its reachable DAG row is retained as terminal historical state with status `SUPERSEDED`. The rejected completion candidates and incomplete implementation remain unlanded historical evidence and transfer no correctness, performance, mutation, or test result.
 
-**Exit:** G10, X05, X68, X80, X88, and labeled/switch/catch/malformed/deep-target siblings are distinguished by the sole graph authority; missing knowledge yields typed abrupt-completion degradation; no AST retention/rewalk, completion memo, second graph/classifier, target-indexed completion set, or fixed target ceiling exists. The representative-corpus skeleton index, public cold request, linear-work, 64/65-target, retained-byte, and zero-completion-allocation performance cells pass limits frozen before implementation.
+**Exit:** none. Exact structural completion and G10 discrimination are debt `FR-D8`, owned by D6 / `U6.LOOP_CLOSURE`; heavy work resumes only after D6 has a closed, code-first carrier inventory. The demanded `FunctionFlowGraph` remains the sole completion reducer, and no syntax-only classifier or second completion authority may be introduced.
 
 ## A3 — Retract known wrong-complete results
 
-**Predecessors:** `A2C`.
+**Predecessors:** `A2`.
 
-Any exposed path that skips an unmodelled obligation returns typed `Partial`, `FlowGap`, or `NoValue` and is not warm-admitted. For G10, A3 consumes only the typed abrupt-completion degradation produced by the sole D6 graph authority; it does not read statement syntax, skeleton regions, completion events, graph edges, or an endpoint accessor. Authored `any` remains distinct. This is the only pre-`A6` semantic behavior change permitted.
+Every non-G10 A2-catalogued wrong-complete path returns a typed degraded usable result or existing typed `NoValue` and is not warm-admitted. Authored or otherwise legitimate semantic `any` remains distinct, and every member of the 154-row checker-correct clean/warm preservation cohort remains complete and warm. A3 has no G10 or structural-completion obligation and must not inspect completion syntax, skeleton regions, events, graph edges, or an endpoint accessor.
 
-**Exit:** every A2-catalogued known wrong-and-warm result, including G10 as reported through `FlowGap::AbruptCompletion`, returns typed `Partial`, `FlowGap`, or `NoValue` and is refused warm admission; authored `any` and the named checker-correct clean controls remain complete and warm.
+**Exit:** every A2-catalogued known wrong-and-warm result except G10 returns a typed degraded usable result or typed `NoValue` and is refused warm admission; authored `any`, the 154-row preservation cohort, and X05/X68/X80/X88 remain checker-correct, clean, and warm. No syntax-only G10 detector exists. G10 remains open debt `FR-D8`, owned by D6.
 
 ## A4 — Install measurement-only attribution and capture the baseline
 
@@ -268,7 +268,7 @@ Retain direct/transitive reads and writes, escape summaries, creation-time front
 
 **Predecessors:** `D3`.
 
-Extend the completion topology, events, edges, and coverage delivered early through A2C on the sole `FunctionFlowGraph`; add deterministic selected-frontier loop convergence, loop-summary edges, state routing, and final clean semantics on that same graph. Do not reconstruct completion meaning from syntax or create another graph/classifier.
+Close debt `FR-D8` by deriving exact structural completion and G10 discrimination on the sole demanded `FunctionFlowGraph`, then add deterministic selected-frontier loop convergence, loop-summary edges, state routing, and final clean semantics on that same graph. Heavy completion work may begin only after the D6 lock contains a closed, code-first carrier inventory. Do not reconstruct completion meaning from syntax or create another graph/classifier.
 
 ## D7 — `this`, sequence, call/context, and value surfaces
 
