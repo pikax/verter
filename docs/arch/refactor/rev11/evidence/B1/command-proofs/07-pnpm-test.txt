@@ -1,0 +1,421 @@
+
+> verter@0.0.1-beta.1 test <workspace-root>
+> pnpm -r --parallel run test
+
+packages/binary-launcher                 |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/language-shared                 |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native                          |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native/npm/darwin-arm64         |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native/npm/darwin-x64           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native/npm/linux-arm64-gnu      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native/npm/linux-arm64-musl     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native/npm/linux-x64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native/npm/linux-x64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native/npm/win32-x64-msvc       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/nuxt                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/typescript-plugin               |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/unplugin                        |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-lsp                      |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-lsp/npm/darwin-arm64     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-lsp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp/npm/win32-x64-msvc   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp                      |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-mcp/npm/darwin-arm64     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-mcp/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-mcp/npm/win32-x64-msvc   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc                      |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-gnu  |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc/npm/linux-arm64-musl |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc/npm/linux-x64-musl   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-tsc/npm/win32-x64-msvc   |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+Scope: 53 of 54 workspace projects
+packages/benchmark test$ vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts src/lsp-bench.init.spec.ts src/lsp-bench.position.spec.ts src/meta-ui-memory-audit.spec.ts src/svelte-perf-contract.spec.ts src/perf/stats.spec.ts src/perf/gate.spec.ts src/perf/corpus.spec.ts src/perf/lsp-driver.spec.ts src/perf/lsp-binary-resolution.spec.ts src/perf/workloads.spec.ts src/perf/run.spec.ts src/perf/axis-a-child.spec.ts src/perf/audit-attribution.spec.ts
+packages/binary-launcher test$ vitest run
+packages/dx-harness test$ pnpm run typecheck && vitest --run
+packages/component-meta test$ vitest --run --exclude '**/native-eval.spec.ts' --exclude '**/checker.benchmark.spec.ts'
+packages/example test$ echo 'example package has no test surface'
+packages/language-shared test$ tsc --noEmit && vitest run
+packages/lsp-test-client test$ vitest --run
+packages/native pretest$ pnpm run ensure-native-loader
+packages/nuxt test$ echo '@verter/nuxt has pre-existing tsc errors in module.ts (Nuxt peer-dep type gaps) unrelated to audit-footprint; no-op per plan Commit 8 escape hatch'
+packages/playground test$ vitest --run --exclude '**/compiler.spec.ts'
+packages/proto test$ vitest --run
+packages/svelte-jsx test$ echo "no tests — @verter/svelte-jsx is a hand-written types-only shim (byte-pinned by the Rust freshness test)"
+packages/svelte-runtime-tests test$ vitest run
+packages/type-ir test$ vitest --run --passWithNoTests
+packages/typeinfo test$ vitest --run --passWithNoTests
+packages/types test$ vitest --run
+packages/typescript-plugin test$ vitest run
+packages/unplugin test$ vitest run && node e2e/scripts/exit-regression.mjs
+packages/verter-lsp test$ vitest run
+packages/verter-mcp test$ vitest run
+packages/verter-tsc test$ echo 'no tests — binary-only distribution'
+packages/vue-conformance-oracle test$ pnpm run check && pnpm run check:style-pseudo
+packages/vue-vscode test$ vitest run --dir src && pnpm run test:e2e:lib:unit && pnpm run test:e2e:acceptance:unit
+packages/wasm test$ pnpm run test:types && vitest run
+packages/example test: example package has no test surface
+packages/nuxt test: @verter/nuxt has pre-existing tsc errors in module.ts (Nuxt peer-dep type gaps) unrelated to audit-footprint; no-op per plan Commit 8 escape hatch
+packages/svelte-jsx test: no tests — @verter/svelte-jsx is a hand-written types-only shim (byte-pinned by the Rust freshness test)
+packages/verter-tsc test: no tests — binary-only distribution
+packages/svelte-jsx test: Done
+packages/nuxt test: Done
+packages/example test: Done
+packages/verter-tsc test: Done
+packages/dx-harness test: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../native                                |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../native/npm/darwin-arm64               |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../native/npm/darwin-x64                 |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../native/npm/linux-arm64-gnu            |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../native/npm/linux-arm64-musl           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../native/npm/linux-x64-gnu              |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../native/npm/linux-x64-musl             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../native/npm/win32-x64-msvc             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/dx-harness test: ../wasm                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/dx-harness test: > @verter/dx-harness@0.0.1 typecheck <workspace-root>/packages/dx-harness
+packages/dx-harness test: > tsc -p tsconfig.test.json --noEmit
+packages/binary-launcher test:  RUN  v4.1.7 <workspace-root>/packages/binary-launcher
+packages/native pretest: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: npm/darwin-arm64                         |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: npm/win32-x64-msvc                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native pretest: ../wasm                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native pretest:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/benchmark test:  RUN  v4.1.7 <workspace-root>/packages/benchmark
+packages/native pretest: > @verter/native@0.0.1-beta.3 ensure-native-loader <workspace-root>/packages/native
+packages/native pretest: > node ./scripts/ensure-native-loader.mjs
+packages/native pretest: Done
+packages/native test$ pnpm run test:types && vitest run
+packages/type-ir test:  RUN  v4.1.7 <workspace-root>/packages/type-ir
+packages/playground test:  RUN  v4.1.7 <workspace-root>/packages/playground
+packages/proto test:  RUN  v4.1.7 <workspace-root>/packages/proto
+packages/vue-conformance-oracle test: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native                                |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native/npm/darwin-arm64               |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native/npm/darwin-x64                 |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-arm64-gnu            |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-arm64-musl           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-x64-gnu              |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-x64-musl             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/win32-x64-msvc             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../wasm                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: > @verter/vue-conformance-oracle@0.0.0 check <workspace-root>/packages/vue-conformance-oracle
+packages/vue-conformance-oracle test: > node gen-vue-goldens.mjs --check
+packages/types test: Testing types with tsc and vue-tsc is an experimental feature.
+packages/types test: Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+packages/types test:  RUN  v4.1.7 <workspace-root>/packages/types
+packages/component-meta test:  RUN  v4.1.7 <workspace-root>/packages/component-meta
+packages/wasm test: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../native                                |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../native/npm/darwin-arm64               |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../native/npm/darwin-x64                 |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../native/npm/linux-arm64-gnu            |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../native/npm/linux-arm64-musl           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../native/npm/linux-x64-gnu              |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../native/npm/linux-x64-musl             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../native/npm/win32-x64-msvc             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/verter-lsp test:  RUN  v4.1.7 <workspace-root>/packages/verter-lsp
+packages/wasm test: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/wasm test: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/wasm test:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/svelte-runtime-tests test:  RUN  v4.1.7 <workspace-root>/packages/svelte-runtime-tests
+packages/lsp-test-client test:  RUN  v4.1.7 <workspace-root>/packages/lsp-test-client
+packages/wasm test:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/unplugin test:  RUN  v4.1.7 <workspace-root>/packages/unplugin
+packages/wasm test: > @verter/wasm@0.0.1-beta.3 test:types <workspace-root>/packages/wasm
+packages/wasm test: > tsc -p tsconfig.types.json
+packages/typescript-plugin test:  RUN  v4.1.7 <workspace-root>/packages/typescript-plugin
+packages/typeinfo test:  RUN  v4.1.7 <workspace-root>/packages/typeinfo
+packages/vue-vscode test:  RUN  v4.1.7 <workspace-root>/packages/vue-vscode
+packages/verter-mcp test:  RUN  v4.1.7 <workspace-root>/packages/verter-mcp
+packages/binary-launcher test:  Test Files  2 passed (2)
+packages/binary-launcher test:       Tests  47 passed (47)
+packages/binary-launcher test:    Start at  10:35:53
+packages/binary-launcher test:    Duration  1.63s (transform 302ms, setup 0ms, import 526ms, tests 784ms, environment 0ms)
+packages/binary-launcher test: Done
+packages/type-ir test:  Test Files  1 passed (1)
+packages/type-ir test:       Tests  6 passed (6)
+packages/type-ir test:    Start at  10:35:54
+packages/type-ir test:    Duration  1.61s (transform 222ms, setup 0ms, import 400ms, tests 5ms, environment 0ms)
+packages/type-ir test: Done
+packages/vue-conformance-oracle test: vue conformance oracle: vue@3.6.0-rc.1, @vue/compiler-dom@3.6.0-rc.1, @vue/compiler-sfc@3.6.0-rc.1, @vue/compiler-vapor@3.6.0-rc.1, esbuild@0.28.0
+packages/native test: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: npm/darwin-arm64                         |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: npm/darwin-x64                           |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: npm/linux-arm64-gnu                      |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: npm/linux-arm64-musl                     |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: npm/linux-x64-gnu                        |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: npm/linux-x64-musl                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: npm/win32-x64-msvc                       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/native test: ../wasm                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test:  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/native test: > @verter/native@0.0.1-beta.3 test:types <workspace-root>/packages/native
+packages/native test: > tsc -p tsconfig.types.json
+packages/verter-mcp test:  Test Files  1 passed (1)
+packages/verter-mcp test:       Tests  47 passed (47)
+packages/verter-mcp test:    Start at  10:35:55
+packages/verter-mcp test:    Duration  1.97s (transform 378ms, setup 0ms, import 847ms, tests 237ms, environment 0ms)
+packages/verter-lsp test:  Test Files  1 passed (1)
+packages/verter-lsp test:       Tests  47 passed (47)
+packages/verter-lsp test:    Start at  10:35:54
+packages/verter-lsp test:    Duration  2.77s (transform 376ms, setup 0ms, import 533ms, tests 349ms, environment 0ms)
+packages/verter-mcp test: Done
+packages/verter-lsp test: Done
+packages/proto test:  Test Files  2 passed (2)
+packages/proto test:       Tests  16 passed (16)
+packages/proto test:    Start at  10:35:54
+packages/proto test:    Duration  3.26s (transform 1.90s, setup 0ms, import 4.02s, tests 175ms, environment 0ms)
+packages/proto test: Done
+packages/typeinfo test:  ❯ tests/extra-imports-structured.spec.ts (2 tests | 1 failed) 237ms
+packages/typeinfo test:      × named-import with localAlias + typeOnly resolves the renamed symbol 40ms
+packages/benchmark test: [verter-rust-audit] request_id=1 canonical=/var/folders/km/hqbb_7hd3k562lz54m0nf0940000gn/T/verter-audit-harness-lwQSzY/src/Sample.vue total_ms=40.12 solver_ms=33.53 solver_steps=0 solve_count=0 capture_inputs_ms=0.21 store_read_ms=0.21 store_merge_ms=0.03 direct_import_proof_ms=0.00 imported_root_proof_ms=0.13 materialize_ms=0.97 serialize_ms=0.00 rss_before=64733184B rss_after=69009408B rss_delta=4276224B host_cache_before=427B host_cache_after=790B workspace_before=492B workspace_after=492B store_view_hits=0 store_view_misses=1 structural_merges=0 imported_dep_entries=2 imported_dep_bytes=790 prepared_type_decls=1 prepared_value_decls=1 footprint_present=true
+packages/benchmark test: [verter-rust-audit] request_id=1 canonical=/src/Sample.vue total_ms=473.45 solver_ms=357.40 solver_steps=0 solve_count=0 capture_inputs_ms=0.39 store_read_ms=0.31 store_merge_ms=114.54 direct_import_proof_ms=0.08 imported_root_proof_ms=0.06 materialize_ms=0.75 serialize_ms=0.00 rss_before=73154560B rss_after=80642048B rss_delta=7487488B host_cache_before=351B host_cache_after=351B workspace_before=183B workspace_after=183B store_view_hits=0 store_view_misses=1 structural_merges=0 imported_dep_entries=1 imported_dep_bytes=351 prepared_type_decls=0 prepared_value_decls=1 footprint_present=true
+packages/vue-conformance-oracle test: goldens check OK: 286 committed artifacts match a fresh run
+packages/typeinfo test:  ❯ tests/vue-instance-props.spec.ts (1 test | 1 failed) 319ms
+packages/typeinfo test:      × evaluates InstanceType<typeof default>['$props'] against a real .vue SFC scope 318ms
+packages/typeinfo test:  ❯ tests/resolve-symbol.spec.ts (4 tests | 1 failed) 75ms
+packages/typeinfo test:      × Expanded mode resolves a non-generic alias body to an Object descriptor 6ms
+packages/svelte-runtime-tests test:  Test Files  7 passed (7)
+packages/svelte-runtime-tests test:       Tests  35 passed (35)
+packages/svelte-runtime-tests test:    Start at  10:35:54
+packages/svelte-runtime-tests test:    Duration  6.92s (transform 8.40s, setup 0ms, import 13.60s, tests 1.24s, environment 18.39s)
+packages/svelte-runtime-tests test: Done
+packages/language-shared test: Testing types with tsc and vue-tsc is an experimental feature.
+packages/language-shared test: Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+packages/typeinfo test: ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+packages/typeinfo test:  FAIL  tests/extra-imports-structured.spec.ts > typeinfo evaluate with structured ImportSpec > named-import with localAlias + typeOnly resolves the renamed symbol
+packages/typeinfo test: AssertionError: expected undefined to be defined
+packages/typeinfo test:  ❯ tests/extra-imports-structured.spec.ts:58:19
+packages/typeinfo test:      56|     if (result.type?.kind === "object") {
+packages/typeinfo test:      57|       const msg = result.type.properties.find((p) => p.name === "msg");
+packages/typeinfo test:      58|       expect(msg).toBeDefined();
+packages/typeinfo test:        |                   ^
+packages/typeinfo test:      59|       expect(msg?.type.kind).toBe("primitive");
+packages/typeinfo test:      60|       if (msg?.type.kind === "primitive") {
+packages/typeinfo test: ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+packages/typeinfo test:  FAIL  tests/resolve-symbol.spec.ts > TypeInfoSession.resolveSymbol > Expanded mode resolves a non-generic alias body to an Object descriptor
+packages/typeinfo test: AssertionError: expected undefined to be defined
+packages/typeinfo test:  ❯ tests/resolve-symbol.spec.ts:42:19
+packages/typeinfo test:      40|     if (result.type?.kind === "object") {
+packages/typeinfo test:      41|       const msg = result.type.properties.find((p) => p.name === "msg");
+packages/typeinfo test:      42|       expect(msg).toBeDefined();
+packages/typeinfo test:        |                   ^
+packages/typeinfo test:      43|       expect(msg?.type.kind).toBe("primitive");
+packages/typeinfo test:      44|       if (msg?.type.kind === "primitive") {
+packages/typeinfo test: ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+packages/typeinfo test:  FAIL  tests/vue-instance-props.spec.ts > TypeInfoSession Vue instance props worked example > evaluates InstanceType<typeof default>['$props'] against a real .vue SFC scope
+packages/typeinfo test: AssertionError: expected [] to include 'msg'
+packages/typeinfo test:  ❯ tests/vue-instance-props.spec.ts:61:29
+packages/typeinfo test:      59|     if (result.type?.kind === "object") {
+packages/typeinfo test:      60|       const propertyNames = result.type.properties.map((p) => p.name);
+packages/typeinfo test:      61|       expect(propertyNames).toContain("msg");
+packages/typeinfo test:        |                             ^
+packages/typeinfo test:      62|       const msg = result.type.properties.find((p) => p.name === "msg");
+packages/typeinfo test:      63|       expect(msg).toBeDefined();
+packages/typeinfo test: ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+packages/typeinfo test:  Test Files  3 failed | 8 passed (11)
+packages/typeinfo test:       Tests  3 failed | 28 passed (31)
+packages/typeinfo test:    Start at  10:35:55
+packages/typeinfo test:    Duration  7.42s (transform 10.29s, setup 0ms, import 20.42s, tests 1.19s, environment 1ms)
+packages/language-shared test:  RUN  v4.1.7 <workspace-root>/packages/language-shared
+packages/typeinfo test: Failed
+<workspace-root>/packages/typeinfo:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @verter/typeinfo@0.0.1-beta.3 test: `vitest --run --passWithNoTests`
+Exit status 1
+packages/vue-conformance-oracle test: ../binary-launcher                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../language-shared                       |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native                                |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native/npm/darwin-arm64               |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../native/npm/darwin-x64                 |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-arm64-gnu            |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-arm64-musl           |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-x64-gnu              |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/linux-x64-musl             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../native/npm/win32-x64-msvc             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../nuxt                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../typescript-plugin                     |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../unplugin                              |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-lsp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-mcp/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc                            |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/darwin-arm64           |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/darwin-x64             |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-arm64-gnu        |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-arm64-musl       |  WARN  Unsupported platform: wanted: {"cpu":["arm64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-x64-gnu          |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/linux-x64-musl         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["musl"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../verter-tsc/npm/win32-x64-msvc         |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["win32"],"libc":["any"]} (current: {"os":"darwin","cpu":"arm64","libc":"unknown"})
+packages/vue-conformance-oracle test: ../wasm                                  |  WARN  Unsupported engine: wanted: {"node":">=22"} (current: {"node":"v20.20.2","pnpm":"10.22.0"})
+packages/vue-conformance-oracle test: > @verter/vue-conformance-oracle@0.0.0 check:style-pseudo <workspace-root>/packages/vue-conformance-oracle
+packages/vue-conformance-oracle test: > node gen-vue-style-pseudo-oracle.mjs --check
+ ELIFECYCLE  Test failed. See above for more details.
+EXIT: 1

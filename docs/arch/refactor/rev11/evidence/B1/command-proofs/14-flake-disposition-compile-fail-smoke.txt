@@ -1,0 +1,329 @@
+   Compiling verter_session v0.0.1-beta.3 (<workspace-root>/crates/verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.83s
+     Running tests/main.rs (target/debug/deps/main-6b3b5b26fe2c9e73)
+
+running 1 test
+test cases::g_compile::compile_fail::hot_materialize_and_script_fact_structural_rails_smoke ...    Compiling cfg-if v1.0.4
+   Compiling syn v2.0.117
+   Compiling serde_core v1.0.228
+   Compiling libc v0.2.183
+   Compiling itoa v1.0.17
+   Compiling serde v1.0.228
+   Compiling rustc-hash v2.1.2
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.17.1
+   Compiling memchr v2.8.0
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling thiserror v2.0.18
+   Compiling unicode-linebreak v0.1.5
+   Compiling smawk v0.3.2
+   Compiling unicode-width v0.2.2
+   Compiling textwrap v0.16.2
+   Compiling oxc-miette-derive v2.7.1
+   Compiling owo-colors v4.3.0
+   Compiling castaway v0.2.4
+   Compiling ryu v1.0.23
+   Compiling oxc_data_structures v0.126.0
+   Compiling unicode-segmentation v1.12.0
+   Compiling static_assertions v1.1.0
+   Compiling compact_str v0.9.0
+   Compiling oxc-miette v2.7.1
+   Compiling oxc_allocator v0.126.0
+   Compiling oxc_estree v0.126.0
+   Compiling smallvec v1.15.1
+   Compiling oxc_str v0.126.0
+   Compiling oxc_ast_macros v0.126.0
+   Compiling siphasher v1.0.2
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.3.0
+   Compiling oxc_span v0.126.0
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling synstructure v0.13.2
+   Compiling bitflags v2.11.0
+   Compiling percent-encoding v2.3.2
+   Compiling zerofrom-derive v0.1.6
+   Compiling verter_span v0.0.1-beta.3 (<workspace-root>/crates/verter_span)
+   Compiling phf_generator v0.13.1
+   Compiling phf_macros v0.13.1
+   Compiling yoke-derive v0.8.1
+   Compiling zerofrom v0.1.6
+   Compiling phf_shared v0.13.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling unicode-id-start v1.4.0
+   Compiling cow-utils v0.1.3
+   Compiling phf v0.13.1
+   Compiling yoke v0.8.1
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-utils v0.8.21
+   Compiling getrandom v0.4.2
+   Compiling typenum v1.20.0
+   Compiling either v1.15.0
+   Compiling scopeguard v1.2.0
+   Compiling nonmax v0.5.5
+   Compiling oxc_index v4.1.0
+   Compiling lock_api v0.4.14
+   Compiling dragonbox_ecma v0.1.12
+   Compiling parking_lot_core v0.9.12
+   Compiling oxc_diagnostics v0.126.0
+   Compiling zerovec-derive v0.11.2
+   Compiling syn v1.0.109
+   Compiling pin-project-lite v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling rand v0.8.5
+   Compiling zerovec v0.11.5
+   Compiling oxc_regular_expression v0.126.0
+   Compiling oxc_syntax v0.126.0
+   Compiling displaydoc v0.2.5
+   Compiling getrandom v0.2.17
+   Compiling phf_shared v0.11.3
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling phf_generator v0.11.3
+   Compiling oxc_ast v0.126.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling num-integer v0.1.46
+   Compiling verter_no_storedspan_derive v0.0.1-beta.3 (<workspace-root>/crates/verter_no_storedspan_derive)
+   Compiling verter_no_typeexpr_derive v0.0.1-beta.3 (<workspace-root>/crates/verter_no_typeexpr_derive)
+   Compiling rustix v1.1.4
+   Compiling colorchoice v1.0.4
+   Compiling anyhow v1.0.102
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.13
+   Compiling anstyle-query v1.1.5
+   Compiling anstream v1.0.0
+   Compiling verter_no_typeexpr v0.0.1-beta.3 (<workspace-root>/crates/verter_no_typeexpr)
+   Compiling verter_no_storedspan v0.0.1-beta.3 (<workspace-root>/crates/verter_no_storedspan)
+   Compiling num-bigint v0.4.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling errno v0.3.14
+   Compiling strsim v0.11.1
+   Compiling zerocopy v0.8.42
+   Compiling clap_lex v1.0.0
+   Compiling clap_builder v4.6.0
+   Compiling oxc_ecmascript v0.126.0
+   Compiling itertools v0.14.0
+   Compiling rayon-core v1.13.0
+   Compiling tinystr v0.8.2
+   Compiling clap_derive v4.6.1
+   Compiling parking_lot v0.12.5
+   Compiling hybrid-array v0.4.12
+   Compiling tracing-core v0.1.36
+   Compiling zerocopy-derive v0.8.42
+   Compiling litemap v0.8.1
+   Compiling verter_ecma v0.0.1-beta.3 (<workspace-root>/crates/verter_ecma)
+   Compiling hashbrown v0.14.5
+   Compiling writeable v0.6.2
+   Compiling lazy_static v1.5.0
+   Compiling ts-rs-macros v12.0.1
+   Compiling icu_locale_core v2.1.1
+   Compiling verter_type_expr v0.0.1-beta.3 (<workspace-root>/crates/verter_type_expr)
+   Compiling clap v4.6.1
+   Compiling prost-derive v0.14.3
+   Compiling rayon v1.12.0
+   Compiling zerotrie v0.2.3
+   Compiling potential_utf v0.1.4
+   Compiling ahash v0.7.8
+   Compiling tracing-attributes v0.1.31
+   Compiling icu_normalizer_data v2.1.1
+   Compiling bytes v1.11.1
+   Compiling icu_properties_data v2.1.2
+   Compiling log v0.4.29
+   Compiling tracing v0.1.44
+   Compiling oxc_parser v0.126.0
+   Compiling icu_collections v2.1.1
+   Compiling icu_provider v2.1.1
+   Compiling ts-rs v12.0.1
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.2
+   Compiling signal-hook-registry v1.4.8
+   Compiling phf_macros v0.11.3
+   Compiling bitmaps v2.1.0
+   Compiling tokio-macros v2.7.0
+   Compiling arc-swap v1.9.1
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling prettyplease v0.2.37
+   Compiling equivalent v1.0.2
+   Compiling regex-syntax v0.8.10
+   Compiling same-file v1.0.6
+   Compiling dtoa v1.0.11
+   Compiling foldhash v0.1.5
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling rand_xoshiro v0.6.0
+   Compiling hashbrown v0.15.5
+   Compiling regex-automata v0.4.14
+   Compiling dtoa-short v0.3.5
+   Compiling indexmap v2.14.0
+   Compiling walkdir v2.5.0
+   Compiling prost v0.14.3
+   Compiling tokio v1.52.3
+   Compiling phf v0.11.3
+   Compiling sized-chunks v0.6.5
+   Compiling verter_audit v0.0.1-beta.3 (<workspace-root>/crates/verter_audit)
+   Compiling dashmap v6.2.1
+   Compiling ptr_meta_derive v0.1.4
+   Compiling oxc_ast_visit v0.126.0
+   Compiling phf_codegen v0.11.3
+   Compiling verter_language v0.0.1-beta.3 (<workspace-root>/crates/verter_language)
+   Compiling crossbeam-channel v0.5.15
+   Compiling cssparser-macros v0.6.1
+   Compiling aho-corasick v1.1.4
+   Compiling cpufeatures v0.3.0
+   Compiling getrandom v0.3.4
+   Compiling outref v0.1.0
+   Compiling fixedbitset v0.5.7
+   Compiling base64 v0.22.1
+   Compiling rkyv v0.7.46
+   Compiling verter_tsgo_api v0.0.1-beta.3 (<workspace-root>/crates/verter_tsgo_api)
+   Compiling petgraph v0.8.3
+   Compiling tempfile v3.27.0
+   Compiling simd-abstraction v0.7.1
+   Compiling sha2 v0.11.0
+   Compiling cssparser v0.33.0
+   Compiling verter_scheduler v0.0.1-beta.3 (<workspace-root>/crates/verter_scheduler)
+   Compiling parcel_selectors v0.28.2
+   Compiling ptr_meta v0.1.4
+   Compiling icu_properties v2.1.2
+   Compiling icu_normalizer v2.1.1
+   Compiling hashbrown v0.12.3
+   Compiling im v15.1.0
+   Compiling prost-types v0.14.3
+   Compiling regex v1.12.3
+   Compiling verter_type_expr_oxc v0.0.1-beta.3 (<workspace-root>/crates/verter_type_expr_oxc)
+   Compiling half v2.7.1
+   Compiling rkyv_derive v0.7.46
+   Compiling ahash v0.8.12
+   Compiling serde_repr v0.1.20
+   Compiling glob v0.3.3
+   Compiling bumpalo v3.20.3
+   Compiling hex v0.4.3
+   Compiling protoc-bin-vendored-linux-s390_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-ppcle_64 v3.2.0
+   Compiling protoc-bin-vendored-macos-x86_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_64 v3.2.0
+   Compiling radium v0.7.0
+   Compiling outref v0.5.2
+   Compiling protoc-bin-vendored-macos-aarch_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-aarch_64 v3.2.0
+   Compiling protoc-bin-vendored-linux-x86_32 v3.2.0
+   Compiling protoc-bin-vendored-win32 v3.2.0
+   Compiling allocator-api2 v0.4.0
+   Compiling matches v0.1.10
+   Compiling vsimd v0.8.0
+   Compiling seahash v4.1.0
+   Compiling multimap v0.10.1
+   Compiling xxhash-rust v0.8.15
+   Compiling prost-build v0.14.3
+   Compiling verter_workspace v0.0.1-beta.3 (<workspace-root>/crates/verter_workspace)
+   Compiling base64-simd v0.8.0
+   Compiling verter_parser v0.0.1-beta.3 (<workspace-root>/crates/verter_parser)
+   Compiling data-url v0.1.1
+   Compiling protoc-bin-vendored v3.2.0
+   Compiling convert_case v0.6.0
+   Compiling idna_adapter v1.2.1
+   Compiling base64-simd v0.7.0
+   Compiling const-str-proc-macro v0.3.2
+   Compiling verter_css_syntax v0.0.1-beta.3 (<workspace-root>/crates/verter_css_syntax)
+   Compiling tap v1.0.1
+   Compiling data-encoding v2.10.0
+   Compiling utf8_iter v1.0.4
+   Compiling precomputed-hash v0.1.1
+   Compiling oxc_sourcemap v7.0.0
+   Compiling vlq v0.5.1
+   Compiling parcel_sourcemap v2.1.1
+   Compiling idna v1.1.0
+   Compiling wyz v0.5.1
+   Compiling verter_semantic v0.0.1-beta.3 (<workspace-root>/crates/verter_semantic)
+   Compiling const-str v0.3.2
+   Compiling lightningcss-derive v1.0.0-alpha.43
+   Compiling verter_protocol v0.0.1-beta.3 (<workspace-root>/crates/verter_protocol)
+   Compiling uuid v1.23.1
+   Compiling cssparser-color v0.1.0
+   Compiling alloca v0.4.0
+   Compiling dashmap v5.5.3
+   Compiling itertools v0.10.5
+   Compiling form_urlencoded v1.2.2
+   Compiling serde-content v0.1.2
+   Compiling proc-macro2 v1.0.106
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling slab v0.4.12
+   Compiling unicode-ident v1.0.24
+   Compiling json-escape-simd v3.0.1
+   Compiling pastey v0.1.1
+   Compiling futures-core v0.3.32
+   Compiling self_cell v1.2.2
+   Compiling futures-task v0.3.32
+   Compiling pathdiff v0.2.3
+   Compiling funty v2.0.0
+   Compiling bitvec v1.0.1
+   Compiling lightningcss v1.0.0-alpha.71
+   Compiling futures-util v0.3.32
+   Compiling oxc_semantic v0.126.0
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling url v2.5.8
+   Compiling debugid v0.8.0
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling verter_macro_dto v0.0.1-beta.3 (<workspace-root>/crates/verter_macro_dto)
+   Compiling itertools v0.13.0
+   Compiling thread_local v1.1.9
+   Compiling quote v1.0.45
+   Compiling if_chain v1.0.3
+   Compiling nu-ansi-term v0.50.3
+   Compiling winnow v1.0.2
+   Compiling cast v0.3.0
+   Compiling criterion-plot v0.8.2
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling sourcemap v9.3.2
+   Compiling verter_compiler v0.0.1-beta.3 (<workspace-root>/crates/verter_compiler)
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling futures-executor v0.3.32
+   Compiling verter_session_query v0.0.1-beta.3 (<workspace-root>/crates/verter_session_query)
+   Compiling tinytemplate v1.2.1
+   Compiling tracing-test-macro v0.2.6
+   Compiling serial_test_derive v3.5.0
+   Compiling page_size v0.6.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling oorandom v11.1.5
+   Compiling constant_time_eq v0.4.2
+   Compiling similar v3.1.1
+   Compiling arrayvec v0.7.6
+   Compiling anes v0.1.6
+   Compiling arrayref v0.3.9
+   Compiling blake3 v1.8.5
+   Compiling criterion v0.8.2
+   Compiling verter_session v0.0.1-beta.3 (<workspace-root>/crates/verter_session)
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling serial_test v3.5.0
+   Compiling tracing-test v0.2.6
+   Compiling verter_session_oracle_macro v0.0.1-beta.3 (<workspace-root>/crates/verter_session_oracle_macro)
+   Compiling verter_session-tests v0.0.0 (<workspace-root>/target/tests/trybuild/verter_session)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 14s
+
+
+test [0m[1mtests/cases/compile-fail/no_typeexpr_direct_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/no_typeexpr_aliased_field.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/output_projector_not_impl_outside_crate.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_has_no_payload_escape.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_partial_exact_syntax.rs[0m [should pass] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_constructible.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_no_negative_evidence.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_iterable.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/cases/compile-fail/script_fact_unavailable_not_deref.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2493 filtered out; finished in 595.92s
+

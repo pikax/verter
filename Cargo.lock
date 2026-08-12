@@ -4049,6 +4049,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_identity"
+version = "0.0.1-beta.3"
+dependencies = [
+ "blake3",
+ "serde_json",
+ "static_assertions",
+ "trybuild",
+]
+
+[[package]]
 name = "verter_language"
 version = "0.0.1-beta.3"
 dependencies = [

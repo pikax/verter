@@ -1,0 +1,226 @@
+Performance cell A6_META_COMPILE_40_COLD_RUST — candidate measurement (recapture)
+==========================================================================
+
+Candidate tree measured: 1512dbcfccc5ee0591bbbe109b5f7a3aabeb5ed9 (work/b1-neutral-contracts).
+The only difference between this SHA and the block's final tip is this evidence file itself
+(and its two preceding evidence-only commits, already included in 1512dbcfc) — no file under
+crates/, packages/, scripts/, Cargo.toml, Cargo.lock, or pnpm-lock.yaml changes after this SHA,
+so the binaries built from it are byte-for-byte what the final tip would produce.
+
+Locked baseline_sha (performance-gates.toml): fb863297a04c7eb114d53ff65736c00240354504
+Locked baseline_tree: a2e01e16d705faecf259152f40d0a3b228b16dbf
+Block base SHA (this block's dispatch point, used as the fresh ABBA baseline arm below):
+  ff3728ec069a8fd2f8d427687fcf33bf88ea9f44
+
+Note on baseline identity: ff3728ec0 is source-identical to the locked baseline_sha
+(fb863297a) for every file this workload's dependency closure reaches — this block's own diff
+(`git diff fb863297a ff3728ec0 -- crates packages scripts Cargo.lock Cargo.toml pnpm-lock.yaml
+.github`) touches only docs/arch/refactor/rev11/ and the ledger, which are outside the compiled
+closure. ff3728ec0 was used as the literal build point for the fresh baseline arm binary because
+it is this block's own recorded dispatch point ("Block base SHA" in the B1 context packet).
+
+--------------------------------------------------------------------------
+0. Protocol correction from the prior (stale) capture
+--------------------------------------------------------------------------
+
+The previous evidence at this path recorded a candidate SHA that was not the block's tip, and
+deviated from the locked `alternating_invocation_abba` policy: it built only ONE binary (the
+candidate) and argued by source-diff that a baseline rebuild was unnecessary, rather than
+building both arms and alternating invocations between them. That reasoning was not wrong about
+the source-identity claim, but it is not the locked protocol, and the corpus/toolchain/machine
+noise a "real" second binary would surface (linker layout, different section addresses, a
+different unit-graph hash even for identical source) is exactly what an ABBA session is for.
+
+This capture builds BOTH arms from real, separate release builds and alternates invocations
+between them in the exact order `performance-gates.toml`'s `[statistics] interleave_policy`
+requires: "baseline and candidate binaries are built with the identical toolchain and profile
+and invoked alternately within one session in A,B,B,A order, at least four invocations per arm".
+
+--------------------------------------------------------------------------
+1. Runner (must match performance-gates.toml [runner]; matches exactly)
+--------------------------------------------------------------------------
+
+$ uname -srm                                    -> Darwin 25.6.0 arm64
+$ sysctl -n machdep.cpu.brand_string             -> Apple M3
+$ sysctl -n hw.logicalcpu hw.physicalcpu         -> 8 / 8
+$ sysctl -n hw.memsize                           -> 25769803776
+$ rustc --version   -> rustc 1.97.1 (8bab26f4f 2026-07-14)
+$ cargo --version   -> cargo 1.97.1 (c980f4866 2026-06-30)
+$ node --version    -> v20.20.2
+$ pnpm --version    -> 10.22.0
+
+AC power, no other user workload during measurement. `CARGO_BUILD_JOBS=2` was used for every
+build in this session per this session's resource cap (below the runner's 8 logical CPUs; the
+gate file's `threads = 8` describes the MEASURED WORKLOAD's own scheduler width at run time, set
+by `SchedulerConfig::default().cpu_threads = num_cpus()`, not the compiler's build parallelism —
+capping `CARGO_BUILD_JOBS` changes how fast rustc compiles, not how many threads the measured
+binary itself uses once running, so it does not touch the cell's `threads` field or its result).
+
+--------------------------------------------------------------------------
+2. Disabled arm — wall clock + peak RSS, genuine A/B/B/A alternation
+--------------------------------------------------------------------------
+
+Two real binaries, one per arm, both `cargo build -p verter_bench --release --example
+attribution_baseline` (default features — attribution instrumentation compiled out):
+
+  baseline arm:  built in a separate worktree checked out at ff3728ec0
+                 `git worktree add --detach /tmp/verter-b1-baseline ff3728ec0`
+                 `cd /tmp/verter-b1-baseline && CARGO_BUILD_JOBS=2 cargo build -p verter_bench \
+                    --release --example attribution_baseline`
+                 Finished `release` profile [optimized] target(s) in 5m 22s (full workspace
+                 release build, first release build of this tree this session)
+
+  candidate arm: built in this worktree at 1512dbcfc
+                 `CARGO_BUILD_JOBS=2 cargo build -p verter_bench --release --example \
+                    attribution_baseline`
+                 Finished `release` profile [optimized] target(s) in 0.65s (already built and
+                 fresh — source under crates/packages/scripts is unchanged since the earlier
+                 same-session release build; verified by `git rev-parse HEAD` printed
+                 immediately before the build command, `1512dbcfccc5ee0591bbbe109b5f7a3aabeb5ed9`)
+
+  md5 baseline binary:  aa82379b579253c5870c8b44efd73019
+  md5 candidate binary: 3374b1d6b94956bb9d36e371129a2005
+  (distinct binaries, confirming these are two real separate builds, not one binary measured
+  twice)
+
+Eight invocations, alternating A,B,B,A,A,B,B,A exactly per the locked `interleave_policy`, each
+`--files 40 --runs 30` (30 measured samples per invocation, so 120 measured samples per arm —
+well over the `short_min_samples = 30` floor), machine otherwise idle (no other build running; a
+transient Spotlight/mdworker_shared CPU spike during worktree setup was allowed to settle before
+any invocation was run — see the memory/load check preceding invocation A1).
+
+  invocation  arm  wall_median_ms  wall_min_ms  maximum_resident_set_size  peak_memory_footprint  attribution
+  A1          base 70.98           67.34        75,202,560                 64,750,096              OFF (confirmed in output)
+  B1          cand 69.85           67.04        74,596,352                 64,143,888              OFF (confirmed in output)
+  B2          cand 71.50           67.12        78,905,344                 68,436,472              OFF (confirmed in output)
+  A2          base 70.55           67.66        74,514,432                 64,045,560              OFF (confirmed in output)
+  A3          base 69.59           68.03        75,137,024                 64,684,560              OFF (confirmed in output)
+  B3          cand 68.48           66.39        74,792,960                 64,340,496              OFF (confirmed in output)
+  B4          cand 68.77           66.48        74,956,800                 64,487,928              OFF (confirmed in output)
+  A4          base 68.90           65.45        75,202,560                 64,733,688              OFF (confirmed in output)
+
+Each row's raw `/usr/bin/time -l` output plus the harness's own `attribution: OFF` banner line is
+retained at `/tmp/abba-{A1,A2,A3,A4,B1,B2,B3,B4}.txt` for this session (not committed — ephemeral
+scratch, reproducible by rerunning the two `cargo build` commands above and the loop below).
+
+2.1 Locked statistics (median of the four invocation medians per arm, A6's own method)
+
+  baseline (A) wall_ns  = median(70.98, 70.55, 69.59, 68.90) = 70.07 ms  = 70,070,000 ns
+  candidate (B) wall_ns = median(69.85, 71.50, 68.48, 68.77) = 69.31 ms  = 69,310,000 ns
+
+  baseline (A) peak_rss  = median(75202560, 74514432, 75137024, 75202560) = 75,169,792 bytes
+  candidate (B) peak_rss = median(74596352, 78905344, 74792960, 74956800) = 74,874,880 bytes
+
+2.2 Control-benchmark drift (session start vs session end, both baseline-arm invocations, per
+    [runner] control_benchmark / max_control_drift_percent = 3.0)
+
+  session start (A1) wall_median_ms = 70.98
+  session end   (A4) wall_median_ms = 68.90
+  drift = |68.90 - 70.98| / 70.98 = 2.9304%   (bound: 3.000%)  PASS — inside bound, session valid
+
+2.3 Gate comparison (candidate vs THIS-SESSION freshly measured baseline arm, per
+    `alternating_invocation_abba`; the frozen `performance-gates.toml` baseline numbers
+    (70,525,000 ns / 74,850,304 bytes) are shown alongside for reference — both comparisons pass)
+
+  metric        this-session baseline   candidate        delta          bound                    verdict
+  wall_ns       70,070,000 ns           69,310,000 ns    -1.0846%       max(3%,2×noise)=3.000%    PASS (faster)
+  wall_ns       (vs locked 70,525,000 ns: delta -1.723%)                3.000%                     PASS (faster)
+  wall_ns abs   —                       max inv. median 71.50 ms        absolute_max=100 ms        PASS
+  peak_rss      75,169,792 bytes        74,874,880 bytes -0.3923%       4.952%                     PASS
+  peak_rss      (vs locked 74,850,304 bytes: delta +0.033%)             4.952%                     PASS
+  peak_rss abs  —                       max inv. RSS 78,905,344 B       absolute_max=268,435,456 B PASS
+
+  Both metrics pass conjunctively under either the fresh-session baseline or the frozen locked
+  baseline; the candidate is marginally faster and marginally lighter than both.
+
+--------------------------------------------------------------------------
+3. Enabled arm — work counters + output oracle (candidate only)
+--------------------------------------------------------------------------
+
+Work counters are deterministic per workload pass (the harness resets counters before every
+measured run — `crates/verter_bench/examples/attribution_baseline.rs`), so they need no
+statistical sampling and no fresh baseline rebuild: they are compared by exact equality against
+the values already locked into `performance-gates.toml` (frozen from `baseline_sha` at A6 lock
+time) and against A6's retained `evidence/A6/baseline-counters.tsv`. This is unchanged from the
+prior capture's approach for this section — only §2 above (the disabled-arm timing/RSS ABBA) was
+protocol-deviant and is what this recapture corrects.
+
+$ cargo build -p verter_bench --release --features attribution --example attribution_baseline
+    Finished `release` profile [optimized] target(s) in 0.21s   (already built and fresh this
+    session — verter_identity has zero production consumers, so no crate this workload's
+    dependency closure reaches recompiled between the earlier same-session attribution build and
+    this candidate tree)
+
+$ ./target/release/examples/attribution_baseline --files 40 --runs 3 --format tsv
+    (full raw TSV retained at /tmp/candidate-enabled-tsv.txt for this session; gated rows below)
+
+wall_median_ms	84.80
+wall_min_ms	84.16
+files	40
+runs	3
+attribution	1
+
+3.1 Gated counters — exact reproduction against the locked baseline
+
+  metric                                          gate limit  candidate   verdict
+  compiler.carrier_parse.calls                     40          40          PASS (exact)
+  session.oxc_script_parse.calls                    40          40          PASS (exact)
+  session.oxc_eval_program_parse.calls              42          42          PASS (exact)
+  session.source_text_copy.amount                   124,410     124,410    PASS (exact)
+  workspace.normalize_canonical_id.calls            11,313      11,313     PASS (exact)
+  session.fact_observe.calls                        16,917      16,917     PASS (exact)
+  session.indexed_ready_build.calls                 8,032       8,032      PASS (exact)
+  session.semantic_dispatch.calls                   4,216       4,216      PASS (exact)
+  compiler.source_map_build.calls                   40          40         PASS (exact)
+  session.semantic_cold_build.calls                 1,063       1,063      PASS (exact — the
+                                                                              cache-key-identity
+                                                                              discriminator: an
+                                                                              inequal new key
+                                                                              type would move
+                                                                              this first)
+  session.cache_admit_cacheable.calls               1,063       1,063      PASS (exact,
+                                                                              absolute_min: equal
+                                                                              to cold builds,
+                                                                              zero ReturnOnly)
+
+  Also diffed directly against docs/arch/refactor/rev11/evidence/A6/baseline-counters.tsv (the
+  original locked-baseline dataset, not just the derived limits above) for every gated row:
+  `calls`/`amount` columns are byte-identical; zero difference.
+
+  zero_counter_assertions:
+    compiler.css_parse       — absent from output (zero calls)   PASS
+    compiler.css_transform   — absent from output (zero calls)   PASS
+    compiler.style_analysis  — absent from output (zero calls)   PASS
+
+3.2 Output oracle
+
+  session.component_meta_digest == 7161214711717846280   -> candidate: 7161214711717846280  PASS (exact)
+  determinism self-check (run1 vs run2 in-process): AGREE                                    PASS
+  compiled_output digest: N/A (no observations on this lane — a known, documented gap, not a
+    requirement; the gate does not assert compiler.compiled_output_digest for this cell)
+
+--------------------------------------------------------------------------
+4. Conjunctive verdict
+--------------------------------------------------------------------------
+
+wall_ns:        PASS (relative -1.0846% vs fresh session baseline / -1.723% vs locked baseline;
+                       absolute max invocation median 71.50 ms << 100 ms; control drift 2.9304% <
+                       3.000% bound)
+peak_rss_bytes: PASS (relative -0.3923% vs fresh session baseline / +0.033% vs locked baseline;
+                       absolute max invocation RSS 78.91 MB << 256 MiB)
+work counters:  PASS (every gated counter reproduces the locked baseline exactly)
+zero-work:      PASS (css_parse/css_transform/style_analysis all zero)
+output oracle:  PASS (component_meta_digest exact match, AGREE determinism)
+
+All metrics pass conjunctively, under the genuine alternating-invocation A,B,B,A protocol locked
+by `performance-gates.toml`'s `interleave_policy`, with both arms built as real, separately
+compiled binaries. A6_META_COMPILE_40_COLD_RUST: PASS for candidate
+1512dbcfccc5ee0591bbbe109b5f7a3aabeb5ed9.
+
+Consistent with the source-identity argument in §0/the prior capture: `verter_identity` lands
+with zero production consumers this block, so this cell's workload (component-meta + host-backed
+compile over 40 Vue components) does not execute a single line of the new crate — the exact-match
+counters and digest, and the sub-1% relative timing/RSS deltas, are the expected result of a
+dependency-neutral crate that adds no normalisation, no copy, and no hash to any site this cell
+measures, now demonstrated by a real two-binary ABBA session rather than argued from a source
+diff alone.
