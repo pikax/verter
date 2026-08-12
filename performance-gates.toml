@@ -1,0 +1,349 @@
+# Verter Revision 11 performance gates.
+#
+# Locked by A6 from templates/performance-gates.template.toml. Every number here
+# was frozen before any candidate for a gated block existed. A gate may be
+# recalibrated only under verification.md 8.1 (machine/toolchain/corpus/competitor
+# materially changed, raw before/after calibration retained, no candidate result
+# inspected first, independent performance reviewer accepts, affected block
+# re-baselined) and only through a new Implementation Lock Record digest and the
+# same independent review class (ADR-016). Weakening a gate after seeing candidate
+# results is prohibited.
+#
+# SCOPE. This file locks the cells the currently unlocked block needs measured.
+# It is not an exhaustive suite for every future block, and it does not pretend to
+# be: verification.md 8.4's direct-compiler, managed-compiler, CSS, provider and
+# competitor benchmark families are NOT locked here and no cell claims them.
+# Adding a cell for a later block is an EXTENSION, requiring a new lock record
+# digest and the same independent review class. Adding a cell never licenses
+# weakening, reweighting, subsetting or reinterpreting an existing one.
+#
+# Every value traces to
+# docs/arch/refactor/rev11/evidence/A6/baseline-measurement.md and
+# docs/arch/refactor/rev11/evidence/A6/counter-reproduction.md.
+#
+# Vocabulary note, stated once. Several template fields presuppose Revision 11
+# types that do not exist at lock time (product-request kinds, output/presentation/
+# serialization profiles, the B4 mapping taxonomy, the owner memory model). Where
+# that is so, the field names the CONCRETE CURRENT configuration and says so at the
+# field. No field is left as a placeholder, and none invents a target-architecture
+# name that nothing in the tree defines.
+
+schema = 1
+revision = 11
+status = "LOCKED"
+
+# Recomputable aggregate over the landed Revision 11 authority tree, per
+# docs/arch/refactor/rev11/PROVENANCE.md ("Aggregate digest of the landed
+# split-package tree"), computed at the A6 candidate tree. The canonical 85-file
+# package digest does not exist: package validation is WAIVED by maintainer
+# ruling R-2. This file lives at the repository root, OUTSIDE that aggregate's
+# input set, so the digest stays recomputable rather than self-referential.
+authority_digest = "b4e59668fd3d8bd87068d9c56b293be50fc595987f452d604c09cb6f347ffcfc"
+
+# The exact post-Gate-0 implementation baseline A6 accepts. Source-identical to
+# the tree A4 measured (verified: the diff restricted to crates/, packages/,
+# scripts/, .github/ and both lockfiles is empty). A6's own documentation-only
+# landing does not become the baseline (contracts/baseline-lock.md 5).
+#
+# This pair was rebound when the integration lineage below it was rewritten to
+# strip program vocabulary from commit messages and three documentation commits
+# then landed on the rewritten lineage. The rewrite is message-only: the
+# superseded baseline 6af543c8a65b495aad2d6231e5e90878c3bf1769 and its live
+# replacement 518dc45f0dc35b716b353f3f79fa30cc929c5d5f share the tree OID
+# e8a6dcd1b6ce2dddf5e965f14138d2ad51f82943, so no measured number below depends
+# on which name is used. See the lock record section 1.
+baseline_sha = "fb863297a04c7eb114d53ff65736c00240354504"
+baseline_tree = "a2e01e16d705faecf259152f40d0a3b228b16dbf"
+created_at_utc = "2026-08-11T22:56:51Z"
+
+[runner]
+# Absolute wall and RSS limits are bound to THIS runner class. A different class
+# is a recalibration under verification.md 8.1, not a local adjustment.
+class = "apple-silicon-laptop-8core-24gib"
+os = "Darwin 25.6.0 arm64"
+cpu = "Apple M3"
+logical_cpus = 8
+memory_bytes = 25769803776
+rust_toolchain = "1.97.1 (8bab26f4f 2026-07-14)"
+node_runtime = "v20.20.2"
+power_policy = "AC power; macOS low-power mode OFF (pmset lowpowermode 0); no other user workload during a measurement session"
+# The control benchmark is the baseline arm itself, re-run at session start and
+# end. A separate synthetic control would drift independently of the thing being
+# measured; this one cannot.
+control_benchmark = "target/release/examples/attribution_baseline --files 40 --runs 30, built from baseline_sha with default features"
+# Equal to the locked wall no-regression bound: if the machine drifts by more
+# than the gate itself, the session cannot distinguish drift from regression and
+# is void. Measured between-invocation noise floor is 1.4757%, well inside it.
+max_control_drift_percent = 3.0
+
+[statistics]
+short_min_samples = 30
+long_min_runs = 10
+confidence = 0.95
+bootstrap_resamples = 10000
+no_regression_floor_percent = 3.0
+noise_multiplier = 2.0
+outlier_policy = "no_discretionary_exclusion: every measured sample enters the statistic. A sample whose cell validity assertions fail invalidates the whole RUN, not the sample. A run during which the machine was not idle, thermally throttled, or interrupted is discarded in whole BEFORE its statistic is read. No sample is removed after the direction of the result is known."
+interleave_policy = "alternating_invocation_abba: baseline and candidate binaries are built with the identical toolchain and profile and invoked alternately within one session in A,B,B,A order, at least four invocations per arm, machine otherwise idle. The control benchmark runs at session start and end; the session is void if the two control medians differ by more than runner.max_control_drift_percent."
+
+[primary_suite]
+id = "A6_LOCK_SUITE"
+cell_ids = ["A6_META_COMPILE_40_COLD_RUST"]
+aggregate = "geomean_ratio"
+# No competitor cell is locked at A6. The competitor comparison belongs to the
+# direct-compiler families (verification.md 8.4), which are locked when the block
+# that owns them is unlocked, by a new lock record.
+competitor_ids = []
+max_verter_to_fastest_ratio = "not_applicable"
+post_result_exception_allowed = false
+premise_change_requires_new_lock = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cell A6_META_COMPILE_40_COLD_RUST
+#
+# One cold project batch: 41 files (40 Vue components + 1 shared TypeScript
+# module the components import from, so the corpus exercises cross-file
+# resolution rather than N isolated files), upserted into a fresh host, loaded,
+# then component metadata per component, then a host-backed batch compile.
+#
+# WHY THIS IS THE CELL FOR NEUTRAL-CONTRACTS WORK. The block now unlocked lands
+# typed identities, profile schemas and canonical encodings. Its template asked
+# for "benchmark cells for canonicalization/hash/key construction overhead".
+# This cell measures exactly that overhead IN SITU:
+# workspace.normalize_canonical_id runs 11,313 times in one pass and the hash
+# sites run on every artifact, so an identity or key type that adds a
+# normalisation, a copy or a hash per construction moves a gated counter.
+# session.semantic_cold_build is the discriminating metric: a new key type that
+# is not equal where the old one was turns warm hits into cold builds, and that
+# counter moves first. A dedicated micro cell may be ADDED by extending this
+# lock; it may not replace this cell.
+#
+# METRICS ARE CONJUNCTIVE. An absolute pass does not offset a relative failure. A
+# timing pass does not offset a work-counter, zero-work, or output-oracle failure.
+# ─────────────────────────────────────────────────────────────────────────────
+[[cell]]
+id = "A6_META_COMPILE_40_COLD_RUST"
+owner = "verter_session"
+operation = "cold_project_batch_component_meta_then_compile_many"
+# The corpus is synthesised in-process by the harness, so it has no fixture
+# directory to fingerprint; the harness source IS the corpus definition and is
+# pinned by blob identity. A run whose harness blob differs is not this cell.
+corpus_fingerprint = "git-blob:a74f90c5d1d06f8fc17a71781d28d0c6ea466853 (crates/verter_bench/examples/attribution_baseline.rs); sha256:1d208e61688efdf6b8e33adce7d0095c1195377e65a06579c26b75b08ea9bb73"
+# SHA-256 over the exact request description string recorded in
+# evidence/A6/baseline-measurement.md; the Revision 11 normalized product-request
+# type does not exist at lock time, so the request is pinned by its literal
+# description instead of by a type it has no instance of.
+normalized_product_request_digest = "d80a5f9e174de68b10257e6ed929331f031950639496ac8465048804fb0f4d48"
+result_contract = "component_meta_analysis_per_component_plus_host_backed_compile_batch_result"
+semantic_profile = "none"
+execution_profile = "cargo_release_profile_default_features_HostConfig_default"
+cache_state = "cold"
+# SchedulerConfig::default().cpu_threads = num_cpus() on native
+# (crates/verter_scheduler/src/scheduler.rs:71), which is this runner's 8 logical
+# CPUs; io_threads = 4. The cell is therefore machine-width-bound, and a runner
+# class with a different width is a recalibration.
+threads = 8
+boundary = "rust"
+required = true
+
+[cell.validity]
+required_product_kinds = ["component_meta", "runtime_compile"]
+# Names the concrete current configuration, not a Revision 11 profile type:
+# CompileManyTarget::HostBacked with CompileBatchOptions::default().
+required_output_profiles = ["host_backed_compile_many_default"]
+required_presentation_profiles = []
+required_serialization_profiles = []
+# The Revision 11 mapping taxonomy (PlacementMap / SourceProjectionMap /
+# RuntimeSourceMapData / EncodedSourceMap) does not exist at lock time. The map
+# construction this workload performs is pinned by the
+# compiler.source_map_build counter metric below instead of by a taxonomy name
+# nothing in the tree defines.
+required_mapping_kinds = []
+required_diagnostics_policy = "host_config_default_no_diagnostics_selection"
+required_exactness = "exact"
+# The semantic-equivalence oracle. Without it a candidate could pass every work
+# and timing gate by producing different metadata faster.
+output_oracle = "session.component_meta_digest == 7161214711717846280"
+# The corpus authors no style block, so any CSS work is incidental work the
+# request did not ask for (verification.md 7's zero-work negative proof). These
+# three sites appear in no baseline dataset row.
+#
+# Deliberately NOT asserted zero: compiler.compiled_output_digest and the FFI
+# boundary sites. They record zero because this workload's lane does not reach
+# them, which is a known gap, not a requirement. Freezing a gap as a gate would
+# make a later block's correct fix fail.
+zero_counter_assertions = [
+  "compiler.css_parse",
+  "compiler.css_transform",
+  "compiler.style_analysis",
+]
+
+# ── timing and memory: measured on the DISABLED instrumentation arm ───────────
+# The enabled arm installs AttributingAllocator as the global allocator and costs
+# +7-13% on this workload. Timing metrics and counter metrics are therefore
+# measured in different arms and are never compared to each other.
+
+# Product budget, not a fit: a cold project batch must sustain no worse than
+# 2.5 ms per component end to end, so a 1,000-component project's initial batch
+# stays inside a 2.5 s cold-project budget. 40 components buys 100 ms. Measured
+# baseline is 70,525,000 ns.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 100000000
+
+# max(3.000%, 2 x 1.4757% measured noise floor) = 3.000%. Not rounded from a
+# larger value: verification.md 8.3 makes this an upper bound.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 3.0
+
+# Product budget, not a fit: an editor host must hold a 1,000-file project under
+# 2 GiB; a 41-file batch is budgeted 256 MiB. Deliberately generous because peak
+# RSS is allocator- and platform-dependent — this is a catastrophe stop, and the
+# tight fence on this metric is the relative gate below. Measured baseline is
+# 74,850,304 bytes.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 268435456
+
+# max(3.000%, 2 x 2.4760% measured noise floor) = 4.952%. NOT rounded up to 5.0:
+# the rule is an upper bound. Stated exactly rather than left implied: the noise
+# floor is 2.4759733% and twice it is 4.9519466%; 2.4760% and 4.9520% are those
+# values at the precision the measurement record prints. So the locked 4.952 sits
+# 0.0000534 percentage points ABOVE the exact cap, not below it — about one part
+# in 46,000 of the noise floor it derives from. Disclosed here rather than
+# presented as exact; the limit is not restated at more digits than four
+# 30-sample invocations support.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "no_regression_percent_max"
+limit = 4.952
+
+# ── work counters: measured on the ENABLED instrumentation arm ────────────────
+# Deterministic. Each limit is the value observed identically in four independent
+# observations (A4's retained dataset plus three fresh runs). All but one are
+# absolute_max, so a candidate that does LESS work passes. The exception is
+# session.cache_admit_cacheable.calls: the failure it guards is the counter
+# FALLING, so it is gated absolute_min — see the comment at that metric.
+#
+# Only counters that actually held still are gated. Two counter columns moved
+# between observations and are deliberately NOT gated:
+# scheduler.task_wait.amount (its unit is Nanoseconds — a duration in a counter's
+# clothing) and session.read_set_signature_build.amount (+60 items, +0.045%,
+# with calls identical). "It is a counter" is not by itself a licence to gate.
+
+# A second carrier parse per file.
+[[cell.metric]]
+name = "compiler.carrier_parse.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 40
+
+# A script re-parse outside the retained snapshot.
+[[cell.metric]]
+name = "session.oxc_script_parse.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 40
+
+# An eval-program re-parse per demand instead of per file version.
+[[cell.metric]]
+name = "session.oxc_eval_program_parse.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 42
+
+# Source bytes copied. A source-sized copy introduced by a new identity or unit
+# type lands here first.
+[[cell.metric]]
+name = "session.source_text_copy.amount"
+statistic = "max"
+comparison = "absolute_max"
+limit = 124410
+
+# The single most repeated call in the system (276 per file). Exactly what a new
+# identity wrapper is liable to add one of per construction.
+[[cell.metric]]
+name = "workspace.normalize_canonical_id.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 11313
+
+# A fact observation added per identity or per key.
+[[cell.metric]]
+name = "session.fact_observe.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 16917
+
+# A re-entry of the serve path per new key.
+[[cell.metric]]
+name = "session.indexed_ready_build.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 8032
+
+# THE discriminating metric for identity work: cache-key equality breakage turns
+# warm hits into cold builds and moves this counter before anything else.
+[[cell.metric]]
+name = "session.semantic_cold_build.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 1063
+
+# Equal to cold builds at baseline: every cold build is admitted cacheable, zero
+# ReturnOnly on this corpus. The failure this metric exists to catch is admission
+# COLLAPSE — cold builds that stop being admitted and are therefore rebuilt on
+# every later demand. That failure makes the counter FALL, so the direction is
+# absolute_min. An absolute_max here would pass with maximum margin precisely when
+# admissions drop to zero: the same inversion that keeps session.semantic_warm_hit
+# out of the gated set below, and the reason this metric is not gated in the same
+# direction as the rest. absolute_min at the baseline value fails as soon as one
+# cold build stops being admitted.
+[[cell.metric]]
+name = "session.cache_admit_cacheable.calls"
+statistic = "max"
+comparison = "absolute_min"
+limit = 1063
+
+# Total dispatches, so a candidate cannot hold cold builds flat by dispatching
+# more. session.semantic_warm_hit is deliberately NOT gated: an absolute_max on
+# warm hits would pass precisely when warm hits collapse, which is the failure it
+# would appear to guard. Cold builds carry that signal instead.
+[[cell.metric]]
+name = "session.semantic_dispatch.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 4216
+
+# Map construction, pinned by counter because the Revision 11 mapping taxonomy
+# does not exist yet.
+[[cell.metric]]
+name = "compiler.source_map_build.calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 40
+
+[cell.competitor]
+rule = "none"
+competitor_ids = []
+max_wall_slowdown_percent = "not_applicable"
+max_peak_rss_increase_percent = "not_applicable"
+post_result_exception_allowed = false
+
+[cell.memory]
+# The Revision 11 owner memory model does not exist at lock time, so there is no
+# per-owner budget to state. Whole-process memory IS gated, by the
+# peak_rss_bytes metrics above. Soak fields are not applicable to a ~70 ms batch
+# cell; no soak cell is locked by A6.
+owner_budget_bytes = "not_applicable"
+allocator_slack_bytes = "not_applicable"
+quiescence_protocol = "not_applicable"
+max_positive_slope_bytes_per_hour = "not_applicable"

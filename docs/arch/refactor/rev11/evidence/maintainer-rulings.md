@@ -8,8 +8,10 @@ the way it does. A future agent continuing the program reads this file together 
 landing; live A0 state lives in the external ledger).
 
 **Maintainer:** Carlos Rodrigues (GitHub `pikax`). Rulings R-1 through R-8 were made
-and recorded on **2026-08-09**; R-9 was made and recorded on **2026-08-10**; R-10
-was made and recorded on **2026-08-11**.
+and recorded on **2026-08-09**; R-9 was made and recorded on **2026-08-10**; R-10 and
+R-11 were made and recorded on **2026-08-11**. R-12 (rescoping AMD-001 §1's timing) was
+made and recorded on **2026-08-12**. R-13 was issued in `A6`'s dispatch packet and
+entered in this register on **2026-08-12** (see that section for its source).
 
 ## R-1 — Maintainer designation
 
@@ -158,6 +160,76 @@ results. Exact structural completion and G10 discrimination remain open debt `FR
 owned by D6 / `U6.LOOP_CLOSURE`, with the sole demanded `FunctionFlowGraph` as completion
 authority and no syntax-only fallback or second classifier.
 
+## R-12 — Rescope AMD-001 §1's timing away from `A6`
+
+**Source.** Raised as an `A6` architecture-review finding (AMD-001's traceability and
+undelivered-prerequisite obligations), then referred for architecture ruling rather than
+resolved by an implementer or track orchestrator, per governance's requirement that a
+governance-§10 deviation on a maintainer-authored amendment is decided by the maintainer.
+
+Maintainer decision (verbatim): **AMEND-AMD-001-TIMING** (not DEFER, not DELIVER-NOW).
+"AMD-001 §1 correctly requires the four artifacts before stacked delivery, but incorrectly
+makes `A6` their delivery point — `A6` is an implementation-lock block, excludes
+speculative later machinery, and its only unlocked successor `B1` is depth-1 with no stack
+window. AMD-001 §3's unchanged fail-closed refusal already prevents the unsupported
+`D1`/`D2` transition meanwhile. Action: amend AMD-001 §1 so the four artifacts remain
+mandatory before the first post-`A6` stack window opens, and unconditionally before `D1`
+enters `PRIVATE_CHECKPOINT`; retain §§2-4 unchanged."
+
+**Disposition.** ADOPTED. `AMD-001` §1 is amended in place (a governance-§10 rescope, full
+seven-field form, recorded inside `AMD-001-stack-window-validator-prerequisite.md` itself
+under "Amendment to §1's timing"); §§2-4 stand unchanged, including `A6`'s continuing
+mechanical-traceability duty to name `AMD-001` and bind its digest. `A6` delivers none of
+the four artifacts; whichever accepted candidate immediately precedes the first opened
+stack window (or, absent one sooner, the candidate immediately before `D1` enters
+`PRIVATE_CHECKPOINT`) carries the delivery duty.
+
+**Consequence for `A6`'s already-bound digest.** Amending `AMD-001` changes its SHA-256.
+`A6`'s Implementation Lock Record and context-packet addendum, which bound the
+PRE-amendment digest under §4's traceability duty, must rebind to the POST-amendment
+digest before `A6`'s candidate is accepted — tracked as open work on `A6`, not a
+retroactive rewrite of what was actually reviewed.
+
+## R-13 — Unlanded local candidate branches abandoned as a class
+
+**Source.** This ruling was issued as a maintainer-ratified decision in `A6`'s dispatch
+packet, under "MAINTAINER-RATIFIED DECISIONS", and is recorded here because that packet
+is where the verbatim ratification lives:
+[`A6/context-packet.md`](A6/context-packet.md) §1. The decision was already binding when
+the lock record cited it; this entry gives it a durable address in the register rather
+than leaving it reachable only through a dispatch prompt. The ratification text (the
+dispatch prompt itself labels the decision "R-12"; it is registered here as **R-13**
+because R-12 in this register is the later AMD-001 timing rescope above — the numbers
+reflect registration order, not dispatch order):
+
+> R-12 (as labelled in the dispatch prompt): the 469-candidate unlanded local-branch
+> population is abandoned as a class (lineage-bound justification: every candidate's
+> merge-base is at or before `2de3b2d07`). No branch is deleted, no GitHub action taken.
+> `port/rust` keeps its individually-recorded disposition from A5 (net +370,822 driven by
+> one generated artifact absent from main; excluding it, it is the population's largest
+> net deletion; its merge-base already satisfies the lineage bound).
+
+Three consequences the register records explicitly, because each is a decision rather
+than a restatement:
+
+1. **Abandonment is a class disposition, not a per-branch review.** The test the class
+   rests on is the lineage bound — every candidate was cut from a merge-base at or before
+   `2de3b2d07`, i.e. before the squashes that superseded them — and that bound holds
+   without exception across the population.
+2. **It authorises no action.** No branch is deleted, no ref is moved, and no GitHub
+   action of any kind is taken; this is consistent with R-8. The disposition records the
+   program's relationship to the population, exactly as R-5 does for PR #98.
+3. **`port/rust` is carved out individually inside the class**, on the evidence A5
+   recorded: its `+370,822` is one 2,991,892-line generated artifact absent from `main`,
+   and excluding that file it is the population's largest net deletion. Its merge-base
+   already satisfies the lineage bound, so the carve-out changes its rationale, not its
+   disposition.
+
+Consumed by the A6 Implementation Lock Record §1 ("Open PR/branch disposition"), whose
+citations of this ruling (rendered there as "R-12", the dispatch prompt's own label) are
+this register's **R-13** — the lock record's citation is updated to say so in the same
+candidate that includes this registration.
+
 ## Registered amendments
 
 Amendments normally record deltas without editing the verbatim-reconstructed authority
@@ -169,11 +241,13 @@ Registry:
   the program-state validator's fail-closed rejection of begun successors of a
   `PRIVATE_CHECKPOINT` predecessor collides with the plan's canonical
   `D1 PRIVATE_CHECKPOINT -> D2` atomic path; before any post-A6 stacked delivery,
-  `A6` must deliver the Node stack-window validator, composite program-state
-  cross-validation, CI wiring, and a discriminating D1/D2 transition test; the
-  composite validator accepts `D2` only when `D1` is the declared private checkpoint
-  in the same validated `ATOMIC_REVIEW` snapshot with `D2` as its acceptance block;
-  the refusal is superseded by that delivery, never simply deleted.
+  the accepted candidate immediately preceding that event must deliver the Node
+  stack-window validator, composite program-state cross-validation, CI wiring, and
+  a discriminating D1/D2 transition test (rescoped away from `A6` by R-12 — see
+  above); the composite validator accepts `D2` only when `D1` is the declared
+  private checkpoint in the same validated `ATOMIC_REVIEW` snapshot with `D2` as
+  its acceptance block; the refusal is superseded by that delivery, never simply
+  deleted.
 - **AMD-002 — A2C completion-model predecessor for A3** —
   [`../amendments/AMD-002-a2c-completion-predecessor.md`](../amendments/AMD-002-a2c-completion-predecessor.md):
   inserts `A2C` between `A2` and `A3`; its points 2 through 4 are superseded by

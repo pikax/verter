@@ -83,7 +83,14 @@ repository uses `core.autocrlf=false`; a CRLF-translating checkout changes the b
 and therefore the digest).
 
 - File count: 74
-- Aggregate digest: `ff49cddeb8f6577144dcf85cb9d026cba0d14e7164e7b3825c4a59b215c8148b`
+- Aggregate digest: `a061d97534f2b96f96a92eae24569f8500c696a4b82d827efbd1a52deb78a173`
+
+(Superseded aggregate `ff49cddeb8f6577144dcf85cb9d026cba0d14e7164e7b3825c4a59b215c8148b` was
+published against the tree before the AMD-001 timing rescope edited a file inside this
+aggregate's own input set (`amendments/`); recomputed and republished in the same commit
+that discovered the drift, per the same recomputable-pipeline discipline stated above —
+this is not a second historical-reconstruction exception, just a normal re-publication
+after an in-scope file changed.)
 
 (The historical aggregate reconstruction digest
 `4ab1523c4fc769cc02da61d017d7e447adf62652189350c947a3f642128d8e5c` was published

@@ -23,6 +23,7 @@ export default defineConfig({
       // root collection the same way this one does); the single-file exclude
       // leaves every one of them collected exactly as before.
       "scripts/validate-program-state.test.mjs",
+      "scripts/validate-performance-gates.test.mjs",
       ".integration-tests/**",
       "packages/playground/**",
       // packages/types has its own vitest.config.ts with typecheck: { only: true }
