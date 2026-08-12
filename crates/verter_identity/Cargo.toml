@@ -1,0 +1,30 @@
+[package]
+name = "verter_identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Dependency-neutral typed identities, profile/result-contract schemas, and canonical encoding — the shared vocabulary layer beneath every owner crate"
+publish = false
+
+# Dependency closure is a FIREWALL contract, exactly like `verter_macro_dto`'s:
+# this crate is the neutral identity/profile/mapping/result-contract vocabulary
+# every layer (syntax frontends, semantic kernel, compiler, managed engine,
+# adapters) constructs and compares typed identities through, so its own
+# production closure must reach NOTHING above layer 1 (identity/span/language/
+# contracts) in `crates/verter_identity/tests/cases/workspace_dependency_layers.rs`'s
+# layer matrix. `blake3` is the sole non-workspace production dependency (the
+# canonical-encoding digest primitive); there is no `verter_*` production
+# dependency at all — even `verter_span` is deliberately NOT a dependency here,
+# because a `Span`-carrying identity is a decision for the type that OWNS the
+# span-relative concept, not for this neutral vocabulary crate.
+[dependencies]
+blake3 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+static_assertions = "1.1.0"
+trybuild = "1.0"

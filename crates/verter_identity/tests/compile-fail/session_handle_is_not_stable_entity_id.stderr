@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/compile-fail/session_handle_is_not_stable_entity_id.rs:16:30
+   |
+16 |     expects_stable_entity_id(handle);
+   |     ------------------------ ^^^^^^ expected `StableEntityId`, found `SessionHandle`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/compile-fail/session_handle_is_not_stable_entity_id.rs:8:4
+   |
+ 8 | fn expects_stable_entity_id(_: StableEntityId) {}
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^ -----------------

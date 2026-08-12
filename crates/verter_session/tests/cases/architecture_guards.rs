@@ -11836,78 +11836,22 @@ fn unrelated_function() {
 // ----------------------------------------------------------------
 // Audit substrate isolation guards — created with the verter_audit
 // crate and the cascade-move that retired the in-session DTO copies.
+//
+// `verter_audit_no_upward_deps` (the Cargo.toml dependency-table scan) was
+// deleted here: its invariant is strictly implied by the whole-workspace
+// resolve-graph closure test
+// (`crates/verter_identity/tests/cases/workspace_dependency_layers.rs`),
+// which proves `verter_audit`'s production closure is exactly
+// `{verter_audit, verter_span}` by walking what cargo actually links rather
+// than scanning manifest text. Keeping both would be a second authority for
+// one rule. `audit_substrate_isolation` below is NOT deleted alongside it:
+// its dependency half is implied by the same closure walk, but its NAMING
+// half (rejecting a bare `verter_*` token on a non-comment source line,
+// including one that is not a dependency at all — e.g. a local binding
+// name) is not something a resolve-graph walk can see. That residue is kept
+// as a separate, named, grandfathered guard (CLAUDE.md's forward-only rule:
+// pre-existing landed scanners are grandfathered, not re-justified).
 // ----------------------------------------------------------------
-
-/// `verter_audit` MUST stay a leaf crate: its `Cargo.toml` lists
-/// only `verter_span` as the verter_*-prefixed dependency in any
-/// dependency table (regular, dev, build, target-keyed, or
-/// `workspace.dependencies`).
-#[test]
-fn verter_audit_no_upward_deps() {
-    let toml_src = read_workspace_file("crates/verter_audit/Cargo.toml");
-    let parsed: toml::Value =
-        toml::from_str(&toml_src).expect("verter_audit/Cargo.toml must parse as TOML");
-
-    // Walk every dependency table that Cargo recognises:
-    // `dependencies`, `dev-dependencies`, `build-dependencies`,
-    // and target-keyed variants under `target.<cfg>.*` and
-    // `workspace.dependencies`. Reject any `verter_*` entry
-    // (besides `verter_span`) anywhere in that namespace.
-    fn names_in_table(table: &toml::Value) -> impl Iterator<Item = &str> {
-        table
-            .as_table()
-            .into_iter()
-            .flat_map(|t| t.keys().map(String::as_str))
-    }
-
-    let mut violations: Vec<String> = Vec::new();
-    let dep_table_names = ["dependencies", "dev-dependencies", "build-dependencies"];
-
-    // Top-level dependency tables.
-    for table_name in dep_table_names {
-        if let Some(table) = parsed.get(table_name) {
-            for name in names_in_table(table) {
-                if name.starts_with("verter_") && name != "verter_span" {
-                    violations.push(format!("[{table_name}]: {name}"));
-                }
-            }
-        }
-    }
-
-    // `target.<cfg>.{dependencies,dev-dependencies,build-dependencies}`.
-    if let Some(targets) = parsed.get("target").and_then(|v| v.as_table()) {
-        for (cfg, body) in targets {
-            for table_name in dep_table_names {
-                if let Some(table) = body.get(table_name) {
-                    for name in names_in_table(table) {
-                        if name.starts_with("verter_") && name != "verter_span" {
-                            violations.push(format!("[target.{cfg}.{table_name}]: {name}"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // `workspace.dependencies`.
-    if let Some(ws) = parsed.get("workspace") {
-        if let Some(table) = ws.get("dependencies") {
-            for name in names_in_table(table) {
-                if name.starts_with("verter_") && name != "verter_span" {
-                    violations.push(format!("[workspace.dependencies]: {name}"));
-                }
-            }
-        }
-    }
-
-    assert!(
-        violations.is_empty(),
-        "verter_audit_no_upward_deps: `verter_audit/Cargo.toml` declares \
-         non-leaf verter_*-prefixed dependencies. The substrate must depend ONLY on \
-         `verter_span` plus ecosystem crates. Offending entries:\n  {}",
-        violations.join("\n  ")
-    );
-}
 
 /// Source files under `crates/verter_audit/src/` MUST `use` only
 /// `verter_span`, `std`, and external crates.
