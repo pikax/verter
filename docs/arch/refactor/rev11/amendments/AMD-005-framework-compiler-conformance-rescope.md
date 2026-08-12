@@ -329,8 +329,8 @@ further narrow correction to an untracked, gitignored scratch note that was neve
 of the reviewed package identity; PASS). All three closed verdicts are `PASS`.
 
 > Ratify AMD-005 for reviewed package commit
-> `ce1d0e4688af1b5bd548b6b68286632cc0f7ede8`, tree
-> `1ff1f83d8e994b6f1169b0b209c9f557c23f4728`, attached without non-report changes in
+> `7442bb9060b7faa0720e528d3f96ee1df1abff95`, tree
+> `69502487b55f87eb7c0c009876865b64397da660`, attached without non-report changes in
 > ratification-bundle commit `aa757eecc1f7748d2eec076ab0665da76cb2904a`, tree
 > `0c078357bac74724208df75c25da4fa74ab95013`, and the listed package digests; accept
 > the exact Vue RC.3 and Svelte 5.56.8 domains, exclusions, amended DAG, charters,

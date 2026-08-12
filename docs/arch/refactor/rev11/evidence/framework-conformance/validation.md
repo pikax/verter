@@ -48,6 +48,13 @@ of all three primary report files (`--pre-review`) or their presence, exact revi
 commit/tree binding, and closed verdict (`--post-review`). Post-review validation is
 not a PASS-verdict oracle.
 
+HISTORICAL: this command validated the primary review reports' binding to the
+original candidate before the bounded fix round. It does not examine the fix-round
+reattestations, so it does not bind to the final `PASS` identity
+(`7442bb9060b7faa0720e528d3f96ee1df1abff95`, tree
+`69502487b55f87eb7c0c009876865b64397da660`) — see AMD-005 §15.1 for that identity.
+Retained here for reproducibility of the original review round only.
+
 ```sh
 node --check docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs
 node --check docs/arch/refactor/rev11/evidence/framework-conformance/generate-oracle-closures.mjs
