@@ -60,4 +60,42 @@ describe("runner re-enumeration against the pinned source trees", () => {
       expect(result.unresolvable).toEqual(["BF2-SELFTEST-BOGUS"]);
     },
   );
+
+  // Targets the content-hash discriminator specifically: a row whose PATH is
+  // real and tracked in the pinned checkout (so it passes the path lookup the
+  // "bogus locator" case above exercises) but whose recorded source_object
+  // (git blob hash) has been deliberately corrupted to not match the live
+  // blob at that path. Without this case, deleting the
+  // `source_object-mismatch` branch in reEnumerateVueRows/reEnumerateSvelteRows
+  // would go undetected by this suite even though the branch is live
+  // production logic.
+  runIf(
+    "a row whose path resolves but whose recorded content hash has drifted is correctly reported unresolvable",
+    () => {
+      const [realRow] = parseCaseManifest("vue-official-cases.tsv");
+      const corrupted = {
+        ...realRow,
+        case_id: "BF2-SELFTEST-HASH-MISMATCH",
+        source_object: "0000000000000000000000000000000000000000",
+      };
+      const result = reEnumerateVueRows(vueSource, [corrupted]);
+      expect(result.resolvable).toBe(0);
+      expect(result.unresolvable).toEqual(["BF2-SELFTEST-HASH-MISMATCH"]);
+    },
+  );
+
+  runIf(
+    "a Svelte row whose path resolves but whose recorded content hash has drifted is correctly reported unresolvable",
+    () => {
+      const [realRow] = parseCaseManifest("svelte-official-cases.tsv");
+      const corrupted = {
+        ...realRow,
+        case_id: "BF2-SELFTEST-SVELTE-HASH-MISMATCH",
+        source_object: "0000000000000000000000000000000000000000",
+      };
+      const result = reEnumerateSvelteRows(svelteSource, [corrupted]);
+      expect(result.resolvable).toBe(0);
+      expect(result.unresolvable).toEqual(["BF2-SELFTEST-SVELTE-HASH-MISMATCH"]);
+    },
+  );
 });
