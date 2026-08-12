@@ -277,8 +277,8 @@ notes = "Gap-analysis-only block: every one of BF1's 7 numbered exit criteria an
 
 [[block]]
 id = "BF2"
-status = "LOCKED"
-charter_digest = ""
+status = "READY"
+charter_digest = "1f99cf7eda1a955ada751f075799dabc8c8ab1defda19b20375f7ca09aa5963b"
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
@@ -294,7 +294,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
-notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
+notes = "Predecessor BF1 ACCEPTED at 6305950725abc2265135694f353b8fb75ef9c9c5 (its performance-lock exit independently reverified: performance-gates.toml PASS, 3 cells/37 metrics/no placeholders, real non-placeholder BF2 Vue/Svelte thresholds). BF2 is execution-legal (test-infrastructure-only, forbids production compiler changes). BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE stays deliberately open — a BF2 implementation/acceptance obligation, not a dispatch blocker; BF2 must not close it via post-result threshold selection. J1 stays locked (CSS work not selected)."
 
 [[block]]
 id = "BF3"
