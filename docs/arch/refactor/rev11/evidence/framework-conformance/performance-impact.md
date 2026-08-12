@@ -6,12 +6,27 @@ machine class, samples, statistics, absolute and relative thresholds, memory cei
 work counters, correctness oracle, and lease policy before BF2 implementation begins.
 Thresholds cannot be changed after observing a successor candidate.
 
+**FROZEN (2026-08-12):** `BF2_VUE_ORACLE_MANIFEST_GENERATE` and
+`BF2_SVELTE_ORACLE_MANIFEST_GENERATE` are locked in `performance-gates.toml` (repository
+root), closing the corresponding row of BF1's reopened exit criterion #6 for these two
+cells specifically. They measure the real, already-authored, already-run BF1
+evidence-preparation tool `generate-official-case-manifests.mjs` — NOT BF2's future
+test-execution harness, which does not exist yet and cannot be measured without
+violating "a performance criterion selected after candidate measurement" (BF1 charter,
+Abort/rescope). Full derivation, raw 10-run session, sandbox network-denial profile, and
+threshold arithmetic:
+[`command-proofs/bf2-oracle-manifest-generate/`](command-proofs/bf2-oracle-manifest-generate/).
+The remaining seven cells below (`BV1`/`BS1`/`B6`/`C4`-owned) are unaffected by this
+freeze and stay deferred to their owning blocks' own landings, per this document's
+original scope — no threshold is invented for them here.
+
 ## Required new cells
 
 | cell | owner/candidate boundary | workload and required counters |
 |---|---|---|
-| `BF2_VUE_ORACLE_MANIFEST_GENERATE` | BF2 harness | complete RC.3 manifest/golden shard; enumerated/imported/blocked counts, compiler calls, peak RSS, wall time, zero network |
-| `BF2_SVELTE_ORACLE_MANIFEST_GENERATE` | BF2 harness | complete 5.56.8 manifest/golden shard; same counters |
+| `BF2_VUE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Official-case enumeration and classification (title-hash extraction, disposition assignment) over the pinned RC.3 source tree — makes ZERO calls to the Vue compiler and produces no golden output, only the `vue-official-cases.tsv` manifest; suite/row/disposition counts, peak RSS, wall time, zero network, byte-exact output digest oracle |
+| `BF2_SVELTE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Same enumeration/classification scope over the pinned 5.56.8 source tree — ZERO Svelte compiler calls, no golden output, only the `svelte-official-cases.tsv` manifest; same counter classes |
+| `BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` (name provisional) | BF2 harness | **NOT FROZEN, deliberately open.** The wider workload of actually invoking the official Vue/Svelte compilers thousands of times against the enumerated cases to produce immutable golden output — a genuinely heavier, not-yet-measurable BF2 workload, since that harness does not exist yet. Freezing it now would violate the charter's own "no criterion selected after candidate measurement" rule. Deferred to whichever block first builds that harness (most likely BF2 itself, since BF2 is the harness owner); no threshold is invented here. This row exists so the gap stays visible rather than silently absorbed into the two enumeration cells above. |
 | `BV1_VUE_VDOM_DIRECT_CORE` | BV1 algorithm | independent local core corpus, cold and warm; parse/semantic/plan/emit/map counts, bytes, allocations/RSS, latency |
 | `BV1_VUE_VAPOR_DIRECT_CORE` | BV1 algorithm | same, distinct Vapor corpus and helper topology oracle |
 | `BV1_VUE_SSR_DIRECT_CORE` | BV1 algorithm | server corpus with SSR correctness oracle and map on/off |
