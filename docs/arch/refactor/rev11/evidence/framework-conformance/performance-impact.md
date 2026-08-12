@@ -16,9 +16,25 @@ violating "a performance criterion selected after candidate measurement" (BF1 ch
 Abort/rescope). Full derivation, raw 10-run session, sandbox network-denial profile, and
 threshold arithmetic:
 [`command-proofs/bf2-oracle-manifest-generate/`](command-proofs/bf2-oracle-manifest-generate/).
-The remaining seven cells below (`BV1`/`BS1`/`B6`/`C4`-owned) are unaffected by this
-freeze and stay deferred to their owning blocks' own landings, per this document's
-original scope — no threshold is invented for them here.
+**FROZEN (2026-08-12, BF2 harness landing):**
+`BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` is now also locked in
+`performance-gates.toml`, closing the row this document previously left
+deliberately open. It measures BF2's own, now-existing golden generator
+(`packages/framework-conformance-harness/bin/generate-goldens.mjs`) — the
+real "invoke the official Vue/Svelte compilers and produce immutable golden
+output" workload — over the 6 independently-authored fixtures and their
+coverage axes (48 golden records: 36 Vue across vdom/vapor/ssr x source-map
+x dev/prod, 12 Svelte across client/server x dev/prod). This measurement was
+taken from the harness as it actually exists at BF2 landing, per this
+document's own instruction ("Deferred to whichever block first builds that
+harness"), following the identical honest-measurement discipline (10 cold
+runs, live correctness oracle, operational zero-network proof) as the two
+cells above. Full derivation:
+[`command-proofs/bf2-official-compiler-invocation-golden-generate/`](command-proofs/bf2-official-compiler-invocation-golden-generate/).
+
+The remaining six cells below (`BV1`/`BS1`/`B6`/`C4`-owned) are unaffected by
+either freeze and stay deferred to their owning blocks' own landings, per
+this document's original scope — no threshold is invented for them here.
 
 ## Required new cells
 
@@ -26,7 +42,7 @@ original scope — no threshold is invented for them here.
 |---|---|---|
 | `BF2_VUE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Official-case enumeration and classification (title-hash extraction, disposition assignment) over the pinned RC.3 source tree — makes ZERO calls to the Vue compiler and produces no golden output, only the `vue-official-cases.tsv` manifest; suite/row/disposition counts, peak RSS, wall time, zero network, byte-exact output digest oracle |
 | `BF2_SVELTE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Same enumeration/classification scope over the pinned 5.56.8 source tree — ZERO Svelte compiler calls, no golden output, only the `svelte-official-cases.tsv` manifest; same counter classes |
-| `BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` (name provisional) | BF2 harness | **NOT FROZEN, deliberately open.** The wider workload of actually invoking the official Vue/Svelte compilers thousands of times against the enumerated cases to produce immutable golden output — a genuinely heavier, not-yet-measurable BF2 workload, since that harness does not exist yet. Freezing it now would violate the charter's own "no criterion selected after candidate measurement" rule. Deferred to whichever block first builds that harness (most likely BF2 itself, since BF2 is the harness owner); no threshold is invented here. This row exists so the gap stays visible rather than silently absorbed into the two enumeration cells above. |
+| `BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` | BF2 harness | **FROZEN** — see above. The wider workload of actually invoking the official Vue/Svelte compilers against the harness's fixture/coverage-axis corpus to produce immutable golden output; golden-count/per-framework work counters, peak RSS, wall time, zero network, byte-exact combined-digest oracle |
 | `BV1_VUE_VDOM_DIRECT_CORE` | BV1 algorithm | independent local core corpus, cold and warm; parse/semantic/plan/emit/map counts, bytes, allocations/RSS, latency |
 | `BV1_VUE_VAPOR_DIRECT_CORE` | BV1 algorithm | same, distinct Vapor corpus and helper topology oracle |
 | `BV1_VUE_SSR_DIRECT_CORE` | BV1 algorithm | server corpus with SSR correctness oracle and map on/off |

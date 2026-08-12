@@ -1,0 +1,31 @@
+{
+  "name": "@verter/framework-conformance-harness",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hermetic, test-only official-core conformance harness for the exact pinned Vue 3.6.0-rc.3 and Svelte 5.56.8 compiler/runtime domains. Generates immutable goldens from the exact official pins, offline, and compares candidate output against them structurally. Never a production dependency; never a runtime.",
+  "type": "module",
+  "scripts": {
+    "generate-goldens": "node bin/generate-goldens.mjs",
+    "check-goldens": "node bin/generate-goldens.mjs --check",
+    "coverage-report": "node bin/coverage-report.mjs",
+    "test": "vitest run --root ."
+  },
+  "devDependencies": {
+    "vue": "3.6.0-rc.3",
+    "@vue/compiler-core": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.3",
+    "@vue/compiler-sfc": "3.6.0-rc.3",
+    "@vue/compiler-ssr": "3.6.0-rc.3",
+    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "@vue/runtime-core": "3.6.0-rc.3",
+    "@vue/runtime-dom": "3.6.0-rc.3",
+    "@vue/runtime-vapor": "3.6.0-rc.3",
+    "@vue/server-renderer": "3.6.0-rc.3",
+    "@vue/reactivity": "3.6.0-rc.3",
+    "@vue/shared": "3.6.0-rc.3",
+    "svelte": "5.56.8",
+    "acorn": "8.16.0",
+    "acorn-walk": "8.3.5",
+    "jsdom": "27.0.1"
+  }
+}

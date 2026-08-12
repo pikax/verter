@@ -1,0 +1,17 @@
+session_start_utc=2026-08-12T16:38:16Z
+node_version=v20.20.2
+runs_requested=10
+harness_head=81d24dc5b861a4862d9dcc7e4e2e75ebbb148a7a
+script_blob=18c6f46e2dcb2fc8d02695edd560ef0485b42d67
+reference_combined_digest=9310dec0c291c0ce207af3ec66fb9eab7e8b288b8e9b44290d4a1b8a5f523bd4
+run_1 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.31 maxrss_bytes=116490240
+run_2 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.27 maxrss_bytes=116736000
+run_3 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=115687424
+run_4 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=118767616
+run_5 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=114704384
+run_6 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=116686848
+run_7 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.34 maxrss_bytes=116916224
+run_8 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=117276672
+run_9 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.32 maxrss_bytes=118652928
+run_10 status=OK counts={"goldens_written":48} digest_ok=true real_s=0.30 maxrss_bytes=115556352
+session_end_utc=2026-08-12T16:38:20Z
