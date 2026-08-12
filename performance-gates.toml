@@ -347,3 +347,526 @@ owner_budget_bytes = "not_applicable"
 allocator_slack_bytes = "not_applicable"
 quiescence_protocol = "not_applicable"
 max_positive_slope_bytes_per_hour = "not_applicable"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTENSION under this file's own SCOPE header: two BF2-owned cells, added to
+# close a reopened BF1 exit criterion (charter "Required evidence and exits"
+# #6 — performance cells, thresholds, counters, memory ceilings, fixture
+# digests, and lease policy frozen BEFORE BF2 work begins). This does not
+# touch any A6 cell, the primary_suite, or any field above this marker.
+#
+# WHY THESE ARE THE CELLS. BF2's future test-execution harness does not exist
+# yet, so measuring it now would be exactly the forbidden "performance
+# criterion selected after candidate measurement" (charter Abort/rescope).
+# What DOES exist, right now, unrelated to any BF2 candidate, is the BF1
+# evidence-preparation tool that already produced the committed
+# vue-official-cases.tsv (2003 rows) and svelte-official-cases.tsv (3457
+# rows): docs/arch/refactor/rev11/evidence/framework-conformance/
+# generate-official-case-manifests.mjs. Its behavior is fully deterministic
+# and it is not BF2's harness — it is the BF1-owned tool that seeds BF2's
+# input manifest. Measuring its real, already-authored, already-run behavior
+# is the same pattern A6 used against its own pre-existing harness
+# (attribution_baseline.rs): freeze a real measurement of an existing tool,
+# not a guess about a future one.
+#
+# STRUCTURAL NOTE (disclosed, not hidden): the script has no flag to
+# generate only one language's manifest — vueManifest() and svelteManifest()
+# both run, then both TSVs are written, in one process, one invocation. The
+# two cells below therefore necessarily share ONE physical wall-time/
+# peak-RSS measurement stream (both metric blocks carry identical measured
+# numbers); they are NOT independently timed. What distinguishes them is
+# each cell's own output digest and per-language work counters, which ARE
+# independently real and independently gated. Full raw session, sandbox
+# profile, and derivation arithmetic:
+# docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# bf2-oracle-manifest-generate/.
+#
+# MACHINE. Measured on this file's OWN locked runner class (verified
+# identical at measurement time: Darwin 25.6.0 arm64, Apple M3, 8 logical
+# CPUs, 25769803776 bytes memory, node v20.20.2) — same [runner] section
+# above. No Cargo command runs in this workload (pure Node + local `git
+# rev-parse`/`git status`), so runner.class governs but
+# CARGO_BUILD_JOBS is not_applicable; the script is single-main-thread (no
+# worker_threads), so bounded-Node-worker-count is trivially 1.
+#
+# SAMPLES. 10 independent cold full-process invocations
+# ([statistics].long_min_runs, not short_min_samples: each run is an
+# external-process cold start dominated by process/subprocess/IO constants,
+# ~24s each, the same "cold one-shot batch" shape as
+# A6_META_COMPILE_40_COLD_RUST rather than runner.control_benchmark's cheap
+# in-process 30-iteration loop — 30 such runs would cost ~4x the wall clock
+# for no additional statistical value given the measured variance below).
+# All 10 samples entered the statistic; outlier_policy's
+# no_discretionary_exclusion applied — none were excluded.
+#
+# ZERO NETWORK. Every measured run executed under a macOS sandbox-exec
+# profile denying all network* operations for the whole process tree
+# (docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# bf2-oracle-manifest-generate/deny-network.sb), verified operationally (a
+# `curl` to a live host fails DNS resolution under the identical profile,
+# while all 10 script invocations completed and produced byte-identical
+# output) and by static source audit (the script's only child_process use is
+# local `git rev-parse`/`git status --porcelain`; no fetch/http/https/net/
+# dns/axios import exists). This sandbox profile is MANDATORY for any future
+# re-measurement of this cell, not optional tooling.
+#
+# GOVERNANCE NOTE. This EXTENSION freezes real, sourced thresholds per the
+# charter's exit criterion; it is not itself a claim that the file's ADR-016
+# independent-performance-reviewer class has signed off on this specific
+# addition — that review is a follow-up governance step, same as any other
+# EXTENSION under this file's SCOPE header. Nothing above this marker was
+# touched to land it.
+# ─────────────────────────────────────────────────────────────────────────────
+[[cell]]
+id = "BF2_VUE_ORACLE_MANIFEST_GENERATE"
+owner = "BF2"
+# Enumeration and classification ONLY: walks the pinned Vue source tree,
+# extracts a title/title-hash per official test declaration, and assigns a
+# disposition. This workload makes ZERO calls to the Vue compiler and writes
+# no golden/compiled output — it produces the case-manifest TSV row set that
+# seeds BF2's future test-execution harness, not that harness itself. The
+# wider "invoke the official compilers + produce golden output" workload is
+# a separate, not-yet-measurable BF2 workload — see the deliberately open
+# BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE row in
+# docs/arch/refactor/rev11/evidence/framework-conformance/performance-impact.md's
+# "Required new cells" table.
+operation = "official_case_enumeration_and_classification; target_manifest=vue-official-cases.tsv"
+# Harness IS the workload definition (no fixture directory — same pattern as
+# A6_META_COMPILE_40_COLD_RUST): pin the generator script's blob, the two
+# pinned framework source commits it asserts via EXPECTED_VUE/
+# EXPECTED_SVELTE, and the oracle npm closure that supplies its one runtime
+# dependency (@babel/parser, resolved via --vue-modules).
+corpus_fingerprint = "git-blob:b61404de48e8ba86767a09414195b67a06ac56be (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:44a7813730579b94004e182e5a67aab27aa9d2a6; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+# No Revision 11 normalized product-request type exists for this offline
+# evidence-preparation tool (same gap A6 names for its own request digest).
+# SHA-256 over the literal pinned invocation description string instead.
+normalized_product_request_digest = "0dd25cf5991d9e127428a49cdda7874aae684ff3bf5ef246bde293541a9b6ac9"
+result_contract = "vue_official_case_manifest_tsv_row_set"
+semantic_profile = "none"
+execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"
+# No Verter host/cache layer is involved in this workload at all.
+cache_state = "not_applicable"
+threads = 1
+boundary = "cli"
+required = true
+
+[cell.validity]
+# No Revision 11 output/presentation/serialization/mapping profile taxonomy
+# applies to this offline tool (same vocabulary gap A6 names at its own
+# required_mapping_kinds). required_product_kinds names the one concrete
+# current operation instead: this offline tool is not itself a Revision 11
+# product-request kind, but the field cannot be left empty (validator: "must
+# name at least one product kind"), so it names the concrete workload rather
+# than a placeholder.
+required_product_kinds = ["official_case_manifest_generation"]
+required_output_profiles = []
+required_presentation_profiles = []
+required_serialization_profiles = []
+required_mapping_kinds = []
+required_diagnostics_policy = "not_applicable"
+required_exactness = "exact"
+# The semantic-equivalence oracle: a byte-exact SHA-256 of the produced TSV.
+# Reproduced fresh in this measurement session and cross-checked against the
+# independently recorded digest in ../evidence/framework-conformance/validation.md.
+# Without this, a candidate could pass every timing/counter gate while
+# silently emitting a different manifest.
+output_oracle = "sha256(vue-official-cases.tsv) == 30123a6d88e1e7382afdcc752b5438c3486dd462e59ce831742ad0a3a3dd95bd"
+# This tool performs no network I/O by contract; the assertion is enforced
+# structurally by execution_profile's mandatory deny-network sandbox (a
+# violation aborts the run rather than passing silently).
+zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
+
+# ── timing and memory: shared single-process measurement with the sibling
+# BF2_SVELTE_ORACLE_MANIFEST_GENERATE cell (see the EXTENSION comment above) ──
+
+# Product budget, not a fit: this is BF1/BF2 evidence-preparation tooling run
+# a handful of times per cycle, not a hot or per-request path. A sane
+# CI-friendly ceiling is "well under a minute". Measured median across 10
+# runs is 24.22 s (24,220,000,000 ns); measured max is 25.63 s. 45 s is
+# ~1.86x the median and ~1.76x the max — real headroom, catastrophe-stop
+# only (accidental retry loop, O(n^2) walk blowup), by design generous like
+# A6's own absolute-ceiling philosophy.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 45000000000
+
+# max(3.000%, 2 x 2.3388% measured coefficient of variation across the 10
+# runs) = 4.6776%. Stated at the precision the 10-sample session supports,
+# not rounded down, per verification.md 8.3's upper-bound rule.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 4.6776
+
+# Generous catastrophe-stop, not the tight fence (that is the relative gate
+# below) — same philosophy as A6's peak_rss_bytes absolute gate. Measured max
+# across 10 runs is 104,316,928 bytes (~99.5 MiB); 384 MiB is ~3.85x that,
+# proportioned similarly to A6's own ~3.6x-over-baseline RSS budget.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 402653184
+
+# max(3.000%, 2 x 2.2850% measured coefficient of variation) = 4.5700%.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "no_regression_percent_max"
+limit = 4.5700
+
+# ── work counters: deterministic, from the committed manifest and
+# cross-checked against every one of the 10 runs' regenerated output.
+# Exact-equality counters (unlike A6's mostly-absolute_max counters) because
+# this generator's output is a fixed reproduction of a frozen source corpus:
+# either direction of drift (more OR fewer rows/suites) is wrong, not just
+# "more work than expected", so each counter is gated both absolute_max and
+# absolute_min at the same measured value. ────────────────────────────────
+
+# 5 Vue package __tests__ trees walked (compiler-core, compiler-dom,
+# compiler-sfc, compiler-ssr, compiler-vapor).
+[[cell.metric]]
+name = "vue.suite_dirs_walked.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 5
+
+[[cell.metric]]
+name = "vue.suite_dirs_walked.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 5
+
+# Total enumerated Vue test declarations (case_id rows).
+[[cell.metric]]
+name = "vue.official_case_rows.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 2003
+
+[[cell.metric]]
+name = "vue.official_case_rows.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 2003
+
+# The generator does not resolve Vue dispositions at this stage: 2003/2003
+# rows are "blocked". A future edit that silently started resolving some
+# without extending this cell would move this counter first.
+[[cell.metric]]
+name = "vue.blocked_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 2003
+
+[[cell.metric]]
+name = "vue.blocked_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 2003
+
+[cell.competitor]
+rule = "none"
+competitor_ids = []
+max_wall_slowdown_percent = "not_applicable"
+max_peak_rss_increase_percent = "not_applicable"
+post_result_exception_allowed = false
+
+[cell.memory]
+owner_budget_bytes = "not_applicable"
+allocator_slack_bytes = "not_applicable"
+quiescence_protocol = "not_applicable"
+max_positive_slope_bytes_per_hour = "not_applicable"
+
+[[cell]]
+id = "BF2_SVELTE_ORACLE_MANIFEST_GENERATE"
+owner = "BF2"
+# Enumeration and classification ONLY: same scope as the sibling
+# BF2_VUE_ORACLE_MANIFEST_GENERATE cell above — walks the pinned Svelte
+# source tree and assigns a disposition per suite. Makes ZERO calls to the
+# Svelte compiler and writes no golden/compiled output.
+operation = "official_case_enumeration_and_classification; target_manifest=svelte-official-cases.tsv"
+corpus_fingerprint = "git-blob:b61404de48e8ba86767a09414195b67a06ac56be (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:44a7813730579b94004e182e5a67aab27aa9d2a6; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+normalized_product_request_digest = "94d08f58783de4705dcf2484137e67f16db1649eb8cbedb7978a8ba3906d5676"
+result_contract = "svelte_official_case_manifest_tsv_row_set"
+semantic_profile = "none"
+execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"
+cache_state = "not_applicable"
+threads = 1
+boundary = "cli"
+required = true
+
+[cell.validity]
+required_product_kinds = ["official_case_manifest_generation"]
+required_output_profiles = []
+required_presentation_profiles = []
+required_serialization_profiles = []
+required_mapping_kinds = []
+required_diagnostics_policy = "not_applicable"
+required_exactness = "exact"
+output_oracle = "sha256(svelte-official-cases.tsv) == c251be5b8b1de3e58c526700c426e2502e8bd1eb1dd622e22119b667adee7a8e"
+zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
+
+# ── timing and memory: identical measured numbers to the sibling
+# BF2_VUE_ORACLE_MANIFEST_GENERATE cell — see that cell's comments and the
+# EXTENSION note above for the shared single-process rationale and the full
+# derivation arithmetic. Not restated verbatim a second time; the values are
+# the same 10-run session. ──────────────────────────────────────────────
+
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 45000000000
+
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 4.6776
+
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 402653184
+
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "no_regression_percent_max"
+limit = 4.5700
+
+# 22 distinct Svelte suites enumerated under packages/svelte/tests.
+[[cell.metric]]
+name = "svelte.suite_dirs_enumerated.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 22
+
+[[cell.metric]]
+name = "svelte.suite_dirs_enumerated.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 22
+
+# Total enumerated Svelte sample/suite-sentinel rows.
+[[cell.metric]]
+name = "svelte.official_case_rows.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 3457
+
+[[cell.metric]]
+name = "svelte.official_case_rows.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 3457
+
+[[cell.metric]]
+name = "svelte.blocked_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 3313
+
+[[cell.metric]]
+name = "svelte.blocked_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 3313
+
+# migrate/preprocess/print: classified outside Verter's compiler product
+# boundary by the generator itself (SVELTE_NOT_APPLICABLE), not a gap.
+[[cell.metric]]
+name = "svelte.not_applicable_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 144
+
+[[cell.metric]]
+name = "svelte.not_applicable_disposition_rows.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 144
+
+[cell.competitor]
+rule = "none"
+competitor_ids = []
+max_wall_slowdown_percent = "not_applicable"
+max_peak_rss_increase_percent = "not_applicable"
+post_result_exception_allowed = false
+
+[cell.memory]
+owner_budget_bytes = "not_applicable"
+allocator_slack_bytes = "not_applicable"
+quiescence_protocol = "not_applicable"
+max_positive_slope_bytes_per_hour = "not_applicable"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE — EXTENSION added by BF2,
+# freezing the row `docs/arch/refactor/rev11/evidence/framework-conformance/
+# performance-impact.md` left DELIBERATELY OPEN pending BF2's own harness
+# existing ("Deferred to whichever block first builds that harness (most
+# likely BF2 itself...)"). This measures BF2's actual golden generator
+# (`packages/framework-conformance-harness/bin/generate-goldens.mjs`) — the
+# real "invoke the official Vue/Svelte compilers to produce immutable golden
+# output" workload — NOT the BF1 manifest-enumeration tool the sibling
+# BF2_VUE_ORACLE_MANIFEST_GENERATE / BF2_SVELTE_ORACLE_MANIFEST_GENERATE
+# cells above measure. No pre-existing cell in this file is touched by this
+# addition (SCOPE header at the top of this file).
+#
+# METHODOLOGY. 10 full cold external-process invocations of the unmodified
+# generator, each verified against a live correctness oracle (an exact
+# combined SHA-256 of all 48 produced golden files, cross-checked against
+# the pre-session `--check`-verified committed goldens) and run under the
+# identical macOS `sandbox-exec -f deny-network.sb` profile BF1 used for its
+# own manifest-generation measurement — operationally verified in this
+# session (a `curl` to a live host fails DNS resolution under the identical
+# profile, while all 10 invocations completed and produced byte-identical
+# output). No sample discarded (outlier_policy: no_discretionary_exclusion).
+# Full derivation, raw 10-run session, and threshold arithmetic:
+# docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# bf2-official-compiler-invocation-golden-generate/.
+#
+# GOVERNANCE NOTE (same as the sibling cells' EXTENSION marker above): this
+# freezes a real, sourced measurement per the charter's own deferred-cell
+# instruction; it is not itself a claim that this file's ADR-016 independent-
+# performance-reviewer class has signed off on this specific addition — that
+# review is a follow-up governance step, same as any other EXTENSION under
+# this file's SCOPE header.
+# ─────────────────────────────────────────────────────────────────────────────
+[[cell]]
+id = "BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE"
+owner = "BF2"
+# The wider workload the sibling manifest-enumeration cells explicitly do
+# NOT cover: actually invoking the pinned official Vue/Svelte compilers
+# (vdom/vapor/ssr backends; client/server targets) over every fixture x
+# coverage-axis combination and writing immutable golden JSON with full
+# provenance.
+operation = "official_compiler_invocation_and_golden_generation; target=packages/framework-conformance-harness/goldens"
+corpus_fingerprint = "git-blob:18c6f46e2dcb2fc8d02695edd560ef0485b42d67 (packages/framework-conformance-harness/bin/generate-goldens.mjs); harness-package:git-blob:4bdcbd1c28e1f25230350497485e672a54f1520b (packages/framework-conformance-harness/package.json); vue-package-version:3.6.0-rc.3; svelte-package-version:5.56.8; fixtures=6 (3 vue, 3 svelte)"
+# No Revision 11 normalized product-request type exists for this offline
+# evidence-preparation tool (same gap the sibling BF2 cells and A6 both
+# name for their own request digests). SHA-256 over the literal pinned
+# invocation description string instead.
+normalized_product_request_digest = "c64e4d957bc56a7f57e3db11710d9eb265b9bd96786ef566fdf2b8170879311a"
+result_contract = "official_core_golden_record_set"
+semantic_profile = "none"
+execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(../evidence/framework-conformance/command-proofs/bf2-official-compiler-invocation-golden-generate/deny-network.sb)"
+cache_state = "not_applicable"
+threads = 1
+boundary = "cli"
+required = true
+
+[cell.validity]
+required_product_kinds = ["official_core_golden_generation"]
+required_output_profiles = []
+required_presentation_profiles = []
+required_serialization_profiles = []
+required_mapping_kinds = []
+required_diagnostics_policy = "not_applicable"
+required_exactness = "exact"
+# The semantic-equivalence oracle: a byte-exact combined SHA-256 across all
+# 48 produced golden JSON files (cat goldens/vue/*.json goldens/svelte/*.json
+# | shasum -a 256), reproduced fresh in this measurement session and
+# cross-checked against a `--check`-verified state of the committed goldens
+# immediately before the session began.
+output_oracle = "sha256(cat goldens/vue/*.json goldens/svelte/*.json) == 9310dec0c291c0ce207af3ec66fb9eab7e8b288b8e9b44290d4a1b8a5f523bd4"
+zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
+
+# Product budget, not a fit: this generator runs a handful of times per BF2
+# harness-evidence cycle, not a hot or per-request path. Measured median
+# across 10 runs is 0.304s; measured max is 0.34s. 5s is ~16.7x the median
+# and ~14.7x the max — real headroom, catastrophe-stop only.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 5000000000
+
+# max(3.000%, 2 x 5.5435% measured coefficient of variation across the 10
+# runs) = 11.0870%. Looser than the sibling BF2 manifest-generation cells'
+# ~4.68% because this workload is short enough (~0.3s) that
+# `/usr/bin/time -l`'s 2-decimal (10ms-bucket) precision materially inflates
+# the measured variance — disclosed explicitly in the command-proof README
+# rather than left implied.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 11.0870
+
+# Generous catastrophe-stop. Measured max across 10 runs is 118,767,616
+# bytes (~113.3 MiB); 384 MiB is ~3.39x that — independently derived here,
+# landing at a comparable order of magnitude to the sibling BF2 cells
+# because the underlying process shape (one short-lived Node.js process, no
+# heavy allocation) is comparable.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 402653184
+
+# max(3.000%, 2 x 1.0423% measured coefficient of variation) = 3.000% (the
+# 3% floor governs).
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "no_regression_percent_max"
+limit = 3.000
+
+# ── work counters: deterministic, from the committed goldens and
+# cross-checked against every one of the 10 runs' regenerated output. Exact
+# both directions (like the sibling BF2 cells): the fixture x axis product
+# is a fixed, known count — either direction of drift is a real regression.
+[[cell.metric]]
+name = "goldens_written.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 48
+
+[[cell.metric]]
+name = "goldens_written.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 48
+
+[[cell.metric]]
+name = "vue.goldens.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 36
+
+[[cell.metric]]
+name = "vue.goldens.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 36
+
+[[cell.metric]]
+name = "svelte.goldens.count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 12
+
+[[cell.metric]]
+name = "svelte.goldens.count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 12
+
+[cell.competitor]
+rule = "none"
+competitor_ids = []
+max_wall_slowdown_percent = "not_applicable"
+max_peak_rss_increase_percent = "not_applicable"
+post_result_exception_allowed = false
+
+[cell.memory]
+owner_budget_bytes = "not_applicable"
+allocator_slack_bytes = "not_applicable"
+quiescence_protocol = "not_applicable"
+max_positive_slope_bytes_per_hour = "not_applicable"

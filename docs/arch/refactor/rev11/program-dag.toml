@@ -61,28 +61,58 @@ class = "foundational"
 predecessors = ["A6"]
 
 [[block]]
-id = "B2"
-name = "Shared syntax frontends and parse owner domains"
-class = "foundational"
+id = "BF1"
+name = "Framework compiler contract and compatibility lock"
+class = "foundational-gate"
 predecessors = ["B1"]
+
+[[block]]
+id = "BF2"
+name = "Official-core compiler conformance harness"
+class = "foundational"
+predecessors = ["BF1"]
+
+[[block]]
+id = "BF3"
+name = "Known-wrong successful-cell safety retraction"
+class = "foundational-safety"
+predecessors = ["BF2"]
+
+[[block]]
+id = "B2"
+name = "Framework parsing recovery diagnostics and stable identities"
+class = "foundational"
+predecessors = ["BF3"]
 
 [[block]]
 id = "B3"
-name = "Compositional product planner"
+name = "Canonical typed compiler request and prerequisite planner"
 class = "foundational"
-predecessors = ["B1"]
+predecessors = ["BF3"]
 
 [[block]]
 id = "B4"
-name = "Compact source units mappings and blanking deletion"
+name = "Logical source units mapping composition and atomic publication"
 class = "foundational-atomic"
 predecessors = ["B2", "B3"]
 
 [[block]]
-id = "B5"
-name = "Borrowed one-shot compiler atomic cutover"
-class = "foundational-atomic"
+id = "BV1"
+name = "Vue compiler-output conformance train"
+class = "subsystem"
 predecessors = ["B4"]
+
+[[block]]
+id = "BS1"
+name = "Svelte compiler-output conformance train"
+class = "subsystem"
+predecessors = ["B4"]
+
+[[block]]
+id = "B5"
+name = "Accepted framework algorithms through sole direct compiler core"
+class = "foundational-atomic"
+predecessors = ["BV1", "BS1"]
 
 [[block]]
 id = "B6"
@@ -110,9 +140,9 @@ predecessors = ["C2"]
 
 [[block]]
 id = "C4"
-name = "Zero-work batch-shape regime-equivalence proof"
+name = "Direct prepared batch and project-aware equivalence proof"
 class = "foundational"
-predecessors = ["B5", "C3"]
+predecessors = ["B6", "C3"]
 
 [[block]]
 id = "D1"

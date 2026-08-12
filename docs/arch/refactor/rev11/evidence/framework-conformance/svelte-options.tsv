@@ -1,0 +1,36 @@
+surface	option	classification	canonical treatment / refusal
+svelte:parse	filename	not applicable	The pinned official parse implementation ignores this value; it cannot become a second source-identity authority.
+svelte:parse	modern	not applicable	Selects only the returned official AST shape; OfficialAST is not an established Verter product.
+svelte:parse	loose	unsupported fail-closed	Changes syntax-error recovery and AST return behavior; no loose-parse capability is claimed, so explicit requests fail construction.
+svelte:ModuleCompileOptions	dev	supported canonical	Explicit development/production profile.
+svelte:ModuleCompileOptions	generate	supported canonical	Client/server selection only for a claimed module product; otherwise request fails.
+svelte:ModuleCompileOptions	filename	host-resolved	Canonical logical source identity.
+svelte:ModuleCompileOptions	rootDir	host-resolved	Canonical workspace/source-root input.
+svelte:ModuleCompileOptions	warningFilter	host-resolved	Host presentation filter is separate from complete compiler diagnostics; it cannot erase acceptance evidence.
+svelte:ModuleCompileOptions	experimental.async	supported canonical	Explicit experimental cell only where the capability matrix enables it.
+svelte:CompileOptions	name	derived	Derived stable component name unless an established route exposes an explicit canonical override.
+svelte:CompileOptions	customElement	supported canonical	Canonical boolean selector; official callback form is host-resolved to a boolean before B3 and never crosses the core. Source-authored descriptor fields are classified separately.
+svelte:SvelteOptions.customElement	tag	supported canonical	Canonical validated custom-element tag from the source-authored descriptor.
+svelte:SvelteOptions.customElement	shadow	supported canonical	Canonical validated open/none/declarative-shadow selection from the source-authored descriptor.
+svelte:SvelteOptions.customElement.props	*.attribute	supported canonical	Canonical validated per-prop attribute-name override.
+svelte:SvelteOptions.customElement.props	*.reflect	supported canonical	Canonical per-prop reflection boolean.
+svelte:SvelteOptions.customElement.props	*.type	supported canonical	Canonical validated per-prop conversion type.
+svelte:SvelteOptions.customElement	extend	unsupported fail-closed	Arbitrary class-extension callback/identifier is not admitted to the compiler core; explicit presence refuses the custom-element product.
+svelte:CompileOptions	accessors	unsupported fail-closed	Not currently claimed; must not be silently ignored.
+svelte:CompileOptions	namespace	supported canonical	Explicit html/svg/mathml/foreign namespace where claimed.
+svelte:CompileOptions	immutable	unsupported fail-closed	Legacy semantic option is not currently claimed.
+svelte:CompileOptions	css	supported canonical	Explicit injected/external behavior; official callback form is host-resolved before B3.
+svelte:CompileOptions	cssHash	host-resolved	Only a serializable canonical hash policy is allowed; arbitrary callbacks fail construction.
+svelte:CompileOptions	preserveComments	supported canonical	Explicit boolean.
+svelte:CompileOptions	preserveWhitespace	supported canonical	Explicit boolean.
+svelte:CompileOptions	fragments	supported canonical	Explicit html/tree fragment strategy where officially applicable.
+svelte:CompileOptions	runes	supported canonical	Explicit true/false/infer selection; official callback form is host-resolved before B3.
+svelte:CompileOptions	discloseVersion	supported canonical	Explicit disclosure behavior.
+svelte:CompileOptions	compatibility	supported canonical	Canonical compatibility object; only inventoried fields allowed.
+svelte:CompileOptions	compatibility.componentApi	unsupported fail-closed	Svelte 4 component API compatibility is not initially claimed.
+svelte:CompileOptions	sourcemap	derived	Derived from canonical map request/B4 incoming map; caller object cannot be a second authority.
+svelte:CompileOptions	outputFilename	host-resolved	Canonical output identity/placement.
+svelte:CompileOptions	cssOutputFilename	host-resolved	Canonical CSS output identity/placement.
+svelte:CompileOptions	hmr	unsupported fail-closed	No HMR semantic claim until a dedicated capability cell is ratified.
+svelte:CompileOptions	modernAst	not applicable	Official AST-return shape is not an established Verter product.
+svelte:OptimizeOptions	hydrate	test-only	Official migrate/optimization helper option is not a Verter compile request; used only in harness controls.

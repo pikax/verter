@@ -1,0 +1,119 @@
+surface	option	classification	canonical treatment / refusal
+compiler-core:ParserOptions	onWarn	derived	Diagnostic sink is derived from the atomic request; no caller callback crosses the core.
+compiler-core:ParserOptions	onError	derived	Diagnostic sink is derived from the atomic request; no caller callback crosses the core.
+compiler-core:ParserOptions	compatConfig	unsupported fail-closed	Vue-2 compatibility behavior is outside the RC.3 capability lock.
+compiler-core:ParserOptions	compatConfig.MODE	unsupported fail-closed	No silent Vue-2/Vue-3 compatibility mode switching.
+compiler-core:ParserOptions	compatConfig.COMPILER_IS_ON_ELEMENT	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_V_BIND_SYNC	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_V_IF_V_FOR_PRECEDENCE	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_V_BIND_OBJECT_ORDER	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_V_ON_NATIVE	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_NATIVE_TEMPLATE	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_INLINE_TEMPLATE	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	compatConfig.COMPILER_FILTERS	unsupported fail-closed	Compiler deprecation behavior cannot be ignored.
+compiler-core:ParserOptions	parseMode	derived	Derived from SFC/template/product context; not caller-selectable after parsing starts.
+compiler-core:ParserOptions	ns	derived	Initial namespace derives from the source/product context.
+compiler-core:ParserOptions	isNativeTag	derived	RC.3 platform semantics select the predicate.
+compiler-core:ParserOptions	isVoidTag	derived	RC.3 DOM semantics select the predicate.
+compiler-core:ParserOptions	isPreTag	derived	RC.3 DOM semantics select the predicate.
+compiler-core:ParserOptions	isIgnoreNewlineTag	derived	RC.3 DOM semantics select the predicate.
+compiler-core:ParserOptions	isBuiltInComponent	derived	RC.3 VDOM/Vapor family supplies the built-in set.
+compiler-core:ParserOptions	isCustomElement	supported canonical	Canonical custom-element matcher/prefix set in the Vue request.
+compiler-core:ParserOptions	getNamespace	derived	RC.3 platform namespace rules; no public callback authority.
+compiler-core:ParserOptions	delimiters	supported canonical	Exact two-string delimiter tuple.
+compiler-core:ParserOptions	whitespace	supported canonical	Canonical preserve/condense policy.
+compiler-core:ParserOptions	decodeEntities	host-resolved	Host decoder is selected by environment but must match the RC.3 entity contract.
+compiler-core:ParserOptions	comments	supported canonical	Explicit boolean; profile default is normalized by B3.
+compiler-core:ParserOptions	prefixIdentifiers	derived	Forced by product/backend topology where official API requires it.
+compiler-core:ParserOptions	expressionPlugins	host-resolved	Derived from script language plus explicitly normalized parser plugins.
+compiler-core:TransformOptions	nodeTransforms	test-only	Official-oracle extension hook only; production request rejects it.
+compiler-core:TransformOptions	directiveTransforms	test-only	Official-oracle extension hook only; production request rejects it.
+compiler-core:TransformOptions	transformHoist	derived	Selected by the framework backend.
+compiler-core:TransformOptions	onWarn	derived	Same atomic diagnostic sink as parser warnings.
+compiler-core:TransformOptions	onError	derived	Same atomic diagnostic sink as parser errors.
+compiler-core:TransformOptions	compatConfig	unsupported fail-closed	Same complete Vue-2 compatibility refusal as ParserOptions.
+compiler-core:TransformOptions	isBuiltInComponent	derived	RC.3 VDOM/Vapor family supplies the built-in set.
+compiler-core:TransformOptions	isCustomElement	supported canonical	Same canonical matcher/prefix set used by parsing.
+compiler-core:TransformOptions	hoistStatic	supported canonical	Explicit normalized semantic option.
+compiler-core:TransformOptions	cacheHandlers	supported canonical	Explicit normalized semantic option.
+compiler-core:TransformOptions	scopeId	derived	Derived from SFC identity and scoped-style plan.
+compiler-core:TransformOptions	slotted	derived	Derived from SFC scoped/slotted metadata.
+compiler-core:TransformOptions	ssrCssVars	derived	Derived from analyzed SFC CSS variables for server products.
+compiler-core:TransformOptions	hmr	supported canonical	Explicit development/HMR profile where route supports it.
+compiler-core:SharedTransformCodegenOptions	prefixIdentifiers	derived	Same canonical derived setting as parser/transform phase.
+compiler-core:SharedTransformCodegenOptions	expressionPlugins	host-resolved	Same normalized parser-plugin domain.
+compiler-core:SharedTransformCodegenOptions	ssr	derived	Derived from requested RuntimeServer product.
+compiler-core:SharedTransformCodegenOptions	inSSR	derived	Derived internal phase state; caller cannot set it independently.
+compiler-core:SharedTransformCodegenOptions	bindingMetadata	derived	Derived from Vue script semantic analysis or typed project demand.
+compiler-core:SharedTransformCodegenOptions	inline	derived	Derived from requested inline/separate assembly form.
+compiler-core:SharedTransformCodegenOptions	isTS	derived	Derived from script language and expression plugin domain.
+compiler-core:SharedTransformCodegenOptions	filename	host-resolved	Canonical logical source identity supplies it.
+compiler-core:CodegenOptions	mode	unsupported fail-closed	Function-mode/global-mode output is not an established Verter product.
+compiler-core:CodegenOptions	sourceMap	derived	Derived from the canonical map request.
+compiler-core:CodegenOptions	scopeId	derived	Derived from SFC identity and scoped-style plan.
+compiler-core:CodegenOptions	optimizeImports	supported canonical	Explicit backend optimization cell; no silent profile default.
+compiler-core:CodegenOptions	runtimeModuleName	supported canonical	Validated module-source override capability; otherwise exact family default.
+compiler-core:CodegenOptions	ssrRuntimeModuleName	supported canonical	Validated server module-source override capability.
+compiler-core:CodegenOptions	runtimeGlobalName	not applicable	Only meaningful for unsupported function/global output mode.
+compiler-sfc:parse	filename	host-resolved	Canonical logical source identity.
+compiler-sfc:parse	sourceMap	derived	Derived from canonical map request.
+compiler-sfc:parse	sourceRoot	host-resolved	Canonical workspace/source-root mapping input.
+compiler-sfc:parse	pad	supported canonical	Explicit SFC mapping/placement choice where established products expose it.
+compiler-sfc:parse	ignoreEmpty	supported canonical	Explicit SFC block-presence policy.
+compiler-sfc:parse	compiler	test-only	Official parser injection used only to test the oracle; production rejects it.
+compiler-sfc:parse	templateParseOptions	derived	Built from the normalized Vue request; no second options authority.
+compiler-sfc:compileScript	id	derived	Stable SFC identity and scope domain.
+compiler-sfc:compileScript	isProd	derived	Derived from development/production profile.
+compiler-sfc:compileScript	sourceMap	derived	Derived from canonical map request.
+compiler-sfc:compileScript	babelParserPlugins	supported canonical	Validated ordered plugin inventory beyond language-derived plugins.
+compiler-sfc:compileScript	globalTypeFiles	host-resolved	Resolved canonical project files; requires project-aware route.
+compiler-sfc:compileScript	inlineTemplate	derived	Derived from requested assembly form.
+compiler-sfc:compileScript	genDefaultAs	supported canonical	Explicit assembly symbol only for the internal assembly contract.
+compiler-sfc:compileScript	templateOptions	derived	Constructed from the same canonical request.
+compiler-sfc:compileScript	hoistStatic	supported canonical	Explicit normalized script/template optimization.
+compiler-sfc:compileScript	propsDestructure	supported canonical	Explicit Vue macro semantics option.
+compiler-sfc:compileScript	fs	host-resolved	C3 project provider; never an arbitrary production callback.
+compiler-sfc:compileScript	customElement	supported canonical	Boolean or canonical matcher form normalized by B3.
+compiler-sfc:compileScript	vapor	derived	Derived from the selected Vue Vapor family.
+compiler-sfc:compileTemplate	source	derived	Selected template source unit.
+compiler-sfc:compileTemplate	ast	derived	B2/BV1 parsed template identity; never caller-supplied as second authority.
+compiler-sfc:compileTemplate	filename	host-resolved	Canonical logical source identity.
+compiler-sfc:compileTemplate	id	derived	Stable SFC identity/scope domain.
+compiler-sfc:compileTemplate	scoped	derived	Derived from analyzed style blocks.
+compiler-sfc:compileTemplate	slotted	derived	Derived from scoped/slotted analysis.
+compiler-sfc:compileTemplate	isProd	derived	Derived from development/production profile.
+compiler-sfc:compileTemplate	vapor	derived	Derived from selected client family; not combined into a novel SSR backend.
+compiler-sfc:compileTemplate	ssr	derived	Derived from RuntimeServer request and overrides client compiler selection per RC.3.
+compiler-sfc:compileTemplate	ssrCssVars	derived	Derived from analyzed CSS variables.
+compiler-sfc:compileTemplate	inMap	derived	B4 supplies the incoming source-space map.
+compiler-sfc:compileTemplate	compiler	test-only	Official compiler injection only; production rejects it.
+compiler-sfc:compileTemplate	compilerOptions	derived	Constructed only from this inventory's canonical request.
+compiler-sfc:compileTemplate	preprocessLang	external	Style/template preprocessor identity is external to compiler semantics.
+compiler-sfc:compileTemplate	preprocessOptions	external	Passed only to the selected external preprocessor.
+compiler-sfc:compileTemplate	preprocessCustomRequire	external	External preprocessor resolution; never bundled into compiler core.
+compiler-sfc:compileTemplate	transformAssetUrls	supported canonical	Canonical boolean/options transform policy.
+compiler-sfc:AssetURLOptions	base	supported canonical	Exact asset base semantics.
+compiler-sfc:AssetURLOptions	includeAbsolute	supported canonical	Explicit absolute-URL transformation policy.
+compiler-sfc:AssetURLOptions	tags	supported canonical	Canonical tag-to-attribute mapping.
+compiler-sfc:compileStyle	source	derived	Selected style source unit.
+compiler-sfc:compileStyle	filename	host-resolved	Canonical logical source identity.
+compiler-sfc:compileStyle	id	derived	Stable SFC/style identity.
+compiler-sfc:compileStyle	scoped	derived	Derived from style block metadata.
+compiler-sfc:compileStyle	trim	supported canonical	Explicit style whitespace policy.
+compiler-sfc:compileStyle	isProd	derived	Derived from development/production profile.
+compiler-sfc:compileStyle	inMap	derived	B4 incoming source-space map.
+compiler-sfc:compileStyle	preprocessLang	external	External preprocessor selection.
+compiler-sfc:compileStyle	preprocessOptions	external	External preprocessor options.
+compiler-sfc:compileStyle	preprocessCustomRequire	external	External preprocessor resolution.
+compiler-sfc:compileStyle	postcssOptions	external	External PostCSS configuration.
+compiler-sfc:compileStyle	postcssPlugins	external	External PostCSS plugin behavior.
+compiler-sfc:compileStyle	map	derived	Derived from canonical map request and B4 composition.
+compiler-sfc:compileStyle	isAsync	derived	Derived from selected external preprocessing pipeline.
+compiler-sfc:compileStyle	modules	supported canonical	Explicit CSS Modules capability where claimed.
+compiler-sfc:compileStyle	modulesOptions	supported canonical	Canonical CSS Modules options structure.
+compiler-sfc:CSSModulesOptions	scopeBehaviour	supported canonical	Explicit local/global behavior.
+compiler-sfc:CSSModulesOptions	generateScopedName	host-resolved	Only named/serializable policy forms enter the canonical request; arbitrary callback rejected.
+compiler-sfc:CSSModulesOptions	hashPrefix	supported canonical	Exact hash prefix.
+compiler-sfc:CSSModulesOptions	localsConvention	supported canonical	Exact locals naming policy; callback form rejected.
+compiler-sfc:CSSModulesOptions	exportGlobals	supported canonical	Explicit boolean.
+compiler-sfc:CSSModulesOptions	globalModulePaths	host-resolved	Canonical resolved paths; arbitrary RegExp objects do not cross transport.

@@ -1,0 +1,17 @@
+session_start_utc=2026-08-12T15:36:47Z
+node_version=v20.20.2
+runs_requested=10
+vue_source_head=3adb225775c9b28223a56e07f7a2f874b6fbb138
+svelte_source_head=44a7813730579b94004e182e5a67aab27aa9d2a6
+script_blob=b61404de48e8ba86767a09414195b67a06ac56be
+run_1 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.05 maxrss_bytes=101367808
+run_2 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.14 maxrss_bytes=101302272
+run_3 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.23 maxrss_bytes=101793792
+run_4 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.21 maxrss_bytes=99876864
+run_5 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.07 maxrss_bytes=104316928
+run_6 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.21 maxrss_bytes=100646912
+run_7 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.26 maxrss_bytes=101433344
+run_8 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=25.58 maxrss_bytes=102825984
+run_9 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=24.66 maxrss_bytes=98615296
+run_10 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=25.63 maxrss_bytes=95420416
+session_end_utc=2026-08-12T15:40:53Z
