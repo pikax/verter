@@ -235,8 +235,8 @@ notes = "Implementation Lock Record + locked performance-gates.toml (no placehol
 
 [[block]]
 id = "B1"
-status = "LOCKED"
-charter_digest = ""
+status = "READY"
+charter_digest = "ac60d191221fc5e5938e0343091c6809648a482960ca7c1a49596e547d3e28e1"
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
@@ -252,7 +252,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
-notes = ""
+notes = "Predecessor A6 ACCEPTED at ff3728ec069a8fd2f8d427687fcf33bf88ea9f44; B1 is execution-legal (BLOCK_READY per A6's exit condition). Codex Sol xhigh parallelism consult ruled Track B only for now — J1 not selected/unbound, B2/B3 depend on B1, shared Cargo.lock/benchmark-machine/firewall-config risk. Track B orchestrator dispatched."
 
 [[block]]
 id = "B2"
