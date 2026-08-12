@@ -1,0 +1,57 @@
+# Locked bounded-stack policy.
+#
+# This is the POLICY, not a snapshot. It is deliberately not an instance of
+# templates/stack-window.template.toml: that template describes one OPEN stack
+# window, and no window is open. The standing operating mode is depth 1 — blocks
+# land sequentially on the accepted tip of the integration lineage, and a
+# sequential block needs no stack-window record at all, which is why every block
+# so far has correctly carried `stack_id = ""`.
+#
+# A snapshot instance IS minted from the template, validated, and digest-recorded
+# at the moment a window opens. The values below are what that instance must
+# carry; a snapshot that contradicts any of them is invalid.
+
+schema = 1
+revision = 11
+status = "LOCKED"
+kind = "policy"
+
+[policy]
+# The permitted range is two through six (ORCHESTRATOR.md 7). Two is the minimum
+# of that range and the exact depth the one mandated stacked delivery needs.
+max_open_stack_layers = 2
+stack_mode_policy = "ATOMIC_REVIEW"
+# Not a preference: GitHub-native stacks, merge queues and dependent PRs are all
+# unavailable, because nothing is pushed to origin and no pull request is opened
+# (maintainer ruling R-8). A "stack" here is a chain of local branches.
+stack_tool = "LOCAL_BRANCH_CHAIN"
+stack_tool_version = "git 2.x local branch chain; no stack tool installed (gt / git-town / spr / ghstack / jj all absent at the entry checkout)"
+landing_mode = "bottom-up"
+default_operating_depth = 1
+
+# LANDABLE stays permitted but unused: no two blocks are currently planned to be
+# in review simultaneously.
+permitted_modes = ["ATOMIC_REVIEW", "LANDABLE"]
+
+[applicability]
+# Depth 1 is the default; a window is opened only for the case below or for one
+# the maintainer explicitly ratifies.
+sequential_default = "blocks land one at a time on the accepted tip of the integration lineage; no stack window is opened, no snapshot is minted, `stack_id` stays empty"
+only_mandated_window = "the private-checkpoint block followed by its sole acceptance-and-landing block, which contracts/stacked-prs.md 3.2 names as the canonical ATOMIC_REVIEW case; the checkpoint layer never lands independently"
+larger_window_approval = "a window wider than 2 requires an explicit maintainer decision recorded as a ruling, plus a validator that models the wider window; it is not an orchestrator judgement call"
+
+[invalidation]
+restack = "any base advance under an open window requires a restack; the restacked layers are new candidates"
+review_invalidation = "a restack invalidates every review verdict bound to the superseded candidate identity, because a verdict binds one exact SHA AND tree"
+ci_invalidation = "not applicable — no GitHub Actions job runs for any block of this program; the canonical local gate is re-run on the restacked candidate instead"
+
+[prerequisite]
+# AMD-001. Recorded here rather than silently carried: the refusal it describes is
+# superseded by delivering the validator, never simply deleted.
+status = "OUTSTANDING"
+requirement = "before any stacked delivery — any window opened, any block claiming the contingent stacked-work exception, and in particular before the private-checkpoint block may enter PRIVATE_CHECKPOINT — the Node stack-window validator, composite program-state cross-validation, and a discriminating checkpoint/acceptance transition test must exist"
+reference = "docs/arch/refactor/rev11/amendments/AMD-001-stack-window-validator-prerequisite.md"
+not_delivered_here = "this lock does not deliver it; see the Implementation Lock Record 11 for the deferral, its owner and its resolution point"
+resolution_point = "before the first snapshot with more than one open layer is minted, and unconditionally before the private-checkpoint block begins"
+blocking_now = false
+why_not_blocking_now = "the block unlocked by this lock is sequential and single-layer; the existing program-state validator already refuses a begun successor of a PRIVATE_CHECKPOINT predecessor, so the unmodelled path is closed rather than open"

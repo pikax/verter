@@ -118,7 +118,12 @@
 //      Default stall 12m (--stall). On stall: reap + sweep; exit 125.
 //   7. Spotlight marker (macOS): a <runnerTarget>/.metadata_never_index file is written so Spotlight does
 //      not index the build tree (a harmless no-op file on Linux/Windows).
-//   8. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
+//   8. Resource ceiling: build jobs and test concurrency are finite (defaults: min(host CPUs, 4)); every
+//      contained child tree is sampled for aggregate RSS once per second and is reaped when it reaches
+//      the gate memory ceiling (default: 50% of physical RAM). A ceiling trip is the distinct, non-PASS
+//      `ABORTED — memory ceiling` outcome (exit 123). Repeated sampler failure also aborts rather than
+//      silently running unmonitored.
+//   9. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
 //      outcome class. nextest reports several non-`FAIL` terminal outcomes — `N timed out`, `N exec
 //      failed`, a crash status (SIGABRT/SIGSEGV/LEAK-FAIL/…) — and reports a cancelled or interrupted run
 //      as `A/B tests run`, meaning B-A selected tests NEVER EXECUTED. None of those are in nextest's
@@ -200,7 +205,7 @@
 //             · `buf` present + `oxfmt` MISSING               → SETUP FAILURE, exit 127 (LOUD; ensure `oxfmt`)
 //               — never tolerated, never a degraded run.
 //         - pnpm IS resolvable → `pnpm install --frozen-lockfile` (never mutates the lockfile), then:
-//             · watchdog (TIMEOUT/STALL)                      → propagated, never tolerated.
+//             · watchdog (MEMORY/TIMEOUT/STALL)               → propagated, never tolerated.
 //             · spawnError / launched non-zero                → SETUP FAILURE, exit 127 (LOUD, never
 //               PASS-WITH-TOLERATED) — e.g. a frozen-lockfile mismatch.
 //             · exit 0 → RE-RESOLVE `buf`/`oxfmt`: both present → tolerance DISABLED; `buf` missing OR `oxfmt`
@@ -215,14 +220,16 @@
 //
 // USAGE
 //   node scripts/gate.mjs [--timeout 80m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
-//                         [--test-threads N]                # THE GATE — exit 0 = suite built + passed.
+//                         [--build-jobs N] [--test-threads N] [--memory-limit 12GiB]
+//                                                           # THE GATE — exit 0 = suite built + passed.
 //   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 80m] [--stall 12m]
+//                         [--build-jobs N] [--memory-limit 12GiB]
 //                                             # warm-pass: archive + list (+ a one-shot warm of the macOS
 //                                             # first-launch assessment). Prints the `PREPARED_NOT_GATE`
 //                                             # marker — this is a PRE-WARM (tests were NOT run), NOT a gate
 //                                             # pass, and is not counted in a timed gate. --prepare combines
-//                                             # ONLY with --target-dir/--timeout/--stall; any other flag or a
-//                                             # positional argument is a usage error (exit 127).
+//                                             # ONLY with the flags shown; any other flag or a positional
+//                                             # argument is a usage error (exit 127).
 //   node scripts/gate.mjs --help              # prints this usage + exits 0. Accepts no other argument
 //                                             # (a bare --help only); --help with any other token => 127.
 //     durations: s/m/h suffix or bare seconds (e.g. 80m, 12m, 5s, 90).
@@ -235,6 +242,7 @@
 //   0   PASS / PASS-WITH-TOLERATED  (the GATE: a real `node scripts/gate.mjs` run); OR a successful
 //       --prepare warm-pass (PREPARED_NOT_GATE — NOT a gate pass); OR --help after printing usage
 //   1   FAIL          (a build/test command failed / a non-tolerated test failed)
+//   123 ABORTED       (active child tree reached the memory ceiling, or its RSS monitor became unavailable)
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
 //   126 LOCK-REFUSED  (another gate holds the single-flight mutex and is alive / lock uninspectable)
@@ -246,6 +254,7 @@
 //   VERTER_GATE_TARGET_DIR             runner-owned target dir (default <repo>/target/gate-runner)
 //   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_BUILD_BUILD_DIR are SCRUBBED and forced to the
 //     runner-owned dir.
+//   CARGO_BUILD_JOBS is SCRUBBED and forced to --build-jobs (default min(host CPUs, 4)).
 //   (No environment variable can divert this CLI to a non-gate success path.)
 
 import { readdirSync, realpathSync, statSync } from "node:fs";
@@ -269,6 +278,9 @@ import {
   resolveRepoRoot,
   defaultLockDir,
   buildCargoEnv,
+  deriveGateResourceLimits,
+  parseMemorySize,
+  formatMemorySize,
   // mutex + teardown
   Mutex,
   reapActiveStep,
@@ -498,8 +510,9 @@ function reportOversizeProductionSources(repoRoot) {
 //     positional) is a USAGE error (exit 127) — only a bare `gate.mjs --help` prints usage and exits 0, so
 //     a stray flag can never be silently swallowed under the exit-0 help mode.
 //   --prepare   : accepts ONLY the companion flags the prepare warm-pass actually uses (--target-dir,
-//     --timeout, --stall, each with its value); ANY other flag (e.g. --no-fail-fast / --test-threads — gate-
-//     only) or ANY positional token is a USAGE error (exit 127). `gate.mjs --prepare junk` /
+//     --timeout, --stall, --build-jobs, --memory-limit, each with its value); ANY other flag (e.g.
+//     --no-fail-fast / --test-threads — gate-only) or ANY positional token is a USAGE error (exit 127).
+//     `gate.mjs --prepare junk` /
 //     `--prepare --selftest-x` exit 127, so prepare's exit-0 cannot be reached with junk argv.
 // The gate mode (no mode flag) accepts the full real-gate flag set.
 // ----------------------------------------------------------------------------------------------------
@@ -507,10 +520,38 @@ function reportOversizeProductionSources(repoRoot) {
 // Flags --prepare is allowed to combine with (the warm-pass front half — archiveAndList — reads exactly
 // these). Each takes a value argument. Gate-only flags (--no-fail-fast / --test-threads) are NOT here, so
 // `--prepare --no-fail-fast` is a usage error rather than a silently-ignored flag.
-const PREPARE_ALLOWED_VALUE_FLAGS = new Set(["--target-dir", "--timeout", "--stall"]);
+const PREPARE_ALLOWED_VALUE_FLAGS = new Set([
+  "--target-dir",
+  "--timeout",
+  "--stall",
+  "--build-jobs",
+  "--memory-limit",
+]);
 
 function usageError(msg) {
   return new Error(msg);
+}
+
+function parsePositiveInteger(value, flag) {
+  const parsed = Number(value);
+  if (!/^\d+$/.test(String(value || "")) || !Number.isSafeInteger(parsed) || parsed < 1) {
+    throw usageError(`${flag} requires a positive integer`);
+  }
+  return parsed;
+}
+
+function defaultOptions(mode) {
+  const resources = deriveGateResourceLimits();
+  return {
+    mode,
+    timeoutSecs: parseDuration("80m"),
+    stallSecs: parseDuration("12m"),
+    targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
+    noFailFast: true,
+    buildJobs: resources.buildJobs,
+    testThreads: resources.testThreads,
+    memoryLimitBytes: resources.memoryLimitBytes,
+  };
 }
 
 function parseArgs(argv) {
@@ -524,28 +565,15 @@ function parseArgs(argv) {
           "--help` for usage; any flag or positional alongside --help is a usage error.",
       );
     }
-    return {
-      mode: "help",
-      timeoutSecs: parseDuration("80m"),
-      stallSecs: parseDuration("12m"),
-      targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
-      noFailFast: true,
-      testThreads: null,
-    };
+    return defaultOptions("help");
   }
 
   // --prepare is mutually exclusive: it combines ONLY with its warm-pass companion flags
-  // (--target-dir/--timeout/--stall) and accepts NO positional argument and NO gate-only flag. This is the
+  // (--target-dir/--timeout/--stall/--build-jobs/--memory-limit) and accepts NO positional argument and
+  // NO gate-only flag. This is the
   // non-gate warm-pass; rejecting stray argv keeps its exit-0 unreachable with junk arguments.
   if (argv.includes("--prepare")) {
-    const opts = {
-      mode: "prepare",
-      timeoutSecs: parseDuration("80m"),
-      stallSecs: parseDuration("12m"),
-      targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
-      noFailFast: true,
-      testThreads: null,
-    };
+    const opts = defaultOptions("prepare");
     let i = 0;
     while (i < argv.length) {
       const a = argv[i];
@@ -559,9 +587,12 @@ function parseArgs(argv) {
         if (a === "--target-dir") opts.targetDir = v;
         else if (a === "--timeout") opts.timeoutSecs = parseDuration(v);
         else if (a === "--stall") opts.stallSecs = parseDuration(v);
+        else if (a === "--build-jobs") opts.buildJobs = parsePositiveInteger(v, a);
+        else if (a === "--memory-limit") opts.memoryLimitBytes = parseMemorySize(v);
       } else {
         throw usageError(
-          `--prepare accepts only --target-dir/--timeout/--stall (and no positional argument); got ` +
+          `--prepare accepts only --target-dir/--timeout/--stall/--build-jobs/--memory-limit ` +
+            `(and no positional argument); got ` +
             `'${a}'. --prepare is the warm-pass, NOT the gate — gate-only flags and stray tokens are rejected.`,
         );
       }
@@ -571,14 +602,7 @@ function parseArgs(argv) {
   }
 
   // Gate mode — the real-gate flag set. No mode flag, so the gate-pass contract applies.
-  const opts = {
-    mode: "gate",
-    timeoutSecs: parseDuration("80m"),
-    stallSecs: parseDuration("12m"),
-    targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
-    noFailFast: true,
-    testThreads: null,
-  };
+  const opts = defaultOptions("gate");
   let i = 0;
   while (i < argv.length) {
     const a = argv[i];
@@ -590,12 +614,17 @@ function parseArgs(argv) {
       opts.targetDir = argv[++i];
     } else if (a === "--no-fail-fast") {
       opts.noFailFast = true;
+    } else if (a === "--build-jobs") {
+      opts.buildJobs = parsePositiveInteger(argv[++i], a);
     } else if (a === "--test-threads") {
-      opts.testThreads = argv[++i];
+      opts.testThreads = parsePositiveInteger(argv[++i], a);
+    } else if (a === "--memory-limit") {
+      opts.memoryLimitBytes = parseMemorySize(argv[++i]);
     } else {
       throw usageError(
         `unknown argument: '${a}'. This gate accepts only --timeout/--stall/--target-dir/` +
-          `--no-fail-fast/--test-threads/--prepare/--help; it has no test-seam or custom-command mode.`,
+          `--no-fail-fast/--build-jobs/--test-threads/--memory-limit/--prepare/--help; ` +
+          `it has no test-seam or custom-command mode.`,
       );
     }
     i++;
@@ -657,7 +686,7 @@ async function main() {
     process.env.VERTER_GATE_LOCK || process.env.MOM_GATE_LOCK || defaultLockDir(repoRealpath);
 
   const token = `${process.pid}.${nowMs()}.${Math.floor(Math.random() * 1e9)}`;
-  const cargoEnv = buildCargoEnv(process.env, runnerTarget);
+  const cargoEnv = buildCargoEnv(process.env, runnerTarget, undefined, opts.buildJobs);
 
   // Ensure the runner target dir exists + drop the Spotlight marker (macOS) — harmless no-op file elsewhere.
   mkdirSync(runnerTarget, { recursive: true });
@@ -756,6 +785,11 @@ async function main() {
   }
   log(`mutex acquired (token=${token} lockdir=${lockdir})`);
   log(`runner target dir: ${runnerTarget}`);
+  log(
+    `resource ceiling: cargo build jobs=${opts.buildJobs}, ` +
+      `test threads=${opts.mode === "prepare" ? "n/a (prepare runs no tests)" : opts.testThreads}, ` +
+      `active child-tree RSS=${formatMemorySize(opts.memoryLimitBytes)}`,
+  );
 
   const deadlineMs = nowMs() + opts.timeoutSecs * 1000;
   const stallMs = opts.stallSecs * 1000;
@@ -770,6 +804,8 @@ async function main() {
         gateDir,
         deadlineMs,
         stallMs,
+        buildJobs: opts.buildJobs,
+        memoryLimitBytes: opts.memoryLimitBytes,
       });
     } else {
       exitCode = await runGate(opts, {
@@ -779,6 +815,8 @@ async function main() {
         gateDir,
         deadlineMs,
         stallMs,
+        buildJobs: opts.buildJobs,
+        memoryLimitBytes: opts.memoryLimitBytes,
       });
     }
   } catch (e) {
@@ -830,7 +868,16 @@ const SHIPPED_CFG_FILTER = "package(verter_session) + package(verter_scheduler)"
 // watchdog model) is identical across variants.
 // ----------------------------------------------------------------------------------------------------
 async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
-  const { cargoEnv, repoRealpath, runnerTarget, gateDir, deadlineMs, stallMs } = ctx;
+  const {
+    cargoEnv,
+    repoRealpath,
+    runnerTarget,
+    gateDir,
+    deadlineMs,
+    stallMs,
+    buildJobs,
+    memoryLimitBytes,
+  } = ctx;
   const archiveFile = join(gateDir, variant.archiveName);
   const extractDir = join(gateDir, variant.extractName);
   mkdirSync(gateDir, { recursive: true });
@@ -845,6 +892,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
       "nextest",
       "archive",
       "--workspace",
+      "--build-jobs",
+      String(buildJobs),
       ...(variant.cargoProfile ? ["--cargo-profile", variant.cargoProfile] : []),
       "--archive-file",
       archiveFile,
@@ -859,6 +908,7 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     deadlineMs,
     stallMs,
     targetDir: runnerTarget,
+    memoryLimitBytes,
   });
   if (archiveRes.reason) {
     return { error: mapStepReason(archiveRes), where: "archive", res: archiveRes };
@@ -914,6 +964,7 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     deadlineMs,
     stallMs,
     targetDir: runnerTarget,
+    memoryLimitBytes,
     captureStdoutSeparately: true, // keep JSON out of the mirrored stderr stream
   });
   if (listRes.reason) {
@@ -1020,7 +1071,7 @@ async function runPrepare(ctx) {
 }
 
 async function runVueMacroOracleChecks(ctx) {
-  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
   for (const invocation of vueMacroOracleGateCommands(process.execPath)) {
     log(`Vue macro oracle: ${invocation.name} …`);
     const result = await runContainedStep({
@@ -1032,6 +1083,7 @@ async function runVueMacroOracleChecks(ctx) {
       deadlineMs,
       stallMs,
       targetDir: runnerTarget,
+      memoryLimitBytes,
     });
     if (result.reason) {
       err(`${invocation.name} ${result.reason} after ${Math.round(result.durationMs / 1000)}s`);
@@ -1067,7 +1119,7 @@ async function runVueMacroOracleChecks(ctx) {
 // and it runs the filterset below, not the whole archive.
 // ----------------------------------------------------------------------------------------------------
 async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
-  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
   log(
     "SURFACE 3: building the shipped-cfg test universe " +
@@ -1121,6 +1173,7 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
     SHIPPED_CFG_FILTER,
   ];
   if (opts.noFailFast) runArgs.push("--no-fail-fast");
+  runArgs.push("--test-threads", String(opts.testThreads));
   const runRes = await runContainedStep({
     cmd: "cargo",
     args: runArgs,
@@ -1130,6 +1183,7 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
     deadlineMs,
     stallMs,
     targetDir: runnerTarget,
+    memoryLimitBytes,
   });
   if (runRes.reason) {
     err(`SURFACE 3 nextest run ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`);
@@ -1172,7 +1226,7 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
 //   6. Aggregate failures across all three surfaces; tolerated-only => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
-  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
   // ---------- BUILD-PREREQUISITE PREFLIGHT (the FIRST step of the gate) ----------
   // Parts of the suite load artifacts cargo does not build: the real-provider suites spawn the pinned
@@ -1271,6 +1325,7 @@ async function runGate(opts, ctx) {
         deadlineMs,
         stallMs,
         targetDir: runnerTarget,
+        memoryLimitBytes,
       });
     },
   });
@@ -1342,6 +1397,7 @@ async function runGate(opts, ctx) {
     repoRealpath,
   ];
   if (opts.noFailFast) runArgs.push("--no-fail-fast");
+  runArgs.push("--test-threads", String(opts.testThreads));
   const runRes = await runContainedStep({
     cmd: "cargo",
     args: runArgs,
@@ -1351,6 +1407,7 @@ async function runGate(opts, ctx) {
     deadlineMs,
     stallMs,
     targetDir: runnerTarget,
+    memoryLimitBytes,
   });
   if (runRes.reason) {
     err(`nextest run ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`);
@@ -1420,10 +1477,9 @@ async function runGate(opts, ctx) {
       sessionPkgInfo,
       s["binary-name"] || "verter_session",
     );
-    // Preserve the libtest DEFAULT threading (do NOT force --test-threads=1). Optionally pass an explicit
-    // passthrough if the caller asked for it.
-    const binArgs = [];
-    if (opts.testThreads != null) binArgs.push(`--test-threads=${opts.testThreads}`);
+    // Use the same explicit finite concurrency as the nextest surfaces. The suites still run sequentially;
+    // this caps the worker threads within the currently active shared-process libtest binary.
+    const binArgs = [`--test-threads=${opts.testThreads}`];
     const res = await runContainedStep({
       cmd: bin,
       args: binArgs,
@@ -1433,6 +1489,7 @@ async function runGate(opts, ctx) {
       deadlineMs,
       stallMs,
       targetDir: runnerTarget,
+      memoryLimitBytes,
       captureStdoutSeparately: true, // keep libtest stdout parseable; still mirror stderr
     });
     if (res.reason) {

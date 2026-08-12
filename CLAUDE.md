@@ -377,6 +377,17 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 non-exempt file above 1,500 lines as `path (N lines)`. File size is informational and never affects the
 gate verdict.
 
+**Resource ceilings — MEMORY-CEILING-MANDATORY.** Every gate/`--prepare` run is bounded by three flags,
+each host-derived by default and overridable: `--build-jobs <N>` (cargo build parallelism, default
+`min(4, cpuCount)`), `--test-threads <N>` (nextest/libtest thread count, gate-only, default
+`min(4, cpuCount)`), `--memory-limit <SIZE>` (active child-tree RSS ceiling, e.g. `8GiB`/`12288MiB`,
+default `max(512MiB, 50% of physical RAM)`). Policy: every gate run — agent or CI — goes through this
+bounded wrapper with an explicit or defaulted `--memory-limit`; there is no sanctioned unbounded
+invocation. A breach kills the active child tree fast and exits 123 (`ABORTED — memory ceiling`) — this
+means NO gate verdict was produced. The same rule covers TIMEOUT (124), STALL (125), and any run whose
+summary did not complete: an aborted or incomplete run is NOT PROVEN, never a PASS, and must never be
+recorded as one.
+
 **Build-prerequisite preflight (fail-closed, the gate's FIRST step).** Parts of the Rust suite load
 artifacts cargo does not build: the real-provider suites spawn the pinned tsserver with `--globalPlugins
 @verter/typescript-plugin --pluginProbeLocations packages/vue-vscode/node_modules`, a pnpm symlink to

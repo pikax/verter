@@ -252,6 +252,10 @@ const GATE = join(SELFTEST_DIR, "gate.mjs");
 // The SELF-TEST-ONLY subprocess runner (mutex + containment + timeout/stall + teardown + seam, against
 // sleep/echo stand-ins). It imports the same gate primitives; production never runs it.
 const RUNNER = join(SELFTEST_DIR, "gate-selftest-runner.mjs");
+// The memory-ceiling self-test (parseMemorySize / deriveGateResourceLimits / buildCargoEnv job-cap clamp /
+// process-table RSS parsers / real MEMORY-MONITOR reap behavior). Run as a subprocess below so it is part
+// of this same canonical self-test entrypoint instead of sitting unreferenced.
+const MEMORY_SELFTEST = join(SELFTEST_DIR, "gate-memory-selftest.mjs");
 
 // The gate-owned lock sentinel file name — must match GATE_LOCK_SENTINEL in gate.mjs. A lockdir is
 // reclaimable ONLY if it carries this marker (proving the gate created it); the crafted-lock scenarios
@@ -7115,6 +7119,31 @@ async function main() {
           "cargo; everything built => SATISFIED and the run proceeds — plus every fail-closed probe shape " +
           "(spawn error, signal, timeout, unparseable output) in-process. Every plant is stat-proven " +
           "applied and re-stated after the run.",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB10) MEMORY-CEILING SELF-TEST WIRING — scripts/gate-memory-selftest.mjs asserts parseMemorySize,
+  // deriveGateResourceLimits, buildCargoEnv's job-cap clamp, the POSIX/Windows process-table RSS parsers,
+  // and runContainedStep's real MEMORY / MEMORY_MONITOR reap behavior (including the MEMORY-vs-TIMEOUT/
+  // STALL reap-grace discrimination). Run it here, as a subprocess, so it rides the SAME canonical
+  // self-test entrypoint (`node scripts/gate-selftest.mjs`) instead of sitting unreferenced by anything.
+  // --------------------------------------------------------------------------------------------------
+  {
+    const r = spawnSync(process.execPath, [MEMORY_SELFTEST], {
+      env: process.env,
+      encoding: "utf8",
+    });
+    if (r.status === 0) {
+      pass(
+        "(GB10) gate-memory-selftest.mjs: memory-ceiling parsing/derivation/reap assertions all pass, " +
+          "including the MEMORY-reap-escalates-faster-than-TIMEOUT/STALL timing discrimination.",
+      );
+    } else {
+      fail(
+        `(GB10) gate-memory-selftest.mjs exited ${r.status === null ? `signal ${r.signal}` : r.status} — ` +
+          `memory-ceiling assertions failed:\n${r.stdout || ""}${r.stderr || ""}`,
       );
     }
   }
