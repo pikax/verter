@@ -78,3 +78,12 @@ are `A1/sentinel-verification.md` entries.
 - Experimental behavior cannot be silently used as a stable oracle for another surface.
 - Every enabled row links exact tests and benchmark cells.
 - Unsupported and partial behavior is part of the public contract, not an implementation accident.
+
+# 4. Proposed AMD-005 framework detail
+
+AMD-005 is not ratified. Its proposed exact framework/profile/route expansion is
+machine-readable at
+[`../evidence/framework-conformance/capability-matrix.tsv`](../evidence/framework-conformance/capability-matrix.tsv).
+Until ratification and BF1 acceptance, those rows do not replace the `VERIFY` seed
+truth above. On acceptance they govern Vue RC.3 and Svelte 5.56.8 compiler products;
+the seed rows remain historical lineage.

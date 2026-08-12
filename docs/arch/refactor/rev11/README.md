@@ -45,11 +45,15 @@ this directory and that external ledger to continue the program.
 
 ## Program state
 
-- Entry state is **A0**, locked at entry SHA `9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0`
+- The historical entry remains SHA `9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0`
   (tree `3cf111cf5665586b7d8fdfd520f01cfee3bf8108`).
-- **A0 is NOT accepted.** No implementation block has started. Only `A0` is exposed in
-  program state; per `program-dag.toml`, `A1` becomes legal only on maintainer
-  acceptance of A0.
+- The tracked live ledger records A0–B1 accepted at the integration tip from which
+  AMD-005 was rebased. B1's accepted identity is
+  `03b2fdbfc6d12452824768d9e389a5f6f3d680df`, tree
+  `7f8230066735db17650b5d594a95d597540b3729`; its former worktree and branch have
+  been removed.
+- AMD-005's five new rows are locked. Its DAG/state edits are a validator-clean
+  proposal only and do not expose BF1 before exact-tree maintainer ratification.
 
 ## Registered amendments
 
@@ -79,6 +83,12 @@ Amendments live in [`amendments/`](amendments/) and bind the program:
   supersedes the A2C predecessor and reduces A3 to non-G10 wrong-complete retractions,
   while leaving exact structural completion and G10 discrimination as debt `FR-D8`,
   owned by D6 / `U6.LOOP_CLOSURE`.
+- **AMD-005 — Framework compiler conformance rescope (PROPOSED, NOT RATIFIED):**
+  [`amendments/AMD-005-framework-compiler-conformance-rescope.md`](amendments/AMD-005-framework-compiler-conformance-rescope.md)
+  prepares exact Vue RC.3 and Svelte 5.56.8 compatibility locks, five new
+  framework/conformance blocks, amended B/C boundaries, and a validator-clean
+  56-block DAG. It has no execution authority until three independent challenge
+  reports and an exact-tree maintainer decision exist.
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.
