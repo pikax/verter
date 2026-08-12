@@ -277,24 +277,24 @@ notes = "Gap-analysis-only block: every one of BF1's 7 numbered exit criteria an
 
 [[block]]
 id = "BF2"
-status = "ACCEPTED"
+status = "REVIEW"
 charter_digest = "1f99cf7eda1a955ada751f075799dabc8c8ab1defda19b20375f7ca09aa5963b"
 context_packet_digest = "52c927f3ddb197590181126dff178ec3eab1cd997036b7be156462ad15d11b67"
 base_sha = "0c0c6bc7870ec1edcbfcb966fcd6fde9e666d63f"
 candidate_sha = "58d42a65d1e993e97d18dc40c3989996a9cd3c71"
 candidate_tree = "d33afb76ba212652c0fe489a0337aaa8543ec515"
-accepted_sha = "58d42a65d1e993e97d18dc40c3989996a9cd3c71"
-accepted_tree = "d33afb76ba212652c0fe489a0337aaa8543ec515"
+accepted_sha = ""
+accepted_tree = ""
 landing_equivalence_digest = ""
 evidence_digest = "64882196cda6f8a13ffd1c087e0c15cbce0f6be910f4dbcda965388f7a0ca966"
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PASS"
-architecture_review = "PASS"
-adversarial_review = "PASS"
-maintainer_decision = "ACCEPTED"
-notes = "REOPEN #1 RESOLVED. (1) PERFORMANCE — maintainer took the explicit FALLBACK over a Codex xhigh bootstrap-protocol ruling: BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE removed from performance-gates.toml, row explicit open/not-yet-locked, BF2 claims no performance exit on it. Tracked as debt in docs/arch/refactor/rev11/evidence/BF2/debt-BF2-perf-gate-deferred.md — owner BV1/BS1, resolution gate before that owner's own perf-lock exit, acceptance ID FC-PERF-001, full consult+ruling preserved durably. (2) MANIFEST/SOURCE — the 6 previously-skipped proofs (pinned-source-drift, Vue/Svelte runner re-enumeration, corrupted-locator discrimination) now execute for real against pinned checkouts and pass; re-enumeration strengthened to a real content-hash check. Manifest classification honestly left blocked for ~5316/5460 rows (genuine downstream-block dependency per AMD-005, not dropped scope). (3) HARNESS/NORMALIZER — closed: link-validity now checks imported exports exist (not just require.resolve()), Svelte SSR self-test added, both hydration-control self-tests added, 6 new normalizer mutation categories (import/export-source, events, component calls, slots, authored/public names, control-flow). (4) EVIDENCE CUSTODY — genuine pre-dispatch packet (evidence/BF2/context-packet-reopen1.md, authored before fix code) + full review-report text for both rounds committed durably under evidence/BF2/reviews/. Round-2 review found one bounded gap (re-enumeration content-hash check had zero discriminating coverage) — fixed with two mutation-proven negative-control tests, reverified 65/65 package tests, mutation plant confirmed fail->revert->pass. All reviews used the hardened per-exit-criterion evidence-citation instruction (standing rule adopted after BF1+BF2 both slipped through general-scan review). Predecessor BF1 remains ACCEPTED at 6305950725abc2265135694f353b8fb75ef9c9c5, unaffected. BF3 next legal once this transition is validated. J1 stays locked (CSS work not selected)."
+conformance_review = "INVALIDATED"
+architecture_review = "INVALIDATED"
+adversarial_review = "INVALIDATED"
+maintainer_decision = "PENDING"
+notes = "REOPEN #2 (SECOND-REOPEN CIRCUIT BREAKER APPLIES — paused for maintainer/architecture ruling on approach, not another autonomous fix cycle). A literal per-exit-criterion re-verification consult found the reopen-1 acceptance (candidate/accepted_sha 58d42a65d) was ALSO wrong: 10 of 16 numbered exit criteria FAIL with cited file:line evidence, including genuine correctness defects, not just documentation gaps — FC-NORMALIZER-001 fails decisively: normalize.mjs renames every unexported local binding and erases /*#__PURE__*/-class semantic comments, producing forbidden false structural equivalence on authored/public-adjacent content (the exact category the original spec named as never-normalizable). Also: FC-HARNESS-001 fails (transitive package-closure drift unchecked; golden provenance missing generator commit/tree and normalizer implementation digest; TypeScript-observable validation absent per BF2.md:20); link failure detection incomplete (export/re-export sources unchecked); atomic result accounting not universal (generate-goldens.mjs writes goldens one file at a time, non-atomic as a set); diagnostic/mapping discrimination narrow (message/end-span, sourcesContent/sourceRoot ignored); several normalizer mutation-category tests are weaker stand-ins than claimed. FC-MANIFEST-001 PASS narrowly (with one documentation defect: attribution names B3 instead of the actual omitted owner B4). Offline execution, non-vacuous arms, golden immutability, runtime failure detection PASS. STOP condition triggered: this is BF2's second reopen — per CLAUDE.md's second-REOPEN circuit breaker, approval for BF2's design/review-adequacy has LAPSED; do not dispatch a third autonomous fix cycle without a recorded architecture/product ruling on approach (possible directions: scope-split BF2's charter, mandate literal per-criterion audit as BF2's own review method rather than general scan, or accept a narrower BF2 exit with more deferred to BV1/BS1). Predecessor BF1 remains ACCEPTED at 6305950725abc2265135694f353b8fb75ef9c9c5, unaffected. BF3/J1 stay blocked."
 
 [[block]]
 id = "BF3"
