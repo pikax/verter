@@ -28,7 +28,7 @@ import {
   readdirSync,
   realpathSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, cpus, tmpdir, totalmem } from "node:os";
 import { join, dirname, basename, sep, isAbsolute, win32, posix } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -36,6 +36,7 @@ import { createHash } from "node:crypto";
 // Exit-code constants (distinct, documented). Shared with gate.mjs and gate-selftest.mjs.
 //   0   PASS / PASS-WITH-TOLERATED
 //   1   FAIL          (a build/test command failed / a non-tolerated test failed)
+//   123 ABORTED       (memory ceiling reached, or the RSS monitor became unavailable)
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
 //   126 LOCK-REFUSED  (another gate holds the single-flight mutex and is alive / lock uninspectable)
@@ -43,13 +44,72 @@ import { createHash } from "node:crypto";
 // ----------------------------------------------------------------------------------------------------
 export const EXIT_PASS = 0;
 export const EXIT_FAIL = 1;
+export const EXIT_MEMORY = 123;
 export const EXIT_TIMEOUT = 124;
 export const EXIT_STALL = 125;
 export const EXIT_LOCK_REFUSED = 126;
 export const EXIT_USAGE = 127;
 
+// MEMORY / MEMORY_MONITOR reap escalation is far tighter than the TIMEOUT/STALL default (5000ms):
+// a ceiling breach means the tree is allocating right now, so runContainedStep's reapNow gives it this
+// short a SIGTERM grace (instead of killGraceMs) before SIGKILL — materially bounding how much further it
+// can grow after the breach is observed. See runContainedStep's memoryKillGraceMs option.
+export const MEMORY_KILL_GRACE_MS = 200;
+
 export const IS_WINDOWS = process.platform === "win32";
 export const IS_MAC = process.platform === "darwin";
+
+const MiB = 1024 ** 2;
+const GiB = 1024 ** 3;
+
+export function parseMemorySize(value) {
+  const match = /^([0-9]+(?:\.[0-9]+)?)(MiB|GiB)$/i.exec(String(value || "").trim());
+  if (!match)
+    throw new Error(
+      `memory limit must be a positive MiB/GiB value (for example 12288MiB or 12GiB)`,
+    );
+  const bytes = Number(match[1]) * (match[2].toLowerCase() === "gib" ? GiB : MiB);
+  if (!Number.isFinite(bytes) || bytes <= 0) throw new Error("memory limit must be positive");
+  return Math.floor(bytes);
+}
+
+export function formatMemorySize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown";
+  if (bytes < GiB) return `${(bytes / MiB).toFixed(0)} MiB`;
+  return `${(bytes / GiB).toFixed(2)} GiB`;
+}
+
+function positiveInteger(value, label) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0)
+    throw new Error(`${label} must be a positive integer`);
+  return parsed;
+}
+
+// Conservative defaults for the canonical gate. Four-way compile/test concurrency keeps an 8-core
+// workstation responsive, while the child-tree RSS ceiling reserves half of physical memory for the OS,
+// the parent agent, editors, and unrelated work. Callers may lower or raise these explicit limits, but a
+// canonical invocation always resolves to finite positive values.
+export function deriveGateResourceLimits({
+  cpuCount = typeof availableParallelism === "function" ? availableParallelism() : cpus().length,
+  totalMemBytes = totalmem(),
+  buildJobs,
+  testThreads,
+  memoryLimitBytes,
+} = {}) {
+  const saneCpuCount = Number.isSafeInteger(cpuCount) && cpuCount > 0 ? cpuCount : 1;
+  const defaultParallelism = Math.max(1, Math.min(4, saneCpuCount));
+  const saneTotalMem =
+    Number.isFinite(totalMemBytes) && totalMemBytes > 0 ? totalMemBytes : 2 * GiB;
+  return {
+    buildJobs: positiveInteger(buildJobs ?? defaultParallelism, "build jobs"),
+    testThreads: positiveInteger(testThreads ?? defaultParallelism, "test threads"),
+    memoryLimitBytes: positiveInteger(
+      memoryLimitBytes ?? Math.max(512 * MiB, Math.floor(saneTotalMem * 0.5)),
+      "memory limit bytes",
+    ),
+  };
+}
 
 // cargo-nextest's Windows archive contains test executables but omits their hashed PDB sidecars. Most
 // tests do not need a PDB at runtime, but verter_napi's allocation-site audit intentionally proves that
@@ -561,7 +621,7 @@ export function resolvePnpm(env, isFileFn = defaultIsFile, windows = IS_WINDOWS)
 //       - pnpm IS resolvable: run the injected `runInstall()` (production: the platform-aware
 //         `pnpmInstallCommand` inside the contained-step / timeout / stall machinery). Strict PRECEDENCE
 //         (a later branch never overrides an earlier one):
-//           · watchdog reason (TIMEOUT/STALL)       → action "watchdog" (PROPAGATED via `mapStepReason`,
+//           · watchdog reason                       → action "watchdog" (PROPAGATED via `mapStepReason`,
 //             never tolerated).
 //           · install spawnError                    → action "setup-fail" (tolerance OFF). After a positive
 //             pnpm probe, spawnError is a launcher/race/permission/cmd failure, NOT proven pnpm absence.
@@ -684,7 +744,7 @@ export async function preflightFreshnessTooling(opts) {
   // source of truth for both the probe and the launch.
   const installRes = await runInstall({ pnpmPath });
 
-  // A watchdog kill (TIMEOUT/STALL) from the install step is PROPAGATED, never tolerated.
+  // A watchdog kill (memory/timeout/stall) from the install step is PROPAGATED, never tolerated.
   if (installRes && installRes.reason) {
     return {
       freshnessToleranceAllowed: false,
@@ -1517,6 +1577,106 @@ export function listProcesses() {
   return rows;
 }
 
+// Parse `ps -axo pid=,pgid=,rss=` and sum the resident sets of the contained POSIX process group.
+// RSS is reported by ps in KiB. Summing per-process RSS is intentionally conservative because shared pages
+// may appear in more than one process: the watchdog's job is to preserve machine headroom, not to maximize
+// utilization up to the last uniquely-resident byte.
+export function parsePosixProcessTableRss(text, processGroupId) {
+  let rssKiB = 0;
+  let processCount = 0;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match || Number(match[2]) !== Number(processGroupId)) continue;
+    rssKiB += Number(match[3]);
+    processCount += 1;
+  }
+  if (processCount === 0) {
+    return {
+      ok: false,
+      rssBytes: 0,
+      processCount: 0,
+      detail: "process group absent from ps snapshot",
+    };
+  }
+  return { ok: true, rssBytes: rssKiB * 1024, processCount };
+}
+
+// Parse `pid<TAB>parent-pid<TAB>working-set-bytes` rows and recursively sum a Windows process tree.
+export function parseWindowsProcessTableRss(text, rootPid) {
+  const rows = new Map();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+([0-9]+)\s+([0-9]+)\s*$/.exec(line);
+    if (!match) continue;
+    rows.set(Number(match[1]), { parentPid: Number(match[2]), rssBytes: Number(match[3]) });
+  }
+  if (!rows.has(Number(rootPid))) {
+    return {
+      ok: false,
+      rssBytes: 0,
+      processCount: 0,
+      detail: "tree root absent from CIM snapshot",
+    };
+  }
+  const included = new Set([Number(rootPid)]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, row] of rows) {
+      if (!included.has(pid) && included.has(row.parentPid)) {
+        included.add(pid);
+        changed = true;
+      }
+    }
+  }
+  let rssBytes = 0;
+  for (const pid of included) rssBytes += rows.get(pid).rssBytes;
+  return { ok: true, rssBytes, processCount: included.size };
+}
+
+// Platform-native process-tree RSS snapshot. The production watchdog treats repeated inability to sample
+// as a memory-safety abort, so a missing/broken process inspector cannot silently disable the ceiling.
+export function sampleProcessTreeRssBytes(rootPid) {
+  if (!rootPid) return { ok: false, rssBytes: 0, processCount: 0, detail: "child pid unavailable" };
+  if (IS_WINDOWS) {
+    const command =
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.WorkingSetSize)" }';
+    const result = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", command],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    );
+    if (result.status !== 0 || result.error) {
+      return {
+        ok: false,
+        rssBytes: 0,
+        processCount: 0,
+        detail: result.error ? result.error.message : `PowerShell CIM exited ${result.status}`,
+      };
+    }
+    return parseWindowsProcessTableRss(result.stdout, rootPid);
+  }
+
+  const result = spawnSync("ps", ["-axww", "-o", "pid=,pgid=,rss="], {
+    encoding: "utf8",
+    timeout: 5_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.status !== 0 || result.error) {
+    return {
+      ok: false,
+      rssBytes: 0,
+      processCount: 0,
+      detail: result.error ? result.error.message : `ps exited ${result.status}`,
+    };
+  }
+  return parsePosixProcessTableRss(result.stdout, rootPid);
+}
+
 export function isBuildTool(cmd) {
   // cargo / rustc / cargo-nextest / nextest — word-ish boundaries so "cargo-nextest" and "/usr/bin/cargo"
   // both match but an unrelated path containing "cargocult" does not. An optional `.exe` suffix is matched
@@ -1984,8 +2144,8 @@ export async function reapActiveStep() {
 // runContainedStep — launch one external command in a NEW process group (POSIX) / job-tree (Windows) under
 // the whole-gate deadline + the phase-appropriate stall detector, capturing combined stdout+stderr to a
 // growing buffer (also mirrored to our stderr). Returns
-// { code, reason, durationMs, stdout, stderr, spawnError, reapConfirmedDead, signalName }.
-//   reason: "TIMEOUT" | "STALL" | "" (empty when not a watchdog kill).
+// { code, reason, durationMs, stdout, stderr, spawnError, reapConfirmedDead, signalName, peakRssBytes }.
+//   reason: "MEMORY" | "MEMORY_MONITOR" | "TIMEOUT" | "STALL" | "".
 //   reapConfirmedDead: when a watchdog reap ran, whether the child tree was VERIFIED dead afterward
 //     (true), false if death could not be confirmed within the bound. Undefined when no reap ran.
 //   signalName: the SIGNAL name the child was terminated by (e.g. "SIGABRT") when it was signal-killed
@@ -1998,6 +2158,13 @@ export async function reapActiveStep() {
 //   deadlineMs: the WHOLE-GATE absolute deadline (ms epoch). The step is bounded by it; when it passes the
 //               step is reaped as TIMEOUT. (The same deadline is shared across every step so the budget is
 //               whole-gate, not per-step.)
+//
+//   killGraceMs: the SIGTERM->SIGKILL grace used for a TIMEOUT/STALL (or external-signal) reap. Defaults to
+//                5000ms.
+//   memoryKillGraceMs: the SEPARATE, much shorter SIGTERM->SIGKILL grace used ONLY for a MEMORY /
+//                MEMORY_MONITOR reap (defaults to MEMORY_KILL_GRACE_MS, 200ms) — a ceiling breach means the
+//                tree is allocating right now, so it does not get the same multi-second grace a well-behaved
+//                build/test process gets on TIMEOUT/STALL.
 // ----------------------------------------------------------------------------------------------------
 export async function runContainedStep(opts) {
   const {
@@ -2010,8 +2177,17 @@ export async function runContainedStep(opts) {
     stallMs,
     targetDir,
     killGraceMs = 5000,
+    // MEMORY / MEMORY_MONITOR reap grace: deliberately far shorter than killGraceMs. A ceiling breach means
+    // a process is actively allocating RIGHT NOW — the whole point of the ceiling is to stop that growth as
+    // fast as possible, so these two reasons must not sit through the same SIGTERM grace window a
+    // well-behaved TIMEOUT/STALL reap gives a tree to exit cleanly. See MEMORY_KILL_GRACE_MS below.
+    memoryKillGraceMs = MEMORY_KILL_GRACE_MS,
     captureStdoutSeparately = false,
     windowsVerbatimArguments = false,
+    memoryLimitBytes = 0,
+    memoryPollMs = 1000,
+    memorySampleFailureLimit = 3,
+    memorySampler = sampleProcessTreeRssBytes,
   } = opts;
 
   const child = spawn(cmd, args, {
@@ -2035,6 +2211,11 @@ export async function runContainedStep(opts) {
   let lastGrowthMs = nowMs();
   let lastSize = -1;
   let lastArtifact = "";
+  let peakRssBytes = 0;
+  let memoryProcessCount = 0;
+  let memorySampleFailures = 0;
+  let memorySampleFailureDetail = "";
+  let lastMemorySampleMs = 0;
 
   child.stdout.on("data", (d) => {
     const s = d.toString();
@@ -2057,10 +2238,10 @@ export async function runContainedStep(opts) {
   let reaped = false;
   // Did the watchdog's reap actually signal a LIVE child/process group? Set SYNCHRONOUSLY by reapNow at the
   // instant it begins the reap (before any await), so the close handler reads a settled value even when the
-  // child resolves `close` in the same tick. A real TIMEOUT/STALL reap hits a live group (true); a one-tick
+  // child resolves `close` in the same tick. A real watchdog reap hits a live group (true); a one-tick
   // race where the child had already exited before we signaled gets ESRCH (false). The close handler clears
   // a spurious `reason` ONLY when this is false — so a process that TRAPS SIGTERM and exits(0)
-  // (watchdogSignaledLive=true) keeps its TIMEOUT/STALL verdict.
+  // (watchdogSignaledLive=true) keeps its abort verdict.
   let watchdogSignaledLive = false;
   // Whether the watchdog reap CONFIRMED the tree dead (from reapTree's verification poll). Surfaced to the
   // caller so a teardown can record reap certainty.
@@ -2077,37 +2258,83 @@ export async function runContainedStep(opts) {
     // Capture the signaled-live discriminator SYNCHRONOUSLY, before the awaited reap can interleave with the
     // child's `close`.
     watchdogSignaledLive = groupOrPidAlive(child.pid);
+    // MEMORY / MEMORY_MONITOR get the short memoryKillGraceMs escalation, not the TIMEOUT/STALL killGraceMs:
+    // the tree is actively over the RSS ceiling right now, so it must not be given the same multi-second
+    // SIGTERM grace a well-behaved build/test process gets to exit cleanly.
+    const grace = why === "MEMORY" || why === "MEMORY_MONITOR" ? memoryKillGraceMs : killGraceMs;
     reapPromise = (async () => {
-      const outcome = await reapTree(child.pid, killGraceMs);
+      const outcome = await reapTree(child.pid, grace);
       reapConfirmedDead = outcome.confirmedDead;
       // reapTree already captured wasLive synchronously; prefer its richer signal when present.
       if (typeof outcome.wasLive === "boolean") watchdogSignaledLive = outcome.wasLive;
-      await provenanceSweep(targetDir, killGraceMs);
+      await provenanceSweep(targetDir, grace);
     })();
   };
 
-  // Watchdog: owns BOTH the whole-gate deadline and the phase stall detector.
-  const watchdog = setInterval(() => {
-    const cur = nowMs();
-    // Whole-gate hard deadline.
-    if (deadlineMs > 0 && cur >= deadlineMs) {
-      reapNow("TIMEOUT");
-      return;
-    }
-    // Stall.
-    if (stallMs > 0) {
-      const size = totalBytes;
-      let artifact = "";
-      if (phase === "build") artifact = artifactSignature(targetDir);
-      if (size !== lastSize || artifact !== lastArtifact) {
-        lastSize = size;
-        lastArtifact = artifact;
-        lastGrowthMs = cur;
-      } else if (cur - lastGrowthMs >= stallMs) {
-        reapNow("STALL");
+  // Watchdog: owns the RSS ceiling, whole-gate deadline, and phase stall detector. Memory is checked first:
+  // once the tree crosses the safe ceiling, continuing even until the next deadline/stall check risks the
+  // very machine-wide OOM this runner exists to prevent.
+  const watchdog = setInterval(
+    () => {
+      const cur = nowMs();
+      if (memoryLimitBytes > 0 && cur - lastMemorySampleMs >= memoryPollMs) {
+        lastMemorySampleMs = cur;
+        let sample;
+        try {
+          sample = memorySampler(child.pid);
+        } catch (error) {
+          sample = { ok: false, detail: error && error.message ? error.message : String(error) };
+        }
+        if (sample && sample.ok) {
+          memorySampleFailures = 0;
+          memorySampleFailureDetail = "";
+          peakRssBytes = Math.max(peakRssBytes, sample.rssBytes || 0);
+          memoryProcessCount = sample.processCount || 0;
+          if (sample.rssBytes >= memoryLimitBytes) {
+            err(
+              `ABORTED — memory ceiling: active child tree RSS ${formatMemorySize(sample.rssBytes)} ` +
+                `across ${memoryProcessCount} process(es) reached the ${formatMemorySize(memoryLimitBytes)} ` +
+                "limit; terminating the contained process tree. No gate verdict was produced.",
+            );
+            reapNow("MEMORY");
+            return;
+          }
+        } else {
+          memorySampleFailures += 1;
+          memorySampleFailureDetail =
+            sample && sample.detail ? sample.detail : "unknown sampler failure";
+          if (memorySampleFailures >= memorySampleFailureLimit) {
+            err(
+              `ABORTED — memory safety monitor unavailable after ${memorySampleFailures} consecutive ` +
+                `samples (${memorySampleFailureDetail}); terminating the contained process tree rather than ` +
+                "running without an enforceable ceiling. No gate verdict was produced.",
+            );
+            reapNow("MEMORY_MONITOR");
+            return;
+          }
+        }
       }
-    }
-  }, 1000);
+      // Whole-gate hard deadline.
+      if (deadlineMs > 0 && cur >= deadlineMs) {
+        reapNow("TIMEOUT");
+        return;
+      }
+      // Stall.
+      if (stallMs > 0) {
+        const size = totalBytes;
+        let artifact = "";
+        if (phase === "build") artifact = artifactSignature(targetDir);
+        if (size !== lastSize || artifact !== lastArtifact) {
+          lastSize = size;
+          lastArtifact = artifact;
+          lastGrowthMs = cur;
+        } else if (cur - lastGrowthMs >= stallMs) {
+          reapNow("STALL");
+        }
+      }
+    },
+    memoryLimitBytes > 0 ? Math.max(50, Math.min(1000, memoryPollMs)) : 1000,
+  );
 
   // `spawnError` distinguishes "the OS could not launch the command at all" (ENOENT / EACCES — a
   // setup/usage condition, exit 127) from "the command RAN and exited non-zero" (a real build/test
@@ -2147,18 +2374,19 @@ export async function runContainedStep(opts) {
       /* best-effort reap */
     }
   }
-  // One-tick race vs a REAL trapped-SIGTERM exit-0. The 1s watchdog can set `reason` (TIMEOUT/STALL) in the
+  // One-tick race vs a REAL trapped-SIGTERM exit-0. The watchdog can set an abort `reason` in the
   // same tick the child resolves `close`. Two cases must be told apart:
   //   (a) PURE RACE — the child had ALREADY finished (cleanly, code 0) before the reap signaled, so the
   //       reap found NOTHING live (watchdogSignaledLive=false). The step genuinely completed in time; the
   //       watchdog reason is spurious and must be cleared.
   //   (b) REAL REAP, trapped-exit-0 — the watchdog fired on a genuine deadline/stall and found a LIVE
   //       process group (watchdogSignaledLive=true), but that process TRAPPED SIGTERM and exit(0)'d before
-  //       SIGKILL. The close code is 0, yet this was a REAL TIMEOUT/STALL — the verdict STANDS.
-  // Keying on `code === 0` alone (the prior logic) masked case (b) as a PASS. We key on whether the reap
-  // actually found a live target instead: clear `reason` ONLY for the proven no-op race (not signaled
-  // live). If it WAS signaled live, the TIMEOUT/STALL reason survives regardless of the trapped exit code.
-  if (reason && code === 0 && !watchdogSignaledLive) {
+  //       SIGKILL. The close code is 0, yet this was a REAL watchdog abort — the verdict STANDS.
+  // Keying on `code === 0` alone (the prior logic) masked case (b) as a PASS. TIMEOUT/STALL key on whether
+  // the reap actually found a live target: clear those reasons only for the proven no-op race. MEMORY and
+  // MEMORY_MONITOR are different: the sampler already observed the unsafe fact, so their abort survives
+  // even if the process exits between that observation and the signal probe.
+  if ((reason === "TIMEOUT" || reason === "STALL") && code === 0 && !watchdogSignaledLive) {
     reason = "";
   }
 
@@ -2177,6 +2405,11 @@ export async function runContainedStep(opts) {
     spawnError,
     reapConfirmedDead,
     signalName,
+    peakRssBytes,
+    memoryLimitBytes,
+    memoryProcessCount,
+    memorySampleFailures,
+    memorySampleFailureDetail,
   };
 }
 
@@ -2867,12 +3100,20 @@ function isCwdIndependentAbsolute(dir, windows) {
 // `Path` is a DIFFERENT var Rust never reads and MUST be left untouched — the POSIX branch sanitizes exactly
 // the single `findPathEnvKey(env, false)` key (`PATH` only) and never touches a `Path`.
 // ----------------------------------------------------------------------------------------------------
-export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS) {
+export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS, buildJobs = null) {
   const env = { ...baseEnv };
   delete env.CARGO_TARGET_DIR;
   delete env.CARGO_BUILD_TARGET_DIR;
   delete env.CARGO_BUILD_BUILD_DIR;
   env.CARGO_TARGET_DIR = runnerTarget;
+  if (buildJobs !== null && buildJobs !== undefined) {
+    const jobs = positiveInteger(buildJobs, "build jobs");
+    // Windows folds environment names, so remove every casing before installing the one canonical cap.
+    for (const key of Object.keys(env)) {
+      if ((windows ? key.toUpperCase() : key) === "CARGO_BUILD_JOBS") delete env[key];
+    }
+    env.CARGO_BUILD_JOBS = String(jobs);
+  }
   // Force non-TTY / CI-style output so progress lands in the captured log, not a TTY spinner.
   env.CARGO_TERM_COLOR = "never";
   env.CARGO_TERM_PROGRESS_WHEN = "never";
@@ -3061,9 +3302,10 @@ export function buildSuiteEnv(baseCargoEnv, manifestDir, pkgInfo, crateName) {
   return env;
 }
 
-// Map a contained-step result to an exit code. A watchdog reason wins (TIMEOUT/STALL); otherwise the
-// child's own exit (0 => PASS, non-zero => FAIL).
+// Map a contained-step result to an exit code. A watchdog reason wins; otherwise the child's own exit
+// (0 => PASS, non-zero => FAIL).
 export function mapStepReason(res) {
+  if (res.reason === "MEMORY" || res.reason === "MEMORY_MONITOR") return EXIT_MEMORY;
   if (res.reason === "TIMEOUT") return EXIT_TIMEOUT;
   if (res.reason === "STALL") return EXIT_STALL;
   if (res.code === 0) return EXIT_PASS;
