@@ -256,8 +256,8 @@ notes = "verter_identity crate (layer 1): StableEntityId/SessionHandle, QueryIde
 
 [[block]]
 id = "BF1"
-status = "LOCKED"
-charter_digest = ""
+status = "READY"
+charter_digest = "ef45ad3e19f74273ded8e41b43b31b239fda84b6eb13924ed887a5a5a8e6b98c"
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
@@ -273,7 +273,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
-notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
+notes = "AMD-005 (Framework Compiler Conformance Rescope) maintainer-ratified and landed at ade8a301b (reviewed package ce1d0e4688/1ff1f83d8e, ratified bundle aa757eecc/0c078357b; 3/3 conformance+architecture+governance PASS after 2 fix/reattest rounds within the 3-round cap, ratification recorded in AMD-005 §15.1). Predecessor B1 ACCEPTED at 03b2fdbfc; B1 is no longer B2/B3's direct predecessor under the amended DAG — BF1 is now execution-legal, BF2/BF3 stay LOCKED until BF1/BF2 accept respectively, B2/B3 stay blocked until BF3 accepts per maintainer direction."
 
 [[block]]
 id = "BF2"
