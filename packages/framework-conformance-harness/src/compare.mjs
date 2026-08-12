@@ -25,23 +25,64 @@ export function checkParseValidity(code, label) {
  * package specifiers or other declared fragments, which is out of this
  * bounded harness's scope — see README "what's built vs deferred").
  *
- * @returns {{ ok: boolean, resolved: string[], unresolved: string[] }}
+ * `require.resolve()` only proves the MODULE FILE exists — it passes even
+ * when a named import binds to an export the module never declares (a
+ * genuinely-missing named export). To catch that class, every resolved
+ * specifier's module is actually IMPORTED and each `ImportSpecifier`'s
+ * imported name is checked against the module's real, live export set.
+ * `ImportDefaultSpecifier`/`ImportNamespaceSpecifier` are validated by
+ * import succeeding at all (a default/namespace binding cannot be "missing"
+ * the way a named export can — ESM synthesizes a namespace object even for
+ * a CJS module with no explicit exports).
+ *
+ * @returns {{ ok: boolean, resolved: string[], unresolved: string[], missingExports: string[] }}
  */
 export function checkLinkValidity(ast, baseDir) {
   const require = createRequire(baseDir.endsWith("/") ? baseDir : `${baseDir}/`);
   const resolved = [];
   const unresolved = [];
+  const missingExports = [];
   for (const stmt of ast.body) {
     if (stmt.type !== "ImportDeclaration") continue;
     const specifier = stmt.source.value;
+    let resolvedPath;
     try {
-      require.resolve(specifier);
-      resolved.push(specifier);
+      resolvedPath = require.resolve(specifier);
     } catch {
       unresolved.push(specifier);
+      continue;
+    }
+    resolved.push(specifier);
+
+    const namedImports = stmt.specifiers
+      .filter((s) => s.type === "ImportSpecifier")
+      .map((s) => s.imported.name ?? s.imported.value);
+    if (namedImports.length === 0) continue;
+
+    let moduleExports;
+    try {
+      // require() (not require.resolve) actually loads the module so its
+      // real, live export surface can be inspected — an ESM-flavored
+      // default export normalizes named-export presence via `.default`
+      // interop, matched here by also checking the top-level keys.
+      moduleExports = require(resolvedPath);
+    } catch (error) {
+      for (const name of namedImports) {
+        missingExports.push(`${specifier}#${name} (module failed to load: ${error.message})`);
+      }
+      continue;
+    }
+    const exportKeys = new Set(Object.keys(moduleExports ?? {}));
+    for (const name of namedImports) {
+      if (!exportKeys.has(name)) missingExports.push(`${specifier}#${name}`);
     }
   }
-  return { ok: unresolved.length === 0, resolved, unresolved };
+  return {
+    ok: unresolved.length === 0 && missingExports.length === 0,
+    resolved,
+    unresolved,
+    missingExports,
+  };
 }
 
 /**
@@ -119,7 +160,12 @@ export function compareArtifacts(golden, candidate, { linkBaseDir } = {}) {
   let link = null;
   if (candidateParse.ok && linkBaseDir) {
     link = checkLinkValidity(candidateParse.ast, linkBaseDir);
-    if (!link.ok) reasons.push(`candidate has unresolved imports: ${link.unresolved.join(", ")}`);
+    if (link.unresolved.length > 0) {
+      reasons.push(`candidate has unresolved imports: ${link.unresolved.join(", ")}`);
+    }
+    if (link.missingExports.length > 0) {
+      reasons.push(`candidate imports missing named exports: ${link.missingExports.join(", ")}`);
+    }
   }
 
   let structural = null;

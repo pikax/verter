@@ -6,26 +6,43 @@
 // (see package.json + domain-pin.mjs).
 //
 // These checkouts are deliberately NOT committed to the repository (they are
-// full upstream working trees, hundreds of files). A contributor or CI job
-// that wants to run the git-checkout-dependent suites sets the two env vars
-// below to local clones pinned at the exact commits in domain-pin.mjs. When
-// unset, callers must treat the affected suite as SKIPPED with an explicit
-// reason — never as a silent pass.
+// full upstream working trees, thousands of files). They are provisioned ONCE,
+// reproducibly and fail-closed, by `node scripts/provision-oracle-checkouts.mjs`,
+// which fetches exactly the commits pinned in domain-pin.mjs into
+// <package>/.oracle-checkouts/<framework> (gitignored) and verifies them with
+// checkout-pin.mjs before returning. That provisioning step is the ONLY
+// network-touching operation in the package and is never invoked from a test:
+// once it has run, every suite below runs entirely offline against local files.
+//
+// Resolution order: explicit BF2_VUE_SOURCE / BF2_SVELTE_SOURCE env vars (a
+// contributor or CI job pointing at their own pinned clones), else the default
+// provisioned cache (BF2_ORACLE_CACHE or <package>/.oracle-checkouts). When
+// neither exists, callers must treat the affected suite as SKIPPED with an
+// explicit reason — never as a silent pass.
 
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+
+import { HARNESS_ROOT } from "./paths.mjs";
+
+export const DEFAULT_ORACLE_CACHE_ROOT = process.env.BF2_ORACLE_CACHE
+  ? resolve(process.env.BF2_ORACLE_CACHE)
+  : join(HARNESS_ROOT, ".oracle-checkouts");
+
+function pick(envValue, framework) {
+  const explicit = envValue ? resolve(envValue) : undefined;
+  if (explicit && existsSync(explicit)) return explicit;
+  const fallback = join(DEFAULT_ORACLE_CACHE_ROOT, framework);
+  return existsSync(fallback) ? fallback : undefined;
+}
 
 /**
  * @returns {{ vueSource: string|undefined, svelteSource: string|undefined }}
  */
 export function oracleSourcePaths() {
-  const vueSource = process.env.BF2_VUE_SOURCE ? resolve(process.env.BF2_VUE_SOURCE) : undefined;
-  const svelteSource = process.env.BF2_SVELTE_SOURCE
-    ? resolve(process.env.BF2_SVELTE_SOURCE)
-    : undefined;
   return {
-    vueSource: vueSource && existsSync(vueSource) ? vueSource : undefined,
-    svelteSource: svelteSource && existsSync(svelteSource) ? svelteSource : undefined,
+    vueSource: pick(process.env.BF2_VUE_SOURCE, "vue"),
+    svelteSource: pick(process.env.BF2_SVELTE_SOURCE, "svelte"),
   };
 }
 

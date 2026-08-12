@@ -16,21 +16,26 @@ violating "a performance criterion selected after candidate measurement" (BF1 ch
 Abort/rescope). Full derivation, raw 10-run session, sandbox network-denial profile, and
 threshold arithmetic:
 [`command-proofs/bf2-oracle-manifest-generate/`](command-proofs/bf2-oracle-manifest-generate/).
-**FROZEN (2026-08-12, BF2 harness landing):**
-`BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` is now also locked in
-`performance-gates.toml`, closing the row this document previously left
-deliberately open. It measures BF2's own, now-existing golden generator
-(`packages/framework-conformance-harness/bin/generate-goldens.mjs`) — the
-real "invoke the official Vue/Svelte compilers and produce immutable golden
-output" workload — over the 6 independently-authored fixtures and their
-coverage axes (48 golden records: 36 Vue across vdom/vapor/ssr x source-map
-x dev/prod, 12 Svelte across client/server x dev/prod). This measurement was
-taken from the harness as it actually exists at BF2 landing, per this
-document's own instruction ("Deferred to whichever block first builds that
-harness"), following the identical honest-measurement discipline (10 cold
-runs, live correctness oracle, operational zero-network proof) as the two
-cells above. Full derivation:
+**ATTEMPTED-THEN-INVALIDATED (2026-08-12, BF2 harness landing) — STAYS OPEN:**
+`BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` was briefly locked in
+`performance-gates.toml` from a 10-run measurement of BF2's own,
+just-built golden generator
+(`packages/framework-conformance-harness/bin/generate-goldens.mjs`). That
+freeze was INVALID — the candidate chose its own pass criteria from its own
+implementation, exactly what this document's abort language and
+`docs/arch/refactor/rev11/governance.md`'s Gate authority rule forbid. A
+Codex Sol xhigh architecture consult confirmed the violation and proposed a
+maintainer-ratified bootstrap-gate protocol (independent gate authority,
+pre-measure registration, disjoint calibration + holdout sessions); the
+maintainer ruled FALLBACK — withhold the freeze rather than pursue that
+protocol now. The row is restored to explicitly OPEN, exactly as this
+document originally left it ("Deferred to whichever block first builds that
+harness"); no cell is defined for this id in `performance-gates.toml`. The
+invalidated 10-run session is retained only as audit evidence, never as
+inputs to a future freeze:
 [`command-proofs/bf2-official-compiler-invocation-golden-generate/`](command-proofs/bf2-official-compiler-invocation-golden-generate/).
+Tracked as debt — durable owner, resolution gate, and acceptance ID at
+[`../BF2/debt-BF2-perf-gate-deferred.md`](../BF2/debt-BF2-perf-gate-deferred.md).
 
 The remaining six cells below (`BV1`/`BS1`/`B6`/`C4`-owned) are unaffected by
 either freeze and stay deferred to their owning blocks' own landings, per
@@ -42,7 +47,7 @@ this document's original scope — no threshold is invented for them here.
 |---|---|---|
 | `BF2_VUE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Official-case enumeration and classification (title-hash extraction, disposition assignment) over the pinned RC.3 source tree — makes ZERO calls to the Vue compiler and produces no golden output, only the `vue-official-cases.tsv` manifest; suite/row/disposition counts, peak RSS, wall time, zero network, byte-exact output digest oracle |
 | `BF2_SVELTE_ORACLE_MANIFEST_GENERATE` | BF2 harness | **FROZEN** — see above. Same enumeration/classification scope over the pinned 5.56.8 source tree — ZERO Svelte compiler calls, no golden output, only the `svelte-official-cases.tsv` manifest; same counter classes |
-| `BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` | BF2 harness | **FROZEN** — see above. The wider workload of actually invoking the official Vue/Svelte compilers against the harness's fixture/coverage-axis corpus to produce immutable golden output; golden-count/per-framework work counters, peak RSS, wall time, zero network, byte-exact combined-digest oracle |
+| `BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE` | downstream owner (see debt record) | **OPEN — tracked debt.** The wider workload of actually invoking the official Vue/Svelte compilers against the harness's fixture/coverage-axis corpus to produce immutable golden output; golden-count/per-framework work counters, peak RSS, wall time, zero network, byte-exact combined-digest oracle. Not frozen by BF2 — see above and [`../BF2/debt-BF2-perf-gate-deferred.md`](../BF2/debt-BF2-perf-gate-deferred.md) |
 | `BV1_VUE_VDOM_DIRECT_CORE` | BV1 algorithm | independent local core corpus, cold and warm; parse/semantic/plan/emit/map counts, bytes, allocations/RSS, latency |
 | `BV1_VUE_VAPOR_DIRECT_CORE` | BV1 algorithm | same, distinct Vapor corpus and helper topology oracle |
 | `BV1_VUE_SSR_DIRECT_CORE` | BV1 algorithm | server corpus with SSR correctness oracle and map on/off |

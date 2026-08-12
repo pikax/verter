@@ -35,14 +35,15 @@ follows.
   oracles, none of which the normalizer can override.
 - **Deterministic runtime execution** (`src/execute-vue-runtime.mjs`,
   `src/execute-svelte-runtime.mjs`): SSR execution against the real official
-  `@vue/server-renderer` / `svelte/server` runtimes. The failure-detection
-  self-test currently exercises the Vue path (`executeVueSsr`) only;
-  `executeSvelteSsr` is implemented and real but not yet self-tested.
+  `@vue/server-renderer` / `svelte/server` runtimes. `test/failure-detection.spec.mjs`
+  exercises both `executeVueSsr` and `executeSvelteSsr` with a real
+  throws-on-error arm and a real succeeds-on-real-SSR arm each.
 - **Hydration control pairing** (`src/hydration.mjs`): official server /
   official client hydration in a deterministic jsdom environment, for both
   frameworks — the harness-control pairing `ssr-hydration.md` names.
-  Implemented, pluggable, and not yet exercised by this package's own tests
-  (see the required-exits note below).
+  `test/hydration.spec.mjs` drives both `hydrateVue` and `hydrateSvelteClient`
+  against real official-compiled server + client artifacts (pairing #1), plus
+  a negative-control arm each.
 - **Official-case coverage accounting** (`src/coverage-report.mjs`,
   `bin/coverage-report.mjs`): re-enumerates every row of the BF1-ratified
   `vue-official-cases.tsv` (2003 rows) and `svelte-official-cases.tsv` (3457
@@ -87,9 +88,11 @@ conformance — see the charter's own "Scale and pacing guidance":
   in `program-dag.toml`: `B4 -> {BV1, BS1}`, while BF2's only predecessor is
   BF1). `hydrateVue`/`hydrateSvelteClient` are pluggable entry points BV1/BS1
   can drive through once that candidate output exists. Pairing #1
-  (official/official, the harness control) is implemented but not yet
-  exercised by any test or CLI path in this package — it will be driven for
-  real once a BV1/BS1 consumer calls it, the same as pairings #2 and #3.
+  (official/official, the harness control) IS exercised — `test/hydration.spec.mjs`
+  drives both `hydrateVue` and `hydrateSvelteClient` against real
+  official-compiled server + client artifacts, proving the mechanism end to
+  end. Pairings #2 and #3 will be driven for real once a BV1/BS1 consumer
+  calls the same entry points with real candidate output.
 - **TypeScript-observable product conformance** (`FC-TS-001`,
   `typescript-product-conformance.md`) is not covered by this package — it
   names a distinct oracle (the TypeScript compiler/API) outside this

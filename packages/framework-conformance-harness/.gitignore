@@ -1,3 +1,1 @@
-.runtime-scratch/
-.coverage-report.json
-*.tmp-*
+.oracle-checkouts/

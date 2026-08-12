@@ -212,6 +212,111 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every category)", 
     expect(report.verdict).toBe("fail");
   });
 
+  it("import/export-source substitution (candidate imports the runtime helpers from a different specifier)", () => {
+    const golden = goldenVdom();
+    // The compiled fragment imports its VDOM helpers from "vue" — retarget
+    // the import SOURCE itself (not a helper name) to a different package
+    // specifier, exactly the class checkLinkValidity/normalizer must catch.
+    const mutated = golden.code.replace('from "vue"', 'from "vue-evil-fork"');
+    assertMutationApplied(golden.code, mutated);
+    expect(mutated).toContain('"vue-evil-fork"');
+    const report = compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
+  it("event binding mutation (authored event name changed on emit + declaration)", () => {
+    const propsEmit = readFileSync(path.join(HARNESS_ROOT, "fixtures/vue/props-emit.vue"), "utf8");
+    const golden = compileVueFixture(propsEmit, "fixtures/vue/props-emit.vue", {
+      backend: "vdom",
+      sourceMap: false,
+      isProd: false,
+    });
+    expect(golden.code).toContain('emit("toggle"');
+    const mutated = golden.code
+      .replace('emit("toggle"', 'emit("toggled"')
+      .replace('emits: ["toggle"]', 'emits: ["toggled"]');
+    assertMutationApplied(golden.code, mutated);
+    expect(mutated).toContain('"toggled"');
+    const report = compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
+  it("component-call mutation (candidate mounts a different child component)", () => {
+    const a =
+      'import { createVNode as _createVNode } from "vue";\nimport Comp from "./Comp.js";\nexport default function render() { return _createVNode(Comp); }';
+    const b =
+      'import { createVNode as _createVNode } from "vue";\nimport OtherComp from "./OtherComp.js";\nexport default function render() { return _createVNode(OtherComp); }';
+    assertMutationApplied(a, b);
+    const report = compareArtifacts(
+      { code: a, diagnostics: [] },
+      { code: b, diagnostics: [] },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
+  it("slot-name mutation (renderSlot target renamed — a named slot silently becomes a different slot)", () => {
+    const slots = readFileSync(path.join(HARNESS_ROOT, "fixtures/vue/slots.vue"), "utf8");
+    const golden = compileVueFixture(slots, "fixtures/vue/slots.vue", {
+      backend: "vdom",
+      sourceMap: false,
+      isProd: false,
+    });
+    expect(golden.code).toContain('_renderSlot(_ctx.$slots, "header"');
+    const mutated = golden.code.replace(
+      '_renderSlot(_ctx.$slots, "header"',
+      '_renderSlot(_ctx.$slots, "banner"',
+    );
+    assertMutationApplied(golden.code, mutated);
+    const report = compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
+  it("authored/public prop-name mutation (a component's public prop key renamed)", () => {
+    const propsEmit = readFileSync(path.join(HARNESS_ROOT, "fixtures/vue/props-emit.vue"), "utf8");
+    const golden = compileVueFixture(propsEmit, "fixtures/vue/props-emit.vue", {
+      backend: "vdom",
+      sourceMap: false,
+      isProd: false,
+    });
+    expect(golden.code).toContain("label: { type: String");
+    // Rename the PUBLIC prop key everywhere it is referenced — a real API
+    // surface change, not a cosmetic rename of a private generated binding.
+    const mutated = golden.code.replaceAll("label", "caption");
+    assertMutationApplied(golden.code, mutated);
+    expect(mutated).toContain("caption: { type: String");
+    const report = compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
+  it("control-flow mutation (if/else branches swapped — same total text shape, different runtime path)", () => {
+    const a = "export default function f(cond) {\n  if (cond) { return 1; } else { return 2; }\n}";
+    const b = "export default function f(cond) {\n  if (cond) { return 2; } else { return 1; }\n}";
+    assertMutationApplied(a, b);
+    const report = compareArtifacts(
+      { code: a, diagnostics: [] },
+      { code: b, diagnostics: [] },
+      { linkBaseDir: HARNESS_ROOT },
+    );
+    expect(report.verdict).toBe("fail");
+  });
+
   it("scope-aware renaming does not FALSELY equate two genuinely different same-named-shadow programs", () => {
     // Both programs use the identifier `v` twice (outer + inner), but bind
     // it to a different VALUE in each — proving canonical renaming is keyed

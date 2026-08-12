@@ -8,6 +8,7 @@
     "generate-goldens": "node bin/generate-goldens.mjs",
     "check-goldens": "node bin/generate-goldens.mjs --check",
     "coverage-report": "node bin/coverage-report.mjs",
+    "provision-oracles": "node scripts/provision-oracle-checkouts.mjs",
     "test": "vitest run --root ."
   },
   "devDependencies": {

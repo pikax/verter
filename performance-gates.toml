@@ -705,168 +705,31 @@ allocator_slack_bytes = "not_applicable"
 quiescence_protocol = "not_applicable"
 max_positive_slope_bytes_per_hour = "not_applicable"
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE — EXTENSION added by BF2,
-# freezing the row `docs/arch/refactor/rev11/evidence/framework-conformance/
-# performance-impact.md` left DELIBERATELY OPEN pending BF2's own harness
-# existing ("Deferred to whichever block first builds that harness (most
-# likely BF2 itself...)"). This measures BF2's actual golden generator
-# (`packages/framework-conformance-harness/bin/generate-goldens.mjs`) — the
-# real "invoke the official Vue/Svelte compilers to produce immutable golden
-# output" workload — NOT the BF1 manifest-enumeration tool the sibling
-# BF2_VUE_ORACLE_MANIFEST_GENERATE / BF2_SVELTE_ORACLE_MANIFEST_GENERATE
-# cells above measure. No pre-existing cell in this file is touched by this
-# addition (SCOPE header at the top of this file).
+# BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE — OPEN / NOT YET LOCKED.
 #
-# METHODOLOGY. 10 full cold external-process invocations of the unmodified
-# generator, each verified against a live correctness oracle (an exact
-# combined SHA-256 of all 48 produced golden files, cross-checked against
-# the pre-session `--check`-verified committed goldens) and run under the
-# identical macOS `sandbox-exec -f deny-network.sb` profile BF1 used for its
-# own manifest-generation measurement — operationally verified in this
-# session (a `curl` to a live host fails DNS resolution under the identical
-# profile, while all 10 invocations completed and produced byte-identical
-# output). No sample discarded (outlier_policy: no_discretionary_exclusion).
-# Full derivation, raw 10-run session, and threshold arithmetic:
+# `docs/arch/refactor/rev11/evidence/framework-conformance/performance-impact.md`
+# originally left this row deliberately open pending BF2's own harness
+# existing. BF2 (2026-08-12) froze a cell here from a 10-run measurement of
+# its OWN just-built `generate-goldens.mjs` — the candidate choosing its own
+# pass criteria, forbidden by this file's SCOPE header and by
+# `docs/arch/refactor/rev11/governance.md`'s Gate authority rule. A Codex
+# Sol xhigh architecture consult confirmed the violation and the maintainer
+# ruled FALLBACK: withhold the freeze rather than pursue the consult's
+# proposed bootstrap-gate protocol. The prior cell, its numeric thresholds,
+# and the 10-run session that produced them are INVALID and are NOT carried
+# forward here (retained only as invalidated evidence at
 # docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
-# bf2-official-compiler-invocation-golden-generate/.
+# bf2-official-compiler-invocation-golden-generate/ for audit).
 #
-# GOVERNANCE NOTE (same as the sibling cells' EXTENSION marker above): this
-# freezes a real, sourced measurement per the charter's own deferred-cell
-# instruction; it is not itself a claim that this file's ADR-016 independent-
-# performance-reviewer class has signed off on this specific addition — that
-# review is a follow-up governance step, same as any other EXTENSION under
-# this file's SCOPE header.
+# This row stays explicitly OPEN — no cell is defined below for this id.
+# BF2 does not claim this performance exit passed. Resolution is tracked
+# debt: see
+# docs/arch/refactor/rev11/evidence/BF2/debt-BF2-perf-gate-deferred.md
+# for the durable owner, resolution gate, acceptance ID, and ruling
+# references. That block must freeze this cell (or a successor id covering
+# the same workload) through an independent gate-authority process before
+# its own performance-lock exit, per this file's ordinary EXTENSION rules —
+# not by reusing BF2's invalidated numbers.
 # ─────────────────────────────────────────────────────────────────────────────
-[[cell]]
-id = "BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE"
-owner = "BF2"
-# The wider workload the sibling manifest-enumeration cells explicitly do
-# NOT cover: actually invoking the pinned official Vue/Svelte compilers
-# (vdom/vapor/ssr backends; client/server targets) over every fixture x
-# coverage-axis combination and writing immutable golden JSON with full
-# provenance.
-operation = "official_compiler_invocation_and_golden_generation; target=packages/framework-conformance-harness/goldens"
-corpus_fingerprint = "git-blob:18c6f46e2dcb2fc8d02695edd560ef0485b42d67 (packages/framework-conformance-harness/bin/generate-goldens.mjs); harness-package:git-blob:4bdcbd1c28e1f25230350497485e672a54f1520b (packages/framework-conformance-harness/package.json); vue-package-version:3.6.0-rc.3; svelte-package-version:5.56.8; fixtures=6 (3 vue, 3 svelte)"
-# No Revision 11 normalized product-request type exists for this offline
-# evidence-preparation tool (same gap the sibling BF2 cells and A6 both
-# name for their own request digests). SHA-256 over the literal pinned
-# invocation description string instead.
-normalized_product_request_digest = "c64e4d957bc56a7f57e3db11710d9eb265b9bd96786ef566fdf2b8170879311a"
-result_contract = "official_core_golden_record_set"
-semantic_profile = "none"
-execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(../evidence/framework-conformance/command-proofs/bf2-official-compiler-invocation-golden-generate/deny-network.sb)"
-cache_state = "not_applicable"
-threads = 1
-boundary = "cli"
-required = true
-
-[cell.validity]
-required_product_kinds = ["official_core_golden_generation"]
-required_output_profiles = []
-required_presentation_profiles = []
-required_serialization_profiles = []
-required_mapping_kinds = []
-required_diagnostics_policy = "not_applicable"
-required_exactness = "exact"
-# The semantic-equivalence oracle: a byte-exact combined SHA-256 across all
-# 48 produced golden JSON files (cat goldens/vue/*.json goldens/svelte/*.json
-# | shasum -a 256), reproduced fresh in this measurement session and
-# cross-checked against a `--check`-verified state of the committed goldens
-# immediately before the session began.
-output_oracle = "sha256(cat goldens/vue/*.json goldens/svelte/*.json) == 9310dec0c291c0ce207af3ec66fb9eab7e8b288b8e9b44290d4a1b8a5f523bd4"
-zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
-
-# Product budget, not a fit: this generator runs a handful of times per BF2
-# harness-evidence cycle, not a hot or per-request path. Measured median
-# across 10 runs is 0.304s; measured max is 0.34s. 5s is ~16.7x the median
-# and ~14.7x the max — real headroom, catastrophe-stop only.
-[[cell.metric]]
-name = "wall_ns"
-statistic = "median"
-comparison = "absolute_max"
-limit = 5000000000
-
-# max(3.000%, 2 x 5.5435% measured coefficient of variation across the 10
-# runs) = 11.0870%. Looser than the sibling BF2 manifest-generation cells'
-# ~4.68% because this workload is short enough (~0.3s) that
-# `/usr/bin/time -l`'s 2-decimal (10ms-bucket) precision materially inflates
-# the measured variance — disclosed explicitly in the command-proof README
-# rather than left implied.
-[[cell.metric]]
-name = "wall_ns"
-statistic = "median"
-comparison = "no_regression_percent_max"
-limit = 11.0870
-
-# Generous catastrophe-stop. Measured max across 10 runs is 118,767,616
-# bytes (~113.3 MiB); 384 MiB is ~3.39x that — independently derived here,
-# landing at a comparable order of magnitude to the sibling BF2 cells
-# because the underlying process shape (one short-lived Node.js process, no
-# heavy allocation) is comparable.
-[[cell.metric]]
-name = "peak_rss_bytes"
-statistic = "max"
-comparison = "absolute_max"
-limit = 402653184
-
-# max(3.000%, 2 x 1.0423% measured coefficient of variation) = 3.000% (the
-# 3% floor governs).
-[[cell.metric]]
-name = "peak_rss_bytes"
-statistic = "max"
-comparison = "no_regression_percent_max"
-limit = 3.000
-
-# ── work counters: deterministic, from the committed goldens and
-# cross-checked against every one of the 10 runs' regenerated output. Exact
-# both directions (like the sibling BF2 cells): the fixture x axis product
-# is a fixed, known count — either direction of drift is a real regression.
-[[cell.metric]]
-name = "goldens_written.count"
-statistic = "max"
-comparison = "absolute_max"
-limit = 48
-
-[[cell.metric]]
-name = "goldens_written.count"
-statistic = "max"
-comparison = "absolute_min"
-limit = 48
-
-[[cell.metric]]
-name = "vue.goldens.count"
-statistic = "max"
-comparison = "absolute_max"
-limit = 36
-
-[[cell.metric]]
-name = "vue.goldens.count"
-statistic = "max"
-comparison = "absolute_min"
-limit = 36
-
-[[cell.metric]]
-name = "svelte.goldens.count"
-statistic = "max"
-comparison = "absolute_max"
-limit = 12
-
-[[cell.metric]]
-name = "svelte.goldens.count"
-statistic = "max"
-comparison = "absolute_min"
-limit = 12
-
-[cell.competitor]
-rule = "none"
-competitor_ids = []
-max_wall_slowdown_percent = "not_applicable"
-max_peak_rss_increase_percent = "not_applicable"
-post_result_exception_allowed = false
-
-[cell.memory]
-owner_budget_bytes = "not_applicable"
-allocator_slack_bytes = "not_applicable"
-quiescence_protocol = "not_applicable"
-max_positive_slope_bytes_per_hour = "not_applicable"
