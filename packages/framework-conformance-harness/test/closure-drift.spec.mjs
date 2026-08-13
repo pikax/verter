@@ -76,6 +76,25 @@ afterAll(() => {
   for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * Copies a LIVE shared install into a private installs root, excluding the
+ * transient scratch subtrees parallel test workers create and REMOVE inside
+ * the install concurrently (`.bf2-scratch` — runtime-execution modules,
+ * `.link-scratch` — link-axis importers). Copying those races cpSync into
+ * ENOENT on an entry removed mid-copy; they carry no closure content — the
+ * validated payload is `node_modules` + the npm metadata — so the copy is
+ * equivalent for every gate primed on it.
+ */
+function copyInstallTree(from, to) {
+  cpSync(from, to, {
+    recursive: true,
+    filter: (src) => {
+      const base = path.basename(src);
+      return base !== ".bf2-scratch" && base !== ".link-scratch";
+    },
+  });
+}
+
 function sha256(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -487,7 +506,7 @@ describe("production load path REFUSES a drifted or torn realized tree before an
   function primedInstallsRoot() {
     const vueInstall = oracleLinkBaseDir("vue");
     const installsRoot = scratchDir("bf2-installs-gate-");
-    cpSync(vueInstall, path.join(installsRoot, "vue"), { recursive: true });
+    copyInstallTree(vueInstall, path.join(installsRoot, "vue"));
     const prime = spawnSync(process.execPath, ["--input-type=module", "-e", PRIME_SCRIPT], {
       encoding: "utf8",
       cwd: HARNESS_ROOT,
@@ -569,7 +588,7 @@ describe("production load path REFUSES a drifted or torn realized tree before an
     // can be recorded as a fresh content baseline.
     const svelteInstall = oracleLinkBaseDir("svelte");
     const installsRoot = scratchDir("bf2-installs-svelte-torn-");
-    cpSync(svelteInstall, path.join(installsRoot, "svelte"), { recursive: true });
+    copyInstallTree(svelteInstall, path.join(installsRoot, "svelte"));
     const prime = spawnSync(process.execPath, ["--input-type=module", "-e", SVELTE_PRIME_SCRIPT], {
       encoding: "utf8",
       cwd: HARNESS_ROOT,
@@ -620,7 +639,7 @@ describe("production load path REFUSES a drifted or torn realized tree before an
     // this same process and require the refusal — the content gate must run
     // on every load, not only the first one per process.
     const installsRoot = scratchDir("bf2-installs-memo-");
-    cpSync(oracleLinkBaseDir("vue"), path.join(installsRoot, "vue"), { recursive: true });
+    copyInstallTree(oracleLinkBaseDir("vue"), path.join(installsRoot, "vue"));
     const previousInstallsEnv = process.env.BF2_ORACLE_INSTALLS;
     process.env.BF2_ORACLE_INSTALLS = installsRoot;
     try {

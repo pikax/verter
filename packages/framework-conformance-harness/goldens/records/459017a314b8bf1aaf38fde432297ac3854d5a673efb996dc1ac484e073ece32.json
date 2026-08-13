@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "3adb225775c9b28223a56e07f7a2f874b6fbb138",
+    "tree": "36da8dc8841a35d3e1163e4b9bb5752f95ca527a",
+    "packageVersion": "3.6.0-rc.3"
+  },
+  "packageLockSha256": "0dd2290c0b7d01f4727953b838610727b18bcb999b634eeb8ab726508a34b951",
+  "realizedClosureSha256": "a0a58df52c90abdffca1a61f94fe5a7ed2918f586f36e73a5e8d9decd01ce1e7",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "8a9ab85431c6361f28cc32b00758a204277b473d53471f02782437dfadde2e08",
+    "commit": "dd450bf222f743342109284cdb95199332818886",
+    "tree": "7aee9b80564a4f92a5e22af61cfc0188eb36bccf",
+    "worktreeDirty": false,
+    "implementationSha256": "756cae0d3c97af67bcb13f28b42ceb65690464477fe5b9fb663704a21759a43e"
+  },
+  "fixture": {
+    "path": "fixtures/vue/basic-interpolation.vue",
+    "sha256": "9af37e23a9e5a23ddcfdfb9ec3c15f2b15cd8f739d2c52a2fd63e6ba275268f1"
+  },
+  "options": {
+    "backend": "ssr",
+    "sourceMap": true,
+    "isProd": true
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "87a64f6276bd167137cab2bb857c5c4bf8a7a7bd9fe7fb4d55a049036938a4f4",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 5,
+    "implementationSha256": "49d0b7a5a870a2c6095407828706c6662d1c1ba81218a6c9b6b51f3ed6e8a749",
+    "normalizedDigestSha256": "71768f2d049a7c2366657231e1c11e95c36b52928f7cc0f0373572dff12e6938"
+  },
+  "code": "import { ref } from \"vue\";\n\n\nconst _sfc_main = {\n  __name: 'basic-interpolation',\n  setup(__props, { expose: __expose }) {\n  __expose();\n\nconst count = ref(0);\nconst items = [\"a\", \"b\", \"c\"];\n\nconst __returned__ = { count, items, ref }\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}\n\n}\nimport { mergeProps as _mergeProps } from \"vue\"\nimport { ssrRenderAttrs as _ssrRenderAttrs, ssrInterpolate as _ssrInterpolate, ssrRenderList as _ssrRenderList } from \"vue/server-renderer\"\n\nfunction ssrRender(_ctx, _push, _parent, _attrs, $props, $setup, $data, $options) {\n  _push(`<div${_ssrRenderAttrs(_mergeProps({ class: \"root\" }, _attrs))}>`)\n  if ($setup.count > 0) {\n    _push(`<p>${_ssrInterpolate($setup.count)}</p>`)\n  } else {\n    _push(`<p>zero</p>`)\n  }\n  _push(`<ul><!--[-->`)\n  _ssrRenderList($setup.items, (item) => {\n    _push(`<li>${_ssrInterpolate(item)}</li>`)\n  })\n  _push(`<!--]--></ul></div>`)\n}\n_sfc_main.ssrRender = ssrRender\nexport default _sfc_main",
+  "map": {
+    "version": 3,
+    "sources": [
+      "fixtures/vue/basic-interpolation.vue"
+    ],
+    "sourcesContent": [
+      "<script setup>\nimport { ref } from \"vue\";\n\nconst count = ref(0);\nconst items = [\"a\", \"b\", \"c\"];\n</script>\n\n<template>\n  <div class=\"root\">\n    <p v-if=\"count > 0\">{{ count }}</p>\n    <p v-else>zero</p>\n    <ul>\n      <li v-for=\"item in items\" :key=\"item\">{{ item }}</li>\n    </ul>\n  </div>\n</template>\n"
+    ],
+    "names": [],
+    "mappings": "AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAEzB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACpB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;;;;;6CAItB,KAAK,EAAC,MAAM;MACN,YAAK;gCAAS,YAAK;;;;;iBAGP,YAAK,GAAb,IAAI;iCAA0B,IAAI"
+  }
+}

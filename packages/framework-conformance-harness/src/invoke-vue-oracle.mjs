@@ -16,6 +16,7 @@ import { validateVueFragments } from "./fragments.mjs";
 import { VUE_DOMAIN } from "./domain-pin.mjs";
 import { PackageDriftError } from "./package-pin.mjs";
 import { ensureOracleDomain, oracleRequire } from "./oracle-install.mjs";
+import { composeAssembledModuleMap } from "./sourcemap.mjs";
 
 /**
  * Captures every contract-observable field the official compiler exposes on
@@ -114,17 +115,32 @@ export function compileVueFixture(source, filename, options) {
 
   let bindingMetadata = null;
   let scriptCode = null;
+  let scriptMap = null;
   let scriptBindings = {};
   const hasScriptSetup = Boolean(descriptor.scriptSetup);
 
   if (hasScriptSetup || descriptor.script) {
     try {
+      // The requested compilation profile must reach EVERY official phase,
+      // not only compileTemplate: the official compiler derives the script
+      // half's backend semantics at compileScript itself (pinned dist,
+      // compiler-sfc.cjs.js: `vapor = sfc.vapor || options.vapor`,
+      // `ssr = options.templateOptions?.ssr`) — the vapor arm gates the
+      // `__vapor: true` runtime-interop marker (JS branch) and the
+      // `defineVaporComponent` wrapper (TS branch), and the ssr arm gates
+      // client-only script injection such as `useCssVars` — and it reads
+      // `options.isProd` directly (scoped css-vars hashing, TS type-declared
+      // prop erasure), so the prod axis must be visible here too.
       const compiled = compileScript(descriptor, {
         id: filename,
         inlineTemplate: false,
         sourceMap,
+        isProd,
+        vapor,
+        templateOptions: { ssr },
       });
       scriptCode = compiled.content;
+      scriptMap = compiled.map ?? null;
       bindingMetadata = compiled.bindings ?? {};
       scriptBindings = bindingMetadata;
     } catch (error) {
@@ -142,7 +158,19 @@ export function compileVueFixture(source, filename, options) {
     isProd,
     ssr,
     vapor,
-    ssrCssVars: [],
+    // Official bundler tooling passes the parsed descriptor's own v-bind()
+    // css-vars inventory (@vitejs/plugin-vue@6.0.7, dist/index.mjs:222,
+    // `ssrCssVars: cssVars` from `const { id, cssVars } = descriptor`) —
+    // the SSR backend relocates css-vars out of the script half and into
+    // the render half's `_cssVars`/`_mergeProps` attrs merge, which only
+    // happens when compileTemplate can see the inventory here.
+    ssrCssVars: descriptor.cssVars,
+    // The descriptor block map chains the render fragment's original
+    // coordinates back to WHOLE-FIXTURE-FILE positions (official's own
+    // composition, exactly what bundler tooling passes) — without it the
+    // fragment map's original lines are template-block-relative and the
+    // published map mis-anchors against the fixture source.
+    inMap: sourceMap ? (descriptor.template.map ?? undefined) : undefined,
     compilerOptions: {
       mode: "module",
       bindingMetadata: scriptBindings,
@@ -168,9 +196,28 @@ export function compileVueFixture(source, filename, options) {
     return { code: null, map: null, diagnostics, backend, bindingMetadata };
   }
 
+  // The published map describes the PUBLISHED assembled module: each
+  // official fragment map (script half; render half, already chained to
+  // whole-file original coordinates via inMap above) is re-anchored by the
+  // assembly's exact geometry. See sourcemap.mjs.
+  let map = null;
+  if (sourceMap) {
+    map = composeAssembledModuleMap(
+      assembly.parts.map((part) => ({
+        ...part,
+        map:
+          part.role === "script"
+            ? scriptMap
+            : part.role === "render"
+              ? (templateResult.map ?? null)
+              : null,
+      })),
+    );
+  }
+
   return {
     code: assembly.code,
-    map: sourceMap ? (templateResult.map ?? null) : null,
+    map,
     diagnostics,
     backend,
     bindingMetadata,
@@ -191,7 +238,10 @@ export function compileVueFixture(source, filename, options) {
  * shape contract, and assembling around a known-invalid fragment is the
  * fail-open the textual assembler used to permit.
  *
- * @returns {{ code: string|null, fragmentDiagnostics: Array<object> }}
+ * @returns {{ code: string|null, fragmentDiagnostics: Array<object>,
+ *   parts: Array<object>|null }} `parts` is the assembly geometry
+ *   (role/preEditCode/postEditCode/edit per fragment) map composition
+ *   consumes — see sourcemap.mjs `composeAssembledModuleMap`.
  */
 export function assembleAndValidate({ scriptCode, renderCode, ssr, vapor }) {
   const validation = validateVueFragments({ scriptCode, renderCode, ssr });
@@ -204,9 +254,13 @@ export function assembleAndValidate({ scriptCode, renderCode, ssr, vapor }) {
       start: null,
       end: null,
     }));
+  const assembled = validation.ok
+    ? assembleNonInline({ scriptCode, renderCode, ssr, vapor })
+    : null;
   return {
-    code: validation.ok ? assembleNonInline({ scriptCode, renderCode, ssr, vapor }) : null,
+    code: assembled?.code ?? null,
     fragmentDiagnostics,
+    parts: assembled?.parts ?? null,
   };
 }
 
@@ -241,7 +295,15 @@ function rebindDefaultExport(scriptCode, bindingName) {
   // Replace the `export default` keyword span — everything from the
   // statement's start up to its declaration expression — leaving the
   // declaration itself byte-identical.
-  return spliceAt(scriptCode, node.start, node.declaration.start, `const ${bindingName} = `);
+  const replacement = `const ${bindingName} = `;
+  return {
+    code: spliceAt(scriptCode, node.start, node.declaration.start, replacement),
+    edit: {
+      start: node.start,
+      end: node.declaration.start,
+      replacementLength: replacement.length,
+    },
+  };
 }
 
 /**
@@ -264,6 +326,7 @@ function unexportRenderFunction(renderCode) {
   const [node] = exported;
   return {
     code: spliceAt(renderCode, node.start, node.declaration.start, ""),
+    edit: { start: node.start, end: node.declaration.start, replacementLength: 0 },
     functionName: node.declaration.id.name,
   };
 }
@@ -280,16 +343,36 @@ function unexportRenderFunction(renderCode) {
  * replaced. A source that merely CONTAINS the text "export default" inside
  * a string literal is never touched by the rebind.
  */
-function assembleNonInline({ scriptCode, renderCode, ssr }) {
+function assembleNonInline({ scriptCode, renderCode, ssr, vapor }) {
   const renderProp = ssr ? "ssrRender" : "render";
-  const componentDecl = scriptCode
+  // Scriptless SFCs get a synthesized component object; for a vapor build
+  // official bundler assembly attaches the runtime-interop marker there,
+  // since no compileScript output exists to carry it. Authority (verified
+  // verbatim, and NOT covered by the pinned oracle domain — plugin-vue sits
+  // outside domain-pin.mjs): @vitejs/plugin-vue@6.0.7, dist/index.mjs:1424,
+  // genScriptCode:
+  //   let scriptCode = `const ${scriptIdentifier} = { ${descriptor.vapor ? "__vapor: true" : ""} }`;
+  // The marker's NECESSITY is proven against the pinned runtime itself (the
+  // vapor-interop mount controls), and the exact emitted string is pinned by
+  // a literal regression test, so a change to this constant is caught
+  // structurally even without a dynamic plugin-vue pin.
+  const rebound = scriptCode
     ? rebindDefaultExport(scriptCode, "_sfc_main")
-    : "const _sfc_main = {}";
+    : { code: vapor ? "const _sfc_main = { __vapor: true }" : "const _sfc_main = {}", edit: null };
   const render = unexportRenderFunction(renderCode);
-  return [
-    componentDecl,
-    render.code,
+  const footer = [
     `_sfc_main.${renderProp} = ${render.functionName}`,
     "export default _sfc_main",
   ].join("\n");
+  const parts = [
+    {
+      role: "script",
+      preEditCode: scriptCode ?? rebound.code,
+      postEditCode: rebound.code,
+      edit: rebound.edit,
+    },
+    { role: "render", preEditCode: renderCode, postEditCode: render.code, edit: render.edit },
+    { role: "footer", preEditCode: footer, postEditCode: footer, edit: null },
+  ];
+  return { code: parts.map((part) => part.postEditCode).join("\n"), parts };
 }

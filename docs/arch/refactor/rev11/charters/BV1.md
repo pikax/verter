@@ -36,6 +36,13 @@ requires no C3 implementation or live project resolver. `FC-TS-001-PROJECT` is
 C3's later end-to-end partition; it combines accepted BV1 codegen with the real
 project/type substrate and closes `FC-TS-001` for the jointly owned Vue cells.
 
+## BV0 preservation
+
+BV1's required exits additionally prove that every BV0 correction survives the final
+B2–B4 substrate and that the exact BV0 seed pack remains green. BV1 may replace a
+BV0 implementation only with an accepted equivalent correction; it may not
+reintroduce a corrected defect or convert one into a refusal or tracked divergence.
+
 ## Required exits
 
 `FC-VUE-001`, `FC-HYDRATION-001`, `FC-TS-001-LOCAL`, `FC-ATOMIC-001`,

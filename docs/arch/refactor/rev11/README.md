@@ -89,6 +89,12 @@ Amendments live in [`amendments/`](amendments/) and bind the program:
   framework/conformance blocks, amended B/C boundaries, and a validator-clean
   56-block DAG. It has no execution authority until three independent challenge
   reports and an exact-tree maintainer decision exist.
+- **AMD-006 — Vue known-defect correction (PROPOSED, NOT RATIFIED):**
+  [`amendments/AMD-006-vue-known-defect-correction.md`](amendments/AMD-006-vue-known-defect-correction.md)
+  adds BV0 as an immediate, bounded Vue-defect-correction block between BF2 and
+  {B2, B3}; narrows BF3 to Svelte/non-Vue-runtime scope; and requires BV1 to preserve
+  BV0's corrections. It has no execution authority until three independent challenge
+  reports and an exact-tree maintainer decision exist.
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.
