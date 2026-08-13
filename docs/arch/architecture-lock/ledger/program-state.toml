@@ -298,8 +298,8 @@ notes = "REOPEN #2 RESOLVED (7 total rounds across two invalidations). Second-re
 
 [[block]]
 id = "BF3"
-status = "LOCKED"
-charter_digest = ""
+status = "READY"
+charter_digest = "cec86c9e176f1613666adf77898c97298a98fcf0f22464a850526ef0b604e945"
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
@@ -315,7 +315,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
-notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
+notes = "Predecessor BF2 ACCEPTED at c3a83667edfd869b3e93c8a63aa3e475729d598f. BF3 is execution-legal: real Rust production-code safety-retraction work (AMD-005 §12, bf3-safety-retraction-scope.md) across verter_session/verter_compiler entry points (Vue VDOM/Vapor/SSR, Svelte client/server, PublicApi/TSC/declaration, diagnostics/maps/CSS, NAPI/WASM/host/bundler), using BF2's now-accepted conformance harness as the oracle. High-risk oracle/validator/shared-contract class — shift-left quality rules (junior-dev-level pre-dispatch scoping, mandatory adversarial plant-red-green from round 1) apply from the start given BF2's 7-round history."
 
 [[block]]
 id = "B2"
