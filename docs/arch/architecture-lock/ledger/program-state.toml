@@ -19,7 +19,7 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
-current_block = "A3"
+current_block = "BF2"
 
 [repository]
 remote = "https://github.com/pikax/verter"
@@ -277,7 +277,7 @@ notes = "Gap-analysis-only block: every one of BF1's 7 numbered exit criteria an
 
 [[block]]
 id = "BF2"
-status = "ACCEPTED"
+status = "IN_PROGRESS"
 charter_digest = "1f99cf7eda1a955ada751f075799dabc8c8ab1defda19b20375f7ca09aa5963b"
 context_packet_digest = "52c927f3ddb197590181126dff178ec3eab1cd997036b7be156462ad15d11b67"
 base_sha = "0c0c6bc7870ec1edcbfcb966fcd6fde9e666d63f"
@@ -290,15 +290,15 @@ evidence_digest = "9f67b09c8548361a350449c28186c1dd6724500443571756b230ad602bee2
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PASS"
-architecture_review = "PASS"
-adversarial_review = "PASS"
-maintainer_decision = "ACCEPTED"
-notes = "REOPEN #2 RESOLVED (7 total rounds across two invalidations). Second-reopen circuit breaker satisfied by two Codex xhigh rulings, durably recorded at evidence/BF2/second-reopen-ruling.md: REV11-BF2-REOPEN2-001 (root cause — hardened per-criterion citation still allowed weak assertions to satisfy strong contract quantifiers; approach ruled: fix all 10 failing criteria fully IN BF2, none deferred, since BF2 owns the oracle/validator later blocks are judged BY; prescribed a stricter 16-row-matrix + kill-mutation + fresh-adversarial-probe review method) and REV11-BF2-REOPEN2-002 (round-3 3-way reviewer disagreement arbitrated by independent re-verification, not a vote — resolved to 9 real items, dismissed a reviewer claim that contradicted the ruling authority's own prior text). Rounds 2-6 (00451700f/f878d9cdd/a3753c87c/19cce22c8/41929246e) each closed convergent findings under that method — real correctness defects fixed: normalizer no longer erases authored/public identifiers or semantic comments; closure-verification gate now hashes actual package content and is genuinely fail-closed before oracle load (was detect-after-the-fact, and a same-process memo bypass skipped both gates entirely); Svelte torn-tree gate now resolves the actual svelte/compiler load specifier, not just the package root; TypeScript observation covers call/construct/index signatures; Svelte hydration detection replaced with a real signal comparison covering text-root/marker-loss cases; realization-lock exclusion test made deterministic instead of a timing race; full export/re-export linking, atomic golden-set publication (single commit point, stale-reader-safe), diagnostic/mapping field comparison, and category-accurate normalizer mutation tests all closed. Round 7 (targeted rows 1+4 only, rows 2/3/5-16 already settled): conformance PASS, architecture PASS, adversarial found one narrow non-substantive finding (new B3 hydration test lacked a timeout, flaked under full-suite contention) — folded in directly as a mechanical zero-assertion-change fix under standing judgment for small clearly-in-scope convergent findings (matches an already-reviewed sibling fix pattern in the same commit), independently verified 226/226 across 4 runs by the program orchestrator, not dispatched as a fresh round 8. Landed as one squashed commit (history of 6 fix commits + evidence, tree-verified lossless against the original chain) per program branch hygiene. Predecessor BF1 remains ACCEPTED at 6305950725abc2265135694f353b8fb75ef9c9c5, unaffected. BF3 next legal once this transition is validated. J1 stays locked (CSS work not selected)."
+conformance_review = "INVALIDATED"
+architecture_review = "INVALIDATED"
+adversarial_review = "INVALIDATED"
+maintainer_decision = "PENDING"
+notes = "REOPEN #3: BV0's round-1 adversarial review found invoke-vue-oracle.mjs never passes vapor/ssr to compileScript, so every harness-generated Vapor golden was compiled as non-Vapor official output (BF2's own defect, not BV0's) — proven with the pinned rc.3 compiler. BV0 then matched production code to those wrong goldens, deleting the load-bearing __vapor marker from real non-SSR Vapor builds. A Codex xhigh scoping ruling (evidence/vue-known-defect-correction/reviews/round1-reopen-scoping-ruling.md) holds this is BF2-owned (oracle/golden-generation authority) and requires a formal reopen with fresh 3-mandate review, not a BV0-side patch. Prior accepted_sha/accepted_tree/reviews retained above as the historical acceptance record only — current authority is INVALIDATED pending repair. Repair scope: pass vapor+templateOptions.ssr into compileScript, regenerate every affected official golden (Vapor and SSR/non-inline), add JS+TS controls for __vapor/defineVaporComponent. BF1 not reopened (locked the option contract before the harness existed; BF2 violated a valid lock, the lock itself wasn't falsified). BV0 moved to BLOCKED pending this repair; downstream unaffected (nothing past BF2 has been accepted)."
 
 [[block]]
 id = "BV0"
-status = "READY"
+status = "BLOCKED"
 charter_digest = "572fc21cce211cd63622ec50207d7b11cf687b7db62ff1270d82b6d0f2e0f306"
 context_packet_digest = ""
 base_sha = ""
@@ -311,15 +311,15 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PENDING"
-architecture_review = "PENDING"
-adversarial_review = "PENDING"
+conformance_review = "INVALIDATED"
+architecture_review = "INVALIDATED"
+adversarial_review = "INVALIDATED"
 maintainer_decision = "PENDING"
-notes = "Introduced and ratified by AMD-006 (landed fdb6f62911fffc43c7f64610033bdf2e8a591fbf). Predecessor BF2 ACCEPTED at c3a83667edfd869b3e93c8a63aa3e475729d598f — BV0 is execution-legal. Owns immediate, bounded, source-root-cause correction of the genuine Vue VDOM/Vapor/SSR defects BF2's exact rc.3 seed matrix exposed (missing non-inline <script setup> __expose() emission, VDOM slot-fallback static caching/CACHED patch flag, and the remaining genuine seed-matrix defects named in the AMD-006 deviation memo). Must NOT introduce B3's canonical request, B4's publication architecture, a universal IR, a temporary typed refusal, or BV1's complete official-case pack. Maintainer direction applies: production stays correct via real fixes (TDD: failing regression first, then root-cause correction) — no guard, tracker, waiver, or retraction artifact of any kind. B2/B3 wait on both BV0 and BF3 acceptance."
+notes = "Introduced and ratified by AMD-006 (landed fdb6f62911fffc43c7f64610033bdf2e8a591fbf). Round-1 candidate c40a1ca96b73cf9b723fd7209516ea0462deaad2 (preserved at branch backup/bv0-round1-candidate, tree a5e504057db9227a71b31186952aba9a58478047) received a genuine 3-way BLOCKING verdict (evidence/vue-known-defect-correction/reviews/round1-{conformance,architecture,adversarial}.md): two self-introduced VDOM regressions absorbed into a waiver ledger under a false rationale, a stale doc left contradicting shipped behavior, an undisclosed ~85% conformance-divergence growth concentrated in genuine Vapor semantic bugs, link/runtime axes silently skippable, an out-of-charter Svelte migration riding along, and — most severe — a matched-wrong-golden regression traced to a BF2-owned harness defect (see BF2 notes). Reverted off program/architecture-lock (was never accepted; b64358705 restored as tip) per the Codex scoping ruling: BLOCKED pending BF2's reopen and reacceptance, then BV0 rebases and reruns its full comprehensive fix (VDOM regressions, stale doc deletion, Vapor semantic regressions, fail-closed axis skips) under a fresh 3-mandate review. Svelte migration must land as a separate authorized commit/block, never bundled into BV0 again. B2/B3 wait on both BV0 and BF3 acceptance."
 
 [[block]]
 id = "BF3"
-status = "READY"
+status = "BLOCKED"
 charter_digest = "7b537a95656ec2ae49acfc0d9813b0183f3625b22f921548ee072db033233e12"
 context_packet_digest = ""
 base_sha = ""
@@ -336,7 +336,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
-notes = "Predecessor BF2 ACCEPTED at c3a83667edfd869b3e93c8a63aa3e475729d598f. Narrowed by ratified AMD-006 to Svelte and non-Vue-runtime scope; Vue VDOM/Vapor/SSR findings reassigned to BV0 as immediate-fix work (maintainer direction: production stays correct, wrong output is a bug to fix, not grounds for a retraction/tracking mechanism — see evidence/vue-known-defect-correction/deviation-memo.md). BF3's own typed-non-success/whole-cell-retraction mechanism is UNCHANGED and remains in force for its retained Svelte/non-Vue-runtime domain (Codex xhigh ruling: a general forward-looking rule does not retroactively repeal an already-ratified charter mechanism). BF3 dispatch additionally waits on BV0 acceptance (program-dag.toml: B2/B3 require both BV0 and BF3)."
+notes = "Predecessor BF2 ACCEPTED at c3a83667edfd869b3e93c8a63aa3e475729d598f (now reopened — see BF2 notes; BF3 BLOCKED until BF2 reaccepted). Narrowed by ratified AMD-006 to Svelte and non-Vue-runtime scope; Vue VDOM/Vapor/SSR findings reassigned to BV0 as immediate-fix work (maintainer direction: production stays correct, wrong output is a bug to fix, not grounds for a retraction/tracking mechanism — see evidence/vue-known-defect-correction/deviation-memo.md). BF3's own typed-non-success/whole-cell-retraction mechanism is UNCHANGED and remains in force for its retained Svelte/non-Vue-runtime domain (Codex xhigh ruling: a general forward-looking rule does not retroactively repeal an already-ratified charter mechanism). BF3 dispatch additionally waits on BV0 acceptance (program-dag.toml: B2/B3 require both BV0 and BF3)."
 
 [[block]]
 id = "B2"
