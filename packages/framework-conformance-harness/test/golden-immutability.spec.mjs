@@ -3,7 +3,8 @@
 // Proves candidate output can never update its own expectation — checked
 // structurally (the comparator module has no write path into goldens/ at
 // all) AND operationally (running many divergent comparisons against a real
-// committed golden leaves that file's bytes byte-identical afterward).
+// committed golden leaves the manifest and its record files byte-identical
+// afterward).
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -11,24 +12,30 @@ import path from "node:path";
 
 import * as compareModule from "../src/compare.mjs";
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
-import { readGoldenFile } from "../src/golden-store.mjs";
+import { goldenManifestPath, readGoldenByName, readGoldenManifest } from "../src/golden-store.mjs";
 import { GOLDENS_ROOT, HARNESS_ROOT } from "../src/paths.mjs";
+import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 
-const GOLDEN_PATH = path.join(GOLDENS_ROOT, "vue", "basic-interpolation__vdom__map0__prod0.json");
+const GOLDEN_NAME = "vue/basic-interpolation__vdom__map0__prod0";
+
+function goldenRecordPath() {
+  const manifest = readGoldenManifest(GOLDENS_ROOT);
+  return path.join(GOLDENS_ROOT, "records", `${manifest.entries[GOLDEN_NAME]}.json`);
+}
 
 describe("golden immutability — structural", () => {
   it("the comparator module exports no filesystem-write function", () => {
-    // compare.mjs must not import node:fs write functions at all — the
+    // compare.mjs must not export write-shaped functions at all — the
     // ABSENCE of any write-shaped export is what makes "candidate cannot
     // update its own expectation" true by construction, not convention.
     const exportNames = Object.keys(compareModule);
     for (const name of exportNames) {
-      expect(name.toLowerCase()).not.toMatch(/write|save|persist|update.*golden/);
+      expect(name.toLowerCase()).not.toMatch(/write|save|persist|publish|update.*golden/);
     }
   });
 
-  it("readGoldenFile returns a deep-frozen object", () => {
-    const record = readGoldenFile(GOLDEN_PATH);
+  it("readGoldenByName returns a deep-frozen object", () => {
+    const record = readGoldenByName(GOLDENS_ROOT, GOLDEN_NAME);
     expect(Object.isFrozen(record)).toBe(true);
     expect(Object.isFrozen(record.domain)).toBe(true);
     expect(() => {
@@ -38,9 +45,11 @@ describe("golden immutability — structural", () => {
 });
 
 describe("golden immutability — operational", () => {
-  it("the golden file's bytes are unchanged after many divergent comparisons", () => {
-    const before = readFileSync(GOLDEN_PATH, "utf8");
-    const golden = JSON.parse(before);
+  it("the golden manifest and record bytes are unchanged after many divergent comparisons", async () => {
+    const manifestBefore = readFileSync(goldenManifestPath(GOLDENS_ROOT), "utf8");
+    const recordFile = goldenRecordPath();
+    const recordBefore = readFileSync(recordFile, "utf8");
+    const golden = JSON.parse(recordBefore);
 
     const source = readFileSync(
       path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
@@ -57,10 +66,12 @@ describe("golden immutability — operational", () => {
       }),
     ];
     for (const candidate of divergentVariants) {
-      compareModule.compareArtifacts(golden, candidate, { linkBaseDir: HARNESS_ROOT });
+      await compareModule.compareArtifacts(golden, candidate, {
+        linkBaseDir: oracleLinkBaseDir("vue"),
+      });
     }
 
-    const after = readFileSync(GOLDEN_PATH, "utf8");
-    expect(after).toBe(before);
+    expect(readFileSync(goldenManifestPath(GOLDENS_ROOT), "utf8")).toBe(manifestBefore);
+    expect(readFileSync(recordFile, "utf8")).toBe(recordBefore);
   });
 });

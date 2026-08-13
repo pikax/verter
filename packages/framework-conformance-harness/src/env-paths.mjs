@@ -2,8 +2,9 @@
 // touch the pinned Vue/Svelte GIT SOURCE checkouts directly (case-manifest
 // re-enumeration, source/package drift-refusal self-tests). Golden
 // generation and structural comparison do NOT need these — they only need
-// the pinned npm packages, which are ordinary workspace devDependencies
-// (see package.json + domain-pin.mjs).
+// the pinned npm packages, loaded from the isolated per-domain installs
+// realized from the committed oracle locks (see oracle-install.mjs +
+// domain-pin.mjs).
 //
 // These checkouts are deliberately NOT committed to the repository (they are
 // full upstream working trees, thousands of files). They are provisioned ONCE,

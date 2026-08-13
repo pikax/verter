@@ -1,0 +1,20 @@
+session_start_utc=2026-08-12T21:15:51Z
+node_version=v20.20.2
+runs_requested=10
+candidate_head=a78dd9a7f50dbd8206c3b85de85da9ee08926f5b
+vue_source_head=3adb225775c9b28223a56e07f7a2f874b6fbb138
+svelte_source_head=44a7813730579b94004e182e5a67aab27aa9d2a6
+script_blob=b61404de48e8ba86767a09414195b67a06ac56be
+sandbox_profile_sha=e11a4d9848f2527e2770be448f35ab491c0a4130
+curl_denial_control_exit=6 (nonzero=denied, required)
+run_1 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=23.12 maxrss_bytes=101974016
+run_2 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.76 maxrss_bytes=102973440
+run_3 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.61 maxrss_bytes=101826560
+run_4 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.63 maxrss_bytes=101531648
+run_5 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.53 maxrss_bytes=101236736
+run_6 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.65 maxrss_bytes=102203392
+run_7 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=23.00 maxrss_bytes=102072320
+run_8 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=23.02 maxrss_bytes=101285888
+run_9 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=22.86 maxrss_bytes=101990400
+run_10 status=OK counts={"vue_rows":2003,"svelte_rows":3457} real_s=23.52 maxrss_bytes=101580800
+session_end_utc=2026-08-12T21:19:41Z

@@ -70,42 +70,46 @@ describe("offline execution — portable proof", () => {
 describe("offline execution — operational macOS sandbox proof", () => {
   const runIf = process.platform === "darwin" ? it : it.skip;
 
-  runIf("golden generation runs under sandbox-exec deny-network while curl fails", () => {
-    const sandboxProfile = path.join(HARNESS_ROOT, "test", "deny-network.sb");
-    writeFileSync(sandboxProfile, "(version 1)\n(allow default)\n(deny network*)\n");
+  runIf(
+    "golden generation runs under sandbox-exec deny-network while curl fails",
+    () => {
+      const sandboxProfile = path.join(HARNESS_ROOT, "test", "deny-network.sb");
+      writeFileSync(sandboxProfile, "(version 1)\n(allow default)\n(deny network*)\n");
 
-    // Control: a real network call MUST fail under this profile — proves
-    // the sandbox is actually denying network, not silently permitting it.
-    const curlResult = spawnSync(
-      "sandbox-exec",
-      ["-f", sandboxProfile, "curl", "-sS", "-m", "3", "https://example.com"],
-      {
-        encoding: "utf8",
-      },
-    );
-    expect(curlResult.status).not.toBe(0);
-
-    // Subject: golden generation's --check mode must SUCCEED under the
-    // identical profile (it only reads locally-installed pinned packages
-    // and locally-authored fixtures, then compares to committed goldens).
-    const dir = mkdtempSync(path.join(tmpdir(), "bf2-sandbox-"));
-    try {
-      const checkResult = spawnSync(
+      // Control: a real network call MUST fail under this profile — proves
+      // the sandbox is actually denying network, not silently permitting it.
+      const curlResult = spawnSync(
         "sandbox-exec",
-        [
-          "-f",
-          sandboxProfile,
-          process.execPath,
-          path.join(HARNESS_ROOT, "bin/generate-goldens.mjs"),
-          "--check",
-        ],
-        { encoding: "utf8", cwd: HARNESS_ROOT },
+        ["-f", sandboxProfile, "curl", "-sS", "-m", "3", "https://example.com"],
+        {
+          encoding: "utf8",
+        },
       );
-      expect(checkResult.status, checkResult.stderr).toBe(0);
-      expect(checkResult.stdout).toContain("OK:");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(sandboxProfile, { force: true });
-    }
-  });
+      expect(curlResult.status).not.toBe(0);
+
+      // Subject: golden generation's --check mode must SUCCEED under the
+      // identical profile (it only reads locally-installed pinned packages
+      // and locally-authored fixtures, then compares to committed goldens).
+      const dir = mkdtempSync(path.join(tmpdir(), "bf2-sandbox-"));
+      try {
+        const checkResult = spawnSync(
+          "sandbox-exec",
+          [
+            "-f",
+            sandboxProfile,
+            process.execPath,
+            path.join(HARNESS_ROOT, "bin/generate-goldens.mjs"),
+            "--check",
+          ],
+          { encoding: "utf8", cwd: HARNESS_ROOT },
+        );
+        expect(checkResult.status, checkResult.stderr).toBe(0);
+        expect(checkResult.stdout).toContain("OK:");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(sandboxProfile, { force: true });
+      }
+    },
+    60_000,
+  ); // spawns curl + a full --check child; the 5s default flakes under parallel worker contention
 });

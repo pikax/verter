@@ -1,1 +1,6 @@
 .oracle-checkouts/
+.oracle-npm-cache/
+.oracle-installs/
+.runtime-scratch/
+.link-scratch/
+.coverage-report.json

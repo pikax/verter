@@ -2,30 +2,59 @@
 // (`svelte/compiler`). Never writes an expectation; only produces a raw
 // compilation artifact for the caller (golden generator or comparator).
 //
-// Package pin is asserted on import — any drift from domain-pin.mjs throws
-// before a single line of the oracle compiler runs.
+// The compiler is loaded DYNAMICALLY from the isolated per-domain
+// installation realized from the committed oracle lock (oracle-install.mjs)
+// — never from workspace dependency resolution, and never via a static
+// top-level import of the oracle package. The ESM entry is used
+// deliberately: Svelte's ESM compiler (`src/compiler/index.js`) imports its
+// REAL dependencies — `acorn`, `@sveltejs/acorn-typescript`, … — from the
+// surrounding node_modules tree, so loading it from the isolated install is
+// what makes the actual parser/plugin combination the locked one (the CJS
+// bundle inlines those dependencies and would mask the closure entirely).
+// The full validation gate runs at this module's load, before a single line
+// of the oracle compiler is evaluated.
 
-import { compile } from "svelte/compiler";
+import { SVELTE_DOMAIN } from "./domain-pin.mjs";
+import { PackageDriftError } from "./package-pin.mjs";
+import { ensureOracleDomain, importOracleModule } from "./oracle-install.mjs";
 
-import { SVELTE_DOMAIN, EVIDENCE_LOCK_DIGESTS } from "./domain-pin.mjs";
-import { assertPackagesPinned } from "./package-pin.mjs";
-import { HARNESS_ROOT, SVELTE_EVIDENCE_LOCK } from "./paths.mjs";
-
-let pinned = false;
+/** Runs the isolated-install validation gate without loading the compiler. */
 export function assertSveltePinned() {
-  if (pinned) return;
-  assertPackagesPinned(
-    SVELTE_DOMAIN,
-    HARNESS_ROOT,
-    SVELTE_EVIDENCE_LOCK,
-    EVIDENCE_LOCK_DIGESTS.sveltePackageLockSha256,
+  ensureOracleDomain("svelte");
+}
+
+// Gate first, then load the oracle from the validated isolated install.
+// (Top-level await: importers of this module observe either a fully-gated,
+// fully-loaded compiler or the gate's refusal error — never a half state.)
+assertSveltePinned();
+const { compile, VERSION } = await importOracleModule("svelte", "svelte/compiler");
+
+// Loaded-module identity gate: the compiler ACTUALLY IN USE attests its own
+// version against the domain pin. The install-tree layers above prove the
+// isolated closure; this proves the loaded module IS from that closure —
+// a load that slipped through any other resolution path (e.g. a
+// workspace-hoisted svelte at a different version) refuses here.
+if (VERSION !== SVELTE_DOMAIN.packageVersion) {
+  throw new PackageDriftError(
+    `loaded svelte/compiler reports version ${VERSION}, pinned ${SVELTE_DOMAIN.packageVersion}`,
+    { expected: SVELTE_DOMAIN.packageVersion, actual: VERSION, layer: "loaded-module-identity" },
   );
-  pinned = true;
+}
+
+/** Version the LOADED oracle compiler attests — for identity self-tests. */
+export function svelteOracleCompilerVersion() {
+  return VERSION;
 }
 
 /**
  * @typedef {"client"|"server"} SvelteGenerateTarget
  */
+
+/** Captures the official compiler's span exactly: line, column (start AND end). */
+function toPosition(position) {
+  if (position === null || position === undefined) return null;
+  return { line: position.line ?? null, column: position.column ?? null };
+}
 
 /**
  * Compiles one independently-authored Svelte component fixture with the
@@ -61,7 +90,9 @@ export function compileSvelteFixture(source, filename, options) {
       kind: "compile-error",
       code: error?.code ?? null,
       message: String(error?.message ?? error),
-      start: error?.start ?? null,
+      source: filename,
+      start: toPosition(error?.start),
+      end: toPosition(error?.end),
     });
     return { code: null, map: null, css: null, diagnostics, generate };
   }
@@ -71,7 +102,9 @@ export function compileSvelteFixture(source, filename, options) {
       kind: "warning",
       code: warning.code ?? null,
       message: warning.message,
-      start: warning.start ?? null,
+      source: filename,
+      start: toPosition(warning.start),
+      end: toPosition(warning.end),
     });
   }
 

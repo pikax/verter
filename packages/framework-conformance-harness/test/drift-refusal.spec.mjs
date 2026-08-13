@@ -1,9 +1,12 @@
 // Self-test: source/package drift refusal (BF2 required exit).
 //
-// Proves the harness REJECTS a mutated pin at three independent layers —
-// git checkout drift, evidence-lock byte drift, and evidence-lock content
+// Proves the harness REJECTS a mutated pin at the direct layers — git
+// checkout drift, evidence-lock byte drift, and evidence-lock content
 // drift — using REAL mutated copies (never a mocked assertion), and that it
-// ACCEPTS the genuine, unmutated pin.
+// ACCEPTS the genuine, unmutated pin. The TRANSITIVE half of drift refusal
+// — nested lock-entry mutations, closure-evidence digest/derivation, and
+// the realized disposable-install enumeration — lives in
+// test/closure-drift.spec.mjs, with its own planted mutations.
 
 import { describe, expect, it, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -14,8 +17,14 @@ import path from "node:path";
 import { assertCheckoutPinned, CheckoutDriftError } from "../src/checkout-pin.mjs";
 import { assertPackagesPinned, PackageDriftError } from "../src/package-pin.mjs";
 import { VUE_DOMAIN, EVIDENCE_LOCK_DIGESTS } from "../src/domain-pin.mjs";
-import { HARNESS_ROOT, VUE_EVIDENCE_LOCK } from "../src/paths.mjs";
+import { VUE_EVIDENCE_LOCK } from "../src/paths.mjs";
+import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 import { oracleSourcePaths } from "../src/env-paths.mjs";
+
+// Layer 1 resolves the direct packages from the ISOLATED oracle install —
+// the only place the oracle domain resolves from since workspace
+// resolution stopped defining it.
+const VUE_INSTALL = oracleLinkBaseDir("vue");
 
 const scratchDirs = [];
 function scratchDir() {
@@ -86,7 +95,7 @@ describe("package/evidence-lock drift refusal", () => {
   it("accepts the genuine committed evidence lock", () => {
     const resolved = assertPackagesPinned(
       VUE_DOMAIN,
-      HARNESS_ROOT,
+      VUE_INSTALL,
       VUE_EVIDENCE_LOCK,
       EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256,
     );
@@ -104,7 +113,7 @@ describe("package/evidence-lock drift refusal", () => {
     expect(() =>
       assertPackagesPinned(
         VUE_DOMAIN,
-        HARNESS_ROOT,
+        VUE_INSTALL,
         mutated,
         EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256,
       ),
@@ -112,7 +121,7 @@ describe("package/evidence-lock drift refusal", () => {
     try {
       assertPackagesPinned(
         VUE_DOMAIN,
-        HARNESS_ROOT,
+        VUE_INSTALL,
         mutated,
         EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256,
       );
@@ -137,7 +146,7 @@ describe("package/evidence-lock drift refusal", () => {
     )[0];
     expect(freshDigest).not.toBe(EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256);
     try {
-      assertPackagesPinned(VUE_DOMAIN, HARNESS_ROOT, mutated, freshDigest);
+      assertPackagesPinned(VUE_DOMAIN, VUE_INSTALL, mutated, freshDigest);
       throw new Error("expected PackageDriftError");
     } catch (error) {
       expect(error).toBeInstanceOf(PackageDriftError);
@@ -154,7 +163,7 @@ describe("package/evidence-lock drift refusal", () => {
     expect(() =>
       assertPackagesPinned(
         impossibleDomain,
-        HARNESS_ROOT,
+        VUE_INSTALL,
         VUE_EVIDENCE_LOCK,
         EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256,
       ),

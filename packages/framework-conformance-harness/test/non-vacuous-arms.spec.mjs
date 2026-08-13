@@ -7,33 +7,33 @@
 // real-vs-empty pair must fail structurally, never silently pass.
 
 import { describe, expect, it } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
 import { compileSvelteFixture } from "../src/invoke-svelte-oracle.mjs";
 import { compareArtifacts } from "../src/compare.mjs";
 import { parseModule } from "../src/normalize.mjs";
+import { readGoldenSet } from "../src/golden-store.mjs";
 import { GOLDENS_ROOT, HARNESS_ROOT } from "../src/paths.mjs";
+import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 
 describe("non-vacuous official arm", () => {
   it("every committed golden carries substantial, well-formed code", () => {
+    const set = readGoldenSet(GOLDENS_ROOT);
     let checked = 0;
-    for (const dir of ["vue", "svelte"]) {
-      for (const file of readdirSync(path.join(GOLDENS_ROOT, dir))) {
-        const record = JSON.parse(readFileSync(path.join(GOLDENS_ROOT, dir, file), "utf8"));
-        expect(record.code.length).toBeGreaterThan(50);
-        const ast = parseModule(record.code, file);
-        expect(ast.body.length).toBeGreaterThan(0);
-        checked += 1;
-      }
+    for (const [name, record] of set) {
+      expect(record.code.length).toBeGreaterThan(50);
+      const ast = parseModule(record.code, name);
+      expect(ast.body.length).toBeGreaterThan(0);
+      checked += 1;
     }
     expect(checked).toBe(48);
   });
 });
 
 describe("non-vacuous candidate arm — comparator does not trivially pass on emptiness", () => {
-  it("rejects an empty-vs-real candidate (never silently passes on vacuity)", () => {
+  it("rejects an empty-vs-real candidate (never silently passes on vacuity)", async () => {
     const source = readFileSync(
       path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
       "utf8",
@@ -44,11 +44,13 @@ describe("non-vacuous candidate arm — comparator does not trivially pass on em
       isProd: false,
     });
     const emptyCandidate = { code: "", diagnostics: [] };
-    const report = compareArtifacts(golden, emptyCandidate, { linkBaseDir: HARNESS_ROOT });
+    const report = await compareArtifacts(golden, emptyCandidate, {
+      linkBaseDir: oracleLinkBaseDir("vue"),
+    });
     expect(report.verdict).toBe("fail");
   });
 
-  it("passes only when the candidate arm ALSO does real, matching compiler work", () => {
+  it("passes only when the candidate arm ALSO does real, matching compiler work", async () => {
     const source = readFileSync(
       path.join(HARNESS_ROOT, "fixtures/svelte/props-events.svelte"),
       "utf8",
@@ -67,7 +69,9 @@ describe("non-vacuous candidate arm — comparator does not trivially pass on em
     });
     expect(golden.code.length).toBeGreaterThan(50);
     expect(candidate.code.length).toBeGreaterThan(50);
-    const report = compareArtifacts(golden, candidate, { linkBaseDir: HARNESS_ROOT });
+    const report = await compareArtifacts(golden, candidate, {
+      linkBaseDir: oracleLinkBaseDir("svelte"),
+    });
     expect(report.verdict).toBe("pass");
   });
 });

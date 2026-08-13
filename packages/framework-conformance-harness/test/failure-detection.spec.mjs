@@ -1,4 +1,5 @@
-// Self-test: parse/link/runtime failure detection (BF2 required exit).
+// Self-test: parse/runtime failure detection (BF2 required exit). The full
+// linking-surface failure detection lives in test/link-surface.spec.mjs.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -6,14 +7,14 @@ import path from "node:path";
 
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
 import { compileSvelteFixture } from "../src/invoke-svelte-oracle.mjs";
-import { compareArtifacts, checkParseValidity, checkLinkValidity } from "../src/compare.mjs";
-import { parseModule } from "../src/normalize.mjs";
+import { compareArtifacts, checkParseValidity } from "../src/compare.mjs";
 import { executeVueSsr, cleanupScratch } from "../src/execute-vue-runtime.mjs";
 import {
   executeSvelteSsr,
   cleanupScratch as cleanupSvelteScratch,
 } from "../src/execute-svelte-runtime.mjs";
 import { HARNESS_ROOT } from "../src/paths.mjs";
+import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 
 describe("parse failure detection", () => {
   it("flags syntactically broken candidate code", () => {
@@ -22,7 +23,7 @@ describe("parse failure detection", () => {
     expect(result.error).toBeTruthy();
   });
 
-  it("compareArtifacts reports a parse failure without computing structural equality", () => {
+  it("compareArtifacts reports a parse failure without computing structural equality", async () => {
     const source = readFileSync(
       path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
       "utf8",
@@ -33,65 +34,12 @@ describe("parse failure detection", () => {
       isProd: false,
     });
     const brokenCandidate = { code: "export default function( {", diagnostics: [] };
-    const report = compareArtifacts(golden, brokenCandidate, { linkBaseDir: HARNESS_ROOT });
+    const report = await compareArtifacts(golden, brokenCandidate, {
+      linkBaseDir: oracleLinkBaseDir("vue"),
+    });
     expect(report.verdict).toBe("fail");
     expect(report.candidateParse.ok).toBe(false);
     expect(report.structural).toBeNull();
-  });
-});
-
-describe("link (import resolution) failure detection", () => {
-  it("flags an import specifier that does not resolve against the real packages", () => {
-    const ast = parseModule(
-      'import { thing } from "this-package-does-not-exist-bf2-selftest";\nexport default thing;',
-    );
-    const result = checkLinkValidity(ast, HARNESS_ROOT);
-    expect(result.ok).toBe(false);
-    expect(result.unresolved).toContain("this-package-does-not-exist-bf2-selftest");
-  });
-
-  it("accepts an import that resolves against the real pinned packages", () => {
-    const ast = parseModule('import { ref } from "vue";\nexport default ref;');
-    const result = checkLinkValidity(ast, HARNESS_ROOT);
-    expect(result.ok).toBe(true);
-    expect(result.resolved).toContain("vue");
-    expect(result.missingExports).toEqual([]);
-  });
-
-  it("flags a named import whose module resolves but does NOT export that name (require.resolve() alone would pass this)", () => {
-    // "vue" genuinely resolves as a module, but never exports a binding
-    // named this — this is exactly the class require.resolve() cannot
-    // catch on its own.
-    const ast = parseModule(
-      'import { thisNamedExportDoesNotExistOnVueBf2Selftest } from "vue";\nexport default thisNamedExportDoesNotExistOnVueBf2Selftest;',
-    );
-    const result = checkLinkValidity(ast, HARNESS_ROOT);
-    expect(result.ok).toBe(false);
-    expect(result.resolved).toContain("vue");
-    expect(result.missingExports).toEqual(["vue#thisNamedExportDoesNotExistOnVueBf2Selftest"]);
-  });
-
-  it("compareArtifacts fails a candidate whose named import is missing from a real, resolvable module", () => {
-    const source = readFileSync(
-      path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
-      "utf8",
-    );
-    const golden = compileVueFixture(source, "fixtures/vue/basic-interpolation.vue", {
-      backend: "vdom",
-      sourceMap: false,
-      isProd: false,
-    });
-    const brokenCandidate = {
-      code:
-        'import { thisNamedExportDoesNotExistOnVueBf2Selftest } from "vue";\n' +
-        "export default thisNamedExportDoesNotExistOnVueBf2Selftest;",
-      diagnostics: [],
-    };
-    const report = compareArtifacts(golden, brokenCandidate, { linkBaseDir: HARNESS_ROOT });
-    expect(report.verdict).toBe("fail");
-    expect(report.link.ok).toBe(false);
-    expect(report.link.missingExports).toContain("vue#thisNamedExportDoesNotExistOnVueBf2Selftest");
-    expect(report.reasons.some((r) => r.includes("missing named exports"))).toBe(true);
   });
 });
 
