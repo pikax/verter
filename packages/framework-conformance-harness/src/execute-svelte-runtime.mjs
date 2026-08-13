@@ -1,20 +1,27 @@
 // Deterministic execution of compiled Svelte output against the pinned
-// OFFICIAL server runtime (`svelte/server`'s `render`) — never a Verter-owned
-// runtime.
+// OFFICIAL server runtime (`svelte/server`'s `render`) — never a
+// Verter-owned runtime. Runtime and compiled scratch module both load from
+// the isolated per-domain installation (oracle-install.mjs), so bare
+// `svelte/*` imports resolve against the exact realized closure and share
+// one module instance graph.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { HARNESS_ROOT } from "./paths.mjs";
+import { importOracleModule, oracleScratchDir } from "./oracle-install.mjs";
 
-const SCRATCH_DIR = path.join(HARNESS_ROOT, ".runtime-scratch");
+// Instance-scoped scratch: parallel test workers each load their own module
+// instance, so cleanup can never delete another worker's in-flight modules.
+const SCRATCH_LABEL = `svelte-ssr-${randomUUID()}`;
+let scratchDir = null;
 
 function scratchModulePath(code) {
-  mkdirSync(SCRATCH_DIR, { recursive: true });
+  if (scratchDir === null) scratchDir = oracleScratchDir("svelte", SCRATCH_LABEL);
+  mkdirSync(scratchDir, { recursive: true }); // cleanup may have removed it mid-run
   const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
-  const filePath = path.join(SCRATCH_DIR, `svelte-ssr-${digest}.mjs`);
+  const filePath = path.join(scratchDir, `svelte-ssr-${digest}.mjs`);
   writeFileSync(filePath, code, "utf8");
   return filePath;
 }
@@ -28,7 +35,7 @@ export async function executeSvelteSsr(serverCode, props = {}) {
   const filePath = scratchModulePath(serverCode);
   try {
     const [{ render }, mod] = await Promise.all([
-      import("svelte/server"),
+      importOracleModule("svelte", "svelte/server"),
       import(pathToFileURL(filePath).href),
     ]);
     const component = mod.default;
@@ -40,5 +47,5 @@ export async function executeSvelteSsr(serverCode, props = {}) {
 }
 
 export function cleanupScratch() {
-  rmSync(SCRATCH_DIR, { recursive: true, force: true });
+  if (scratchDir !== null) rmSync(scratchDir, { recursive: true, force: true });
 }

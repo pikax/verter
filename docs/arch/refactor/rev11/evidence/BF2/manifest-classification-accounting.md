@@ -7,16 +7,31 @@ pass did and did not classify in `vue-official-cases.tsv` (2003 rows) and
 
 ## What this pass DID complete for real
 
-Both manifests are now 100% **runner-re-enumerated** against the exact
-pinned Vue 3.6.0-rc.3 / Svelte 5.56.8 checkouts, with the strengthened check
-in `src/coverage-report.mjs` (`reEnumerateVueRows`/`reEnumerateSvelteRows`):
-every row's `source_object` git blob/tree hash is verified against the live
-pinned tree (not just path existence), and `declaration_kind`/`title_kind`/
-`title_sha256` are validated against the closed sets the manifest generator
-ever emits. `test/coverage.spec.mjs` proves this for all 2003 + 3457 rows —
-zero unresolvable — plus a corrupted-locator negative control. This is the
-"every row is reachable, not silently dropped" half of `FC-MANIFEST-001`,
-and it is genuinely satisfied end to end.
+Both manifests are 100% **content-verified against the pinned trees** by the
+check in `src/coverage-report.mjs` (`reEnumerateVueRows`/`reEnumerateSvelteRows`),
+whose exact mechanism is — stated precisely, no more and no less:
+
+- every row's `source_locator` FILE (Vue) or DIRECTORY (Svelte) must be
+  tracked/present in the exact pinned Vue 3.6.0-rc.3 / Svelte 5.56.8
+  checkout, and
+- the row's recorded `source_object` (git blob hash for Vue files, git tree
+  object for Svelte sample directories) must equal the LIVE object hash at
+  that path in the pinned tree — i.e. the bytes the row was generated from
+  are byte-identical to the pinned tree today, and
+- `declaration_kind`/`title_kind` must be members of the closed sets the
+  manifest generator ever emits, and `title_sha256` must be a well-formed
+  64-hex digest.
+
+What this mechanism does **NOT** do: it does not re-parse the file at the
+locator's line/column, re-extract the declaration title, or independently
+recompute `title_sha256` from source. Because the whole file's bytes are
+pinned by the object-hash check, the locator and title-hash remain exactly
+as valid as when the generator recorded them — but their initial recording
+is trusted from the BF1 generation run, not independently re-derived here.
+`test/coverage.spec.mjs` proves the mechanism above for all 2003 + 3457
+rows — zero unresolvable — plus corrupted-locator and corrupted-content-hash
+negative controls. This is the "every row is reachable and content-pinned,
+not silently dropped" half of `FC-MANIFEST-001`.
 
 ## What this pass did NOT classify, and why
 
@@ -69,13 +84,14 @@ them.
 
 | manifest | disposition | count | evidence_id | resolvable this pass? |
 |---|---|---:|---|---|
-| Vue | `blocked` | 2003 | `-` | No — needs a Verter Vue candidate (BV1/B2/B3), downstream of BF2 |
-| Svelte | `blocked` | 3313 | `-` | No — needs a Verter Svelte candidate (BS1/B2/B3), downstream of BF2 |
+| Vue | `blocked` | 2003 | `-` | No — needs a Verter Vue candidate; per the manifest's `provisional_owner` column these rows are owned by BV1 (1,494) and B2/BV1 (509), downstream of BF2 |
+| Svelte | `blocked` | 3313 | `-` | No — needs a Verter Svelte candidate; per `provisional_owner` these rows are owned by BS1 (2,695), B2/BS1 (589), and BS1/B4 (29), downstream of BF2 |
 | Svelte | `not_applicable` | 144 | `-` | Already correctly classified (product-boundary, no candidate needed); `evidence_id` staying `-` is consistent with BF1's original manifest (disposition, not resolution, is the completeness signal for this class) |
 
 **Total unresolved-by-this-pass: 5316 of 5460 rows (2003 + 3313).** This
-residue is not silently dropped: it is the exact set AMD-005 assigns to B2/B3
-(via BV1/BS1) once those blocks exist, and BF3's charter explicitly covers
+residue is not silently dropped: it is the exact set the manifests'
+`provisional_owner` column assigns to BV1, B2/BV1, BS1, B2/BS1, and BS1/B4
+(B3 owns no manifest rows) once those blocks exist, and BF3's charter explicitly covers
 retracting any reachable-success claim these rows might otherwise imply. No
 row in either manifest was marked with a fabricated `evidence_id` or moved
 off `blocked` without a real comparison behind it.

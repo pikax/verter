@@ -43,6 +43,24 @@ export const VUE_DOMAIN = Object.freeze({
     "@vue/shared":
       "sha512-EFnGq/OonnFgOtgAhXLIv8owITuFsaGglKXjsAUJQ+2uVuCPxypdW7NIZUlt7ED2raM1Hn/C83eTeK0tZVGCZw==",
   }),
+  // The EXACT oracle module specifiers production code loads from this
+  // domain's realized install, with the loader each callsite uses — the
+  // authoritative inventory the entry-resolvability gate must prove
+  // loadable (oracle-install.mjs). Resolving a package's ROOT entry proves
+  // nothing about a divergent subpath/condition target (svelte/compiler's
+  // `require` and `default` exports point at DIFFERENT files), so the gate
+  // resolves each row under the same loader semantics as its caller.
+  // Derived from the real callers; keep in sync when a loader callsite is
+  // added or removed:
+  //   - invoke-vue-oracle.mjs:       oracleRequire("vue", "@vue/compiler-sfc")
+  //   - execute-vue-runtime.mjs:     importOracleModule("vue", "vue"),
+  //                                  importOracleModule("vue", "@vue/server-renderer")
+  //   - hydration.mjs (hydrateVue):  importOracleModule("vue", "vue")
+  oracleLoadSpecifiers: Object.freeze([
+    Object.freeze({ specifier: "@vue/compiler-sfc", loader: "require" }),
+    Object.freeze({ specifier: "vue", loader: "import" }),
+    Object.freeze({ specifier: "@vue/server-renderer", loader: "import" }),
+  ]),
 });
 
 export const SVELTE_DOMAIN = Object.freeze({
@@ -57,6 +75,22 @@ export const SVELTE_DOMAIN = Object.freeze({
     svelte:
       "sha512-PY8LOw7xP6c8IOiVqdo0sbbZVYhXRSfklOQLAUyGBKqjTX0wx/z4l/9J+PmBpmlLnxzEb1NqltxQ5/wZme/Cmg==",
   }),
+  // See VUE_DOMAIN.oracleLoadSpecifiers for the field contract. Real
+  // callers this inventory is derived from:
+  //   - invoke-svelte-oracle.mjs:     importOracleModule("svelte", "svelte/compiler")
+  //   - execute-svelte-runtime.mjs:   importOracleModule("svelte", "svelte/server")
+  //   - hydration.mjs (hydrateSvelteClient): the generated runner imports
+  //     "svelte" from inside the install tree in a child launched with
+  //     `--conditions=browser`, hence the extra condition on that row.
+  oracleLoadSpecifiers: Object.freeze([
+    Object.freeze({ specifier: "svelte/compiler", loader: "import" }),
+    Object.freeze({ specifier: "svelte/server", loader: "import" }),
+    Object.freeze({
+      specifier: "svelte",
+      loader: "import",
+      extraConditions: Object.freeze(["browser"]),
+    }),
+  ]),
 });
 
 /** Committed evidence-lock digests this harness cross-checks itself against. */

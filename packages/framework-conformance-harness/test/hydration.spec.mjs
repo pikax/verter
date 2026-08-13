@@ -92,10 +92,123 @@ describe("hydrateSvelteClient — official server / official client (pairing #1)
       JSON.stringify({ label: "click me" }),
     );
     expect(result.ok).toBe(true);
+    expect(result.mismatched).toBe(false);
     expect(result.finalHtml).toContain("click me");
     cleanupSvelteScratch();
     cleanupHydrationScratch();
   });
+
+  it("reports mismatched: true for real client code hydrated onto deliberately mismatched server HTML (negative control)", () => {
+    const source = readFileSync(
+      path.join(HARNESS_ROOT, "fixtures/svelte/props-events.svelte"),
+      "utf8",
+    );
+    const client = compileSvelteFixture(source, "fixtures/svelte/props-events.svelte", {
+      generate: "client",
+      runes: true,
+      dev: false,
+      sourceMap: false,
+    });
+
+    // Server HTML the client props would NEVER produce: hydration markers
+    // intact, same node count, but a different element and different
+    // content. Svelte's prod hydration silently CLAIMS the wrong node (it
+    // checks structure, not tag names or content) — previously this was
+    // reported as a clean hydration because `mismatched` was hardcoded
+    // false; the fresh-render divergence oracle now reports it.
+    const mismatchedSsrHtml = "<!--[--><div>WRONG SERVER CONTENT</div><!--]-->";
+    expect(mismatchedSsrHtml).not.toContain("<button"); // plant proven mismatched vs the client render
+    const adopted = hydrateSvelteClient(
+      mismatchedSsrHtml,
+      client.code,
+      JSON.stringify({ label: "click me" }),
+    );
+    expect(adopted.ok).toBe(true);
+    expect(adopted.mismatched).toBe(true);
+    // The wrong server element genuinely survived hydration (node adoption,
+    // not reconstruction) — exactly why the comparison is required.
+    expect(adopted.finalHtml).toContain("<div>");
+    expect(adopted.finalHtml).not.toContain("<button");
+
+    // Marker-less server HTML: Svelte recovers by discarding the server DOM
+    // and re-mounting fresh, with no prod warning and a final DOM equal to a
+    // fresh render — caught by the server-node reuse identity signal.
+    const recovered = hydrateSvelteClient(
+      "<div>no hydration markers at all</div>",
+      client.code,
+      JSON.stringify({ label: "click me" }),
+    );
+    expect(recovered.ok).toBe(true);
+    expect(recovered.mismatched).toBe(true);
+
+    cleanupSvelteScratch();
+    cleanupHydrationScratch();
+  });
+
+  it("reports mismatched: true for a TEXT-ROOT component hydrated onto markerless wrong server text (negative control)", async () => {
+    // A component whose root is a bare dynamic text binding has ZERO element
+    // children — the class where element-only reuse tracking is vacuously
+    // clean and the comment-free fresh-render comparison sees nothing
+    // either: Svelte discards the wrong markerless server content, rebuilds
+    // fresh, and the final DOM equals a fresh render textually. The reuse
+    // signal must therefore track ALL initial server child nodes (text and
+    // marker comments included), so the replacement is observed.
+    const source = "<script>let { label } = $props();</script>{label}";
+    const client = compileSvelteFixture(source, "fixtures/svelte/text-root.svelte", {
+      generate: "client",
+      runes: true,
+      dev: false,
+      sourceMap: false,
+    });
+    expect(client.code).not.toBeNull();
+
+    // Positive control first: the OFFICIAL marked server rendering of the
+    // same component/props hydrates clean — the widened signal is not
+    // trigger-happy for text-only roots.
+    const server = compileSvelteFixture(source, "fixtures/svelte/text-root.svelte", {
+      generate: "server",
+      runes: true,
+      dev: false,
+      sourceMap: false,
+    });
+    const official = await executeSvelteSsr(server.code, { label: "hello" });
+    expect(official.ok).toBe(true);
+    expect(official.html).toContain("<!--[-->"); // the official render IS marker-bearing
+    const control = hydrateSvelteClient(
+      official.html,
+      client.code,
+      JSON.stringify({ label: "hello" }),
+    );
+    expect(control.ok).toBe(true);
+    expect(control.mismatched).toBe(false);
+
+    // Server HTML with NO hydration markers at all and wrong text: the
+    // marker-bearing initial structure the contract names is entirely
+    // absent, Svelte's recovery replaces the server text node, and the
+    // result must be reported as a mismatch — not silently clean.
+    const markerlessHtml = "WRONG MARKERLESS TEXT";
+    expect(markerlessHtml).not.toContain("<!--"); // proven markerless
+    const markerless = hydrateSvelteClient(
+      markerlessHtml,
+      client.code,
+      JSON.stringify({ label: "hello" }),
+    );
+    expect(markerless.ok).toBe(true);
+    expect(markerless.mismatched).toBe(true);
+
+    // Torn markers under the same text-only root (opening boundary comment,
+    // no anchor/close): also a mismatch, never silently clean.
+    const torn = hydrateSvelteClient(
+      "<!--[-->WRONG TEXT",
+      client.code,
+      JSON.stringify({ label: "hello" }),
+    );
+    expect(torn.ok).toBe(true);
+    expect(torn.mismatched).toBe(true);
+
+    cleanupSvelteScratch();
+    cleanupHydrationScratch();
+  }, 60_000); // six real child spawns (2 compiles, 1 SSR, 3 hydrates); the 5s default flakes under parallel worker contention
 
   it("reports a real error for client code that throws during hydrate (negative control)", () => {
     const result = hydrateSvelteClient(

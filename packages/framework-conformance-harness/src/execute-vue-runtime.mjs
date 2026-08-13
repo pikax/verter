@@ -3,25 +3,31 @@
 // `renderToString`) — never a Verter-owned runtime, never a simplified
 // substitute (ssr-hydration.md).
 //
-// The compiled module is written to a scratch file INSIDE this package's
-// own tree so its bare `from "vue"` imports resolve through ordinary Node
-// module resolution against the exact pinned `vue`/`@vue/server-renderer`
-// devDependencies — the same real-package resolution `checkLinkValidity`
-// proves statically, exercised here dynamically at runtime.
+// The runtime is loaded from the ISOLATED per-domain installation realized
+// from the committed oracle lock (oracle-install.mjs), and the compiled
+// module is written to a scratch file INSIDE that install tree so its bare
+// `from "vue"` imports resolve through ordinary Node module resolution
+// against the exact realized closure — and against the SAME module
+// instances this executor uses (one `vue` instance graph, which SSR
+// rendering requires).
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { HARNESS_ROOT } from "./paths.mjs";
+import { importOracleModule, oracleScratchDir } from "./oracle-install.mjs";
 
-const SCRATCH_DIR = path.join(HARNESS_ROOT, ".runtime-scratch");
+// Instance-scoped scratch: parallel test workers each load their own module
+// instance, so cleanup can never delete another worker's in-flight modules.
+const SCRATCH_LABEL = `vue-ssr-${randomUUID()}`;
+let scratchDir = null;
 
 function scratchModulePath(code) {
-  mkdirSync(SCRATCH_DIR, { recursive: true });
+  if (scratchDir === null) scratchDir = oracleScratchDir("vue", SCRATCH_LABEL);
+  mkdirSync(scratchDir, { recursive: true }); // cleanup may have removed it mid-run
   const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
-  const filePath = path.join(SCRATCH_DIR, `vue-ssr-${digest}.mjs`);
+  const filePath = path.join(scratchDir, `vue-ssr-${digest}.mjs`);
   writeFileSync(filePath, code, "utf8");
   return filePath;
 }
@@ -34,8 +40,8 @@ export async function executeVueSsr(ssrCode) {
   const filePath = scratchModulePath(ssrCode);
   try {
     const [{ createSSRApp }, { renderToString }, mod] = await Promise.all([
-      import("vue"),
-      import("@vue/server-renderer"),
+      importOracleModule("vue", "vue"),
+      importOracleModule("vue", "@vue/server-renderer"),
       import(pathToFileURL(filePath).href),
     ]);
     const component = mod.default;
@@ -48,5 +54,5 @@ export async function executeVueSsr(ssrCode) {
 }
 
 export function cleanupScratch() {
-  rmSync(SCRATCH_DIR, { recursive: true, force: true });
+  if (scratchDir !== null) rmSync(scratchDir, { recursive: true, force: true });
 }

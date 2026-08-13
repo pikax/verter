@@ -1,419 +1,290 @@
 // Parser-backed cosmetic normalizer (conformance-normalizer.md).
 //
 // Produces a CANONICAL FORM of a generated module by re-parsing it to an
-// ESTree AST and returning a position-free, alpha-normalized structural
-// tree. Two programs whose canonical forms are deep-equal are cosmetically
-// identical under the allowed normalization rules:
+// ESTree AST and returning a position-free structural tree. Two programs
+// whose canonical forms are deep-equal are cosmetically identical under the
+// allowed normalization rules:
 //
 //   - whitespace/line-layout: FREE — canonical form never carries
 //     start/end/loc/range, so re-indentation or reflow never affects it.
 //   - quote-delimiter spelling: FREE — acorn decodes string literals to
 //     their `.value`; the canonical form compares decoded values, never raw
-//     source text, so `'x'` and `"x"` canonicalize identically.
+//     source text, so `'x'` and `"x"` canonicalize identically. EXCEPTION:
+//     a TAGGED template's raw spelling is NOT free — the tag function
+//     receives the `.raw` array (`strings.raw`), so raw escape-sequence
+//     spelling is observable program input there and enters the canonical
+//     form (see the TaggedTemplateExpression case in `canonicalize`).
 //   - harmless redundant parentheses: FREE — parentheses are not ESTree
 //     nodes; the parser already resolves precedence, so re-parenthesizing
 //     an equivalent expression produces the identical AST shape.
-//   - private generated identifier spelling: performed EXPLICITLY below by
-//     `canonicalize()`'s scope-aware local-binding renamer.
+//   - comments WITHOUT semantic force (plain prose): FREE — only
+//     tool-consumed comment classes (see `classifySemanticComment`) enter
+//     the canonical form; adding or removing an ordinary explanatory
+//     comment never affects it.
 //
-// Everything the contract forbids stays live BY CONSTRUCTION, not by a
-// separate check bolted on after the fact:
-//   - import/export sources and specifiers: never renamed (see
-//     `isRenamableBinding` — Import*Specifier locals and every exported
-//     name are excluded from the rename map) and their `source.value` /
-//     property positions are ordinary struct fields the deep-equal walk
-//     compares verbatim.
+// IDENTIFIERS ARE STRUCTURAL — there is NO alpha-renaming. The contract
+// permits "private generated identifier spelling under scope-aware
+// alpha-normalization" only for bindings with private generated provenance.
+// The pinned official Vue 3.6.0-rc.3 / Svelte 5.56.8 compilers emit no
+// structural provenance marker distinguishing a compiler-generated private
+// binding from an authored one in their output (a leading-underscore
+// spelling like `_sfc_main` is a naming convention, and inferring
+// generatedness from spelling is exactly the name-based inference this
+// repository's architecture rules forbid). Without explicit provenance an
+// identifier must be treated as potentially authored/public-adjacent, so
+// EVERY identifier participates in equality like any other token. A
+// candidate that spells a local binding differently from the official
+// output is structurally different — never silently equated.
+//
+// SEMANTIC COMMENTS ARE PRESERVED — tool-consumed comments (`/*#__PURE__*/`
+// -class annotations, license/preserve blocks, source-map/sourceURL
+// directives, TS directives, triple-slash references, JSDoc, JSX/bundler
+// pragmas, Istanbul coverage directives, ESLint disable/enable directives,
+// Prettier ignore directives) are collected,
+// classified, and attached to the canonical node they precede, in order.
+// Deleting one, mutating its text, or relocating it to a different
+// expression/statement changes the canonical form and is caught as a
+// structural difference. The classifier is deliberately over-inclusive
+// toward "semantic": misclassifying a prose comment as semantic can only
+// produce a false DIFFERENCE (fail closed), never a false equivalence.
+//
+// Everything else the contract forbids stays live BY CONSTRUCTION:
+//   - import/export sources and specifiers are ordinary struct fields the
+//     deep-equal walk compares verbatim.
 //   - helper/declaration/statement ORDER: the canonical form is a
 //     positional array walk (`Program.body`, `BlockStatement.body`, …) —
-//     reordering two statements changes the canonical array order, which
-//     `deepEqualCanonical` treats as inequality.
-//   - literal values, property keys, JSX-free string content (element tags,
-//     class names, prop names, diagnostic text carried as string literals):
-//     never touched — only `Identifier` BINDING/REFERENCE nodes are
-//     candidates for renaming, and then only when they resolve to a
-//     tracked local binding (see `resolve()`); an ObjectExpression
-//     property KEY identifier is not a binding or a reference (it is a
-//     property name) and is walked as an ordinary literal-shaped leaf, so
-//     `{ class: "x" }` survives untouched even after `class` collides with
-//     an unrelated local variable name elsewhere in the same module.
+//     reordering two statements changes the canonical array order.
+//   - literal values, property keys, template content, element tags, prop
+//     names, diagnostic text carried as string literals: compared verbatim
+//     (only the `raw` quote/escape spelling is dropped).
 
 import * as acorn from "acorn";
 
 export function parseModule(code, sourceFileForDiagnostics) {
-  return acorn.parse(code, {
+  const comments = [];
+  const ast = acorn.parse(code, {
     ecmaVersion: "latest",
     sourceType: "module",
     locations: true,
     allowAwaitOutsideFunction: true,
     sourceFile: sourceFileForDiagnostics,
+    onComment: comments,
   });
-}
-
-const FUNCTION_TYPES = new Set([
-  "FunctionDeclaration",
-  "FunctionExpression",
-  "ArrowFunctionExpression",
-]);
-
-/** Scope frame: name -> canonical id. `kind` is "function" or "block". */
-class Scope {
-  constructor(parent, kind) {
-    this.parent = parent;
-    this.kind = kind;
-    this.bindings = new Map();
-  }
-  /** Function-scoped (`var`) declarations attach to the nearest function/program frame. */
-  functionScope() {
-    let scope = this;
-    while (scope.kind === "block") scope = scope.parent;
-    return scope;
-  }
-  declare(name, canonicalId) {
-    this.bindings.set(name, canonicalId);
-  }
-  resolve(name) {
-    let scope = this;
-    while (scope) {
-      if (scope.bindings.has(name)) return scope.bindings.get(name);
-      scope = scope.parent;
-    }
-    return null;
-  }
+  // Non-enumerable so generic AST walks never see it as a child.
+  Object.defineProperty(ast, "sourceComments", { value: comments, enumerable: false });
+  return ast;
 }
 
 /**
- * @returns {{ tree: object, renameCount: number }}
+ * Classifies a comment as a tool-consumed (semantic-force) class, or null
+ * for plain prose. `type` is acorn's "Line" | "Block"; `value` is the
+ * comment text without its delimiters.
+ *
+ * @returns {string|null} the category name, or null when cosmetic
+ */
+export function classifySemanticComment(type, value) {
+  const trimmed = value.trim();
+  // Bundler annotations: /*#__PURE__*/, /*@__PURE__*/, /*#__NO_SIDE_EFFECTS__*/, …
+  if (/^[#@]__[A-Z_]+__$/.test(trimmed)) return "annotation";
+  // License/preserve blocks: /*! … */, @license, @preserve, @copyright.
+  if (type === "Block" && value.startsWith("!")) return "license";
+  if (/@(license|preserve|copyright)\b/.test(value)) return "license";
+  // Source-map directives: //# sourceMappingURL=…, //# sourceURL=…, //@ legacy form.
+  if (/^[#@]\s*source(Mapping)?URL=/.test(trimmed)) return "source-map-directive";
+  // TS directives: // @ts-ignore, @ts-expect-error, @ts-nocheck, @ts-check.
+  if (/^@ts-(ignore|expect-error|nocheck|check)\b/.test(trimmed)) return "ts-directive";
+  // Triple-slash directives: /// <reference …>, /// <amd-… > (line comment
+  // value starts with the third slash).
+  if (type === "Line" && /^\/\s*<(reference|amd)/.test(value)) return "triple-slash-directive";
+  // JSDoc blocks: /** … */.
+  if (type === "Block" && value.startsWith("*")) return "jsdoc";
+  // JSX / bundler pragmas: @jsx …, @vite-ignore, webpackChunkName: … etc.
+  if (/^@jsx(Runtime|ImportSource|Frag)?\b/.test(trimmed)) return "pragma";
+  if (/^@vite-ignore\b/.test(trimmed)) return "pragma";
+  if (/^webpack[A-Z]\w*\s*:/.test(trimmed)) return "pragma";
+  // Coverage directives: /* istanbul ignore next */, ignore if/else/file —
+  // consumed by Istanbul/nyc instrumentation; deleting or relocating one
+  // changes which code is exempt from coverage.
+  if (/^istanbul\s+ignore\b/.test(trimmed)) return "coverage-directive";
+  // Lint directives: eslint-disable, eslint-disable-line,
+  // eslint-disable-next-line (and the paired eslint-enable, whose removal
+  // silently EXTENDS a disabled region) — consumed by ESLint.
+  if (/^eslint-(disable|enable)(-next-line|-line)?\b/.test(trimmed)) return "lint-directive";
+  // Format directives: prettier-ignore (and prettier-ignore-start/end) —
+  // consumed by Prettier; relocation changes which node is exempt.
+  if (/^prettier-ignore\b/.test(trimmed)) return "format-directive";
+  return null;
+}
+
+/** Collects every positioned AST node in the tree (generic walk). */
+function collectNodes(root) {
+  const nodes = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === null || typeof value !== "object") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) stack.push(item);
+      continue;
+    }
+    if (typeof value.type === "string" && typeof value.start === "number") nodes.push(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "loc" || key === "range") continue;
+      stack.push(child);
+    }
+  }
+  return nodes;
+}
+
+/**
+ * Attaches each SEMANTIC comment to the canonical node it precedes: the
+ * outermost node whose start is the smallest position >= the comment's end.
+ * A trailing comment with no following node (e.g. a sourceMappingURL at
+ * end-of-file) attaches to the Program as a trailing list. Attachment is
+ * positional and deterministic, so relocating a comment to a different
+ * expression/statement moves it to a different canonical node — a
+ * structural difference.
+ *
+ * ESLint-family directives additionally record their LINE-ADJACENCY to the
+ * attached node: `eslint-disable-next-line` suppresses literally the next
+ * source LINE, so a blank line opened between the directive and its target
+ * changes what ESLint suppresses even though the comment text and the
+ * nearest-node attachment are both unchanged. Of the two viable encodings —
+ * (a) the exact line-delta between the directive and its target, or (b) a
+ * boolean blank-line-adjacency bit — this records (a), the exact delta
+ * (`targetLineDelta` = attached node's start line minus the directive's end
+ * line), because the existing attachment loop already has both positions in
+ * hand and the exact delta discriminates every relocation the boolean
+ * would, plus multi-blank-line changes. The delta enters the canonical form
+ * for lint directives ONLY: for the other directive families the consumer
+ * targets the following NODE, not the following LINE, so pure line reflow
+ * around them stays cosmetic as the contract requires.
+ *
+ * @returns {{ leading: WeakMap<object, object[]>, trailing: object[] }}
+ */
+function attachSemanticComments(ast) {
+  const leading = new WeakMap();
+  const trailing = [];
+  const semantic = (ast.sourceComments ?? [])
+    .map((c) => ({
+      type: c.type,
+      text: c.value.trim(),
+      start: c.start,
+      end: c.end,
+      endLine: c.loc?.end?.line,
+      category: classifySemanticComment(c.type, c.value),
+    }))
+    .filter((c) => c.category !== null);
+  if (semantic.length === 0) return { leading, trailing };
+
+  const nodes = collectNodes(ast).filter((n) => n !== ast);
+  semantic.sort((a, b) => a.start - b.start);
+  for (const comment of semantic) {
+    let attached = null;
+    for (const node of nodes) {
+      if (node.start < comment.end) continue;
+      if (
+        attached === null ||
+        node.start < attached.start ||
+        (node.start === attached.start && node.end > attached.end) // outermost on ties
+      ) {
+        attached = node;
+      }
+    }
+    const record = { type: comment.type, category: comment.category, text: comment.text };
+    if (attached === null) {
+      trailing.push(record);
+    } else {
+      if (
+        comment.category === "lint-directive" &&
+        comment.endLine !== undefined &&
+        attached.loc !== undefined
+      ) {
+        record.targetLineDelta = attached.loc.start.line - comment.endLine;
+      }
+      const list = leading.get(attached) ?? [];
+      list.push(record);
+      leading.set(attached, list);
+    }
+  }
+  return { leading, trailing };
+}
+
+/**
+ * @returns {{ tree: object }} the position-free canonical structural tree
  */
 export function canonicalize(ast) {
-  let counter = 0;
-  let renameCount = 0;
-  const exportedNames = collectExportedNames(ast);
+  const { leading, trailing } = attachSemanticComments(ast);
 
-  function freshId() {
-    const id = `$local${counter}`;
-    counter += 1;
-    return id;
-  }
-
-  function declareBinding(scope, name, isRenamable) {
-    if (!isRenamable || exportedNames.has(name)) {
-      scope.declare(name, null); // shadows outer without renaming
-      return;
-    }
-    const id = freshId();
-    scope.declare(name, id);
-    renameCount += 1;
-  }
-
-  function declarePattern(scope, pattern, targetScope, isRenamable) {
-    if (!pattern) return;
-    switch (pattern.type) {
-      case "Identifier":
-        declareBinding(targetScope, pattern.name, isRenamable);
-        return;
-      case "AssignmentPattern":
-        declarePattern(scope, pattern.left, targetScope, isRenamable);
-        return;
-      case "ArrayPattern":
-        for (const el of pattern.elements) declarePattern(scope, el, targetScope, isRenamable);
-        return;
-      case "ObjectPattern":
-        for (const prop of pattern.properties) {
-          if (prop.type === "RestElement")
-            declarePattern(scope, prop.argument, targetScope, isRenamable);
-          else declarePattern(scope, prop.value, targetScope, isRenamable);
-        }
-        return;
-      case "RestElement":
-        declarePattern(scope, pattern.argument, targetScope, isRenamable);
-        return;
-      default:
-        return;
-    }
-  }
-
-  function visitPattern(pattern, scope) {
-    if (!pattern) return null;
-    switch (pattern.type) {
-      case "Identifier": {
-        const canonical = scope.resolve(pattern.name);
-        return { type: "Identifier", name: canonical ?? pattern.name };
-      }
-      case "AssignmentPattern":
-        return {
-          type: "AssignmentPattern",
-          left: visitPattern(pattern.left, scope),
-          right: visit(pattern.right, scope),
-        };
-      case "ArrayPattern":
-        return {
-          type: "ArrayPattern",
-          elements: pattern.elements.map((el) => visitPattern(el, scope)),
-        };
-      case "ObjectPattern":
-        return {
-          type: "ObjectPattern",
-          properties: pattern.properties.map((prop) =>
-            prop.type === "RestElement"
-              ? { type: "RestElement", argument: visitPattern(prop.argument, scope) }
-              : {
-                  type: "Property",
-                  computed: prop.computed,
-                  shorthand: prop.shorthand,
-                  key: prop.computed ? visit(prop.key, scope) : leafKey(prop.key),
-                  value: visitPattern(prop.value, scope),
-                },
-          ),
-        };
-      case "RestElement":
-        return { type: "RestElement", argument: visitPattern(pattern.argument, scope) };
-      default:
-        return visit(pattern, scope);
-    }
-  }
-
-  /** Property keys are names, not references — never renamed. */
-  function leafKey(key) {
-    if (key.type === "Identifier") return { type: "Identifier", name: key.name };
-    return stripLeaf(key);
-  }
-
-  function stripLeaf(node) {
-    if (node === null || typeof node !== "object") return node;
-    if (Array.isArray(node)) return node.map(stripLeaf);
-    const out = {};
-    for (const [k, v] of Object.entries(node)) {
-      if (k === "start" || k === "end" || k === "loc" || k === "range") continue;
-      out[k] = stripLeaf(v);
-    }
+  // Attaches the AST node's leading semantic comments to a canonical node
+  // built for it — shared by the generic walk and manually-built nodes.
+  function withComments(astNode, out) {
+    const comments = leading.get(astNode);
+    if (comments !== undefined) out.semanticComments = comments;
     return out;
   }
 
-  function hoistVarsAndFunctions(body, scope) {
-    for (const stmt of body) hoistStatement(stmt, scope);
-  }
+  function visit(node) {
+    if (node === null || typeof node !== "object") return node;
+    if (Array.isArray(node)) return node.map(visit);
 
-  function hoistStatement(stmt, scope) {
-    if (!stmt) return;
-    switch (stmt.type) {
-      case "VariableDeclaration":
-        if (stmt.kind === "var") {
-          for (const decl of stmt.declarations)
-            declarePattern(scope, decl.id, scope.functionScope(), true);
-        }
-        return;
-      case "FunctionDeclaration":
-        if (stmt.id) declareBinding(scope, stmt.id.name, true);
-        return;
-      case "IfStatement":
-        hoistStatement(stmt.consequent, scope);
-        hoistStatement(stmt.alternate, scope);
-        return;
-      case "ForStatement":
-      case "ForOfStatement":
-      case "ForInStatement":
-        if (stmt.init?.type === "VariableDeclaration") hoistStatement(stmt.init, scope);
-        if (stmt.left?.type === "VariableDeclaration") hoistStatement(stmt.left, scope);
-        hoistStatement(stmt.body, scope);
-        return;
-      case "WhileStatement":
-      case "DoWhileStatement":
-        hoistStatement(stmt.body, scope);
-        return;
-      case "BlockStatement":
-        hoistVarsAndFunctions(stmt.body, scope);
-        return;
-      case "TryStatement":
-        hoistStatement(stmt.block, scope);
-        if (stmt.handler) hoistStatement(stmt.handler.body, scope);
-        if (stmt.finalizer) hoistStatement(stmt.finalizer, scope);
-        return;
-      case "SwitchStatement":
-        for (const c of stmt.cases) hoistVarsAndFunctions(c.consequent, scope);
-        return;
-      default:
-        return;
-    }
-  }
-
-  function visitBlockScoped(body, parentScope) {
-    const scope = new Scope(parentScope, "block");
-    for (const stmt of body) {
-      if (stmt.type === "VariableDeclaration" && stmt.kind !== "var") {
-        for (const decl of stmt.declarations) declarePattern(scope, decl.id, scope, true);
-      }
-      if (stmt.type === "ClassDeclaration" && stmt.id) declareBinding(scope, stmt.id.name, true);
-    }
-    return { scope, tree: body.map((stmt) => visit(stmt, scope)) };
-  }
-
-  function visitFunctionBody(fn, scope) {
-    const fnScope = new Scope(scope, "function");
-    for (const param of fn.params) declarePattern(fnScope, param, fnScope, true);
-    if (fn.body.type === "BlockStatement") {
-      hoistVarsAndFunctions(fn.body.body, fnScope);
-      const { tree } = visitBlockScoped(fn.body.body, fnScope);
-      return {
-        params: fn.params.map((p) => visitPattern(p, fnScope)),
-        body: { type: "BlockStatement", body: tree },
-      };
-    }
-    return {
-      params: fn.params.map((p) => visitPattern(p, fnScope)),
-      body: visit(fn.body, fnScope),
-    };
-  }
-
-  function visit(node, scope) {
-    if (node === null || node === undefined) return node;
-    if (Array.isArray(node)) return node.map((n) => visit(n, scope));
-    if (typeof node !== "object") return node;
-
+    let out;
     switch (node.type) {
-      case "Identifier": {
-        const canonical = scope.resolve(node.name);
-        return { type: "Identifier", name: canonical ?? node.name };
-      }
-      case "VariableDeclarator":
-        return {
-          type: "VariableDeclarator",
-          id: visitPattern(node.id, scope),
-          init: visit(node.init, scope),
-        };
-      case "VariableDeclaration":
-        return {
-          type: "VariableDeclaration",
-          kind: node.kind,
-          declarations: node.declarations.map((d) => visit(d, scope)),
-        };
-      case "FunctionDeclaration":
-      case "FunctionExpression": {
-        const { params, body } = visitFunctionBody(node, scope);
-        return {
-          type: node.type,
-          id: node.id ? { type: "Identifier", name: node.id.name } : null,
-          async: node.async,
-          generator: node.generator,
-          params,
-          body,
-        };
-      }
-      case "ArrowFunctionExpression": {
-        const { params, body } = visitFunctionBody(node, scope);
-        return { type: node.type, async: node.async, expression: node.expression, params, body };
-      }
-      case "BlockStatement":
-        return { type: "BlockStatement", body: visitBlockScoped(node.body, scope).tree };
-      case "CatchClause": {
-        const catchScope = new Scope(scope, "block");
-        if (node.param) declarePattern(catchScope, node.param, catchScope, true);
-        return {
-          type: "CatchClause",
-          param: node.param ? visitPattern(node.param, catchScope) : null,
-          body: { type: "BlockStatement", body: visitBlockScoped(node.body.body, catchScope).tree },
-        };
-      }
-      case "ImportSpecifier":
-      case "ImportDefaultSpecifier":
-      case "ImportNamespaceSpecifier":
-        // Import bindings are helper identities — never renamed, including
-        // the local alias, which must stay observable for helper-source
-        // substitution detection.
-        return stripLeaf(node);
-      case "ImportDeclaration":
-        return stripLeaf(node);
-      case "ExportNamedDeclaration":
-      case "ExportDefaultDeclaration":
-      case "ExportAllDeclaration":
-        return {
-          type: node.type,
-          declaration: visit(node.declaration, scope),
-          specifiers: node.specifiers ? node.specifiers.map(stripLeaf) : undefined,
-          source: node.source ? stripLeaf(node.source) : undefined,
-          exported: node.exported ? stripLeaf(node.exported) : undefined,
-        };
-      case "Property":
-        return {
-          type: "Property",
-          computed: node.computed,
-          shorthand: node.shorthand,
-          method: node.method,
-          kind: node.kind,
-          key: node.computed ? visit(node.key, scope) : leafKey(node.key),
-          value: visit(node.value, scope),
-        };
       case "Literal":
-        // Quote-delimiter spelling is cosmetic: compare the DECODED value
-        // only, never `raw` (which carries the original quote characters).
-        return { type: "Literal", value: node.value, regex: node.regex, bigint: node.bigint };
+        // Quote-delimiter and escape spelling are cosmetic: compare the
+        // DECODED value only, never `raw`.
+        out = { type: "Literal", value: node.value, regex: node.regex, bigint: node.bigint };
+        break;
       case "TemplateElement":
-        // Same rationale as Literal.raw: `cooked` is the decoded value;
-        // `raw` carries the original escape/quote spelling.
-        return { type: "TemplateElement", tail: node.tail, cooked: node.value?.cooked };
-      case "MemberExpression":
-        return {
-          type: "MemberExpression",
-          computed: node.computed,
-          optional: node.optional,
-          object: visit(node.object, scope),
-          property: node.computed ? visit(node.property, scope) : leafKey(node.property),
+        // Same rationale for ORDINARY (untagged) template literals: no
+        // receiver can observe `raw`, so only the decoded `cooked` value is
+        // structural and the escape spelling stays cosmetic. Elements of a
+        // TAGGED template never reach this case — they are canonicalized by
+        // the TaggedTemplateExpression case below, WITH `raw`.
+        out = { type: "TemplateElement", tail: node.tail, cooked: node.value?.cooked };
+        break;
+      case "TaggedTemplateExpression": {
+        // TAGGED templates are different from ordinary ones: the tag
+        // function receives the raw spellings too (`strings.raw`), so a
+        // raw-only change (cooked value identical) is observable program
+        // input — String.raw`a\u0041b` returns the 8-char string
+        // "a\u0041b" while String.raw`aAb` returns "aAb", though both
+        // COOK to "aAb". `raw` enters the canonical form here ONLY.
+        // Expressions interpolated into the tagged template (including any
+        // nested untagged template inside them) canonicalize normally.
+        const quasi = node.quasi;
+        out = {
+          type: "TaggedTemplateExpression",
+          tag: visit(node.tag),
+          quasi: withComments(quasi, {
+            type: "TemplateLiteral",
+            quasis: quasi.quasis.map((element) =>
+              withComments(element, {
+                type: "TemplateElement",
+                tail: element.tail,
+                cooked: element.value?.cooked,
+                raw: element.value?.raw,
+              }),
+            ),
+            expressions: quasi.expressions.map((expression) => visit(expression)),
+          }),
         };
+        break;
+      }
       default: {
-        const out = { type: node.type };
+        out = {};
         for (const [key, value] of Object.entries(node)) {
-          if (
-            key === "type" ||
-            key === "start" ||
-            key === "end" ||
-            key === "loc" ||
-            key === "range"
-          )
-            continue;
-          out[key] = visit(value, scope);
+          if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+          out[key] = visit(value);
         }
-        return out;
       }
     }
+    return withComments(node, out);
   }
 
-  const rootScope = new Scope(null, "function");
-  hoistVarsAndFunctions(ast.body, rootScope);
-  const canonicalBody = ast.body.map((stmt) => {
-    if (stmt.type === "VariableDeclaration" && stmt.kind !== "var") {
-      for (const decl of stmt.declarations) declarePattern(rootScope, decl.id, rootScope, true);
-    }
-    if (stmt.type === "ClassDeclaration" && stmt.id) declareBinding(rootScope, stmt.id.name, true);
-    return visit(stmt, rootScope);
-  });
-
-  return { tree: { type: "Program", body: canonicalBody }, renameCount };
-}
-
-/** Names that must never be alpha-renamed because they are publicly observable. */
-function collectExportedNames(ast) {
-  const names = new Set();
-  for (const stmt of ast.body) {
-    if (stmt.type === "ExportNamedDeclaration") {
-      if (stmt.declaration?.type === "VariableDeclaration") {
-        for (const decl of stmt.declaration.declarations) collectPatternNames(decl.id, names);
-      } else if (stmt.declaration?.type === "FunctionDeclaration" && stmt.declaration.id) {
-        names.add(stmt.declaration.id.name);
-      }
-      for (const spec of stmt.specifiers ?? []) names.add(spec.local.name);
-    }
-  }
-  return names;
-}
-
-function collectPatternNames(pattern, out) {
-  if (!pattern) return;
-  if (pattern.type === "Identifier") out.add(pattern.name);
-  else if (pattern.type === "ArrayPattern")
-    for (const el of pattern.elements) collectPatternNames(el, out);
-  else if (pattern.type === "ObjectPattern")
-    for (const prop of pattern.properties)
-      collectPatternNames(prop.type === "RestElement" ? prop.argument : prop.value, out);
-  else if (pattern.type === "AssignmentPattern") collectPatternNames(pattern.left, out);
+  const tree = visit(ast);
+  if (trailing.length > 0) tree.trailingSemanticComments = trailing;
+  return { tree };
 }
 
 export function deepEqualCanonical(a, b) {
@@ -447,4 +318,4 @@ function stableStringify(value) {
 }
 
 /** Versioned identity for this normalizer's behavior — bump on any rule change. */
-export const NORMALIZER_VERSION = 1;
+export const NORMALIZER_VERSION = 5;
