@@ -79,16 +79,22 @@ class = "foundational-safety"
 predecessors = ["BF2"]
 
 [[block]]
+id = "BV0"
+name = "Immediate Vue known-defect correction"
+class = "subsystem"
+predecessors = ["BF2"]
+
+[[block]]
 id = "B2"
 name = "Framework parsing recovery diagnostics and stable identities"
 class = "foundational"
-predecessors = ["BF3"]
+predecessors = ["BV0", "BF3"]
 
 [[block]]
 id = "B3"
 name = "Canonical typed compiler request and prerequisite planner"
 class = "foundational"
-predecessors = ["BF3"]
+predecessors = ["BV0", "BF3"]
 
 [[block]]
 id = "B4"
