@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url";
 
 import { parseModule, canonicalize, canonicalDigest, deepEqualCanonical } from "./normalize.mjs";
 import { VUE_DOMAIN, SVELTE_DOMAIN } from "./domain-pin.mjs";
+import { normalizedMappingSegments } from "./sourcemap.mjs";
 
 /** @returns {{ ok: true, ast: object } | { ok: false, error: string }} */
 export function checkParseValidity(code, label) {
@@ -136,6 +137,16 @@ function resolvedPackageIdentity(baseDir, packageName) {
  *    pinned package version from domain-pin.mjs; a resolvable-but-wrong
  *    version and a package outside the pinned closures are both failures.
  *
+ * `specifierOverrides` (specifier → module URL/specifier) redirects the
+ * EXPORT-SURFACE load of a bare specifier to a different entry of the SAME
+ * pinned install, for artifacts whose deployment target resolves that
+ * specifier differently than Node does. The one live case: a vapor-backend
+ * artifact's `vue` imports resolve to the with-vapor runtime build (Vue
+ * publishes vapor exports only in its ESM browser/bundler builds; the CJS
+ * entry Node's `vue` resolution lands on carries none of them). The
+ * exact-package-identity check still runs against the ORIGINAL bare
+ * specifier, so the pin discipline is unchanged.
+ *
  * @returns {Promise<{
  *   ok: boolean, resolved: string[], unresolved: string[],
  *   loadFailures: string[], missingExports: string[],
@@ -143,7 +154,7 @@ function resolvedPackageIdentity(baseDir, packageName) {
  *   packageIdentityViolations: string[], unpinnedPackages: string[],
  * }>}
  */
-export async function checkLinkValidity(ast, baseDir) {
+export async function checkLinkValidity(ast, baseDir, { specifierOverrides } = {}) {
   const resolved = [];
   const unresolved = [];
   const loadFailures = [];
@@ -175,7 +186,8 @@ export async function checkLinkValidity(ast, baseDir) {
   }
 
   async function loadSurface(specifier) {
-    const result = await importNamespace(baseDir, specifier);
+    const target = specifierOverrides?.get(specifier) ?? specifier;
+    const result = await importNamespace(baseDir, target);
     if (result.ns) {
       resolved.push(specifier);
       checkPackageIdentity(specifier);
@@ -382,10 +394,38 @@ export const CONTRACTUAL_MAP_FIELDS = [
 export const INCIDENTAL_MAP_FIELDS = ["file"];
 
 /**
+ * The `mappings` field compares on DECODED, normalized segment sets — the
+ * genuine candidate-vs-official axis: two encodings addressing identical
+ * (generated position → original position, source index, name index)
+ * correspondences are equal even when the VLQ spelling, in-line segment
+ * order, duplicate segments, or trailing empty lines differ; any
+ * correspondence difference (a shifted anchor, a dropped or added mapped
+ * position) is a divergence. Segments compare on source/name INDICES, not
+ * resolved strings, so this field stays independent of the separately
+ * compared `sources`/`names` fields. A side whose mappings do not decode
+ * as source-map v3 VLQ falls back to raw string comparison — an
+ * undecodable field can never compare equal to a decodable one unless the
+ * bytes match exactly.
+ */
+function mappingsFieldEqual(goldenMappings, candidateMappings) {
+  let golden;
+  let candidate;
+  try {
+    golden = normalizedMappingSegments(goldenMappings ?? "");
+    candidate = normalizedMappingSegments(candidateMappings ?? "");
+  } catch {
+    return (goldenMappings ?? null) === (candidateMappings ?? null);
+  }
+  return deepEqualCanonical(golden, candidate);
+}
+
+/**
  * Mapping comparison over every contractual field independently. Presence
  * itself is significant: a golden WITH a map and a candidate withOUT one
  * (or vice versa) is a divergence, not a pass. Returns per-field equality
  * so a map matching on every field but one is caught and attributable.
+ * `mappings` compares on decoded segment semantics (see
+ * `mappingsFieldEqual`); every other contractual field compares directly.
  */
 export function compareMappings(goldenMap, candidateMap) {
   if (goldenMap === null && candidateMap === null)
@@ -396,7 +436,10 @@ export function compareMappings(goldenMap, candidateMap) {
   for (const field of CONTRACTUAL_MAP_FIELDS) {
     const goldenValue = goldenMap[field] === undefined ? null : goldenMap[field];
     const candidateValue = candidateMap[field] === undefined ? null : candidateMap[field];
-    fields[field] = deepEqualCanonical(goldenValue, candidateValue);
+    fields[field] =
+      field === "mappings"
+        ? mappingsFieldEqual(goldenMap.mappings, candidateMap.mappings)
+        : deepEqualCanonical(goldenValue, candidateValue);
   }
   const differing = CONTRACTUAL_MAP_FIELDS.filter((field) => !fields[field]);
   return {
@@ -410,17 +453,41 @@ export function compareMappings(goldenMap, candidateMap) {
  * Full comparison report combining every independent oracle. `structural`
  * is only computed when both arms parse validly — a normalizer pass never
  * runs over, and can never mask, a parse failure.
+ *
+ * `axes` records, per independent oracle, whether it genuinely RAN or was
+ * SKIPPED (with the reason). Default behavior is unchanged: a skipped axis
+ * is informational. Under `authoritative: true` — the fail-closed mode a
+ * consumer opts into to prove every axis genuinely executed — any skipped
+ * axis becomes a hard failure reason instead of a silent narrowing.
  */
-export async function compareArtifacts(golden, candidate, { linkBaseDir } = {}) {
+export async function compareArtifacts(
+  golden,
+  candidate,
+  { linkBaseDir, authoritative, linkSpecifierOverrides } = {},
+) {
   const reasons = [];
+  const axes = {
+    parse: { status: "ran", reason: null },
+    link: { status: "ran", reason: null },
+    structural: { status: "ran", reason: null },
+    diagnostics: { status: "ran", reason: null },
+    mapping: { status: "ran", reason: null },
+  };
   const goldenParse = checkParseValidity(golden.code, "golden");
   const candidateParse = checkParseValidity(candidate.code, "candidate");
   if (!goldenParse.ok) reasons.push(`golden failed to parse: ${goldenParse.error}`);
   if (!candidateParse.ok) reasons.push(`candidate failed to parse: ${candidateParse.error}`);
 
   let link = null;
+  if (!linkBaseDir) {
+    axes.link = { status: "skipped", reason: "no linkBaseDir supplied" };
+  } else if (!candidateParse.ok) {
+    axes.link = { status: "skipped", reason: "candidate failed to parse" };
+  }
   if (candidateParse.ok && linkBaseDir) {
-    link = await checkLinkValidity(candidateParse.ast, linkBaseDir);
+    link = await checkLinkValidity(candidateParse.ast, linkBaseDir, {
+      specifierOverrides: linkSpecifierOverrides,
+    });
     if (link.unresolved.length > 0)
       reasons.push(`candidate has unresolved imports: ${link.unresolved.join(", ")}`);
     if (link.loadFailures.length > 0)
@@ -445,6 +512,8 @@ export async function compareArtifacts(golden, candidate, { linkBaseDir } = {}) 
   if (goldenParse.ok && candidateParse.ok) {
     structural = compareStructural(goldenParse.ast, candidateParse.ast);
     if (!structural.equal) reasons.push(`structural divergence at ${structural.firstDivergence}`);
+  } else {
+    axes.structural = { status: "skipped", reason: "an arm failed to parse" };
   }
 
   const diagnostics = compareDiagnostics(golden.diagnostics ?? [], candidate.diagnostics ?? []);
@@ -457,9 +526,18 @@ export async function compareArtifacts(golden, candidate, { linkBaseDir } = {}) 
   const mapping = compareMappings(golden.map ?? null, candidate.map ?? null);
   if (!mapping.equal) reasons.push(`source map diverges: ${mapping.reason}`);
 
+  if (authoritative) {
+    for (const [axis, state] of Object.entries(axes)) {
+      if (state.status === "skipped") {
+        reasons.push(`authoritative mode: ${axis} axis skipped (${state.reason})`);
+      }
+    }
+  }
+
   return {
     verdict: reasons.length === 0 ? "pass" : "fail",
     reasons,
+    axes,
     goldenParse: { ok: goldenParse.ok, error: goldenParse.ok ? null : goldenParse.error },
     candidateParse: {
       ok: candidateParse.ok,

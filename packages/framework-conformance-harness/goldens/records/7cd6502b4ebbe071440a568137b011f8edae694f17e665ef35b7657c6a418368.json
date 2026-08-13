@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "3adb225775c9b28223a56e07f7a2f874b6fbb138",
+    "tree": "36da8dc8841a35d3e1163e4b9bb5752f95ca527a",
+    "packageVersion": "3.6.0-rc.3"
+  },
+  "packageLockSha256": "0dd2290c0b7d01f4727953b838610727b18bcb999b634eeb8ab726508a34b951",
+  "realizedClosureSha256": "a0a58df52c90abdffca1a61f94fe5a7ed2918f586f36e73a5e8d9decd01ce1e7",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "8a9ab85431c6361f28cc32b00758a204277b473d53471f02782437dfadde2e08",
+    "commit": "5fbec05b08163be9f65cc0502bfc8c1e0b1c6181",
+    "tree": "fe4214a51bf612d1b0c99eb5314a703dba0d7778",
+    "worktreeDirty": false,
+    "implementationSha256": "3836b705a7613460c988a0826e3b1dddefc59e7ffecb5075515e1185c649b513"
+  },
+  "fixture": {
+    "path": "fixtures/vue/props-emit.vue",
+    "sha256": "31e148d706cd3999fe256eee8a3a7f7aad6a757547dd55ec69a61c303b301652"
+  },
+  "options": {
+    "backend": "vdom",
+    "sourceMap": false,
+    "isProd": false
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "e5c8d2c25ded8fc91d221274041beb80e6db15fcbbb070e629a9ede338ff4110",
+    "mapPresent": false
+  },
+  "normalizer": {
+    "version": 5,
+    "implementationSha256": "49d0b7a5a870a2c6095407828706c6662d1c1ba81218a6c9b6b51f3ed6e8a749",
+    "normalizedDigestSha256": "26b0f38a23a40a780147c1bb3f34912e3ea3ca5e239a00d33b0b2fdb4cabc088"
+  },
+  "code": "\nconst _sfc_main = {\n  __name: 'props-emit',\n  props: {\n  label: { type: String, required: true },\n  disabled: { type: Boolean, default: false },\n},\n  emits: [\"toggle\"],\n  setup(__props, { expose: __expose, emit: __emit }) {\n  __expose();\n\nconst props = __props;\nconst emit = __emit;\n\nfunction onClick() {\n  emit(\"toggle\", !props.disabled);\n}\n\nconst __returned__ = { props, emit, onClick }\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}\n\n}\nimport { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nconst _hoisted_1 = [\"disabled\"]\n\nfunction render(_ctx, _cache, $props, $setup, $data, $options) {\n  return (_openBlock(), _createElementBlock(\"button\", {\n    disabled: $props.disabled,\n    onClick: $setup.onClick\n  }, _toDisplayString($props.label), 9 /* TEXT, PROPS */, _hoisted_1))\n}\n_sfc_main.render = render\nexport default _sfc_main",
+  "map": null
+}

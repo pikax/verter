@@ -61,8 +61,26 @@ follows.
   message chain, source, start AND end spans, related information, order);
   and full-field source-map comparison over every contractual field
   (`version`, `mappings`, `sources`, `sourceRoot`, `sourcesContent`,
-  `names`; `file` is the one explicitly-classified incidental field).
-  Independent oracles — none of which the normalizer can override.
+  `names`; `file` is the one explicitly-classified incidental field). The
+  `mappings` field compares on DECODED, normalized VLQ segment sets
+  (`src/sourcemap.mjs`): encoding spelling, in-line segment order,
+  duplicates, and trailing empty lines are representation artifacts, while
+  any (generated → original) correspondence difference diverges. Published
+  Vue golden maps describe the ASSEMBLED module — both official fragment
+  maps (script half, and the render half chained through the descriptor
+  block map to whole-file coordinates) re-anchored by the assembly's exact
+  geometry. Independent oracles — none of which the normalizer can
+  override. Every axis reports ran/skipped status, and the opt-in
+  AUTHORITATIVE mode turns any skipped axis into a hard failure.
+- **Candidate acceptance check** (`src/check-candidate.mjs`,
+  `bin/check-candidate.mjs`): compares one candidate artifact against one
+  committed golden across every axis — parse, structural, diagnostics,
+  mapping, link, and runtime execution (server-target goldens execute both
+  arms through the pinned runtime and compare rendered HTML). Default
+  behavior keeps skip-with-reason semantics for absent environment
+  prerequisites; `--authoritative` / `BF2_AUTHORITATIVE=1` is the
+  fail-closed contract for consumers that must prove every applicable axis
+  genuinely ran (skipped axis ⇒ exit 2).
 - **TypeScript-observation validator** (`src/typescript-observe.mjs`): the
   reusable mechanism for TypeScript-observable product validation — drives
   the real pinned `typescript` compiler over produced artifacts in memory
