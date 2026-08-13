@@ -1,6 +1,6 @@
 # AMD-006 — Vue known-defect correction
 
-**Status:** PROPOSED — NOT RATIFIED. This candidate has no execution authority.
+**Status:** RATIFIED (see §8.1). Landed at `fdb6f6291`.
 **Prepared against:** local `program/architecture-lock` commit
 `2493c0056b55e58f28f8df89756bd3a3ffbeed4e`, tree
 `3b4a8634856ab675d81e38cb46dca89e01fe32df`.
@@ -138,3 +138,39 @@ On ratification this amendment supersedes only the conflicting BF3 Vue-retractio
 scope in AMD-005 §5 and §12 and the BF3 "track, don't retract" worktree disposition.
 It does not touch AMD-005's compatibility-domain locks, oracle/exclusion rules,
 capability matrix, or performance-lock process; all remain in force unchanged.
+
+### 8.1 Recorded ratification
+
+The architecture, conformance, and governance reports at
+[`../evidence/vue-known-defect-correction/reviews/`](../evidence/vue-known-defect-correction/reviews/)
+each closed `BLOCKING_FINDINGS` (round 1) against reviewed candidate
+`80be3b5302f6089f24313ee954afbc2432674069`, tree
+`af1625731bb3efe24c831baba98f6f6299e96e2e`, on one shared finding: whether the
+general "fix, don't guard" project rule retroactively supersedes BF3's
+AMD-005-ratified Svelte-domain safety-retraction mechanism. A Codex Sol xhigh
+architecture ruling resolved this RETROACTIVE-NO-FORWARD-ONLY: the rule governs
+BV0's Vue findings and any future findings outside BF3's already-ratified
+retained inventory; it does not repeal BF3's existing, already-ratified
+typed-non-success/whole-cell-retraction/removal-owner mechanism for its
+retained Svelte and non-Vue-runtime scope. No package content change was
+required. Round 2 reattestation on the unchanged candidate closed all three
+mandates `PASS`: `architecture-challenge-reattestation.md`,
+`conformance-challenge-reattestation.md`, `governance-challenge-reattestation.md`.
+
+> Ratify AMD-006 for reviewed package commit
+> `fdb6f62911fffc43c7f64610033bdf2e8a591fbf`, tree
+> `715b3c620a313a37a4289fc05eacf0924d421a5a` (reviewed package and
+> ratification bundle are the same commit — reviews were committed alongside
+> the package in one landing, per program branch hygiene), and the listed
+> package digests; confirm that Vue VDOM/Vapor/SSR production compilation
+> remains successful with no BF3 retraction or temporary tracking; authorize
+> BV0 as the immediate correction owner for the exact BF2 Vue seed domain;
+> narrow BF3 to its remaining Svelte and non-Vue-runtime inventory (its
+> existing retraction mechanism is UNCHANGED and stays in force for that
+> retained domain); amend the DAG so B2 and B3 require both BV0 and BF3;
+> require BV1 to preserve every BV0 correction on the final substrate; and
+> authorize no B2/B3 dispatch until both BV0 and BF3 are accepted.
+
+Any challenged or changed byte requires regenerated identities and fresh
+reports. Silence, merge, or this proposal's commit is not ratification. The
+preparer cannot ratify, review, or satisfy any independent mandate.
