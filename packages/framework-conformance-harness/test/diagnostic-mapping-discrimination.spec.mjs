@@ -2,17 +2,16 @@
 //
 // EVERY contract-observable diagnostic field discriminates INDEPENDENTLY:
 // category/kind, code, the FULL message chain, source/file identity, start
-// AND end spans, related information, and order/count. Likewise every
-// contractual source-map field, including sourcesContent and sourceRoot. A
-// diagnostic or map that matches on every field but one must be caught —
-// each case below differs from its baseline in EXACTLY one field, so a
-// comparison that ignored that field would falsely pass and fail the test.
+// AND end spans, related information, and order/count. A
+// diagnostic that matches on every field but one must be caught — each case
+// below differs from its baseline in EXACTLY one field, so a comparison that
+// ignored that field would falsely pass and fail the test.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { compareDiagnostics, compareMappings, CONTRACTUAL_MAP_FIELDS } from "../src/compare.mjs";
+import { compareDiagnostics } from "../src/compare.mjs";
 import { compileSvelteFixture } from "../src/invoke-svelte-oracle.mjs";
 import { HARNESS_ROOT } from "../src/paths.mjs";
 
@@ -114,75 +113,14 @@ describe("diagnostic discrimination — every field independently", () => {
   });
 });
 
-describe("mapping discrimination — every contractual field independently", () => {
-  /** Fully-populated baseline map; each case perturbs ONE contractual field. */
-  function baselineMap() {
-    return {
-      version: 3,
-      mappings: "AAAA,CAAC",
-      sources: ["x.vue"],
-      sourceRoot: "src/",
-      sourcesContent: ["<template>original</template>"],
-      names: ["count"],
-      file: "out.js",
-    };
-  }
-
-  it("classifies exactly the contractual field set (sourcesContent and sourceRoot included)", () => {
-    expect(CONTRACTUAL_MAP_FIELDS).toEqual([
-      "version",
-      "mappings",
-      "sources",
-      "sourceRoot",
-      "sourcesContent",
-      "names",
-    ]);
-  });
-
-  it("treats identical fully-populated maps as equal", () => {
-    expect(compareMappings(baselineMap(), baselineMap()).equal).toBe(true);
-  });
-
-  const mapCases = [
-    ["version", (m) => ({ ...m, version: 4 })],
-    ["mappings", (m) => ({ ...m, mappings: "AAAA,CAAD" })],
-    ["sources", (m) => ({ ...m, sources: ["y.vue"] })],
-    ["sourceRoot", (m) => ({ ...m, sourceRoot: "lib/" })],
-    ["sourceRoot presence", (m) => ({ ...m, sourceRoot: undefined })],
-    ["sourcesContent", (m) => ({ ...m, sourcesContent: ["<template>MUTATED</template>"] })],
-    ["sourcesContent presence", (m) => ({ ...m, sourcesContent: undefined })],
-    ["names", (m) => ({ ...m, names: ["renamed"] })],
-  ];
-
-  for (const [field, mutate] of mapCases) {
-    it(`distinguishes maps differing ONLY in ${field}`, () => {
-      const golden = baselineMap();
-      const candidate = mutate(baselineMap());
-      expect(JSON.stringify(candidate)).not.toBe(JSON.stringify(golden));
-      const result = compareMappings(golden, candidate);
-      expect(result.equal).toBe(false);
-      const fieldKey = field.split(" ")[0];
-      expect(result.fields[fieldKey]).toBe(false);
-      // Every OTHER contractual field still matches — the catch is
-      // attributable to exactly the perturbed field.
-      for (const other of CONTRACTUAL_MAP_FIELDS) {
-        if (other !== fieldKey) expect(result.fields[other]).toBe(true);
-      }
-    });
-  }
-
-  it("the incidental `file` field alone does NOT flag a divergence (classified, excluded by decision)", () => {
-    const golden = baselineMap();
-    const candidate = { ...baselineMap(), file: "different-out.js" };
-    expect(compareMappings(golden, candidate).equal).toBe(true);
-  });
-
-  it("map presence itself discriminates", () => {
-    expect(compareMappings(baselineMap(), null).equal).toBe(false);
-    expect(compareMappings(null, baselineMap()).equal).toBe(false);
-    expect(compareMappings(null, null).equal).toBe(true);
-  });
-
+describe("map PRESENCE is a recorded, discriminating property of a golden", () => {
+  // Field-by-field comparison against the OFFICIAL compiler's map is gone:
+  // a `mappings` field describes ONE generated document, and Verter's
+  // generated JS is legitimately not byte-identical to official's, so the
+  // two maps are never in the same coordinate space. The mapping axis is
+  // now self-referential (src/mapping-oracle.mjs, exercised by
+  // test/mapping-oracle*.spec.mjs). What remains observable HERE is that a
+  // golden records whether its compilation produced a map at all.
   it("a golden generated with sourceMap:true differs from one generated with sourceMap:false in mapPresent", () => {
     const source = readFileSync(
       path.join(HARNESS_ROOT, "fixtures/svelte/basic-runes.svelte"),
@@ -202,8 +140,7 @@ describe("mapping discrimination — every contractual field independently", () 
     });
     expect(withMap.map).not.toBeNull();
     expect(withoutMap.map).toBeNull();
-    // Real official maps carry the full contractual field set the
-    // comparator discriminates on.
+    // A produced map is a real, populated v3 map.
     expect(withMap.map.mappings).toBeTruthy();
     expect(withMap.map.sources).toBeTruthy();
     expect(withMap.map.names).toBeDefined();

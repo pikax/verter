@@ -59,19 +59,78 @@ follows.
   imports outside the pinned closures fail); structural topology (via the
   normalizer); full-field diagnostic discrimination (kind, code, full
   message chain, source, start AND end spans, related information, order);
-  and full-field source-map comparison over every contractual field
-  (`version`, `mappings`, `sources`, `sourceRoot`, `sourcesContent`,
-  `names`; `file` is the one explicitly-classified incidental field). The
-  `mappings` field compares on DECODED, normalized VLQ segment sets
-  (`src/sourcemap.mjs`): encoding spelling, in-line segment order,
-  duplicates, and trailing empty lines are representation artifacts, while
-  any (generated → original) correspondence difference diverges. Published
-  Vue golden maps describe the ASSEMBLED module — both official fragment
+  and the AUTHORED-SOURCE mapping oracle (see below). Independent oracles —
+  none of which the normalizer can override. Every axis reports ran/skipped
+  status, and the opt-in AUTHORITATIVE mode turns any skipped axis into a
+  hard failure.
+- **Authored-source mapping oracle** (`src/mapping-oracle.mjs`): validates a
+  candidate's source map against the CANDIDATE's own generated code and the
+  authored SFC fixture read from disk. No golden map, and no
+  official-compiler map, is an input. A candidate-vs-official `mappings`
+  comparison cannot be the oracle for this axis: a `mappings` field encodes
+  (generated → original) correspondences over ONE specific generated
+  document, and Verter's generated JS is legitimately not byte-identical to
+  the official compiler's (cosmetic carrier differences are explicitly
+  permitted), so the two maps describe different generated documents by
+  construction — the comparison rejects correct maps whose layout differs
+  and accepts wrong maps that happen to resemble official's. What the oracle
+  checks instead: map presence matches the `sourceMap` request in both
+  directions; `version` 3 and strictly-decodable VLQ with in-bounds source
+  and name indices; generated and original positions in bounds as UTF-16
+  code-unit offsets (CRLF and astral-plane characters included); every
+  source spelling resolving to the exact authored fixture, and any
+  `sourcesContent` equal to that file's real bytes; every source-bearing
+  segment classified under a NAMED relation (verbatim carry, or an explicit
+  rewrite relation such as a `$setup.<name>` context-binding prefix), with
+  an unclassifiable segment a failure rather than a skip; every named
+  segment's `names[nameIdx]` entry actually naming its authored or generated
+  symbol, not merely being in bounds; per-fixture REQUIRED anchors resolving
+  in both directions with exact authored text; and no authored provenance
+  over generated-only ranges. `map.file` is deliberately NOT validated — no
+  committed golden carries the field, so it has no materiality here; the
+  omission is recorded rather than implied. The named relations divide into a
+  POSITION-EXACT majority (the mapped original position must BE a specific
+  authored lexeme, so re-pointing a segment elsewhere on the same authored
+  line breaks it — with `verbatim-carry` position-exact only up to
+  identical-lexeme interchangeability, since it is a text-equality relation)
+  and three relations — `component-instance-surface`,
+  `framework-emitted-token`, `delimiter-anchor` — that constrain only the
+  GENERATED side and accept any in-bounds, non-word-interior original
+  position; the module comment names which is which.
+  The generated-only ranges are DERIVED from the candidate's own parsed
+  module, for both Vue and Svelte, so that requirement runs on every
+  candidate and cannot be switched off from a call site. **Exactly what they
+  cover**, stated as the real boundary: a name is CLAIMABLE when it matches
+  the framework profile's emitted-identifier shapes, is not a render-scope
+  context root, and is not a word the author wrote in the fixture's own
+  script blocks; a claimable name yields a range only in an enumerated
+  BINDING position (declarator id, function/catch parameter, pattern target,
+  object-pattern property VALUE, function/class declaration id, class member
+  key, import-specifier local, object-LITERAL key — never an object-PATTERN
+  key, which names a property of the source object and carries authored text)
+  or one of the enumerated STATEMENT forms (an import whose specifier is an
+  EXACT member of the profile's closed six-string runtime-module set — not a
+  namespace prefix, so an authored `svelte/store` or `vue/reactivity` import
+  stays mappable in both the named and the side-effect form — a
+  member-assignment plumbing statement, a bare or wrapper-call default
+  export, a helper call's callee, a claimable identifier passed directly to a
+  helper call, a bare claimable return). A range that STARTS ITS OWN
+  generated line additionally requires a boundary: nothing may map at the
+  column before it, since a consumer resolving the range's start column
+  would otherwise inherit that segment's authored provenance. A range
+  beginning mid-line is exempt — it sits inside a larger, legitimately
+  mapped expression. Everything else is UNCOVERED — most materially compiler
+  scaffolding spelled with AUTHORED-shaped identifiers, and the
+  non-identifier payload of a synthesized statement (a literal inside
+  `$.delegate(['click'])` genuinely can carry authored provenance). Over that
+  remainder the rail is `framework-emitted-token` / `delimiter-anchor`, which
+  are not position-exact. Published Vue
+  golden maps still describe the ASSEMBLED module — both official fragment
   maps (script half, and the render half chained through the descriptor
   block map to whole-file coordinates) re-anchored by the assembly's exact
-  geometry. Independent oracles — none of which the normalizer can
-  override. Every axis reports ran/skipped status, and the opt-in
-  AUTHORITATIVE mode turns any skipped axis into a hard failure.
+  geometry (`src/sourcemap.mjs`) — and the assembly is required to be a pure
+  coordinate translation of fragment maps that already validated against the
+  authored fixture on their own.
 - **Candidate acceptance check** (`src/check-candidate.mjs`,
   `bin/check-candidate.mjs`): compares one candidate artifact against one
   committed golden across every axis — parse, structural, diagnostics,
@@ -128,7 +187,8 @@ follows.
 | expected-golden immutability | `test/golden-immutability.spec.mjs` — structural (no write export) + operational (manifest and record bytes unchanged after many divergent comparisons) |
 | parse/link/runtime failure detection | `test/failure-detection.spec.mjs` + `test/link-surface.spec.mjs` + `test/fragment-validation.spec.mjs` |
 | atomic result accounting | `test/atomic-result-accounting.spec.mjs` + `test/atomic-golden-set.spec.mjs` |
-| diagnostic/mapping discrimination | `test/diagnostic-mapping-discrimination.spec.mjs` — every contract-observable field independently |
+| diagnostic discrimination | `test/diagnostic-mapping-discrimination.spec.mjs` — every contract-observable field independently |
+| mapping discrimination (authored-source oracle) | `test/mapping-oracle.spec.mjs` (contract, identity, whole-corpus classification, axis wiring, position binding, candidate-derived generated-only ranges, `names` content) + `test/mapping-oracle-mutations.spec.mjs` (shifted/dropped/mis-encoded positions, UTF-16 + CRLF) + `test/mapping-oracle-composition.spec.mjs` (fragment-first validation, pure-translation assembly, generated-only ranges) |
 
 ## What's deliberately NOT built here (honest scope)
 

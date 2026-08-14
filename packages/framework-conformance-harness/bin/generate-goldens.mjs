@@ -28,7 +28,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
+import { compileVueFixture, VUE_BUILD_TRANSFORM_ASSET_URLS } from "../src/invoke-vue-oracle.mjs";
 import { compileSvelteFixture } from "../src/invoke-svelte-oracle.mjs";
 import { VUE_DOMAIN, SVELTE_DOMAIN, EVIDENCE_LOCK_DIGESTS } from "../src/domain-pin.mjs";
 import {
@@ -159,7 +159,17 @@ function vueGoldens() {
             packageLockSha256: EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256,
             fixturePath,
             fixtureSource: source,
-            options: { backend, sourceMap, isProd },
+            // The asset-URL resolution is recorded EXPLICITLY beside the
+            // requested axes: it is a fixed official-build-mode choice
+            // rather than a per-record axis, but a reader of a golden must
+            // not have to know the compiler's own default to know which
+            // resolution produced it (see VUE_BUILD_TRANSFORM_ASSET_URLS).
+            options: {
+              backend,
+              sourceMap,
+              isProd,
+              transformAssetUrls: VUE_BUILD_TRANSFORM_ASSET_URLS,
+            },
           });
           const record = finalizeRecord(provenance, artifact);
           const name = `vue/${caseName}__${backend}__map${sourceMap ? 1 : 0}__prod${isProd ? 1 : 0}`;

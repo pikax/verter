@@ -23,7 +23,9 @@ import path from "node:path";
 
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
 import { compileSvelteFixture } from "../src/invoke-svelte-oracle.mjs";
-import { compareArtifacts, compareMappings } from "../src/compare.mjs";
+import { compareArtifacts } from "../src/compare.mjs";
+import { decodeMappings, encodeMappings } from "../src/sourcemap.mjs";
+import { FIXTURE_ANCHORS, MAPPING_PROFILES } from "../src/mapping-oracle.mjs";
 import { parseModule } from "../src/normalize.mjs";
 import { HARNESS_ROOT } from "../src/paths.mjs";
 import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
@@ -31,10 +33,8 @@ import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 const VUE_BASE = oracleLinkBaseDir("vue");
 const SVELTE_BASE = oracleLinkBaseDir("svelte");
 
-const FIXTURE = readFileSync(
-  path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
-  "utf8",
-);
+const VUE_FIXTURE_PATH = "fixtures/vue/basic-interpolation.vue";
+const FIXTURE = readFileSync(path.join(HARNESS_ROOT, VUE_FIXTURE_PATH), "utf8");
 
 function goldenVdom() {
   return compileVueFixture(FIXTURE, "fixtures/vue/basic-interpolation.vue", {
@@ -414,19 +414,43 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
     expect(report.diagnostics.equal).toBe(false);
   });
 
-  // Category: mappings (drift; full-field discrimination likewise covered
-  // in diagnostic-mapping-discrimination.spec.mjs).
-  it("mapping drift (source map mappings string changed)", async () => {
-    const goldenMap = { mappings: "AAAA,CAAC", sources: ["x.vue"], names: [] };
-    const mutatedMap = { mappings: "AAAA,CAAD", sources: ["x.vue"], names: [] };
-    assertMutationApplied(goldenMap.mappings, mutatedMap.mappings);
-    expect(compareMappings(goldenMap, mutatedMap).equal).toBe(false);
+  // Category: mappings. The axis is SELF-REFERENTIAL — the candidate's map
+  // is validated against the candidate's own generated code and the authored
+  // fixture, never against the golden's map (mapping-oracle.mjs explains why
+  // the latter cannot work). Exhaustive discrimination lives in
+  // test/mapping-oracle*.spec.mjs; what is locked here is that the axis is
+  // wired into compareArtifacts and can fail a report.
+  it("mapping drift (a candidate map that lies about its own output)", async () => {
+    const golden = compileVueFixture(FIXTURE, VUE_FIXTURE_PATH, {
+      backend: "vdom",
+      sourceMap: true,
+      isProd: false,
+    });
+    const segments = decodeMappings(golden.map.mappings);
+    const shifted = segments.map((segment, index) =>
+      index === 0 && segment.srcCol !== null ? { ...segment, srcCol: segment.srcCol + 1 } : segment,
+    );
+    const mutatedMappings = encodeMappings(shifted);
+    assertMutationApplied(golden.map.mappings, mutatedMappings);
+    const mappingContext = {
+      sourceMapRequested: true,
+      fixture: {
+        path: VUE_FIXTURE_PATH,
+        absolutePath: path.join(HARNESS_ROOT, VUE_FIXTURE_PATH),
+      },
+      sourceResolveBases: [HARNESS_ROOT],
+      profile: MAPPING_PROFILES["vue:vdom"],
+      anchors: FIXTURE_ANCHORS[VUE_FIXTURE_PATH],
+    };
+    const clean = await compareArtifacts(golden, golden, { mappingContext });
+    expect(clean.mapping.ok).toBe(true);
     const report = await compareArtifacts(
-      { code: "export default 1;", diagnostics: [], map: goldenMap },
-      { code: "export default 1;", diagnostics: [], map: mutatedMap },
+      golden,
+      { ...golden, map: { ...golden.map, mappings: mutatedMappings } },
+      { mappingContext },
     );
     expect(report.verdict).toBe("fail");
-    expect(report.mapping.equal).toBe(false);
+    expect(report.mapping.ok).toBe(false);
   });
 
   // Category: literal values.
@@ -578,6 +602,234 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
       { code: c, diagnostics: [] },
     );
     expect(report.verdict).toBe("fail"); // literal 2 vs 3 — a genuine value difference
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Import-specifier order. Named specifier order WITHIN ONE import declaration
+// is cosmetic — two modules importing the same names from the same source in a
+// different order are the same program (ESM bindings are hoisted, and the
+// binding set is what the module sees). EVERY other import fact stays
+// structural: membership, imported name, local alias, source module,
+// default/namespace form, the top-level order of the declarations themselves,
+// and the side-effect import sequence.
+//
+// This is deliberately NARROWER than the Rust structural comparator, which is
+// not the authority this normalizer mirrors: `compare.rs`'s own
+// `merge_imports`/`diff_imports` merges EVERY declaration sharing a source
+// into one set before comparing, so it treats declaration GROUPING (and with
+// it declaration order) as cosmetic, keeping only the side-effect sequence
+// ordered. The two comparators agree on ONE point — named-specifier
+// membership compares as a set — and that is the only distinction adopted
+// here. Keeping declaration order and grouping structural is this
+// normalizer's intentionally stricter reading, and it is what the negative
+// controls below enforce.
+//
+// The negative half of this block is the over-broadening control: a fix that
+// canonicalized "all import facts" as a set, or that sorted whole declarations,
+// would pass the permutation test and FAIL these.
+// ---------------------------------------------------------------------------
+
+/**
+ * ROTATES the named specifiers of `code`'s import declaration for `source` —
+ * a pure permutation: the same specifier TEXTS, every one in a new slot,
+ * every other byte of the module untouched.
+ */
+function rotateNamedSpecifiers(code, source) {
+  const ast = parseModule(code, "specifier-rotation");
+  const decl = ast.body.find((s) => s.type === "ImportDeclaration" && s.source.value === source);
+  if (decl === undefined) throw new Error(`no import declaration from "${source}"`);
+  const named = decl.specifiers.filter((s) => s.type === "ImportSpecifier");
+  if (named.length < 2) throw new Error("rotation needs at least two named specifiers");
+  const texts = named.map((s) => code.slice(s.start, s.end));
+  const rotated = [...texts.slice(1), texts[0]];
+  let out = "";
+  let cursor = 0;
+  named.forEach((specifier, i) => {
+    out += code.slice(cursor, specifier.start) + rotated[i];
+    cursor = specifier.end;
+  });
+  return out + code.slice(cursor);
+}
+
+/** The named specifier source texts of `code`'s import declaration for `source`. */
+function namedSpecifierTexts(code, source) {
+  const ast = parseModule(code, "specifier-read");
+  const decl = ast.body.find((s) => s.type === "ImportDeclaration" && s.source.value === source);
+  return decl.specifiers
+    .filter((s) => s.type === "ImportSpecifier")
+    .map((s) => code.slice(s.start, s.end));
+}
+
+/** Compares two synthetic modules with no link oracle (structure in isolation). */
+async function compareSynthetic(a, b) {
+  assertMutationApplied(a, b);
+  return compareArtifacts({ code: a, diagnostics: [] }, { code: b, diagnostics: [] });
+}
+
+describe("normalizer — named import-specifier ORDER is cosmetic (must PASS)", () => {
+  it("real official output: rotating every named specifier of the `vue` import is cosmetic", async () => {
+    // The concrete blocker this rule corrects: official and candidate emit the
+    // same helper import with the same names in a different insertion order.
+    const slots = readFileSync(path.join(HARNESS_ROOT, "fixtures/vue/slots.vue"), "utf8");
+    const golden = compileVueFixture(slots, "fixtures/vue/slots.vue", {
+      backend: "vdom",
+      sourceMap: false,
+      isProd: false,
+    });
+    const mutated = rotateNamedSpecifiers(golden.code, "vue");
+    assertMutationApplied(golden.code, mutated);
+    // Preconditions: the same specifier MULTISET, a genuinely different order,
+    // and no other byte of the module touched.
+    const before = namedSpecifierTexts(golden.code, "vue");
+    const after = namedSpecifierTexts(mutated, "vue");
+    expect(before.length).toBeGreaterThan(1);
+    expect([...after].sort()).toEqual([...before].sort());
+    expect(after).not.toEqual(before);
+    expect(mutated.length).toBe(golden.code.length);
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: VUE_BASE },
+    );
+    expect(report.verdict).toBe("pass");
+    expect(report.structural.equal).toBe(true);
+  });
+
+  it("synthetic: a pure permutation of named specifiers canonicalizes identically", async () => {
+    const report = await compareSynthetic(
+      'import { alpha, beta, gamma } from "x";\nexport default alpha + beta + gamma;',
+      'import { gamma, alpha, beta } from "x";\nexport default alpha + beta + gamma;',
+    );
+    expect(report.verdict).toBe("pass");
+    expect(report.structural.equal).toBe(true);
+  });
+
+  it("synthetic: aliased named specifiers permute freely (alias pairing preserved)", async () => {
+    const report = await compareSynthetic(
+      'import { a as _a, b as _b } from "x";\nexport default _a + _b;',
+      'import { b as _b, a as _a } from "x";\nexport default _a + _b;',
+    );
+    expect(report.verdict).toBe("pass");
+  });
+
+  it("synthetic: a DEFAULT specifier keeps its leading slot while the named tail permutes", async () => {
+    const report = await compareSynthetic(
+      'import D, { a, b } from "x";\nexport default D + a + b;',
+      'import D, { b, a } from "x";\nexport default D + a + b;',
+    );
+    expect(report.verdict).toBe("pass");
+  });
+});
+
+describe("normalizer — every OTHER import fact stays structural (must be CAUGHT)", () => {
+  it("adding a named specifier is caught", async () => {
+    const report = await compareSynthetic(
+      'import { a, b } from "x";\nexport default a + b;',
+      'import { a, b, c } from "x";\nexport default a + b;',
+    );
+    expect(report.candidateParse.ok).toBe(true); // structure catches it, not the parser
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("removing a named specifier is caught", async () => {
+    const report = await compareSynthetic(
+      'import { a, b } from "x";\nexport default a;',
+      'import { a } from "x";\nexport default a;',
+    );
+    expect(report.candidateParse.ok).toBe(true);
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("renaming a named specifier's LOCAL alias is caught (same imported name)", async () => {
+    const report = await compareSynthetic(
+      'import { a as _a, b as _b } from "x";\nexport default _b;',
+      'import { a as _renamed, b as _b } from "x";\nexport default _b;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("renaming a named specifier's IMPORTED name is caught (same local alias)", async () => {
+    // The local binding set is IDENTICAL on both sides — only which export of
+    // the module it is bound to changed, so nothing but the imported-name
+    // comparison can catch it.
+    const report = await compareSynthetic(
+      'import { a as _x, b as _y } from "x";\nexport default _x + _y;',
+      'import { c as _x, b as _y } from "x";\nexport default _x + _y;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("changing the import SOURCE module is caught", async () => {
+    const report = await compareSynthetic(
+      'import { a, b } from "x";\nexport default a + b;',
+      'import { a, b } from "y";\nexport default a + b;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("adding a DEFAULT specifier is caught", async () => {
+    const report = await compareSynthetic(
+      'import { a } from "x";\nexport default a;',
+      'import D, { a } from "x";\nexport default a;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("default → NAMESPACE form change is caught (same local name)", async () => {
+    // Same local binding spelling on both sides: only the specifier FORM
+    // changed, so form must be structural for this to fail.
+    const report = await compareSynthetic(
+      'import D from "x";\nexport default D;',
+      'import * as D from "x";\nexport default D;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("two import DECLARATIONS reordered is caught (module-item order stays structural)", async () => {
+    const report = await compareSynthetic(
+      'import { a } from "x";\nimport { b } from "y";\nexport default a + b;',
+      'import { b } from "y";\nimport { a } from "x";\nexport default a + b;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("two SIDE-EFFECT imports reordered is caught (side-effect sequence stays ordered)", async () => {
+    const report = await compareSynthetic(
+      'import "x";\nimport "y";\nexport default 1;',
+      'import "y";\nimport "x";\nexport default 1;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("regrouping the same named specifiers across two declarations is caught", async () => {
+    // Declaration GROUPING is not merged by this normalizer: the same binding
+    // set split across two declarations from one source is a different module
+    // shape. The over-broadening control against a set-merging fix.
+    const report = await compareSynthetic(
+      'import { a, b } from "x";\nexport default a + b;',
+      'import { a } from "x";\nimport { b } from "x";\nexport default a + b;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("import ATTRIBUTES are caught (same specifiers, same source)", async () => {
+    const report = await compareSynthetic(
+      'import { a } from "x" with { type: "json" };\nexport default a;',
+      'import { a } from "x";\nexport default a;',
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
   });
 });
 

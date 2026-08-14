@@ -1,6 +1,11 @@
 // Self-test: the published golden map describes the PUBLISHED assembled
-// module, and the mapping acceptance axis compares candidate-vs-official
-// on decoded segment semantics.
+// module.
+//
+// The mapping ACCEPTANCE axis lives elsewhere and is self-referential (a
+// candidate's map against its own generated code and the authored fixture —
+// see mapping-oracle.mjs); what is locked here is that the map the harness
+// PUBLISHES alongside a golden really describes the module the golden's
+// `code` field holds.
 //
 // The pre-existing harness artifact this locks out: the raw render-fragment
 // map was published as "the" artifact map — its GENERATED coordinates
@@ -15,9 +20,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
-import { compareMappings } from "../src/compare.mjs";
 import { readGoldenByName } from "../src/golden-store.mjs";
-import { decodeMappings, encodeMappings, normalizedMappingSegments } from "../src/sourcemap.mjs";
+import { decodeMappings, encodeMappings } from "../src/sourcemap.mjs";
 import { GOLDENS_ROOT, HARNESS_ROOT } from "../src/paths.mjs";
 
 const FIXTURE_PATH = "fixtures/vue/basic-interpolation.vue";
@@ -269,51 +273,5 @@ describe("committed golden maps — literal column anchors, every backend", () =
       [77, 9, 27],
       [89, 9, 32],
     ]);
-  });
-});
-
-describe("mapping acceptance axis — decoded candidate-vs-official comparison", () => {
-  it("representation-only differences are equal: VLQ spelling, in-line order, duplicates, trailing empty lines", () => {
-    const { map } = compileWithMap("vdom");
-    const segments = decodeMappings(map.mappings);
-    // Re-encode the SAME correspondences differently: duplicate a segment,
-    // reverse in-line order (encodeMappings re-sorts, so feed the encoder a
-    // hand-rolled variant), and append trailing empty lines.
-    const doubled = [...segments, segments[0]];
-    const variant = `${encodeMappings(doubled)};;;`;
-    expect(variant).not.toBe(map.mappings); // the plant applied
-    const result = compareMappings(map, { ...map, mappings: variant });
-    expect(result.fields.mappings).toBe(true);
-    expect(result.equal).toBe(true);
-  });
-
-  it("a genuine anchor shift is a divergence attributed to the mappings field", () => {
-    const { map } = compileWithMap("vdom");
-    const segments = decodeMappings(map.mappings);
-    const shifted = segments.map((seg, i) =>
-      i === 0 ? { ...seg, srcLine: (seg.srcLine ?? 0) + 1 } : seg,
-    );
-    const result = compareMappings(map, { ...map, mappings: encodeMappings(shifted) });
-    expect(result.equal).toBe(false);
-    expect(result.fields.mappings).toBe(false);
-    for (const field of ["version", "sources", "sourceRoot", "sourcesContent", "names"]) {
-      expect(result.fields[field]).toBe(true);
-    }
-  });
-
-  it("a dropped mapped position is a divergence (segment-set inequality, not spelling)", () => {
-    const { map } = compileWithMap("vdom");
-    const normalized = normalizedMappingSegments(map.mappings);
-    const withoutLast = encodeMappings(normalized.slice(0, -1));
-    const result = compareMappings(map, { ...map, mappings: withoutLast });
-    expect(result.equal).toBe(false);
-    expect(result.fields.mappings).toBe(false);
-  });
-
-  it("an undecodable candidate mappings field never passes against a decodable golden", () => {
-    const { map } = compileWithMap("vdom");
-    const result = compareMappings(map, { ...map, mappings: "%%not-vlq%%" });
-    expect(result.equal).toBe(false);
-    expect(result.fields.mappings).toBe(false);
   });
 });

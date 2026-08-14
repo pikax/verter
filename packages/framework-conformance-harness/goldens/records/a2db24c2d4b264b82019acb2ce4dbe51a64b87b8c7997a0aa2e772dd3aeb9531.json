@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+    "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+    "packageVersion": "5.56.8"
+  },
+  "packageLockSha256": "0c27c9fc7bed24be3fd7a546b55b6ee5858b244a57613390a213fdb454b92ce2",
+  "realizedClosureSha256": "f10fcab693c6db4236b0c8cfd18c75667a90150d35ead315d3a286689e309cf0",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "65a6f2c584d08f10fb15313c251408af810ef6d5901ac3c86bac2fbc299d1c38",
+    "commit": "a52fb630fb8e605be036e6dedc32dbab15dd7244",
+    "tree": "a12ce40a2398b31fdb29adf2c867826f4041c98d",
+    "worktreeDirty": true,
+    "implementationSha256": "6b5c1e6bb31f8c7ff6e85620d343d1ebae7c79629214e767eace52b5c1df6421"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/basic-runes.svelte",
+    "sha256": "ea8607971acb60a6fe161bfa6982d715ecb4c9a913829fc0e372e54b7a54fd79"
+  },
+  "options": {
+    "generate": "server",
+    "runes": true,
+    "dev": false
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "5ff0889ba8e1e94cf0fc2cdab7ba65ff451dbd209544c0a1d5c7f28d91dce5d7",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "8f33a31d1b94a7bc65a26514124c6ec97cef42c0a7e9a01271724dbe66af90d7",
+    "normalizedDigestSha256": "47872adab243951d6910a60c8a0162e27139e9b851c447dc73a93b1441b8d3f4"
+  },
+  "code": "import * as $ from 'svelte/internal/server';\n\nexport default function Basic_runes($$renderer) {\n\tlet count = 0;\n\tlet items = [\"a\", \"b\", \"c\"];\n\n\t$$renderer.push(`<div class=\"root\">`);\n\n\tif (count > 0) {\n\t\t$$renderer.push('<!--[0-->');\n\t\t$$renderer.push(`<p>0</p>`);\n\t} else {\n\t\t$$renderer.push('<!--[-1-->');\n\t\t$$renderer.push(`<p>zero</p>`);\n\t}\n\n\t$$renderer.push(`<!--]--> <ul><!--[-->`);\n\n\tconst each_array = $.ensure_array_like(items);\n\n\tfor (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {\n\t\tlet item = each_array[$$index];\n\n\t\t$$renderer.push(`<li>${$.escape(item)}</li>`);\n\t}\n\n\t$$renderer.push(`<!--]--></ul></div>`);\n}",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "basic-runes.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  let count = $state(0);\n  let items = [\"a\", \"b\", \"c\"];\n</script>\n\n<div class=\"root\">\n  {#if count > 0}\n    <p>{count}</p>\n  {:else}\n    <p>zero</p>\n  {/if}\n  <ul>\n    {#each items as item (item)}\n      <li>{item}</li>\n    {/each}\n  </ul>\n</div>\n"
+    ],
+    "mappings": ";;gDAAA,CAAC;CACC,IAAI,AAAA,KAAK,GAAU,CAAC;CACpB,IAAI,AAAA,KAAK,IAAI,GAAG,EAAE,GAAG,EAAE,GAAG;;;;KAIrB,KAAK,GAAG,CAAC;;;;;;;;;;wCAML,KAAK;;;MAAI,IAAI;;kCACb,IAAI;;;;AAVP,CAAC"
+  }
+}

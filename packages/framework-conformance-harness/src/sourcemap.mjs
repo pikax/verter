@@ -15,11 +15,12 @@
 // position translated; segments inside a replaced keyword span (harness
 // text, no longer present) are dropped.
 //
-// The decoder doubles as the comparator's normalizer (compare.mjs): two
-// mappings fields are equivalent when their DECODED, normalized segment
-// sets agree — VLQ relative-encoding spelling, in-line segment order,
-// duplicate segments, and trailing empty lines are representation
-// artifacts, not mapping semantics.
+// The decoder's consumers are the authored-source mapping oracle
+// (mapping-oracle.mjs), which reads a map's segments to check them against
+// the artifact and the fixture, and the composition self-test. There is no
+// mappings-EQUIVALENCE normalizer here: candidate-vs-official `mappings`
+// comparison was removed as an oracle (it compares two different generated
+// documents), and nothing replaced it.
 
 const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const BASE64_LOOKUP = new Map([...BASE64].map((char, index) => [char, index]));
@@ -139,28 +140,6 @@ export function encodeMappings(segments) {
     lines.push(encoded.join(","));
   }
   return lines.join(";");
-}
-
-/**
- * Normal form for mappings EQUIVALENCE: absolute segments, sorted, with
- * exact duplicates collapsed. Two `mappings` strings whose normal forms
- * agree address identical (generated → original) correspondences; they may
- * still differ in VLQ spelling, in-line ordering, duplicates, or trailing
- * empty lines.
- */
-export function normalizedMappingSegments(mappings) {
-  const key = (s) => `${s.genLine},${s.genCol},${s.srcIdx},${s.srcLine},${s.srcCol},${s.nameIdx}`;
-  const byKey = new Map();
-  for (const segment of decodeMappings(mappings)) byKey.set(key(segment), segment);
-  return [...byKey.values()].sort(
-    (a, b) =>
-      a.genLine - b.genLine ||
-      a.genCol - b.genCol ||
-      (a.srcIdx ?? -1) - (b.srcIdx ?? -1) ||
-      (a.srcLine ?? -1) - (b.srcLine ?? -1) ||
-      (a.srcCol ?? -1) - (b.srcCol ?? -1) ||
-      (a.nameIdx ?? -1) - (b.nameIdx ?? -1),
-  );
 }
 
 /** 0-based (line, column) of a string offset within `text`. */
