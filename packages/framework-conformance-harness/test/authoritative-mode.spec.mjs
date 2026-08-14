@@ -20,9 +20,25 @@ import { cleanupScratch as cleanupVueScratch } from "../src/execute-vue-runtime.
 import { cleanupScratch as cleanupVaporScratch } from "../src/execute-vue-vapor.mjs";
 import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 import { readGoldenManifest, readGoldenByName } from "../src/golden-store.mjs";
+import { MAPPING_PROFILES } from "../src/mapping-oracle.mjs";
 import { GOLDENS_ROOT, HARNESS_ROOT } from "../src/paths.mjs";
 
 const TRIVIAL = { code: 'import { ref } from "vue";\nexport default ref;', diagnostics: [] };
+// The mapping axis is self-referential: it needs the AUTHORED source it is
+// meant to be a map of. TRIVIAL is hand-written and requests no map, so the
+// axis genuinely runs here and asserts the compliant absent/not-requested
+// pair — it is not standing in for a real mapped compilation (those are the
+// checkCandidate cases below and test/mapping-oracle*.spec.mjs).
+const TRIVIAL_MAPPING_CONTEXT = {
+  sourceMapRequested: false,
+  fixture: {
+    path: "fixtures/vue/basic-interpolation.vue",
+    absolutePath: path.join(HARNESS_ROOT, "fixtures/vue/basic-interpolation.vue"),
+  },
+  sourceResolveBases: [HARNESS_ROOT],
+  profile: MAPPING_PROFILES["vue:vdom"],
+  anchors: [],
+};
 const SCRATCH = mkdtempSync(path.join(tmpdir(), "bf2-authoritative-"));
 
 afterAll(() => {
@@ -45,13 +61,20 @@ describe("compareArtifacts axis statuses + authoritative option", () => {
     expect(report.verdict).toBe("pass");
     expect(report.axes.link.status).toBe("skipped");
     expect(report.axes.link.reason).toContain("no linkBaseDir");
-    for (const axis of ["parse", "structural", "diagnostics", "mapping"]) {
+    // Same skip-with-reason discipline for the mapping axis when no
+    // authored-source context is supplied.
+    expect(report.axes.mapping.status).toBe("skipped");
+    expect(report.axes.mapping.reason).toContain("authored-source mapping context");
+    for (const axis of ["parse", "structural", "diagnostics"]) {
       expect(report.axes[axis].status).toBe("ran");
     }
   });
 
   it("authoritative: the SAME skipped link axis is a hard failure naming the axis", async () => {
-    const report = await compareArtifacts(TRIVIAL, TRIVIAL, { authoritative: true });
+    const report = await compareArtifacts(TRIVIAL, TRIVIAL, {
+      authoritative: true,
+      mappingContext: TRIVIAL_MAPPING_CONTEXT,
+    });
     expect(report.verdict).toBe("fail");
     expect(report.reasons.some((r) => r.startsWith("authoritative mode: link axis skipped"))).toBe(
       true,
@@ -62,10 +85,13 @@ describe("compareArtifacts axis statuses + authoritative option", () => {
     const report = await compareArtifacts(TRIVIAL, TRIVIAL, {
       linkBaseDir: oracleLinkBaseDir("vue"),
       authoritative: true,
+      mappingContext: TRIVIAL_MAPPING_CONTEXT,
     });
     expect(report.verdict).toBe("pass");
     expect(report.axes.link.status).toBe("ran");
     expect(report.link.ok).toBe(true);
+    expect(report.axes.mapping.status).toBe("ran");
+    expect(report.mapping.ok).toBe(true);
   });
 });
 

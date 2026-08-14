@@ -174,11 +174,17 @@ itself a defect.
 
 Expected goldens are generated only from the exact official compiler pins. Candidate
 Verter output cannot update its own expectations. Cosmetic normalization is limited
-to whitespace/layout, harmless parentheses, quote spelling, and scope-aware alpha
-renaming of private generated identifiers. It cannot erase helper family/source,
-declarations, meaningful order, DOM/effect/block/event/component/slot/hydration/SSR
-topology, prop-versus-attribute meaning, diagnostics, mappings, literals, or authored
-and public names.
+to whitespace/layout, harmless parentheses, quote spelling, scope-aware alpha
+renaming of private generated identifiers, and the order of the NAMED specifiers
+within one import declaration (ratified by the BF2-reopen Codex scoping ruling at
+`../evidence/vue-known-defect-correction/reviews/round2-scope-consult-ruling.md`,
+Q2 — named ESM specifier order has no semantic effect; the full boundary of this
+exception is `../contracts/conformance-normalizer.md`'s "Allowed normalization"
+list). It cannot erase helper family/source, declarations, meaningful order (including
+declaration-level import order and grouping, which stay structural in this
+normalizer), DOM/effect/block/event/component/slot/hydration/SSR topology,
+prop-versus-attribute meaning, diagnostics, mappings, literals, or authored and
+public names.
 
 ## 9. Conformance acceptance
 

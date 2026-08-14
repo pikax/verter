@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+    "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+    "packageVersion": "5.56.8"
+  },
+  "packageLockSha256": "0c27c9fc7bed24be3fd7a546b55b6ee5858b244a57613390a213fdb454b92ce2",
+  "realizedClosureSha256": "f10fcab693c6db4236b0c8cfd18c75667a90150d35ead315d3a286689e309cf0",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "65a6f2c584d08f10fb15313c251408af810ef6d5901ac3c86bac2fbc299d1c38",
+    "commit": "5d9a8b3d2eff168bf0835930ad0d7cff98e820a0",
+    "tree": "5bbf903b52b53885d3705f324ed97e46a090bd46",
+    "worktreeDirty": true,
+    "implementationSha256": "4432d917a893e30ab18232acb12a532c45d8a15d6de8e357b08361da8ec9a1d7"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/basic-runes.svelte",
+    "sha256": "ea8607971acb60a6fe161bfa6982d715ecb4c9a913829fc0e372e54b7a54fd79"
+  },
+  "options": {
+    "generate": "client",
+    "runes": true,
+    "dev": true
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "ec7d01bebbd66bd4b198bd8a6d160965b7a4db80c7bfe40a1b7be34a193b6136",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "8f33a31d1b94a7bc65a26514124c6ec97cef42c0a7e9a01271724dbe66af90d7",
+    "normalizedDigestSha256": "e7e571813ec9b8021ee0e549910e7bf3b5ee1bc3598798702c3628428e0e8a5c"
+  },
+  "code": "import 'svelte/internal/disclose-version';\n\nBasic_runes[$.FILENAME] = 'fixtures/svelte/basic-runes.svelte';\n\nimport * as $ from 'svelte/internal/client';\n\nvar root = $.add_locations($.from_html(`<p></p>`), Basic_runes[$.FILENAME], [[8, 4]]);\nvar root_1 = $.add_locations($.from_html(`<p>zero</p>`), Basic_runes[$.FILENAME], [[10, 4]]);\nvar root_2 = $.add_locations($.from_html(`<li> </li>`), Basic_runes[$.FILENAME], [[14, 6]]);\nvar root_3 = $.add_locations($.from_html(`<div class=\"root\"><!> <ul></ul></div>`), Basic_runes[$.FILENAME], [[6, 0, [[12, 2]]]]);\n\nexport default function Basic_runes($$anchor, $$props) {\n\t$.check_target(new.target);\n\t$.push($$props, true, Basic_runes);\n\n\tlet count = 0;\n\tlet items = [\"a\", \"b\", \"c\"];\n\tvar $$exports = { ...$.legacy_api() };\n\tvar div = root_3();\n\tvar node = $.child(div);\n\n\t{\n\t\tvar consequent = ($$anchor) => {\n\t\t\tvar p = root();\n\n\t\t\tp.textContent = '0';\n\t\t\t$.append($$anchor, p);\n\t\t};\n\n\t\tvar alternate = ($$anchor) => {\n\t\t\tvar p_1 = root_1();\n\n\t\t\t$.append($$anchor, p_1);\n\t\t};\n\n\t\t$.add_svelte_meta(\n\t\t\t() => $.if(node, ($$render) => {\n\t\t\t\tif (count > 0) $$render(consequent); else $$render(alternate, -1);\n\t\t\t}),\n\t\t\t'if',\n\t\t\tBasic_runes,\n\t\t\t7,\n\t\t\t2\n\t\t);\n\t}\n\n\tvar ul = $.sibling(node, 2);\n\n\t$.add_svelte_meta(\n\t\t() => $.each(ul, 20, () => items, (item) => item, ($$anchor, item) => {\n\t\t\tvar li = root_2();\n\t\t\tvar text = $.child(li, true);\n\n\t\t\t$.reset(li);\n\t\t\t$.template_effect(() => $.set_text(text, item));\n\t\t\t$.append($$anchor, li);\n\t\t}),\n\t\t'each',\n\t\tBasic_runes,\n\t\t13,\n\t\t4\n\t);\n\n\t$.reset(ul);\n\t$.reset(div);\n\t$.append($$anchor, div);\n\n\treturn $.pop($$exports);\n}",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "basic-runes.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  let count = $state(0);\n  let items = [\"a\", \"b\", \"c\"];\n</script>\n\n<div class=\"root\">\n  {#if count > 0}\n    <p>{count}</p>\n  {:else}\n    <p>zero</p>\n  {/if}\n  <ul>\n    {#each items as item (item)}\n      <li>{item}</li>\n    {/each}\n  </ul>\n</div>\n"
+    ],
+    "mappings": ";;;;;;;;;;;uDAAA,CAAC;;;;CACC,IAAI,AAAA,KAAK,GAAU,CAAC;CACpB,IAAI,AAAA,KAAK,IAAI,GAAG,EAAE,GAAG,EAAE,GAAG;;KAG3B,GAAG;oBAAH,GAAG;;;;OAEC,CAAC;;GAAD,CAAC;sBAAD,CAAC;;;;OAED,GAAC;;sBAAD,GAAC;;;;;QAHC,KAAK,GAAG,CAAC;;;;;;;;;KAKb,EAAE;;;eAAF,EAAE,YACM,KAAK,GAAI,IAAI,KAAE,IAAI,aAAV,IAAI;OACjB,EAAE;sBAAF,EAAE;;WAAF,EAAE;4CAAE,IAAI;sBAAR,EAAE;;;;;;;;SAFN,EAAE;SANJ,GAAG;oBAAH,GAAG;;;AAFI,CAAC"
+  }
+}

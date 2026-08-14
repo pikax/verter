@@ -278,7 +278,7 @@ describe("atomic golden-set publication", () => {
     expect(set.size).toBe(48);
     for (const record of set.values()) {
       expect(record.schemaVersion).toBe(3);
-      expect(record.normalizer.version).toBe(5);
+      expect(record.normalizer.version).toBe(6);
       expect(record.normalizer.implementationSha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });

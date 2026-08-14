@@ -16,8 +16,11 @@
 // artifacts mount through the pinned with-vapor interop runtime) is a
 // structural fact, not a skip, and never fails authoritative mode.
 
-import { GOLDENS_ROOT } from "./paths.mjs";
+import path from "node:path";
+
+import { GOLDENS_ROOT, HARNESS_ROOT } from "./paths.mjs";
 import { readGoldenByName } from "./golden-store.mjs";
+import { FIXTURE_ANCHORS, MAPPING_PROFILES } from "./mapping-oracle.mjs";
 import { compareArtifacts, cleanupLinkScratch } from "./compare.mjs";
 import { ensureOracleDomain } from "./oracle-install.mjs";
 import { executeVueSsr } from "./execute-vue-runtime.mjs";
@@ -72,6 +75,35 @@ function linkOverridesFor(framework, record, installDir) {
 }
 
 /**
+ * The authored-source context the mapping axis validates the CANDIDATE's own
+ * map against. Everything comes from the golden's PROVENANCE (which fixture
+ * was compiled, and under which profile) plus the fixture on disk — never
+ * from the golden's own map, which is not an input to this axis at all.
+ *
+ * Generated-only ranges are NOT part of this context: `validateAuthoredMapping`
+ * derives them from the CANDIDATE's own generated code, so the
+ * no-authored-provenance-over-scaffolding requirement runs on every
+ * candidate and cannot be switched off from a call site. Deriving them here
+ * from golden geometry would be wrong as well as unnecessary — a candidate's
+ * layout is legitimately its own.
+ */
+function mappingContextFor(framework, record) {
+  const fixturePath = record.fixture?.path;
+  if (typeof fixturePath !== "string") return null;
+  const profileKey =
+    framework === "vue" ? `vue:${record.options?.backend}` : `svelte:${record.options?.generate}`;
+  const profile = MAPPING_PROFILES[profileKey];
+  if (profile === undefined) return null;
+  return {
+    sourceMapRequested: framework === "vue" ? record.options?.sourceMap === true : true,
+    fixture: { path: fixturePath, absolutePath: path.join(HARNESS_ROOT, fixturePath) },
+    sourceResolveBases: [HARNESS_ROOT, path.dirname(path.join(HARNESS_ROOT, fixturePath))],
+    profile,
+    anchors: FIXTURE_ANCHORS[fixturePath] ?? [],
+  };
+}
+
+/**
  * @param {{
  *   goldenName: string,
  *   candidate: { code: string|null, map?: object|null, diagnostics?: Array<object> },
@@ -121,6 +153,7 @@ export async function checkCandidate({ goldenName, candidate, authoritative = fa
       linkBaseDir: installDir ?? undefined,
       authoritative,
       linkSpecifierOverrides,
+      mappingContext: mappingContextFor(framework, golden),
     },
   );
   const reasons = [...report.reasons];

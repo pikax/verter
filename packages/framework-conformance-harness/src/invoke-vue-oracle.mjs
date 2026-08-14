@@ -85,6 +85,86 @@ export function vueOracleCompilerVersion() {
  */
 
 /**
+ * The asset-URL resolution official bundler tooling passes in BUILD mode —
+ * this harness's own posture: an offline invocation with no user-supplied
+ * `template.transformAssetUrls` and no dev server. Authority (verified
+ * verbatim, and — like the assembly constants below — NOT covered by the
+ * pinned oracle domain): @vitejs/plugin-vue@6.0.7, dist/index.mjs:193,
+ * `else assetUrlOptions = { includeAbsolute: true }`, assigned onto
+ * `transformAssetUrls` at :202 and passed to compileTemplate at :223.
+ *
+ * Passing it EXPLICITLY rather than letting compileTemplate fall through to
+ * the compiler's own bare default (pinned dist,
+ * compiler-sfc.cjs.js:1737-1739 `defaultAssetUrlOptions.includeAbsolute:
+ * false`, selected at :3305) is what keeps an ABSOLUTE asset URL a module
+ * import instead of an inert string attribute — a whole import graph the
+ * default resolution never emits.
+ */
+export const VUE_BUILD_TRANSFORM_ASSET_URLS = Object.freeze({ includeAbsolute: true });
+
+/**
+ * THE `compileTemplate` invocation contract, in one place. Every caller that
+ * drives the pinned compiler's template half — the production path below and
+ * the composition self-test's fragment rebuild — builds its options here, so
+ * the two cannot drift into "the same call, one copy silently narrower".
+ * That drift is precisely how `transformAssetUrls` came to be missing from
+ * the production call in the first place, and a second uncontrolled copy
+ * re-opens it.
+ *
+ * Deliberately NOT passed, because no committed fixture exercises them and a
+ * guess would be worse than an omission — each fails LOUD (a diagnostic), not
+ * open, if a future fixture reaches it: `compilerOptions.expressionPlugins`
+ * (official pushes `"typescript"` for a `lang="ts"`/`"tsx"` script — no
+ * fixture has a TS script), and `preprocessLang` / `preprocessOptions` (no
+ * fixture has a `<template lang="…">`). Adding a fixture in either class
+ * means extending this builder, not patching a call site.
+ *
+ * @param {{ descriptor: object, filename: string, ssr: boolean, vapor: boolean,
+ *   isProd: boolean, sourceMap: boolean, scriptBindings: object|undefined }} input
+ */
+export function vueTemplateCompileOptions({
+  descriptor,
+  filename,
+  ssr,
+  vapor,
+  isProd,
+  sourceMap,
+  scriptBindings,
+}) {
+  return {
+    source: descriptor.template.content,
+    filename,
+    id: filename,
+    scoped: descriptor.styles.some((style) => style.scoped),
+    slotted: descriptor.slotted,
+    isProd,
+    ssr,
+    vapor,
+    // Official bundler tooling passes the parsed descriptor's own v-bind()
+    // css-vars inventory (@vitejs/plugin-vue@6.0.7, dist/index.mjs:222,
+    // `ssrCssVars: cssVars` from `const { id, cssVars } = descriptor`) —
+    // the SSR backend relocates css-vars out of the script half and into
+    // the render half's `_cssVars`/`_mergeProps` attrs merge, which only
+    // happens when compileTemplate can see the inventory here.
+    ssrCssVars: descriptor.cssVars,
+    // Official build-mode asset resolution, passed EXPLICITLY exactly as
+    // bundler tooling resolves it — never inherited from the compiler's own
+    // narrower default. See VUE_BUILD_TRANSFORM_ASSET_URLS.
+    transformAssetUrls: VUE_BUILD_TRANSFORM_ASSET_URLS,
+    // The descriptor block map chains the render fragment's original
+    // coordinates back to WHOLE-FIXTURE-FILE positions (official's own
+    // composition, exactly what bundler tooling passes) — without it the
+    // fragment map's original lines are template-block-relative and the
+    // published map mis-anchors against the fixture source.
+    inMap: sourceMap ? (descriptor.template.map ?? undefined) : undefined,
+    compilerOptions: {
+      mode: "module",
+      bindingMetadata: scriptBindings,
+    },
+  };
+}
+
+/**
  * Compiles one independently-authored Vue SFC fixture with the official
  * pinned compiler.
  *
@@ -116,7 +196,13 @@ export function compileVueFixture(source, filename, options) {
   let bindingMetadata = null;
   let scriptCode = null;
   let scriptMap = null;
-  let scriptBindings = {};
+  // ABSENT, not empty: official bundler tooling passes
+  // `bindingMetadata: resolvedScript ? resolvedScript.bindings : void 0`
+  // (@vitejs/plugin-vue@6.0.7, dist/index.mjs:229), and compiler-core's
+  // render-arity branch is truthy-gated (`options.bindingMetadata &&
+  // !options.inline`), so an empty `{}` for a script-less SFC would emit a
+  // 6-parameter render function official never emits.
+  let scriptBindings;
   const hasScriptSetup = Boolean(descriptor.scriptSetup);
 
   if (hasScriptSetup || descriptor.script) {
@@ -142,40 +228,33 @@ export function compileVueFixture(source, filename, options) {
       scriptCode = compiled.content;
       scriptMap = compiled.map ?? null;
       bindingMetadata = compiled.bindings ?? {};
-      scriptBindings = bindingMetadata;
+      // Threaded VERBATIM, exactly as official tooling threads
+      // `resolvedScript.bindings` — never widened to `{}` by the reported
+      // field's fallback above, for the truthiness reason recorded there.
+      // FORWARD-LOOKING, and untested by construction: on every reachable
+      // path the pinned compiler returns a truthy bindings object here, so
+      // this line changes nothing observable today. It is kept because it
+      // is the faithful threading, not because a current behavior depends
+      // on it — the tested case is the script-LESS one above, where the
+      // binding is absent entirely.
+      scriptBindings = compiled.bindings;
     } catch (error) {
       diagnostics.push(toDiagnostic("script-error", error, filename));
       return { code: null, map: null, diagnostics, backend, bindingMetadata: null };
     }
   }
 
-  const templateResult = compileTemplate({
-    source: descriptor.template.content,
-    filename,
-    id: filename,
-    scoped: descriptor.styles.some((style) => style.scoped),
-    slotted: descriptor.slotted,
-    isProd,
-    ssr,
-    vapor,
-    // Official bundler tooling passes the parsed descriptor's own v-bind()
-    // css-vars inventory (@vitejs/plugin-vue@6.0.7, dist/index.mjs:222,
-    // `ssrCssVars: cssVars` from `const { id, cssVars } = descriptor`) —
-    // the SSR backend relocates css-vars out of the script half and into
-    // the render half's `_cssVars`/`_mergeProps` attrs merge, which only
-    // happens when compileTemplate can see the inventory here.
-    ssrCssVars: descriptor.cssVars,
-    // The descriptor block map chains the render fragment's original
-    // coordinates back to WHOLE-FIXTURE-FILE positions (official's own
-    // composition, exactly what bundler tooling passes) — without it the
-    // fragment map's original lines are template-block-relative and the
-    // published map mis-anchors against the fixture source.
-    inMap: sourceMap ? (descriptor.template.map ?? undefined) : undefined,
-    compilerOptions: {
-      mode: "module",
-      bindingMetadata: scriptBindings,
-    },
-  });
+  const templateResult = compileTemplate(
+    vueTemplateCompileOptions({
+      descriptor,
+      filename,
+      ssr,
+      vapor,
+      isProd,
+      sourceMap,
+      scriptBindings,
+    }),
+  );
   for (const error of templateResult.errors ?? []) {
     diagnostics.push(toDiagnostic("template-error", error, filename));
   }

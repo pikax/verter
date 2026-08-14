@@ -27,10 +27,18 @@
 import { describe, expect, it, afterAll } from "vitest";
 import ts from "typescript";
 
-import { compileVueFixture, assembleAndValidate } from "../src/invoke-vue-oracle.mjs";
+import {
+  compileVueFixture,
+  assembleAndValidate,
+  VUE_BUILD_TRANSFORM_ASSET_URLS,
+} from "../src/invoke-vue-oracle.mjs";
 import { parseModule } from "../src/normalize.mjs";
 import { oracleRequire } from "../src/oracle-install.mjs";
+import { readGoldenSet } from "../src/golden-store.mjs";
+import { GOLDENS_ROOT } from "../src/paths.mjs";
 import { executeVueVaporInterop, cleanupScratch } from "../src/execute-vue-vapor.mjs";
+import { executeVueSsr, cleanupScratch as cleanupSsrScratch } from "../src/execute-vue-runtime.mjs";
+import { hydrateVue, cleanupHydrationScratch } from "../src/hydration.mjs";
 
 const JS_FIXTURE = `<script setup>
 import { ref } from "vue";
@@ -89,6 +97,11 @@ function hasVaporTrueProperty(objectExpression) {
       p.value.type === "Literal" &&
       p.value.value === true,
   );
+}
+
+/** Every module specifier the module imports from, in source order. */
+function importedSources(ast) {
+  return ast.body.filter((s) => s.type === "ImportDeclaration").map((s) => s.source.value);
 }
 
 /** Local names bound from `import { x as y } from "vue"`, keyed by imported name. */
@@ -185,6 +198,276 @@ describe("vapor backend — scriptless SFC synthesized-object marker", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// bindingMetadata ABSENCE for a script-less SFC. Official bundler tooling
+// passes `bindingMetadata: resolvedScript ? resolvedScript.bindings : void 0`
+// (@vitejs/plugin-vue@6.0.7, dist/index.mjs:229) — undefined, not an empty
+// object, when the SFC has no script block at all. The distinction is
+// observable because compiler-core's render-arity branch is TRUTHY-gated
+// (pinned dist, @vue/compiler-core/dist/compiler-core.cjs.js:3500:
+// `if (options.bindingMetadata && !options.inline) args.push("$props",
+// "$setup", "$data", "$options")`), so an empty `{}` — truthy — emits a
+// 6-parameter render function official never emits for a script-less SFC.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_BEARING_FIXTURE = JS_FIXTURE;
+
+/** Parameter names of the named function declaration `name` in a module. */
+function functionParams(code, name, label) {
+  const ast = parseModule(code, label);
+  const declaration = ast.body.find((s) => s.type === "FunctionDeclaration" && s.id?.name === name);
+  if (declaration === undefined) throw new Error(`module declares no function ${name}`);
+  return declaration.params.map((p) => {
+    expect(p.type).toBe("Identifier");
+    return p.name;
+  });
+}
+
+describe("script-less SFC — bindingMetadata is ABSENT at compileTemplate", () => {
+  it("the script-less VDOM artifact's render function takes exactly (_ctx, _cache)", () => {
+    const code = compileArm(SCRIPTLESS_FIXTURE, "vdom").code;
+    expect(functionParams(code, "render", "scriptless-vdom-arity")).toEqual(["_ctx", "_cache"]);
+  });
+
+  it("the script-BEARING VDOM artifact keeps the extended 6-parameter signature (regression control)", () => {
+    // The non-inline script-bearing path passes REAL bindings, so the same
+    // truthy gate must still fire there — a fix that stopped threading
+    // bindingMetadata altogether would break this arm.
+    const code = compileArm(SCRIPT_BEARING_FIXTURE, "vdom").code;
+    expect(functionParams(code, "render", "script-bearing-vdom-arity")).toEqual([
+      "_ctx",
+      "_cache",
+      "$props",
+      "$setup",
+      "$data",
+      "$options",
+    ]);
+  });
+
+  it("the script-BEARING render half genuinely resolves setup bindings through the metadata", () => {
+    // Proves the metadata is not merely PRESENT but semantically consumed:
+    // with real bindings the interpolation compiles to `$setup.count`; with
+    // an empty/absent map it would fall back to `_ctx.count`.
+    const code = compileArm(SCRIPT_BEARING_FIXTURE, "vdom").code;
+    expect(code).toContain("$setup.count");
+    expect(code).not.toContain("_ctx.count");
+  });
+
+  it("the defective invocation — an EMPTY bindingMetadata object — flips the arity back to 6 (discrimination)", () => {
+    // Reconstructs exactly what the harness produced when it defaulted
+    // `scriptBindings` to `{}`: the identical compileTemplate call with a
+    // truthy empty map. Executed on every run, so the positive control above
+    // is never a trivially-satisfied assertion.
+    const { parse, compileTemplate } = oracleRequire("vue", "@vue/compiler-sfc");
+    const filename = "controls-scriptless-defective.vue";
+    const { descriptor } = parse(SCRIPTLESS_FIXTURE, { filename, sourceMap: false });
+    const templateArgs = (bindingMetadata) => ({
+      source: descriptor.template.content,
+      filename,
+      id: filename,
+      scoped: false,
+      slotted: descriptor.slotted,
+      isProd: false,
+      ssr: false,
+      vapor: false,
+      ssrCssVars: descriptor.cssVars,
+      compilerOptions: { mode: "module", bindingMetadata },
+    });
+    const defective = compileTemplate(templateArgs({}));
+    const faithful = compileTemplate(templateArgs(undefined));
+    expect(defective.errors ?? []).toEqual([]);
+    expect(faithful.errors ?? []).toEqual([]);
+    // The ONLY difference between the two arms is the arity of the emitted
+    // render function.
+    const paramsOf = (result, label) => {
+      const ast = parseModule(result.code, label);
+      const exported = ast.body.find(
+        (s) => s.type === "ExportNamedDeclaration" && s.declaration?.type === "FunctionDeclaration",
+      );
+      return exported.declaration.params.map((p) => p.name);
+    };
+    expect(paramsOf(defective, "defective-arity")).toEqual([
+      "_ctx",
+      "_cache",
+      "$props",
+      "$setup",
+      "$data",
+      "$options",
+    ]);
+    expect(paramsOf(faithful, "faithful-arity")).toEqual(["_ctx", "_cache"]);
+    // And the harness's own script-less output matches the FAITHFUL arm.
+    expect(
+      functionParams(compileArm(SCRIPTLESS_FIXTURE, "vdom").code, "render", "harness"),
+    ).toEqual(paramsOf(faithful, "faithful-arity-again"));
+  });
+
+  it("the script-less SSR artifact's ssrRender takes exactly (_ctx, _push, _parent, _attrs)", () => {
+    // The SSR backend consults the SAME truthy gate: the defective empty map
+    // appended $props/$setup/$data/$options here too.
+    const code = compileArm(SCRIPTLESS_FIXTURE, "ssr").code;
+    expect(functionParams(code, "ssrRender", "scriptless-ssr-arity")).toEqual([
+      "_ctx",
+      "_push",
+      "_parent",
+      "_attrs",
+    ]);
+  });
+
+  it("the VAPOR backend's own fixed signature is UNAFFECTED by the metadata gate (scope control)", () => {
+    // Vapor codegen emits its own signature and never consults the
+    // render-arity branch — verified directly against the pinned compiler on
+    // both arms below. Pinning it here bounds the correction: a change that
+    // altered the vapor signature would not be this fix.
+    const { parse, compileTemplate } = oracleRequire("vue", "@vue/compiler-sfc");
+    const filename = "controls-scriptless-vapor.vue";
+    const { descriptor } = parse(SCRIPTLESS_FIXTURE, { filename, sourceMap: false });
+    const vaporArm = (bindingMetadata) =>
+      compileTemplate({
+        source: descriptor.template.content,
+        filename,
+        id: filename,
+        scoped: false,
+        slotted: descriptor.slotted,
+        isProd: false,
+        ssr: false,
+        vapor: true,
+        ssrCssVars: descriptor.cssVars,
+        compilerOptions: { mode: "module", bindingMetadata },
+      }).code;
+    expect(vaporArm({})).toBe(vaporArm(undefined));
+    const params = functionParams(compileArm(SCRIPTLESS_FIXTURE, "vapor").code, "render", "vapor");
+    expect(params).toEqual(["_ctx", "$props", "$emit", "$attrs", "$slots"]);
+  });
+
+  it("the corrected script-less artifacts still render and hydrate against the pinned runtime", async () => {
+    // Behavioral backstop: the corrected arities are not merely a shape
+    // change — the 4-param ssrRender must still server-render the fixture's
+    // real markup, and the 2-param render must hydrate onto it without a
+    // mismatch, through the official pinned runtime.
+    const ssr = await executeVueSsr(compileArm(SCRIPTLESS_FIXTURE, "ssr").code);
+    expect(ssr.error).toBeNull();
+    expect(ssr.ok).toBe(true);
+    expect(ssr.html).toBe('<p class="n">static</p>');
+    const hydrated = await hydrateVue(ssr.html, compileArm(SCRIPTLESS_FIXTURE, "vdom").code);
+    expect(hydrated.error).toBeNull();
+    expect(hydrated.ok).toBe(true);
+    expect(hydrated.mismatched).toBe(false);
+    expect(hydrated.finalHtml).toBe('<p class="n">static</p>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transformAssetUrls — the official BUILD-mode resolution. Official bundler
+// tooling never leaves this option undefined: with no user-supplied option
+// and NO dev server — this harness's own posture, an offline non-dev-server
+// invocation — plugin-vue resolves `assetUrlOptions = { includeAbsolute:
+// true }` (@vitejs/plugin-vue@6.0.7, dist/index.mjs:193; assigned to
+// `transformAssetUrls` at :202 and passed to compileTemplate at :223).
+//
+// Omitting it falls through to the COMPILER's own bare default instead
+// (pinned dist, @vue/compiler-sfc/dist/compiler-sfc.cjs.js:3305 selects the
+// bare `[transformAssetUrl, transformSrcset]` pair, whose
+// `defaultAssetUrlOptions` at :1737-1739 carries `includeAbsolute: false`),
+// under which an ABSOLUTE asset URL stays an inert string attribute rather
+// than becoming a module import — a materially different import graph from
+// the one official build tooling emits for the same SFC.
+//
+// No committed fixture carries an asset URL today, so this axis is invisible
+// in the published set; the controls below therefore drive the harness
+// entry point (compileVueFixture) directly, so the divergence is caught at
+// the invocation rather than only once an asset-bearing fixture is authored.
+// ---------------------------------------------------------------------------
+
+const ABSOLUTE_ASSET_FIXTURE = `<template><img src="/logo.png"><img srcset="/a.png 1x, /b.png 2x"></template>
+`;
+
+const RELATIVE_ASSET_FIXTURE = `<template><img src="./logo.png"></template>
+`;
+
+/** The asset specifiers (never `vue` itself) an artifact imports. */
+function assetImports(code, label) {
+  return importedSources(parseModule(code, label)).filter((s) => s !== "vue");
+}
+
+describe("template asset URLs — official build-mode transformAssetUrls resolution", () => {
+  it("ABSOLUTE src/srcset URLs become module imports, as official build tooling emits", () => {
+    const code = compileArm(ABSOLUTE_ASSET_FIXTURE, "vdom").code;
+    expect(assetImports(code, "absolute-assets")).toEqual(["/logo.png", "/a.png", "/b.png"]);
+    // …and the attributes are no longer inert literals: both node transforms
+    // (src via transformAssetUrl, srcset via transformSrcset) fired.
+    expect(code).not.toContain('src: "/logo.png"');
+    expect(code).not.toContain('srcset: "/a.png 1x, /b.png 2x"');
+  });
+
+  it("a RELATIVE asset URL is imported under BOTH resolutions (scope control)", () => {
+    // Bounds the correction: relative URLs transform regardless of
+    // `includeAbsolute` (pinned dist :1788 short-circuits only when the URL
+    // is non-relative AND includeAbsolute is false), so a change that
+    // altered relative-URL handling would not be this fix.
+    expect(assetImports(compileArm(RELATIVE_ASSET_FIXTURE, "vdom").code, "relative-asset")).toEqual(
+      ["./logo.png"],
+    );
+  });
+
+  it("the bare-default invocation leaves ABSOLUTE URLs inert (discrimination)", () => {
+    // Reconstructs exactly what the harness produced while it passed no
+    // `transformAssetUrls` at all, against the same pinned compiler, and
+    // pins the harness's own output to the FAITHFUL arm. Executed on every
+    // run, so the positive control above is never trivially satisfied.
+    const { parse, compileTemplate } = oracleRequire("vue", "@vue/compiler-sfc");
+    const filename = "controls-asset-urls.vue";
+    const { descriptor } = parse(ABSOLUTE_ASSET_FIXTURE, { filename, sourceMap: false });
+    const templateArgs = (transformAssetUrls) => ({
+      source: descriptor.template.content,
+      filename,
+      id: filename,
+      scoped: false,
+      slotted: descriptor.slotted,
+      isProd: false,
+      ssr: false,
+      vapor: false,
+      ssrCssVars: descriptor.cssVars,
+      transformAssetUrls,
+      compilerOptions: { mode: "module", bindingMetadata: undefined },
+    });
+    const bareDefault = compileTemplate(templateArgs(undefined));
+    const buildMode = compileTemplate(templateArgs({ includeAbsolute: true }));
+    expect(bareDefault.errors ?? []).toEqual([]);
+    expect(buildMode.errors ?? []).toEqual([]);
+
+    // The defect is silent in every other respect — both arms compile
+    // cleanly — and shows up exactly as a missing import graph.
+    expect(assetImports(bareDefault.code, "bare-default-arm")).toEqual([]);
+    expect(bareDefault.code).toContain('src: "/logo.png"');
+    expect(bareDefault.code).toContain('srcset: "/a.png 1x, /b.png 2x"');
+    expect(assetImports(buildMode.code, "build-mode-arm")).toEqual([
+      "/logo.png",
+      "/a.png",
+      "/b.png",
+    ]);
+
+    // The harness's own artifact matches the faithful arm, not the default.
+    expect(assetImports(compileArm(ABSOLUTE_ASSET_FIXTURE, "vdom").code, "harness-asset")).toEqual(
+      assetImports(buildMode.code, "build-mode-arm-again"),
+    );
+  });
+
+  it("EVERY published Vue golden records the resolution explicitly, not as an inherited default", () => {
+    // The choice must be VISIBLE in generated records — a reader of a golden
+    // must not have to know the compiler's own default to know which asset
+    // resolution produced it (bin/generate-goldens.mjs, Vue `options`).
+    expect(VUE_BUILD_TRANSFORM_ASSET_URLS).toEqual({ includeAbsolute: true });
+    expect(Object.isFrozen(VUE_BUILD_TRANSFORM_ASSET_URLS)).toBe(true);
+    const vueRecords = [...readGoldenSet(GOLDENS_ROOT).values()].filter(
+      (record) => record.framework === "vue",
+    );
+    expect(vueRecords.length).toBeGreaterThan(0);
+    for (const record of vueRecords) {
+      expect(record.options.transformAssetUrls).toEqual({ includeAbsolute: true });
+    }
+  });
+});
+
 describe("prod axis — isProd visibility at compileScript", () => {
   // The scoped css-vars KEY is compileScript's own isProd-observable
   // surface (pinned dist genVarName: dev keys are `${id}-${raw}`, prod
@@ -264,6 +547,8 @@ describe("ssr backend — templateOptions.ssr visibility at compileScript", () =
 
 afterAll(() => {
   cleanupScratch();
+  cleanupSsrScratch();
+  cleanupHydrationScratch();
 });
 
 const mountThroughVaporInterop = executeVueVaporInterop;

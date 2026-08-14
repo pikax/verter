@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 
 import { parseModule, canonicalize, canonicalDigest, deepEqualCanonical } from "./normalize.mjs";
 import { VUE_DOMAIN, SVELTE_DOMAIN } from "./domain-pin.mjs";
-import { normalizedMappingSegments } from "./sourcemap.mjs";
+import { validateAuthoredMapping } from "./mapping-oracle.mjs";
 
 /** @returns {{ ok: true, ast: object } | { ok: false, error: string }} */
 export function checkParseValidity(code, label) {
@@ -377,79 +377,6 @@ export function compareDiagnostics(goldenDiagnostics, candidateDiagnostics) {
 }
 
 /**
- * Every CONTRACTUAL source-map field, classified and compared explicitly.
- * `file` is the single incidental field: it names the build environment's
- * output filename, which no framework contract observes — it is recorded
- * in the classification below precisely so its exclusion is a decision,
- * not an omission.
- */
-export const CONTRACTUAL_MAP_FIELDS = [
-  "version",
-  "mappings",
-  "sources",
-  "sourceRoot",
-  "sourcesContent",
-  "names",
-];
-export const INCIDENTAL_MAP_FIELDS = ["file"];
-
-/**
- * The `mappings` field compares on DECODED, normalized segment sets — the
- * genuine candidate-vs-official axis: two encodings addressing identical
- * (generated position → original position, source index, name index)
- * correspondences are equal even when the VLQ spelling, in-line segment
- * order, duplicate segments, or trailing empty lines differ; any
- * correspondence difference (a shifted anchor, a dropped or added mapped
- * position) is a divergence. Segments compare on source/name INDICES, not
- * resolved strings, so this field stays independent of the separately
- * compared `sources`/`names` fields. A side whose mappings do not decode
- * as source-map v3 VLQ falls back to raw string comparison — an
- * undecodable field can never compare equal to a decodable one unless the
- * bytes match exactly.
- */
-function mappingsFieldEqual(goldenMappings, candidateMappings) {
-  let golden;
-  let candidate;
-  try {
-    golden = normalizedMappingSegments(goldenMappings ?? "");
-    candidate = normalizedMappingSegments(candidateMappings ?? "");
-  } catch {
-    return (goldenMappings ?? null) === (candidateMappings ?? null);
-  }
-  return deepEqualCanonical(golden, candidate);
-}
-
-/**
- * Mapping comparison over every contractual field independently. Presence
- * itself is significant: a golden WITH a map and a candidate withOUT one
- * (or vice versa) is a divergence, not a pass. Returns per-field equality
- * so a map matching on every field but one is caught and attributable.
- * `mappings` compares on decoded segment semantics (see
- * `mappingsFieldEqual`); every other contractual field compares directly.
- */
-export function compareMappings(goldenMap, candidateMap) {
-  if (goldenMap === null && candidateMap === null)
-    return { equal: true, reason: "both absent", fields: null };
-  if (goldenMap === null || candidateMap === null)
-    return { equal: false, reason: "map presence differs", fields: null };
-  const fields = {};
-  for (const field of CONTRACTUAL_MAP_FIELDS) {
-    const goldenValue = goldenMap[field] === undefined ? null : goldenMap[field];
-    const candidateValue = candidateMap[field] === undefined ? null : candidateMap[field];
-    fields[field] =
-      field === "mappings"
-        ? mappingsFieldEqual(goldenMap.mappings, candidateMap.mappings)
-        : deepEqualCanonical(goldenValue, candidateValue);
-  }
-  const differing = CONTRACTUAL_MAP_FIELDS.filter((field) => !fields[field]);
-  return {
-    equal: differing.length === 0,
-    reason: differing.length === 0 ? null : `map fields differ: ${differing.join(", ")}`,
-    fields,
-  };
-}
-
-/**
  * Full comparison report combining every independent oracle. `structural`
  * is only computed when both arms parse validly — a normalizer pass never
  * runs over, and can never mask, a parse failure.
@@ -463,7 +390,7 @@ export function compareMappings(goldenMap, candidateMap) {
 export async function compareArtifacts(
   golden,
   candidate,
-  { linkBaseDir, authoritative, linkSpecifierOverrides } = {},
+  { linkBaseDir, authoritative, linkSpecifierOverrides, mappingContext } = {},
 ) {
   const reasons = [];
   const axes = {
@@ -523,8 +450,30 @@ export async function compareArtifacts(
     );
   }
 
-  const mapping = compareMappings(golden.map ?? null, candidate.map ?? null);
-  if (!mapping.equal) reasons.push(`source map diverges: ${mapping.reason}`);
+  // The mapping axis is SELF-REFERENTIAL: the candidate's map is validated
+  // against the candidate's OWN generated code and the authored fixture, and
+  // the golden's map is not an input. See mapping-oracle.mjs for why a
+  // candidate-vs-official map comparison cannot be the oracle here.
+  let mapping = null;
+  if (!mappingContext) {
+    axes.mapping = {
+      status: "skipped",
+      reason: "no authored-source mapping context supplied",
+    };
+  } else {
+    mapping = validateAuthoredMapping({
+      ...mappingContext,
+      code: candidate.code ?? null,
+      map: candidate.map ?? null,
+    });
+    if (!mapping.ok) {
+      reasons.push(
+        `candidate source map is not truthful about its own output: ${mapping.violations
+          .map((violation) => `${violation.rule} — ${violation.detail}`)
+          .join("; ")}`,
+      );
+    }
+  }
 
   if (authoritative) {
     for (const [axis, state] of Object.entries(axes)) {

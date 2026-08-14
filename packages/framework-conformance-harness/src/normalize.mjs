@@ -21,6 +21,28 @@
 //     tool-consumed comment classes (see `classifySemanticComment`) enter
 //     the canonical form; adding or removing an ordinary explanatory
 //     comment never affects it.
+//   - NAMED import-specifier ORDER within ONE import declaration: FREE —
+//     `import { a, b } from "x"` and `import { b, a } from "x"` bind the
+//     same hoisted ESM bindings to the same module, so the slot a named
+//     specifier occupies in its own declaration is not observable. The
+//     named specifiers of one declaration are therefore canonicalized into
+//     a deterministic content order (see the ImportDeclaration case in
+//     `canonicalize`). This exception is NARROW; each of the following
+//     stays STRUCTURAL and is proven so by a negative test:
+//       * specifier MEMBERSHIP (adding or removing a named specifier),
+//       * the IMPORTED name and the LOCAL alias of each specifier, paired,
+//       * the `source` module,
+//       * DEFAULT and NAMESPACE specifier form and position (at most one of
+//         either may appear and the ECMAScript grammar fixes it ahead of
+//         the named list, so it is never reordered and never sorted),
+//       * import ATTRIBUTES (`with { type: "json" }`),
+//       * the top-level ORDER of the import declarations themselves — the
+//         declarations are ordinary `Program.body` items compared
+//         positionally, and declaration GROUPING is not merged (the same
+//         binding set split across two declarations is a difference),
+//       * the SIDE-EFFECT import sequence (`import "x"` carries no
+//         specifiers at all and is compared in body order like any other
+//         statement).
 //
 // IDENTIFIERS ARE STRUCTURAL — there is NO alpha-renaming. The contract
 // permits "private generated identifier spelling under scope-aware
@@ -50,7 +72,9 @@
 //
 // Everything else the contract forbids stays live BY CONSTRUCTION:
 //   - import/export sources and specifiers are ordinary struct fields the
-//     deep-equal walk compares verbatim.
+//     deep-equal walk compares verbatim — the single exception being the
+//     ORDER (never the content) of one declaration's named import
+//     specifiers, canonicalized as described above.
 //   - helper/declaration/statement ORDER: the canonical form is a
 //     positional array walk (`Program.body`, `BlockStatement.body`, …) —
 //     reordering two statements changes the canonical array order.
@@ -271,6 +295,20 @@ export function canonicalize(ast) {
         };
         break;
       }
+      case "ImportDeclaration": {
+        // Only the ORDER of the NAMED specifiers is canonicalized; every
+        // other field (source, attributes, each specifier's own content)
+        // goes through the ordinary walk untouched. See the header.
+        out = {};
+        for (const [key, value] of Object.entries(node)) {
+          if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+          out[key] =
+            key === "specifiers" && Array.isArray(value)
+              ? canonicalImportSpecifiers(value)
+              : visit(value);
+        }
+        break;
+      }
       default: {
         out = {};
         for (const [key, value] of Object.entries(node)) {
@@ -280,6 +318,37 @@ export function canonicalize(ast) {
       }
     }
     return withComments(node, out);
+  }
+
+  /**
+   * Canonical specifier list of ONE import declaration: any
+   * default/namespace specifier keeps its exact original slot (the
+   * ECMAScript grammar admits at most one of either and fixes it ahead of
+   * the named list, so this leading run is never permutable in valid
+   * source), and the named specifiers that follow are sorted into a
+   * deterministic order.
+   *
+   * The sort key is the specifier's FULL canonical content — imported name,
+   * local alias, and any attached semantic comments — so the sort is total
+   * and content-complete: a permutation yields an identical sorted list,
+   * while adding, removing, or changing ANY specifier changes the multiset
+   * and therefore the sorted list. Two specifiers are never merged.
+   */
+  function canonicalImportSpecifiers(specifiers) {
+    const leading = [];
+    const named = [];
+    for (const specifier of specifiers) {
+      (specifier?.type === "ImportSpecifier" ? named : leading).push(visit(specifier));
+    }
+    if (named.length > 1) {
+      const keys = new Map(named.map((canonical) => [canonical, stableStringify(canonical)]));
+      named.sort((a, b) => {
+        const keyA = keys.get(a);
+        const keyB = keys.get(b);
+        return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+      });
+    }
+    return [...leading, ...named];
   }
 
   const tree = visit(ast);
@@ -318,4 +387,4 @@ function stableStringify(value) {
 }
 
 /** Versioned identity for this normalizer's behavior — bump on any rule change. */
-export const NORMALIZER_VERSION = 5;
+export const NORMALIZER_VERSION = 6;
