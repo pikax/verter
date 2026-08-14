@@ -19,7 +19,7 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
-current_block = "BV0"
+current_block = "BF2"
 
 [repository]
 remote = "https://github.com/pikax/verter"
@@ -277,7 +277,7 @@ notes = "Gap-analysis-only block: every one of BF1's 7 numbered exit criteria an
 
 [[block]]
 id = "BF2"
-status = "ACCEPTED"
+status = "IN_PROGRESS"
 charter_digest = "1f99cf7eda1a955ada751f075799dabc8c8ab1defda19b20375f7ca09aa5963b"
 context_packet_digest = "22e350c67a38cd20eaa274a392c65e946c31073c40ccad7da9d3876cdc41f6d2"
 base_sha = "ed615a96a0f1a811c765ecc2c606026ab6cbb687"
@@ -290,15 +290,15 @@ evidence_digest = "01ed8ab0c6cc07170fc53cccc3d9d20c28e860eb7b89aac1a3f0d4a2130a3
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PASS"
-architecture_review = "PASS"
-adversarial_review = "PASS"
-maintainer_decision = "ACCEPTED"
-notes = "REOPEN #3 RESOLVED. Root cause: invoke-vue-oracle.mjs never passed vapor/templateOptions.ssr/isProd into compileScript, so every harness-generated Vapor/SSR/prod golden's script half was compiled under the wrong profile — BV0's round-1 adversarial review caught it (evidence/vue-known-defect-correction/reviews/round1-adversarial.md), Codex scoping ruling assigned repair to BF2 (evidence/vue-known-defect-correction/reviews/round1-reopen-scoping-ruling.md). Fixed at the option-propagation root; full golden corpus regenerated and traced record-by-record; new plant-red-green-verified JS+TS controls for __vapor/defineVaporComponent/ssr-css-vars/isProd; source-map comparison restored to genuine candidate-vs-official (was narrowed to self-consistency); candidate CLI gained an opt-in fail-closed skip mode. Two prior fix rounds (round 1: all 3 BLOCKING; round 2: CHANGES REQUIRED confirming round-1 fixes were real) before round 3 (3/3 PASS). Locked performance cells reattested via input-identity proof (workload is compiler-call-free and provably untouched by this diff); off-protocol timing sessions retained as labeled NONCONFORMING, not claimed passing. Full detail: evidence/BF2/BF2-reopen3-summary.md. BF1 not reopened (locked the option contract before the harness existed; BF2 violated a valid lock, the lock itself wasn't falsified). BV0 and BF3 unblocked, next legal once this transition is validated."
+conformance_review = "INVALIDATED"
+architecture_review = "INVALIDATED"
+adversarial_review = "INVALIDATED"
+maintainer_decision = "PENDING"
+notes = "REOPEN #4 IN PROGRESS. Reopen #3's option-propagation fix (below, retained as history) stands; a separate defect was found while drafting AMD-007: BF2's mapping axis (compare.mjs compareMappings/mappingsFieldEqual) compares the candidate's source map against the OFFICIAL Vue compiler's own map, field-by-field. Binding maintainer direction: source-map correctness is judged against the exact authored SFC the user wrote, never against any official compiler's own map shape — Verter's assembly legitimately differs in structure. BF2's charter never mandated official-map equality (BF2.md:20/28 only says 'diagnostics, source-map, and TypeScript-observable product validation'); the official comparison was an implementation choice exceeding the charter, no charter amendment needed. Codex xhigh investigation (full ruling: evidence/BF2/reopen4/mapping-oracle-scoping-consult.md) designed the replacement authored-source oracle: map contract/bounds, source identity, per-segment truthfulness (exact-text or explicit authored semantic relation, never an arbitrary in-bounds mapping), bidirectional round trips for required anchors, assembly-composition translation, and zero fabricated provenance over synthetic bytes. Folded into the same reopen (comprehensive-fix rule) alongside the previously-authorized Q2 (helper import-specifier order) and Q4 (script-less bindingMetadata) findings from the BV0-relanding scoping consult (evidence/vue-known-defect-correction/reviews/round1-reopen-scoping-ruling.md). AMD-007 (the BV0A interim source-map block draft, not yet ratified) was corrected to depend on this reopen rather than the old official-comparison design — see docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md. BV0 and BF3 returned to BLOCKED pending reacceptance. --- REOPEN #3 RESOLVED (historical): invoke-vue-oracle.mjs never passed vapor/templateOptions.ssr/isProd into compileScript, so every harness-generated Vapor/SSR/prod golden's script half was compiled under the wrong profile. Fixed at the option-propagation root; full golden corpus regenerated and traced record-by-record; new plant-red-green-verified JS+TS controls for __vapor/defineVaporComponent/ssr-css-vars/isProd; candidate CLI gained an opt-in fail-closed skip mode. Full detail: evidence/BF2/BF2-reopen3-summary.md. BF1 not reopened both times (locked the option contract before the harness existed; BF2 violated a valid lock, the lock itself wasn't falsified)."
 
 [[block]]
 id = "BV0"
-status = "READY"
+status = "BLOCKED"
 charter_digest = "572fc21cce211cd63622ec50207d7b11cf687b7db62ff1270d82b6d0f2e0f306"
 context_packet_digest = ""
 base_sha = ""
@@ -319,7 +319,7 @@ notes = "Introduced and ratified by AMD-006 (landed fdb6f62911fffc43c7f64610033b
 
 [[block]]
 id = "BF3"
-status = "READY"
+status = "BLOCKED"
 charter_digest = "7b537a95656ec2ae49acfc0d9813b0183f3625b22f921548ee072db033233e12"
 context_packet_digest = ""
 base_sha = ""
