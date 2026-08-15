@@ -11,7 +11,7 @@ was clean at that binding point. The candidate's parent is
 `b3249d13d07806a14a4307954dfcc459cf7301ac`, tree
 `57e412549c24c903877b471000569c99591a49fc`, which is also the current clean
 `program/architecture-lock` checkout inspected read-only at
-`/Users/carlosrodrigues/Documents/dev/verter`.
+`<repo-root>`.
 
 ## Blocking findings
 
@@ -20,13 +20,13 @@ was clean at that binding point. The candidate's parent is
   `docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md:263-274`,
   `docs/arch/refactor/rev11/evidence/framework-conformance/program-state-transition.md:33-43`,
   `docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md:288-293`, and
-  `/Users/carlosrodrigues/Documents/dev/verter/docs/arch/architecture-lock/ledger/program-state.toml:236-255`
+  `docs/arch/architecture-lock/ledger/program-state.toml:236-255`
   — **violated principle: a ratification package and its singular transition action
   must describe the live integrated predecessor state exactly; an accepted block
   cannot be treated as an external in-flight candidate or scheduled for acceptance
   again.** The canonical checkout is now `b3249d13d...`, its 51-block ledger records
   B1 `ACCEPTED` with `maintainer_decision = "ACCEPTED"`, and the exact package commit
-  is directly based on that checkout. The stated `/Users/carlosrodrigues/Documents/dev/verter-b1`
+  is directly based on that checkout. The stated `<worktree>/verter-b1`
   checkout does not exist, `git worktree list` registers only the canonical and
   rescope worktrees, and `refs/heads/work/b1-neutral-contracts` is absent. Nevertheless,
   the package says B1 is `READY` and separately in flight, calls that worktree

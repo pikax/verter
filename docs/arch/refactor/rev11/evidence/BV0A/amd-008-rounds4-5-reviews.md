@@ -47,9 +47,9 @@ VERDICT: BLOCK
 
    The stated `Chunk::Overwritten` behavior is correct, but ordinary `CodeTransform` map generation cannot by itself preserve the complete input segment stream:
 
-   - Explicit source-map locations are sorted and deduplicated before emission, collapsing equal-coordinate occurrences: [source_map.rs:128–139](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:128).
-   - Original chunks emit their start, line starts, and registered locations—not every segment from an input map: [source_map.rs:181–195](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs:484–569](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:484).
-   - The accepted decoder genuinely preserves multiple occurrences at one coordinate because a zero generated-column delta pushes another segment without replacement: [sourcemap.mjs:77–103](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:77).
+   - Explicit source-map locations are sorted and deduplicated before emission, collapsing equal-coordinate occurrences: [source_map.rs:128–139](crates/verter_compiler/src/code_transform/source_map.rs:128).
+   - Original chunks emit their start, line starts, and registered locations—not every segment from an input map: [source_map.rs:181–195](crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs:484–569](crates/verter_compiler/src/code_transform/source_map.rs:484).
+   - The accepted decoder genuinely preserves multiple occurrences at one coordinate because a zero generated-column delta pushes another segment without replacement: [sourcemap.mjs:77–103](packages/framework-conformance-harness/src/sourcemap.mjs:77).
 
    Therefore, a transform-map-first implementation can drop ordinary interior segments and collapse equal-coordinate script segments, contradicting positional artifact equality.
 
@@ -66,7 +66,7 @@ VERDICT: BLOCK
 
    > “the following surviving original chunk supplies the transition”
 
-   That is true only if such a chunk exists. Empty overwrite emits no token: [source_map.rs:243–250](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243). The normal compiler footer is terminal: [process.rs:622–626](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/script/process.rs:622). State “if one exists”; terminal deletion has no old-end transition.
+   That is true only if such a chunk exists. Empty overwrite emits no token: [source_map.rs:243–250](crates/verter_compiler/src/code_transform/source_map.rs:243). The normal compiler footer is terminal: [process.rs:622–626](crates/verter_compiler/src/script/process.rs:622). State “if one exists”; terminal deletion has no old-end transition.
 
 2. **BLOCKING — the reference does not receive all real assembler inputs, and its independence remains auditable only by judgment.**
 
@@ -74,16 +74,16 @@ VERDICT: BLOCK
 
    > “the reference receives the original script and template code and maps plus the assembly meta/profile”
 
-   The real function also receives `canonical_id` and the complete `RuntimeCompileOutput`: [compile.rs:21–26](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:21). Exact output depends on inputs omitted by the quoted contract:
+   The real function also receives `canonical_id` and the complete `RuntimeCompileOutput`: [compile.rs:21–26](crates/verter_session/src/compile.rs:21). Exact output depends on inputs omitted by the quoted contract:
 
-   - style/custom-block inventory and `canonical_id`: [compile.rs:34–45](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:34);
-   - template runtime and SSR imports: [compile.rs:48–72](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:48);
-   - `scope_id`: [compile.rs:90–94](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:90);
-   - development `__file__`, HMR, `ssr_module_id`, and runtime-module policy: [compile.rs:118–160](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:118).
+   - style/custom-block inventory and `canonical_id`: [compile.rs:34–45](crates/verter_session/src/compile.rs:34);
+   - template runtime and SSR imports: [compile.rs:48–72](crates/verter_session/src/compile.rs:48);
+   - `scope_id`: [compile.rs:90–94](crates/verter_session/src/compile.rs:90);
+   - development `__file__`, HMR, `ssr_module_id`, and runtime-module policy: [compile.rs:118–160](crates/verter_session/src/compile.rs:118).
 
    Thus the stated input signature cannot independently reconstruct expected code for the real write grammar.
 
-   Separately, two copied implementations in the same Rust test module could “share no code” while retaining identical mistakes. The prior ruling explicitly required a cross-language harness reference and prohibited production placement/splice data: [amd-008-round3-reviews.md:494–511](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/BV0A/amd-008-round3-reviews.md:494); that enforceable boundary is absent from the current text.
+   Separately, two copied implementations in the same Rust test module could “share no code” while retaining identical mistakes. The prior ruling explicitly required a cross-language harness reference and prohibited production placement/splice data: [amd-008-round3-reviews.md:494–511](docs/arch/refactor/rev11/evidence/BV0A/amd-008-round3-reviews.md:494); that enforceable boundary is absent from the current text.
 
    Correction: define a serialized preassembly input DTO containing `canonical_id`, every `RuntimeCompileOutput` field consumed by assembly, `FileMeta`, and `CompileProfile`. Require the reference to live in the JavaScript conformance harness with no dependency on Rust composition/rewrite code, and require an explicit dependency/import audit.
 
@@ -96,13 +96,13 @@ VERDICT: BLOCK
 
    Real compiler fragment maps carry the optional V3 `file` field:
 
-   - `SourceMapOptions` exposes it: [source_map.rs:10–18](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:10).
-   - It is passed into the emitted map: [source_map.rs:123–124](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:123), [source_map.rs:383–392](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:383).
-   - Both script and template compilation set it from `filename`: [compile/mod.rs:1002–1008](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/compile/mod.rs:1002), [compile/mod.rs:1258–1264](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/compile/mod.rs:1258).
+   - `SourceMapOptions` exposes it: [source_map.rs:10–18](crates/verter_compiler/src/code_transform/source_map.rs:10).
+   - It is passed into the emitted map: [source_map.rs:123–124](crates/verter_compiler/src/code_transform/source_map.rs:123), [source_map.rs:383–392](crates/verter_compiler/src/code_transform/source_map.rs:383).
+   - Both script and template compilation set it from `filename`: [compile/mod.rs:1002–1008](crates/verter_compiler/src/compile/mod.rs:1002), [compile/mod.rs:1258–1264](crates/verter_compiler/src/compile/mod.rs:1258).
 
    A corrupted or arbitrary assembled `file` therefore passes the purported complete-artifact comparison.
 
-   The table policy also remains implicit. The repository’s existing JS composer deduplicates sources by spelling/content and names by value: [sourcemap.mjs:184–200](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:184). The amendment’s “table base” mutation instead presupposes append-with-duplicates. The reference cannot independently derive one unique choice from the present prose.
+   The table policy also remains implicit. The repository’s existing JS composer deduplicates sources by spelling/content and names by value: [sourcemap.mjs:184–200](packages/framework-conformance-harness/src/sourcemap.mjs:184). The amendment’s “table base” mutation instead presupposes append-with-duplicates. The reference cannot independently derive one unique choice from the present prose.
 
    This also weakens origin tagging:
 
@@ -120,14 +120,14 @@ VERDICT: BLOCK
 
    Missing cases include:
 
-   - malformed source-map JSON—the production carrier stores maps as strings: [carrier_compiler.rs:520–547](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/framework_common/carrier_compiler.rs:520);
-   - missing or wrong `version`; the oracle separately rejects non-3 versions: [mapping-oracle.mjs:1109–1118](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1109);
-   - absent/non-string `mappings`; the accepted oracle converts an absent member to `""`, which decodes successfully rather than entering “undecodable mappings”: [mapping-oracle.mjs:1113–1118](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1113);
-   - malformed source/name table row types: [mapping-oracle.mjs:1143–1163](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1143), [mapping-oracle.mjs:1217–1229](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1217);
+   - malformed source-map JSON—the production carrier stores maps as strings: [carrier_compiler.rs:520–547](crates/verter_compiler/src/framework_common/carrier_compiler.rs:520);
+   - missing or wrong `version`; the oracle separately rejects non-3 versions: [mapping-oracle.mjs:1109–1118](packages/framework-conformance-harness/src/mapping-oracle.mjs:1109);
+   - absent/non-string `mappings`; the accepted oracle converts an absent member to `""`, which decodes successfully rather than entering “undecodable mappings”: [mapping-oracle.mjs:1113–1118](packages/framework-conformance-harness/src/mapping-oracle.mjs:1113);
+   - malformed source/name table row types: [mapping-oracle.mjs:1143–1163](packages/framework-conformance-harness/src/mapping-oracle.mjs:1143), [mapping-oracle.mjs:1217–1229](packages/framework-conformance-harness/src/mapping-oracle.mjs:1217);
    - unsupported V3 index/`sections` maps;
    - undefined “incompatible table metadata,” especially `file`, `sourceRoot`, and `sourcesContent`.
 
-   “Requested but absent” is also ambiguous for template-only Vapor/SSR. The compiler intentionally creates a synthetic script block with an empty source map: [compile/mod.rs:1045–1066](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/compile/mod.rs:1045), while the assembler sees `Some(script)` and emits it: [compile.rs:74–89](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:74). This must be treated as synthetic sourceless code, not automatically as a missing required authored-fragment map.
+   “Requested but absent” is also ambiguous for template-only Vapor/SSR. The compiler intentionally creates a synthetic script block with an empty source map: [compile/mod.rs:1045–1066](crates/verter_compiler/src/compile/mod.rs:1045), while the assembler sees `Some(script)` and emits it: [compile.rs:74–89](crates/verter_session/src/compile.rs:74). This must be treated as synthetic sourceless code, not automatically as a missing required authored-fragment map.
 
    Correction: define an exhaustive typed preflight taxonomy covering JSON, version, map shape, table types, references, global metadata, sections, and generated-coordinate representability. Derive map-requiredness from the preassembly authored-fragment inventory—e.g. `FileMeta.has_script`—not merely source-map request state or `compiled.script.is_some()`.
 
@@ -154,9 +154,9 @@ VERDICT: BLOCK
 
    AMD-008 correctly identifies the two main locations:
 
-   - AMD-007 owned scope: [AMD-007:129–136](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:129);
-   - AMD-007 Required procedure: [AMD-007:242–249](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:242);
-   - corresponding BV0A text: [BV0A.md:27–34](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:27), [BV0A.md:146–153](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:146).
+   - AMD-007 owned scope: [AMD-007:129–136](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:129);
+   - AMD-007 Required procedure: [AMD-007:242–249](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:242);
+   - corresponding BV0A text: [BV0A.md:27–34](docs/arch/refactor/rev11/charters/BV0A.md:27), [BV0A.md:146–153](docs/arch/refactor/rev11/charters/BV0A.md:146).
 
    But AMD-008 says:
 
@@ -164,8 +164,8 @@ VERDICT: BLOCK
 
    It leaves two additional conflicts standing:
 
-   - Both the inline AMD-007 charter and `BV0A.md` say the interim design “does not require a chunk IR”: [AMD-007:159–167](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:159), [BV0A.md:63–71](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:63).
-   - AMD-007’s recorded maintainer ratification expressly says “no CodeTransform/chunk-IR mandate”: [AMD-007:512–526](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512).
+   - Both the inline AMD-007 charter and `BV0A.md` say the interim design “does not require a chunk IR”: [AMD-007:159–167](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:159), [BV0A.md:63–71](docs/arch/refactor/rev11/charters/BV0A.md:63).
+   - AMD-007’s recorded maintainer ratification expressly says “no CodeTransform/chunk-IR mandate”: [AMD-007:512–526](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512).
 
    AMD-008 also retains:
 
@@ -181,19 +181,19 @@ VERDICT: BLOCK
 
    > “BF2’s authored-source oracle remains unchanged and connected, but residual fragment-emitter violations are BV0’s acceptance responsibility, not BV0A’s.”
 
-   The accepted comparison currently makes every non-clean mapping result part of the overall verdict: [compare.mjs:453–487](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:453). Therefore “runs but does not gate” needs an exact outer procedure: which accepted entry point is invoked, what proves the mapping axis ran, and which result fields are intentionally excluded from BV0A acceptance.
+   The accepted comparison currently makes every non-clean mapping result part of the overall verdict: [compare.mjs:453–487](packages/framework-conformance-harness/src/compare.mjs:453). Therefore “runs but does not gate” needs an exact outer procedure: which accepted entry point is invoked, what proves the mapping axis ran, and which result fields are intentionally excluded from BV0A acceptance.
 
-   Map-disabled behavior itself is mechanically clear—the oracle accepts `map == null` when `sourceMapRequested == false` and rejects an unexpected map: [mapping-oracle.mjs:1096–1102](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1096)—but “applicable” and “required input map” are not bound to a named 36-cell manifest or preassembly fragment inventory.
+   Map-disabled behavior itself is mechanically clear—the oracle accepts `map == null` when `sourceMapRequested == false` and rejects an unexpected map: [mapping-oracle.mjs:1096–1102](packages/framework-conformance-harness/src/mapping-oracle.mjs:1096)—but “applicable” and “required input map” are not bound to a named 36-cell manifest or preassembly fragment inventory.
 
    Correction: bind applicability to the exact locked seed records; require the BF2 mapping axis to report `ran` once for every cell; independently assert map presence for every map-enabled cell and absence for every map-disabled cell; and specify the BV0A wrapper that records BF2’s unchanged report while excluding only its non-clean mapping verdict from the BV0A gate.
 
 Confirmed non-findings:
 
-- Positional comparison is necessary. The decoder preserves wire order: [sourcemap.mjs:70–105](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:70). The oracle preserves equal-coordinate relative order while sorting by column and `resolveAt` selects the last applicable segment: [mapping-oracle.mjs:1165–1171](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1165), [mapping-oracle.mjs:1033–1047](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1033).
-- Rewrite order is correct: rename, then global removal: [compile.rs:82–86](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:82).
+- Positional comparison is necessary. The decoder preserves wire order: [sourcemap.mjs:70–105](packages/framework-conformance-harness/src/sourcemap.mjs:70). The oracle preserves equal-coordinate relative order while sorting by column and `resolveAt` selects the last applicable segment: [mapping-oracle.mjs:1165–1171](packages/framework-conformance-harness/src/mapping-oracle.mjs:1165), [mapping-oracle.mjs:1033–1047](packages/framework-conformance-harness/src/mapping-oracle.mjs:1033).
+- Rewrite order is correct: rename, then global removal: [compile.rs:82–86](crates/verter_session/src/compile.rs:82).
 - `__sfc__` is 7 ASCII bytes and `_sfc_main` is 9.
-- Non-empty overwrite emits one replacement-start token; empty overwrite emits none: [source_map.rs:243–275](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243).
-- BV0 still retains the literal full 36-cell authored-oracle-clean exit: [BV0.md:52–64](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:52).
+- Non-empty overwrite emits one replacement-start token; empty overwrite emits none: [source_map.rs:243–275](crates/verter_compiler/src/code_transform/source_map.rs:243).
+- BV0 still retains the literal full 36-cell authored-oracle-clean exit: [BV0.md:52–64](docs/arch/refactor/rev11/charters/BV0.md:52).
 
 ---
 
@@ -203,7 +203,7 @@ VERDICT: BLOCK
 
 1. **BLOCKING — SOUNDNESS: the “complete decoded map artifact” is not complete, and decoding does not prove that the encoded map is valid.**
 
-   Exact positional equality does correctly close the earlier masking, equal-coordinate reordering, listed-table corruption, and boundary-segment holes—provided the reference is correct. But the artifact in [AMD-008 §2.1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:103) omits observable V3 state:
+   Exact positional equality does correctly close the earlier masking, equal-coordinate reordering, listed-table corruption, and boundary-segment holes—provided the reference is correct. But the artifact in [AMD-008 §2.1](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:103) omits observable V3 state:
 
    - `file`;
    - `ignoreList` and its source-index remapping;
@@ -216,13 +216,13 @@ VERDICT: BLOCK
    - Production remaps `sources[]` correctly but leaves `ignoreList` pointing at the pre-merge source index. Equality passes while debuggers classify the wrong source as third-party.
    - Production retains the script fragment’s `file` value instead of the assembled module identity. Equality passes.
 
-   There is also an encoded-map counterexample in the accepted decoder. I verified that both `A` and `ggggggE` decode to the same sourceless segment at `0:0` through [decodeVlqSegment](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:29). Mathematically, `ggggggE` encodes an out-of-range 2³² quantity; JavaScript’s 32-bit shifts wrap it to zero. ECMA-426 requires conforming generators to avoid decode errors and defines values beyond the 32-bit limit as invalid. [The specification also defines `file`, `ignoreList`, and indexed `sections` as observable source-map structure.](https://tc39.es/ecma426/)
+   There is also an encoded-map counterexample in the accepted decoder. I verified that both `A` and `ggggggE` decode to the same sourceless segment at `0:0` through [decodeVlqSegment](packages/framework-conformance-harness/src/sourcemap.mjs:29). Mathematically, `ggggggE` encodes an out-of-range 2³² quantity; JavaScript’s 32-bit shifts wrap it to zero. ECMA-426 requires conforming generators to avoid decode errors and defines values beyond the 32-bit limit as invalid. [The specification also defines `file`, `ignoreList`, and indexed `sections` as observable source-map structure.](https://tc39.es/ecma426/)
 
    **Required change:** Define one allowed top-level output schema—preferably a flat regular V3 map—and reject `sections` and unsupported semantic extensions. Add exact policies for `file` and `ignoreList`. Parse the actual wire artifact with an independent, spec-conformant validator that checks JSON field types, VLQ range/overflow, accumulated non-negative indices and coordinates, and regular-versus-indexed shape before logical comparison. Do not require raw `mappings` byte equality; valid equivalent encodings need not be byte-identical.
 
 2. **BLOCKING — STRENGTH/DETERMINACY: exact equality currently delegates normative representation choices to the reference implementation.**
 
-   [§2.1 says the reference “pins” table policy](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:133), but the amendment does not itself define:
+   [§2.1 says the reference “pins” table policy](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:133), but the amendment does not itself define:
 
    - stable concatenation versus any permitted normalization;
    - handling of unused table rows;
@@ -240,9 +240,9 @@ VERDICT: BLOCK
 
 3. **BLOCKING — INDEPENDENCE: §2.2(a) establishes code independence, not semantic independence.**
 
-   The “no shared code/helpers/traces” property in [§2.2(a)](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:160) is necessary and structurally auditable through imports and input DTOs. It does not prevent an implementer from translating the same mistaken algorithm into both implementations.
+   The “no shared code/helpers/traces” property in [§2.2(a)](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:160) is necessary and structurally auditable through imports and input DTOs. It does not prevent an implementer from translating the same mistaken algorithm into both implementations.
 
-   The main common-mode opening is `chain(...)`. V3 defines mappings, but it does not supply the amendment’s required multi-level composition algorithm. [CodeTransform](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243) defines the outer rewrite token geometry; the amendment does not define how that token is chained through:
+   The main common-mode opening is `chain(...)`. V3 defines mappings, but it does not supply the amendment’s required multi-level composition algorithm. [CodeTransform](crates/verter_compiler/src/code_transform/source_map.rs:243) defines the outer rewrite token geometry; the amendment does not define how that token is chained through:
 
    - multiple upstream segments at one coordinate;
    - sourceless barriers;
@@ -264,9 +264,9 @@ VERDICT: BLOCK
    - rewrite, placement, remapping, ordering, and synthetic boundaries remain BV0A-owned;
    - a missing, added, or reordered boundary segment differs from the reference and therefore fails.
 
-   However, the defects from finding 1—wrong `file`, wrong `ignoreList`, mixed `sections`, or invalid-but-leniently-decoded VLQ—are assembly-owned defects that both the artifact comparator and [BF2’s oracle](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1109) can miss. BV0’s later clean verdict cannot close those blind spots.
+   However, the defects from finding 1—wrong `file`, wrong `ignoreList`, mixed `sections`, or invalid-but-leniently-decoded VLQ—are assembly-owned defects that both the artifact comparator and [BF2’s oracle](packages/framework-conformance-harness/src/mapping-oracle.mjs:1109) can miss. BV0’s later clean verdict cannot close those blind spots.
 
-   Applicability is also not bound. The exit says “applicable map-enabled” cells and “map-disabled” cells in [§2.3](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:286), but does not name the immutable authority that partitions all 36 cells. A candidate can omit a troublesome map and derive “disabled/not applicable” from production state; BF2 still runs, but its `map-presence` failure is expressly non-gating.
+   Applicability is also not bound. The exit says “applicable map-enabled” cells and “map-disabled” cells in [§2.3](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:286), but does not name the immutable authority that partitions all 36 cells. A candidate can omit a troublesome map and derive “disabled/not applicable” from production state; BF2 still runs, but its `map-presence` failure is expressly non-gating.
 
    **Required change:** Partition all 36 cells from the locked BF2 request/options manifest, not from candidate map presence. Require an accounting assertion with no unclassified cell. Derive fragment applicability from the pre-assembly compilation inventory; missing maps must not erase applicability.
 
@@ -278,12 +278,12 @@ VERDICT: BLOCK
 
 6. **BLOCKING — SCOPE: the supersession declaration does not cover all conflicting ratified text.**
 
-   [AMD-008 §4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:352) claims to supersede exactly the §3 acceptance sections and two CodeTransform-optional passages. Conflicting AMD-007 text remains outside that declaration:
+   [AMD-008 §4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:352) claims to supersede exactly the §3 acceptance sections and two CodeTransform-optional passages. Conflicting AMD-007 text remains outside that declaration:
 
-   - [AMD-007 §1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:41) still defines BV0A correctness under BF2’s authored-source contract.
-   - [AMD-007 §7](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:449) still says mapping correctness is governed by BF2’s oracle.
-   - The recorded ratification explicitly says [“no CodeTransform/chunk-IR mandate”](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512).
-   - [BV0A’s retained post-list paragraph](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:63) still says the interim does not require a chunk IR.
+   - [AMD-007 §1](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:41) still defines BV0A correctness under BF2’s authored-source contract.
+   - [AMD-007 §7](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:449) still says mapping correctness is governed by BF2’s oracle.
+   - The recorded ratification explicitly says [“no CodeTransform/chunk-IR mandate”](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512).
+   - [BV0A’s retained post-list paragraph](docs/arch/refactor/rev11/charters/BV0A.md:63) still says the interim does not require a chunk IR.
 
    **Required change:** Enumerate and supersede every conflicting sentence, including the relevant §8.1 ratification clause. Clarify whether production must literally use `CodeTransform` or merely reproduce its pinned semantics, and distinguish that local rewrite requirement from a forbidden whole-module/B4 chunk IR.
 
@@ -324,9 +324,9 @@ Quoted text:
 > “Map-disabled cells return no map, and the assembled probe still runs there to prove absence…”
 
 > “BF2’s … verdict is NOT a BV0A acceptance condition.”  
-> [AMD-008 §2](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:236)
+> [AMD-008 §2](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:236)
 
-The amendment never identifies the authority deciding “map-enabled” or “applicable.” The accepted harness already has such an independent authority: `record.options.sourceMap` in the golden provenance. [check-candidate.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/check-candidate.mjs:90)
+The amendment never identifies the authority deciding “map-enabled” or “applicable.” The accepted harness already has such an independent authority: `record.options.sourceMap` in the golden provenance. [check-candidate.mjs](packages/framework-conformance-harness/src/check-candidate.mjs:90)
 
 Exploit: classify a failing cell from candidate map presence or candidate-produced metadata. Return no map, call the cell map-disabled, skip equality, and let BF2 report `map-presence`; that verdict is explicitly non-gating.
 
@@ -341,9 +341,9 @@ Quoted text:
 > “Concretely the reference … independently performs the assembly write grammar…”
 
 > “compares expected CODE to production code…”  
-> [AMD-008 §2(a)](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:160)
+> [AMD-008 §2(a)](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:160)
 
-The architecture ruling required an “input-only, cross-language N-version reference in the conformance harness.” [Round-3 ruling](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/BV0A/amd-008-round3-reviews.md:494) The current text silently drops both “cross-language” and “in the conformance harness.”
+The architecture ruling required an “input-only, cross-language N-version reference in the conformance harness.” [Round-3 ruling](docs/arch/refactor/rev11/evidence/BV0A/amd-008-round3-reviews.md:494) The current text silently drops both “cross-language” and “in the conformance harness.”
 
 It also requires byte identity with “pre-amendment output” but binds no baseline commit, fixture outputs, or digests. Since the former detailed write-order procedure is replaced in full, “assembly write grammar” can be copied from the candidate implementation.
 
@@ -361,11 +361,11 @@ and:
 
 > `M1 = chain(rename_transform_map, input_script_map)`  
 > `M2 = chain(removal_transform_map, M1)`  
-> [AMD-008 §2](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:133)
+> [AMD-008 §2](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:133)
 
 `chain` is undefined. V3 specifies map representation, not the complete policy for composing two maps. The text does not define lookup bias, equal-coordinate selection, sourceless termination, name propagation, or table merging/deduplication. “Pinned by the reference” leaves the normative decision to test code.
 
-Exploit: when chaining through two equal-coordinate input segments, both implementations select the first rather than the last applicable segment. Exact equality passes, while the actual oracle consumer selects the last applicable segment. [mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1033)
+Exploit: when chaining through two equal-coordinate input segments, both implementations select the first rather than the last applicable segment. Exact equality passes, while the actual oracle consumer selects the last applicable segment. [mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:1033)
 
 Likewise, production and reference may both deduplicate duplicate source/name rows or choose the same unjustified `sourceRoot` normalization.
 
@@ -393,7 +393,7 @@ A comparator that ignores `original` and `name_index` still detects every prescr
 The mutation-execution requirement is also insufficient:
 
 > “must be proven to have actually applied — present, unique, and new in the source before the run…”  
-> [AMD-008 §2(e)](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:245)
+> [AMD-008 §2(e)](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:245)
 
 A unique source mutation that causes compilation or setup failure satisfies “must FAIL” without proving the equality gate discriminated.
 
@@ -404,22 +404,22 @@ Required correction: add one-field mutations for every artifact field and sequen
 Quoted text:
 
 > “This amendment supersedes exactly two things and no more.”  
-> [AMD-008 §4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:352)
+> [AMD-008 §4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:352)
 
 But AMD-007 §1 still says:
 
 > “BV0A owns … a real, correct map — correct under BF2’s accepted authored-source contract…”  
-> [AMD-007 §1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:41)
+> [AMD-007 §1](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:41)
 
 BV0A owned-scope item 4 still says the result is:
 
 > “validated through BF2’s reaccepted authored-source oracle”  
-> [BV0A charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:54)
+> [BV0A charter](docs/arch/refactor/rev11/charters/BV0A.md:54)
 
 And AMD-007’s recorded ratification expressly authorized:
 
 > “no CodeTransform/chunk-IR mandate”  
-> [AMD-007 §8.1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512)
+> [AMD-007 §8.1](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:512)
 
 AMD-008 names only the duplicated owned-scope/procedure clauses, not these additional ratified statements.
 
@@ -432,7 +432,7 @@ Quoted text:
 > “incompatible table metadata between fragments”
 
 > “These FAIL BV0A closed (or rescope to their true owner)”  
-> [AMD-008 §2 item 4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:307)
+> [AMD-008 §2 item 4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:307)
 
 “Incompatible table metadata” has no closed definition. It could include perfectly composable differing `sourceRoot` values, absent versus `null` content entries, or duplicate table rows. The text also does not require classification against immutable raw inputs before production rewriting.
 
@@ -446,7 +446,7 @@ Quoted text:
 
 > “The compared subject is the complete decoded map ARTIFACT”
 
-But `MapArtifact` omits the standard optional `file` member, even though the Rust map generator carries it into `SourceMap::new`. [source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:123)
+But `MapArtifact` omits the standard optional `file` member, even though the Rust map generator carries it into `SourceMap::new`. [source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:123)
 
 Exploit: production emits an incorrect or invented `file`; the declared exact comparator cannot observe it.
 
@@ -458,7 +458,7 @@ Quoted text:
 
 > “BV0A’s implementation attempt proves a real, valuable, but NARROWER claim…”
 
-The same section later admits its pooled violation matching could consume an assembly-introduced violation using a spurious fragment entry. [AMD-008 §1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:21) That mechanism did not prove the asserted neutrality claim.
+The same section later admits its pooled violation matching could consume an assembly-introduced violation using a spurious fragment entry. [AMD-008 §1](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:21) That mechanism did not prove the asserted neutrality claim.
 
 Required correction: say the attempt “sought to prove” the narrower claim but failed to establish it. Also qualify “materially stronger than attribution” as stronger specifically for assembly-neutrality—not for authored-source correctness.
 
@@ -469,7 +469,7 @@ The oracle’s non-gating status is not inherently a waiver. The sentences that 
 and:
 
 > “BV0’s own literal 36/36 fully-oracle-clean exit is unchanged…”  
-> [AMD-008 §§1–2](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:82)
+> [AMD-008 §§1–2](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:82)
 
 BV0’s charter still requires all 36 cells to pass the authored-source oracle. The redesign is therefore a principled scope split in intent, but the current BV0A gate remains exploitable.
 
@@ -483,13 +483,13 @@ VERDICT: BLOCK
 
 1. BLOCKING — The rewrite algebra omits the post-overwrite transition for non-empty overwrites.
 
-   Quoted text: “The following surviving original chunk supplies the transition …” is specified only for an “EMPTY overwrite” ([AMD-008:210](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:210)). For non-empty overwrites, the text specifies only one replacement-start token ([AMD-008:200](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:200), [AMD-008:302](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:302)).
+   Quoted text: “The following surviving original chunk supplies the transition …” is specified only for an “EMPTY overwrite” ([AMD-008:210](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:210)). For non-empty overwrites, the text specifies only one replacement-start token ([AMD-008:200](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:200), [AMD-008:302](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:302)).
 
    Real `CodeTransform` behavior is:
 
-   - A middle or left-aligned overwrite creates an `Overwritten` chunk followed by an `Original` chunk ([code_transform.rs:617](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/code_transform.rs:617)).
-   - A non-empty `Overwritten` chunk emits one token at its start ([source_map.rs:243](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243)).
-   - The following `Original` chunk independently emits another token at its chunk start ([source_map.rs:181](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs:505](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:505)).
+   - A middle or left-aligned overwrite creates an `Overwritten` chunk followed by an `Original` chunk ([code_transform.rs:617](crates/verter_compiler/src/code_transform/code_transform.rs:617)).
+   - A non-empty `Overwritten` chunk emits one token at its start ([source_map.rs:243](crates/verter_compiler/src/code_transform/source_map.rs:243)).
+   - The following `Original` chunk independently emits another token at its chunk start ([source_map.rs:181](crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs:505](crates/verter_compiler/src/code_transform/source_map.rs:505)).
 
    Thus every non-terminal rename has an old-end transition as well. The reference algorithm can legally omit it under the present text.
 
@@ -497,14 +497,14 @@ VERDICT: BLOCK
 
 2. BLOCKING — Ordering is not defined when rewriting makes previously different positions collide.
 
-   Quoted text: surviving occurrences preserve only “its ORDINAL among equal-coordinate occurrences” ([AMD-008:197](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:197)). The text does not order:
+   Quoted text: surviving occurrences preserve only “its ORDINAL among equal-coordinate occurrences” ([AMD-008:197](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:197)). The text does not order:
 
    - surviving occurrences whose distinct input coordinates collapse after deletion;
    - an overwrite-start token against an existing occurrence at the same output coordinate;
    - an old-end transition against another shifted occurrence;
    - an assembly-boundary token against a fragment token.
 
-   These ties are semantically observable. The decoder retains every zero-delta occurrence in wire order ([sourcemap.mjs:76](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:76)), while `resolveAt` selects the last applicable segment ([mapping-oracle.mjs:1039](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1039)). The real chunk emitter’s order is its chunk traversal order ([source_map.rs:178](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:178)).
+   These ties are semantically observable. The decoder retains every zero-delta occurrence in wire order ([sourcemap.mjs:76](packages/framework-conformance-harness/src/sourcemap.mjs:76)), while `resolveAt` selects the last applicable segment ([mapping-oracle.mjs:1039](packages/framework-conformance-harness/src/mapping-oracle.mjs:1039)). The real chunk emitter’s order is its chunk traversal order ([source_map.rs:178](crates/verter_compiler/src/code_transform/source_map.rs:178)).
 
    Concrete correction: define the complete output occurrence order as the exact `CodeTransform` chunk-emission walk, including placement/boundary emission, with a deterministic intra-coordinate precedence. Add controls for rewrite-induced collisions, not only the current swap of two already-equal input occurrences.
 
@@ -512,20 +512,20 @@ VERDICT: BLOCK
 
    Quoted text:
 
-   - “Fragment source spellings are rebased into assembled-relative spellings” ([AMD-008:181](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:181)).
-   - “source spellings … are carried OPAQUELY and unchanged” ([AMD-008:218](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:218)).
+   - “Fragment source spellings are rebased into assembled-relative spellings” ([AMD-008:181](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:181)).
+   - “source spellings … are carried OPAQUELY and unchanged” ([AMD-008:218](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:218)).
 
-   Both cannot hold. Nor does the amendment define the base identity, path/URL resolution rules, normalization, or serialization required by “rebased into assembled-relative spellings.” The actual fragment producer sets both `file` and `source` from `options.filename` ([compile/mod.rs:1002](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/compile/mod.rs:1002), [compile/mod.rs:1258](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/compile/mod.rs:1258)).
+   Both cannot hold. Nor does the amendment define the base identity, path/URL resolution rules, normalization, or serialization required by “rebased into assembled-relative spellings.” The actual fragment producer sets both `file` and `source` from `options.filename` ([compile/mod.rs:1002](crates/verter_compiler/src/compile/mod.rs:1002), [compile/mod.rs:1258](crates/verter_compiler/src/compile/mod.rs:1258)).
 
-   Likewise, “`file` is the assembled module’s own identity” ([AMD-008:161](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:161)) does not choose between the actual main identities: `canonical_id` and the generated `._VERTER_.bundle.ts` identity ([id.rs:183](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/id.rs:183)).
+   Likewise, “`file` is the assembled module’s own identity” ([AMD-008:161](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:161)) does not choose between the actual main identities: `canonical_id` and the generated `._VERTER_.bundle.ts` identity ([id.rs:183](crates/verter_session/src/id.rs:183)).
 
    Concrete correction: state the exact `file` value, define a complete source-root resolution and reserialization function with explicit bases, and change “unchanged” to permit only that specified reserialization. Specify the accepted emitted ignore-list key spelling as well.
 
 4. BLOCKING — The universal mutation protocol is impossible for fail-closed and baseline controls.
 
-   Quoted text: “Every mutation” must prove that “the candidate artifact was actually emitted,” “the independent reference was UNCHANGED,” and “the NAMED equality assertion produced the RED” ([AMD-008:378](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:378)).
+   Quoted text: “Every mutation” must prove that “the candidate artifact was actually emitted,” “the independent reference was UNCHANGED,” and “the NAMED equality assertion produced the RED” ([AMD-008:378](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:378)).
 
-   But the amendment also mandates wire validation before comparison ([AMD-008:142](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:142)). Malformed JSON, invalid VLQ, indexed maps, and invalid table indices therefore must fail before the equality assertion. The applicability control may intentionally prevent an artifact, and the byte-baseline control must fail at code comparison before map equality.
+   But the amendment also mandates wire validation before comparison ([AMD-008:142](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:142)). Malformed JSON, invalid VLQ, indexed maps, and invalid table indices therefore must fail before the equality assertion. The applicability control may intentionally prevent an artifact, and the byte-baseline control must fail at code comparison before map equality.
 
    Concrete correction: divide controls into explicit protocols:
 
@@ -536,7 +536,7 @@ VERDICT: BLOCK
 
 5. BLOCKING — The controls do not prove all compared fields or all declared failure categories.
 
-   Quoted text: “One mutation per compared artifact field” ([AMD-008:356](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:356)).
+   Quoted text: “One mutation per compared artifact field” ([AMD-008:356](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:356)).
 
    The sweep omits direct mutations for:
 
@@ -547,15 +547,15 @@ VERDICT: BLOCK
    - ignore-list presence/absence;
    - ordered-segment collision precedence.
 
-   Its fail-closed sweep claims “One plant per item 4 category” ([AMD-008:366](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:366)) but omits malformed `sourcesContent` rows and the entire “incompatible table metadata” category. It also has no control for the missing non-empty-overwrite transition from finding 1.
+   Its fail-closed sweep claims “One plant per item 4 category” ([AMD-008:366](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:366)) but omits malformed `sourcesContent` rows and the entire “incompatible table metadata” category. It also has no control for the missing non-empty-overwrite transition from finding 1.
 
-   “FIVE geometry mutations” ([AMD-008:324](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:324)) is misleading: the five numbered categories require eight separately planted mutations ([AMD-008:340](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:340)).
+   “FIVE geometry mutations” ([AMD-008:324](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:324)) is misleading: the five numbered categories require eight separately planted mutations ([AMD-008:340](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:340)).
 
    Concrete correction: enumerate every executable control with a stable ID and expected rejecting assertion; add direct one-field mutations for every `MapArtifact` and `Segment` field and every preflight category.
 
 6. BLOCKING — `UncomposableInputMap` is neither exhaustive nor judgment-free.
 
-   Quoted text: the taxonomy is “exhaustive” and `UncomposableInputMap` “is exactly” the listed cases ([AMD-008:428](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:428), [AMD-008:434](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:434)).
+   Quoted text: the taxonomy is “exhaustive” and `UncomposableInputMap` “is exactly” the listed cases ([AMD-008:428](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:428), [AMD-008:434](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:434)).
 
    Missing or ambiguous cases include:
 
@@ -567,17 +567,17 @@ VERDICT: BLOCK
    - conflicting ignore-list metadata;
    - unknown semantic fields and `debugId`.
 
-   These are real shapes recognized by the pinned `oxc_sourcemap` dependency ([Cargo.lock:2149](/Users/carlosrodrigues/Documents/dev/verter/Cargo.lock:2149)). Its schema contains `file`, `sourceRoot`, `sourcesContent`, `debugId`, and both ignore-list spellings ([oxc decode.rs:9](/Users/carlosrodrigues/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_sourcemap-7.0.0/src/decode.rs:9)); it explicitly rejects invalid ignore indices ([oxc decode.rs:52](/Users/carlosrodrigues/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_sourcemap-7.0.0/src/decode.rs:52)) and negative accumulated coordinates ([oxc decode.rs:175](/Users/carlosrodrigues/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxc_sourcemap-7.0.0/src/decode.rs:175)).
+   These are real shapes recognized by the pinned `oxc_sourcemap` dependency ([Cargo.lock:2149](Cargo.lock:2149)). Its schema contains `file`, `sourceRoot`, `sourcesContent`, `debugId`, and both ignore-list spellings ([oxc decode.rs:9](oxc_sourcemap-7.0.0/src/decode.rs:9)); it explicitly rejects invalid ignore indices ([oxc decode.rs:52](oxc_sourcemap-7.0.0/src/decode.rs:52)) and negative accumulated coordinates ([oxc decode.rs:175](oxc_sourcemap-7.0.0/src/decode.rs:175)).
 
-   Meanwhile, the accepted oracle silently defaults absent `sources` and `names` to empty arrays ([mapping-oracle.mjs:1121](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1121)). The amendment does not state whether BV0A normalizes these or rejects them.
+   Meanwhile, the accepted oracle silently defaults absent `sources` and `names` to empty arrays ([mapping-oracle.mjs:1121](packages/framework-conformance-harness/src/mapping-oracle.mjs:1121)). The amendment does not state whether BV0A normalizes these or rejects them.
 
-   “A `sourceRoot` pair that cannot both be honoured” and arrays that “cannot be made index-parallel” ([AMD-008:443](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:443)) are conclusions, not deterministic predicates.
+   “A `sourceRoot` pair that cannot both be honoured” and arrays that “cannot be made index-parallel” ([AMD-008:443](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:443)) are conclusions, not deterministic predicates.
 
    Concrete correction: define a closed input DTO schema and a deterministic preflight decision table for every member and malformed state. Define precisely which shapes normalize and which produce `UncomposableInputMap`.
 
 7. BLOCKING — Independence remains one-way and permits a tautological implementation.
 
-   Quoted text: the JavaScript reference has “NO dependency … on Rust composition” and must not be “transcribed from the production implementation” ([AMD-008:241](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:241), [AMD-008:262](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:262)).
+   Quoted text: the JavaScript reference has “NO dependency … on Rust composition” and must not be “transcribed from the production implementation” ([AMD-008:241](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:241), [AMD-008:262](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:262)).
 
    This does not forbid the reverse dependency: production code or generated Rust fixtures could be derived from the JavaScript reference. Nor are the “literal hand-authored vectors” assigned mandatory coverage, stable identities, or independently pinned expected artifacts. A token vector unrelated to the hard rewrite/table cases would satisfy the literal wording.
 
@@ -585,39 +585,39 @@ VERDICT: BLOCK
 
 8. MAJOR — Origin tags are insufficient as specified for actual-output failure attribution.
 
-   Quoted text: origin “survives rewriting, placement, and table remapping,” is “failure-reporting data,” but “the emitted wire map does not serialize” it and production may retain it only “where it needs” it ([AMD-008:314](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:314)).
+   Quoted text: origin “survives rewriting, placement, and table remapping,” is “failure-reporting data,” but “the emitted wire map does not serialize” it and production may retain it only “where it needs” it ([AMD-008:314](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:314)).
 
-   The compared `MapArtifact` has no provenance field ([AMD-008:111](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:111)). Therefore an extra actual segment, an omitted expected segment, or a tie-order mismatch cannot be attributed from the comparison artifact without returning to coordinate/position inference. Input tagging does correctly distinguish duplicate table rows, fragment boundaries, and invalid fragment-local coordinates, but it does not prove provenance for unmatched actual occurrences.
+   The compared `MapArtifact` has no provenance field ([AMD-008:111](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:111)). Therefore an extra actual segment, an omitted expected segment, or a tie-order mismatch cannot be attributed from the comparison artifact without returning to coordinate/position inference. Input tagging does correctly distinguish duplicate table rows, fragment boundaries, and invalid fragment-local coordinates, but it does not prove provenance for unmatched actual occurrences.
 
    Concrete correction: require a test-only provenance sidecar with one entry per emitted segment occurrence and table row, compared or reported alongside the logical artifact. Alternatively, delete the failure-attribution claim and state that all exact-equality failures are BV0A-owned without finer attribution.
 
 9. MAJOR — The name-binding statement contradicts the overwrite rules.
 
-   Quoted text: “a rewrite never … drops a name binding” ([AMD-008:215](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:215)). Yet the immediately preceding rules drop every segment occurrence inside either overwrite kind ([AMD-008:200](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:200), [AMD-008:210](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:210)); those occurrences may carry `name_index`.
+   Quoted text: “a rewrite never … drops a name binding” ([AMD-008:215](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:215)). Yet the immediately preceding rules drop every segment occurrence inside either overwrite kind ([AMD-008:200](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:200), [AMD-008:210](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:210)); those occurrences may carry `name_index`.
 
    Concrete correction: say that unused `names[]` table rows are retained, while named segment occurrences inside replaced ranges are dropped and any synthesized transition/overwrite occurrence receives the name selected by the specified chaining lookup.
 
 10. MINOR — The supersession count is factually wrong, though the substantive list is mostly complete.
 
-   Quoted text: “The `CodeTransform`/chunk-IR language, in all four places it appears” ([AMD-008:505](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:505)).
+   Quoted text: “The `CodeTransform`/chunk-IR language, in all four places it appears” ([AMD-008:505](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:505)).
 
    The paragraph itself identifies three mirrored passage classes in each of two documents—six textual locations:
 
-   - AMD-007 owned-scope item 2 ([AMD-007:126](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:126));
-   - AMD-007 retained chunk-IR paragraph ([AMD-007:159](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:159));
-   - AMD-007 Required procedure ([AMD-007:243](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:243));
-   - the corresponding three BV0A passages ([BV0A:32](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:32), [BV0A:63](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:63), [BV0A:148](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:148)).
+   - AMD-007 owned-scope item 2 ([AMD-007:126](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:126));
+   - AMD-007 retained chunk-IR paragraph ([AMD-007:159](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:159));
+   - AMD-007 Required procedure ([AMD-007:243](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:243));
+   - the corresponding three BV0A passages ([BV0A:32](docs/arch/refactor/rev11/charters/BV0A.md:32), [BV0A:63](docs/arch/refactor/rev11/charters/BV0A.md:63), [BV0A:148](docs/arch/refactor/rev11/charters/BV0A.md:148)).
 
-   AMD-007 §8.1 is a seventh occurrence handled separately ([AMD-007:520](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:520)). Owned-scope item 4 is also correctly enumerated separately.
+   AMD-007 §8.1 is a seventh occurrence handled separately ([AMD-007:520](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:520)). Owned-scope item 4 is also correctly enumerated separately.
 
    Concrete correction: replace “all four places” with “the six mirrored passages,” retaining §8.1 as the separately enumerated seventh occurrence.
 
 Confirmed conforming points:
 
 - §2’s positional-comparison rationale is correct: equal generated coordinates are representable, wire order is retained, and consumer resolution selects the last occurrence.
-- The production rewrite order is correctly stated: rename first, removal second ([compile.rs:82](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:82)). `__sfc__` is 7 ASCII bytes and `_sfc_main` is 9.
-- A non-empty `Chunk::Overwritten` emits one start token; an empty overwrite emits none. UTF-16 generated columns are also correctly described ([source_map.rs:574](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:574)).
-- The revised exits clearly require exact equality for map-enabled cells, asserted absence for map-disabled cells, and BF2 execution without using its mapping verdict as the BV0A gate ([AMD-008:394](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:394)).
+- The production rewrite order is correctly stated: rename first, removal second ([compile.rs:82](crates/verter_session/src/compile.rs:82)). `__sfc__` is 7 ASCII bytes and `_sfc_main` is 9.
+- A non-empty `Chunk::Overwritten` emits one start token; an empty overwrite emits none. UTF-16 generated columns are also correctly described ([source_map.rs:574](crates/verter_compiler/src/code_transform/source_map.rs:574)).
+- The revised exits clearly require exact equality for map-enabled cells, asserted absence for map-disabled cells, and BF2 execution without using its mapping verdict as the BV0A gate ([AMD-008:394](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:394)).
 
 ---
 
@@ -629,9 +629,9 @@ The ordered-artifact approach is directionally correct and genuinely removes vio
 
 1. CRITICAL — SOUNDNESS: non-empty overwrites omit the old-end transition
 
-Design problem: AMD-008 says a non-empty overwrite replaces all in-range occurrences with exactly one occurrence at the replacement start ([AMD-008 §2.1(d)](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:197), [§2.2(c)](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:302)). It mentions the following-original-chunk transition only for empty overwrites.
+Design problem: AMD-008 says a non-empty overwrite replaces all in-range occurrences with exactly one occurrence at the replacement start ([AMD-008 §2.1(d)](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:197), [§2.2(c)](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:302)). It mentions the following-original-chunk transition only for empty overwrites.
 
-That is not the real `CodeTransform` behavior. `Chunk::Overwritten` emits the replacement-start token, then a following `Chunk::Original` unconditionally emits another token at its chunk start ([source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243), [emit_mapped_content](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:510)).
+That is not the real `CodeTransform` behavior. `Chunk::Overwritten` emits the replacement-start token, then a following `Chunk::Original` unconditionally emits another token at its chunk start ([source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:243), [emit_mapped_content](crates/verter_compiler/src/code_transform/source_map.rs:510)).
 
 Concrete counterexample:
 
@@ -666,7 +666,7 @@ Required change: specify the entire outer chunk token stream for every overwrite
 - Exact generated-coordinate transformation for every surviving occurrence.
 - Collision/coalescing and equal-coordinate ordinal rules.
 
-Add a non-empty-overwrite old-end mutation and hand-authored vector. The current geometry control tests that transition only for removal ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:343)).
+Add a non-empty-overwrite old-end mutation and hand-authored vector. The current geometry control tests that transition only for removal ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:343)).
 
 2. HIGH — STRENGTH: canonical equality is underdefined where it removes legitimate freedom
 
@@ -693,7 +693,7 @@ Raw `mappings` byte equality itself is not needed: after strict validation, alte
 
 3. HIGH — INDEPENDENCE: structural independence is good, common-mode independence is unproven
 
-Design problem: JavaScript location, no Rust dependency, and a single input-only DTO are appropriate and auditable ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:241)). “Not transcribed from production” is a review instruction, not a structurally enforceable property. Cross-language translation can preserve the same misunderstanding—as finding 1 demonstrates.
+Design problem: JavaScript location, no Rust dependency, and a single input-only DTO are appropriate and auditable ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:241)). “Not transcribed from production” is a review instruction, not a structurally enforceable property. Cross-language translation can preserve the same misunderstanding—as finding 1 demonstrates.
 
 Why it matters: exact equality proves only agreement. Without a third authority, N-version implementations can agree exactly on the same defect.
 
@@ -709,9 +709,9 @@ N-version implementation is useful corroboration, but it is not sufficient as th
 
 4. CRITICAL — BOUNDARY: the BV0A/BV0 split is conceptually preserved, but not closed
 
-Design problem: the amendment correctly says BV0A carries mechanically composable emitter mappings opaquely and BV0 later judges their authored truth ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:452)). However, finding 1 permits a BV0A composition defect that both later rails can miss.
+Design problem: the amendment correctly says BV0A carries mechanically composable emitter mappings opaquely and BV0 later judges their authored truth ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:452)). However, finding 1 permits a BV0A composition defect that both later rails can miss.
 
-Choose `A` and `B` in the counterexample so both are in-bounds and satisfy an allowed relation—or place the affected generated token in one of the oracle’s acknowledged loose/uncovered regions ([mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:37)). The incorrect lack of a post-rename transition then:
+Choose `A` and `B` in the counterexample so both are in-bounds and satisfy an allowed relation—or place the affected generated token in one of the oracle’s acknowledged loose/uncovered regions ([mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:37)). The incorrect lack of a post-rename transition then:
 
 - Matches the equally defective reference artifact.
 - Remains oracle-clean in BV0.
@@ -723,19 +723,19 @@ Required change: close findings 1–3 and require controls over every assembly b
 
 5. INFO / CLEARED — CIRCULARITY
 
-The logical circularity is genuinely broken. BV0A no longer needs emitter-owned mapping violations to be clean; it must deliver a faithfully composed artifact, while BV0 retains the full 36-cell oracle-clean exit ([BV0.md](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:52), [AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:413)).
+The logical circularity is genuinely broken. BV0A no longer needs emitter-owned mapping violations to be clean; it must deliver a faithfully composed artifact, while BV0 retains the full 36-cell oracle-clean exit ([BV0.md](docs/arch/refactor/rev11/charters/BV0.md:52), [AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:413)).
 
 Required change: none to the DAG or ownership principle. The new BV0A proof must first be made sound.
 
 6. INFO / CLEARED — SCOPE
 
-The widening is now explicitly declared. §4 supersedes the conflicting Objective/procedure/exits/abort text, AMD-007 §§1, 7, and 8.1, all four chunk/`CodeTransform` passages, and BV0A owned-scope item 4 ([AMD-008 §4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:490)). The mandate remains local to the two script rewrites and does not confer whole-module chunk-IR or B4 authority.
+The widening is now explicitly declared. §4 supersedes the conflicting Objective/procedure/exits/abort text, AMD-007 §§1, 7, and 8.1, all four chunk/`CodeTransform` passages, and BV0A owned-scope item 4 ([AMD-008 §4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:490)). The mandate remains local to the two script rewrites and does not confer whole-module chunk-IR or B4 authority.
 
 Required change: none, provided the corrected rewrite algebra remains limited to these two operations.
 
 7. HIGH — RIGHT-SIZING AND ACCEPTANCE CONTROLS
 
-Design problem: the blanket mutation rule is internally impossible. Every mutation supposedly must emit a candidate artifact, leave the reference unchanged, and fail specifically at the equality assertion ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:378)). But:
+Design problem: the blanket mutation rule is internally impossible. Every mutation supposedly must emit a candidate artifact, leave the reference unchanged, and fail specifically at the equality assertion ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:378)). But:
 
 - Malformed input-map mutations must fail preflight before emitting an artifact.
 - The code mutation must fail the byte-baseline assertion before map equality.
@@ -785,7 +785,7 @@ Quoted text:
 
 > “The following surviving original chunk supplies the transition from the removed range’s old end IF ONE EXISTS…”
 
-The last rule is stated only for an empty overwrite. In the real implementation, a non-empty `Chunk::Overwritten` emits its replacement-start token and advances the cursor; the following `Chunk::Original` then emits another token at its generated start, mapped from the old range end. See [source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243), and [source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:510).
+The last rule is stated only for an empty overwrite. In the real implementation, a non-empty `Chunk::Overwritten` emits its replacement-start token and advances the cursor; the following `Chunk::Original` then emits another token at its generated start, mapped from the old range end. See [source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:181), [source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:243), and [source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:510).
 
 Concrete exploit: both production and reference omit the rename-end transition when no input segment exists exactly at the old end. The replacement token’s provenance then leaks into following original bytes until a later segment. Exact equality passes because both implementations follow the same incomplete prose. The controls require a removal transition mutation, but no corresponding rename transition mutation.
 
@@ -810,7 +810,7 @@ Quoted text:
 
 Cross-language and no-import rules do not establish N-version independence. Production and reference can be generated from the same JSON/DSL, copy the same mistaken newline rule, or be manually translated from one common description without importing Rust.
 
-More fundamentally, the amendment does not normatively specify the complete code-byte grammar needed to compute expected code. The real assembler relies on `render_ids`, `format_import_specifier`, Rust debug-string escaping, exact punctuation, and conditional newline behavior in [compile.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:34). The amendment specifies write order, not those byte rules. The JavaScript reference must therefore copy or infer production behavior despite the “No translation” clause.
+More fundamentally, the amendment does not normatively specify the complete code-byte grammar needed to compute expected code. The real assembler relies on `render_ids`, `format_import_specifier`, Rust debug-string escaping, exact punctuation, and conditional newline behavior in [compile.rs](crates/verter_session/src/compile.rs:34). The amendment specifies write order, not those byte rules. The JavaScript reference must therefore copy or infer production behavior despite the “No translation” clause.
 
 The baseline is also not pinned tightly enough:
 
@@ -837,7 +837,7 @@ Quoted text:
 
 > “Fragment source spellings are rebased into assembled-relative spellings at composition time…”
 
-“Own identity” does not specify an exact byte string. The codebase exposes both the canonical main ID and a `._VERTER_.bundle.ts` identity in [id.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/id.rs:183). Both production and reference can choose the same wrong one.
+“Own identity” does not specify an exact byte string. The codebase exposes both the canonical main ID and a `._VERTER_.bundle.ts` identity in [id.rs](crates/verter_session/src/id.rs:183). Both production and reference can choose the same wrong one.
 
 The `sourceRoot` rule is not an algorithm. It provides no source-map URL/base, URL/path normalization rules, or treatment of absolute URLs, Windows spellings, queries, or `null` source rows. Under the source-map specification, relative sources are resolved relative to the source-map URL after applying `sourceRoot`; `file` does not provide that base and is deliberately context-defined. [ECMA-426](https://tc39.es/ecma426/2024/)
 

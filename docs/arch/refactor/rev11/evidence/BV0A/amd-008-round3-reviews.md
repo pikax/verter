@@ -144,7 +144,7 @@ VERDICT: BLOCK
 
 1. **BLOCKING — Raw V3 multiset equality is not sufficient to prove neutral composition.**
 
-   Source-map segment order is observable when multiple segments share a generated coordinate. The oracle’s own lookup chooses the last applicable segment ([mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1033)), while item 1 deliberately compares a multiset ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85)). This also contradicts BV0A’s unchanged obligation to preserve segment order ([BV0A.md](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:47)).
+   Source-map segment order is observable when multiple segments share a generated coordinate. The oracle’s own lookup chooses the last applicable segment ([mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:1033)), while item 1 deliberately compares a multiset ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85)). This also contradicts BV0A’s unchanged obligation to preserve segment order ([BV0A.md](docs/arch/refactor/rev11/charters/BV0A.md:47)).
 
    I reproduced three counterexamples against the real oracle:
 
@@ -182,9 +182,9 @@ VERDICT: BLOCK
 
 3. **BLOCKING — The ownership split is not preserved at assembly-only mapping boundaries.**
 
-   The oracle explicitly admits uncovered generated scaffolding and non-position-exact relations ([mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:31)), plus `boundary:false` regions where inherited provenance is accepted ([mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:799)). A source-bearing mapping can therefore bleed into assembly scaffolding without producing any violation. That is a BV0A defect, not a BV0 emitter defect, and BV0’s later “oracle clean” exit cannot close an oracle blind spot.
+   The oracle explicitly admits uncovered generated scaffolding and non-position-exact relations ([mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:31)), plus `boundary:false` regions where inherited provenance is accepted ([mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:799)). A source-bearing mapping can therefore bleed into assembly scaffolding without producing any violation. That is a BV0A defect, not a BV0 emitter defect, and BV0’s later “oracle clean” exit cannot close an oracle blind spot.
 
-   Conversely, the rule that ambiguous joins or coordinates outside expected fragment spans become assembly-owned ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:177)) can assign inherited fragment defects to BV0A. Examples include:
+   Conversely, the rule that ambiguous joins or coordinates outside expected fragment spans become assembly-owned ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:177)) can assign inherited fragment defects to BV0A. Examples include:
 
    - an out-of-generated-bounds fragment segment, which by definition may not lie in a fragment span after rebasing;
    - a source-table entry deduplicated from both fragments, for which no unique fragment owner exists;
@@ -209,7 +209,7 @@ VERDICT: BLOCK
 
 5. **BLOCKING — Human-readable `detail` and range labels are an unsound acceptance API; the oracle-change prohibition is the wrong tradeoff.**
 
-   The oracle exposes only `{rule, detail}` ([mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1073)), so the amendment proposes reparsing seventeen families of diagnostic prose and even rewriting human-readable range labels. This duplicates the oracle’s private formatting grammar as an architectural contract.
+   The oracle exposes only `{rule, detail}` ([mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:1073)), so the amendment proposes reparsing seventeen families of diagnostic prose and even rewriting human-readable range labels. This duplicates the oracle’s private formatting grammar as an architectural contract.
 
    Fail-closed parsing prevents some false acceptance, but it still creates:
 
@@ -218,7 +218,7 @@ VERDICT: BLOCK
    - platform/version coupling through parser and decoder error text;
    - another large schema that cannot be compiler-checked against the oracle.
 
-   Required change: reopen BF2 narrowly and make the oracle emit additive structured violations, for example `{ rule, payload, detail }`, where `payload` contains typed coordinates, source/name indices, anchor ID, range kind/stable range ID, and expected/actual relation where applicable. Preserve `detail` purely for diagnostics and preserve the existing verdict semantics. AMD-008’s prohibition on any oracle change ([AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:318)) must be removed for this additive schema correction.
+   Required change: reopen BF2 narrowly and make the oracle emit additive structured violations, for example `{ rule, payload, detail }`, where `payload` contains typed coordinates, source/name indices, anchor ID, range kind/stable range ID, and expected/actual relation where applicable. Preserve `detail` purely for diagnostics and preserve the existing verdict semantics. AMD-008’s prohibition on any oracle change ([AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:318)) must be removed for this additive schema correction.
 
 6. **MAJOR — The algorithm is not deterministic or fully implementable as written.**
 
@@ -269,7 +269,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “this one does not, substituting 9 bytes for 8”
 
-   See [AMD-008 §2.1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:104).
+   See [AMD-008 §2.1](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:104).
 
    The real rename is 7→9 bytes, as AMD-007/BV0A correctly state, not 8→9. More seriously, for the first splice and a segment at `p == e`, the declared `d` is zero because there are no earlier splices. The “otherwise” formula therefore leaves the segment at `p`, although the correct result is `p + 2`.
 
@@ -287,15 +287,15 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “Every surviving raw segment occurrence must appear EXACTLY ONCE in the assembled multiset”
 
-   See [AMD-008 §2.1](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85).
+   See [AMD-008 §2.1](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85).
 
    But the supposedly unchanged owned scope requires:
 
    > “preserving declared source identities, source contents, lines, columns, and segment order”
 
-   See [BV0A owned scope](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:47).
+   See [BV0A owned scope](docs/arch/refactor/rev11/charters/BV0A.md:47).
 
-   Concrete exploit: swap two same-line encoded segments at generated columns 5 and 10, emitting column deltas `+10, -5`. The pinned decoder accepts this. For example, `decodeMappings("U,L")` returns columns `[10, 5]`. The raw multiset is unchanged, while the oracle explicitly sorts its lookup inventory by generated column at [mapping-oracle.mjs:1166](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1166). Thus the malformed/reordered map is normalized back into passing order for validation. Equal-coordinate segment reversal is worse because it can change which original position a consumer resolves.
+   Concrete exploit: swap two same-line encoded segments at generated columns 5 and 10, emitting column deltas `+10, -5`. The pinned decoder accepts this. For example, `decodeMappings("U,L")` returns columns `[10, 5]`. The raw multiset is unchanged, while the oracle explicitly sorts its lookup inventory by generated column at [mapping-oracle.mjs:1166](packages/framework-conformance-harness/src/mapping-oracle.mjs:1166). Thus the malformed/reordered map is normalized back into passing order for validation. Equal-coordinate segment reversal is worse because it can change which original position a consumer resolves.
 
    This also disproves §4’s claim that the owned-scope list remains untouched: the replacement acceptance definition no longer enforces one of its affirmative requirements.
 
@@ -311,7 +311,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “a cell with no template fragment, no script fragment, or no map requested is exempt from the corresponding probe”
 
-   See [AMD-008 §2.1–§2.3](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:125).
+   See [AMD-008 §2.1–§2.3](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:125).
 
    “Independently witnessed” is asserted but no permissible witness is specified.
 
@@ -329,7 +329,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “the anchor-completeness core key `(rule, fragment, anchor-id)`”
 
-   See [AMD-008 collision controls](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:260).
+   See [AMD-008 collision controls](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:260).
 
    The required set has no one-field control for, among others:
 
@@ -361,7 +361,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “`RESCOPE_REQUIRED` remains reserved for a genuinely absent, false, or uncomposable input map”
 
-   See [AMD-008 §2.1 and §2.4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:135).
+   See [AMD-008 §2.1 and §2.4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:135).
 
    The diagnosed `const`→`<` source-bearing segment is literally a false mapping under the accepted oracle. The amendment simultaneously treats it as carry-forward-acceptable and as grounds for rescope. This lets the implementer decide after seeing a failure whether “false” means oracle-wrong or merely structurally untransformable.
 
@@ -385,7 +385,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “oracle/invocation changes”
 
-   remains untouched. See [AMD-008 §2.2](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:145) and [§4](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:340).
+   remains untouched. See [AMD-008 §2.2](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:145) and [§4](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:340).
 
    These can be reconciled only by interpreting “invocation” as “the already accepted assembled BF2 invocation,” while treating the standalone calls as new BV0A-only test invocations. The amendment never states that distinction.
 
@@ -397,9 +397,9 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “an assembled `map-presence`, `map-version`, or `mappings-decode` violation returns before any segment is examined”
 
-   See [AMD-008 §2.2](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:232).
+   See [AMD-008 §2.2](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:232).
 
-   The pinned oracle does not return after `map-version`; it records the failure and continues into decoding and segment validation at [mapping-oracle.mjs:1109](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1109).
+   The pinned oracle does not return after `map-version`; it records the failure and continues into decoding and segment validation at [mapping-oracle.mjs:1109](packages/framework-conformance-harness/src/mapping-oracle.mjs:1109).
 
    The related claim that a probe reports “a PREFIX of what would fail” is also inaccurate: returns occur at artifact level, while `continue` suppressions occur independently per segment and later anchor/range phases can still run.
 
@@ -415,7 +415,7 @@ The ownership split is legitimate in principle, but AMD-008’s replacement gate
 
    > “ratification-bundle commit `<bundle-full-sha>`, tree `<bundle-tree-oid>`”
 
-   See [AMD-008 §5](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:350).
+   See [AMD-008 §5](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:350).
 
    Nothing requires the bundle delta to contain only review records and the §5.1 decision. “Any changed reviewed-package byte requires … fresh reports” does not prohibit adding unrelated or modified charter bytes in the bundle.
 
@@ -467,7 +467,7 @@ Segment =
 
 The segment comparison is positional: same length, and segment `i` must equal expected segment `i`. It is not a set, multiset, sorted list, or consumer-classification comparison.
 
-This is mandatory because BV0A’s unchanged charter explicitly preserves segment order [BV0A.md](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0A.md:47), while AMD-008 silently substitutes a multiset [AMD-008](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85). The accepted decoder preserves wire order, including negative generated-column deltas [sourcemap.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/sourcemap.mjs:70), and the oracle’s lookup selects the last applicable segment [mapping-oracle.mjs](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/mapping-oracle.mjs:1033). Equal-coordinate order is therefore observable.
+This is mandatory because BV0A’s unchanged charter explicitly preserves segment order [BV0A.md](docs/arch/refactor/rev11/charters/BV0A.md:47), while AMD-008 silently substitutes a multiset [AMD-008](docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md:85). The accepted decoder preserves wire order, including negative generated-column deltas [sourcemap.mjs](packages/framework-conformance-harness/src/sourcemap.mjs:70), and the oracle’s lookup selects the last applicable segment [mapping-oracle.mjs](packages/framework-conformance-harness/src/mapping-oracle.mjs:1033). Equal-coordinate order is therefore observable.
 
 The reference must also specify assembly-owned sourceless boundary segments. At a synthetic-write boundary, append a one-field segment when the current same-line mapping state would otherwise make the synthetic bytes inherit source provenance. No source-bearing segment may be invented for assembly scaffolding.
 
@@ -540,7 +540,7 @@ Never infer ownership from final coordinates, fragment spans, source spelling, o
 
 The real `CodeTransform` semantics are normative. A distinct point-rebasing/clamping policy is wrong.
 
-The current assembler performs two post-generation string replacements [compile.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/compile.rs:74). The correct implementation is two sequential code-and-map transforms:
+The current assembler performs two post-generation string replacements [compile.rs](crates/verter_session/src/compile.rs:74). The correct implementation is two sequential code-and-map transforms:
 
 ```text
 M1 = chain(rename_transform_map, input_script_map)
@@ -555,7 +555,7 @@ Pass order is fixed:
 
 Each pass must drive both its output code and transform map. Because the second pass addresses the first pass’s coordinate space, these are sequential transforms, not one overlapping edit batch.
 
-`Chunk::Overwritten` emits one token at replacement start mapped to the overwritten range’s original start; it does not preserve and clamp every segment inside the replaced range [source_map.rs](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/code_transform/source_map.rs:243). Removal emits no replacement token. The following surviving original chunk supplies the transition from the removed range’s old end.
+`Chunk::Overwritten` emits one token at replacement start mapped to the overwritten range’s original start; it does not preserve and clamp every segment inside the replaced range [source_map.rs](crates/verter_compiler/src/code_transform/source_map.rs:243). Removal emits no replacement token. The following surviving original chunk supplies the transition from the removed range’s old end.
 
 Accordingly:
 

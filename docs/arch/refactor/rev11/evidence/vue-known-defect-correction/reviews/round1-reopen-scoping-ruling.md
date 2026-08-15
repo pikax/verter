@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.147.0
 --------
-workdir: /Users/carlosrodrigues/Documents/dev/verter
+workdir: <repo-root>
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -32,7 +32,7 @@ Give a clear, decisive ruling for each question, citing the charter/evidence tex
 codex
 I’m using the project’s architecture guidance because this is a charter-boundary and ownership ruling. I’ll read the canonical architecture rules plus the BV0 charter and all three review reports, then map each ruling to the exact local text.
 exec
-/bin/zsh -lc "wc -l CLAUDE.md .claude/skills/architecture/SKILL.md docs/arch/refactor/rev11/charters/BV0.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md && sed -n '1,240p' CLAUDE.md && sed -n '241,480p' CLAUDE.md && sed -n '481,720p' CLAUDE.md" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "wc -l CLAUDE.md .claude/skills/architecture/SKILL.md docs/arch/refactor/rev11/charters/BV0.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md && sed -n '1,240p' CLAUDE.md && sed -n '241,480p' CLAUDE.md && sed -n '481,720p' CLAUDE.md" in <repo-root>
  succeeded in 0ms:
      659 CLAUDE.md
      230 .claude/skills/architecture/SKILL.md
@@ -702,7 +702,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/agent-prompts`         | Generating implementation/continuation/review/fix prompts for driving separate agent sessions |
 
 exec
-/bin/zsh -lc "sed -n '1,260p' .claude/skills/architecture/SKILL.md" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "sed -n '1,260p' .claude/skills/architecture/SKILL.md" in <repo-root>
  succeeded in 0ms:
 ---
 name: architecture
@@ -936,7 +936,7 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 ```
 
 exec
-/bin/zsh -lc "sed -n '1,220p' CLAUDE.md" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "sed -n '1,220p' CLAUDE.md" in <repo-root>
  succeeded in 0ms:
 # Verter
 
@@ -1160,7 +1160,7 @@ Guards: `no_napi_direct_verter_compiler_emitters`, `compat_one_napi_call_audit`.
 
 
 exec
-/bin/zsh -lc "sed -n '221,440p' CLAUDE.md" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "sed -n '221,440p' CLAUDE.md" in <repo-root>
  succeeded in 0ms:
 See `/component-meta` skill for the full policy, resolver rules, and cache contracts.
 
@@ -1384,7 +1384,7 @@ For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing
 **Agent test policy:** `node scripts/gate.mjs` is the default Rust gate — it builds the test universe once and runs the two debug surfaces (`cargo nextest run --workspace` process-isolation + the in-process `verter_session` libtest binaries, the same direct surface as `cargo test -p verter_session --tests`) from the same archive with no second-command recompile, then builds a second `--workspace` archive under the `no-debug-assertions` profile and runs `package(verter_session) + package(verter_scheduler)` from it (SURFACE 3, the shipped-`cfg(debug_assertions)` surface). It runs the `verter_session` binaries under the workspace-unified `session_metrics` feature set (ON), intentionally replacing the old package-scoped default-feature (`session_metrics` OFF) rebuild rather than reproducing its feature config — that ON config is what the shipped LSP uses and what removes the second compile; no test target the old pair compiled is dropped. A contributor without Node, or debugging one surface in isolation, runs `cargo nextest run --workspace` then `cargo test -p verter_session --tests` directly. The `cases::typeinfo_proto_ts_freshness::*` buf/oxfmt byte-pin is the only tolerated failure, and its tolerance is now VERDICT-GATED on the gate's freshness-tooling preflight: the gate ensures `buf`/`oxfmt` are present (auto `pnpm install --frozen-lockfile` when the `node_modules/.bin` shims are missing) so with `node_modules` present that pair runs GENUINELY — and with the tooling present, tolerance is OFF, so a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), NOT surfaced as PASS-WITH-TOLERATED. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS (no FAIL line); the verdict-gated tolerance flips ON there only as a latent safety net, surfacing PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. PASS-WITH-TOLERATED is never the regression signal on a normal `node_modules`-present machine, and never the normal buf-less verdict either; `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure); a deterministic install failure (frozen-lockfile mismatch) fails loud as setup (exit 127) when an install is attempted (both shims already present ⇒ no install runs). Run the gate with `node_modules` present. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and example builds without improving the normal verification loop (and the silent-skip trap is stated once in Running Tests above). Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks.
 
 exec
-/bin/zsh -lc "sed -n '441,700p' CLAUDE.md" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "sed -n '441,700p' CLAUDE.md" in <repo-root>
  succeeded in 0ms:
 
 ### Documentation Updates
@@ -1607,7 +1607,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/agent-prompts`         | Generating implementation/continuation/review/fix prompts for driving separate agent sessions |
 
 exec
-/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/charters/BV0.md' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/charters/BV0.md' in <repo-root>
  succeeded in 0ms:
      1	# BV0 — Immediate Vue known-defect correction
      2	
@@ -1672,13 +1672,13 @@ exec
     61	substitute a guard, tracker, waiver, fixture-specific branch, or silent deferral.
 
 exec
-/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md' in <repo-root>
  succeeded in 0ms:
      1	# BV0 Conformance Review — candidate `c40a1ca96` vs base `b64358705`
      2	
      3	**Charter:** `docs/arch/refactor/rev11/charters/BV0.md` (Immediate Vue known-defect correction)
      4	**Reviewer role:** CONFORMANCE (criterion-by-criterion against "Required exits")
-     5	**Worktree:** `/Users/carlosrodrigues/Documents/dev/verter-review-bv0-conf`, HEAD `c40a1ca96`, `git status` clean before and after every run.
+     5	**Worktree:** `<worktree>/verter-review-bv0-conf`, HEAD `c40a1ca96`, `git status` clean before and after every run.
      6	
      7	> **Environment caveat, stated up front:** a second (adversarial) reviewer agent is operating in this
      8	> same physical worktree and temporarily reverts production code for mutation testing. Every test run
@@ -1974,7 +1974,7 @@ exec
    298	2. B2 — `official_seed_matrix.rs` treats `skipped` link/runtime axes as informational and prints nothing on success, so it reports 36/36 green when the charter-required exact-package-link and deterministic-runtime axes never executed (demonstrated: identical command, axes flip `skipped → ran` on provisioning alone); fails the "isolated oracle install is present so link checks genuinely execute" exit and the MANDATORY Verification-Must-Prove-Execution rule.
 
 exec
-/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md' in <repo-root>
  succeeded in 0ms:
      1	# BV0 — Architecture Review
      2	
@@ -2161,13 +2161,13 @@ exec
    183	3. The charter exit "The isolated oracle install is present so link checks genuinely execute" is not structurally satisfied — `check-candidate.mjs` reports link and runtime axes as `skipped` whenever the one-time `provision-oracle-npm-cache.mjs` provisioning has not run, and `official_seed_matrix.rs` folds that skip through unmodified, so all 36 cells pass on a clean checkout without either axis executing. Make the provisioned install a fail-closed prerequisite, or supply fresh evidence of a provisioned run with zero skipped axes.
 
 exec
-/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md' in <repo-root>
  succeeded in 0ms:
      1	# BV0 — Adversarial review (candidate `c40a1ca96`, base `b64358705`)
      2	
      3	Charter: `docs/arch/refactor/rev11/charters/BV0.md`
      4	Reviewer posture: assume every test is weak until a real red/green plant proves otherwise.
-     5	Worktree: `/Users/carlosrodrigues/Documents/dev/verter-review-bv0-adv`, left byte-identical to start
+     5	Worktree: `<worktree>/verter-review-bv0-adv`, left byte-identical to start
      6	(`git status --porcelain` empty, `HEAD == c40a1ca96b73cf9b723fd7209516ea0462deaad2`).
      7	
      8	---
@@ -2470,7 +2470,7 @@ exec
 codex
 The key distinction is already visible: correcting the oracle is necessary to make BV0’s own evidence truthful, but changing a shared BF2-owned harness has a wider blast radius than BV0’s source-fix authority. I’m checking the program’s reopen/dependency rules now so the process ruling—especially for already accepted blocks—is grounded rather than inferred.
 exec
-/bin/zsh -lc 'rg -n --hidden -S "REOPEN|reopen|ACCEPTED|accepted|invalidate|invalidation|scope consult|ADOPT-NOW|whole class|comprehensive|dependent|dependency|oracle|shared harness|BF3|Svelte" docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/charters docs/arch/refactor/rev11/evidence/maintainer-rulings.md docs/arch/refactor/rev11 | head -n 700' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'rg -n --hidden -S "REOPEN|reopen|ACCEPTED|accepted|invalidate|invalidation|scope consult|ADOPT-NOW|whole class|comprehensive|dependent|dependency|oracle|shared harness|BF3|Svelte" docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/charters docs/arch/refactor/rev11/evidence/maintainer-rulings.md docs/arch/refactor/rev11 | head -n 700' in <repo-root>
  succeeded in 42ms:
 docs/arch/refactor/rev11/ORCHESTRATOR.md:16:- delegate substantial independent work through immutable context packets;
 docs/arch/refactor/rev11/ORCHESTRATOR.md:20:You must not silently change architecture, weaken a gate, widen a charter, self-approve, or treat your own summary as independent review.
@@ -3174,7 +3174,7 @@ docs/arch/refactor/rev11/contracts/official-core-oracles.md:35:A newer Vue RC, V
 docs/arch/refactor/rev11/contracts/official-core-oracles.md:37:case/golden evidence, independent challenges, and maintainer ratification. A range,
 
 exec
-/bin/zsh -lc 'rg -n --hidden -S "REOPEN|reopen|accepted evidence|Accepted evidence|invalidation|invalidate|predecessor|scope widening|scope|finding disposition|ADOPT-NOW|DEFER|REJECT|block status|status transition" docs/arch/refactor/rev11/governance.md docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/*.md docs/arch/refactor/rev11/contracts/*.md | head -n 500' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'rg -n --hidden -S "REOPEN|reopen|accepted evidence|Accepted evidence|invalidation|invalidate|predecessor|scope widening|scope|finding disposition|ADOPT-NOW|DEFER|REJECT|block status|status transition" docs/arch/refactor/rev11/governance.md docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/*.md docs/arch/refactor/rev11/contracts/*.md | head -n 500' in <repo-root>
  succeeded in 0ms:
 docs/arch/refactor/rev11/contracts/agent-orchestration.md:10:The authority package states what must become true. The repository and accepted evidence state what is currently true. The orchestrator may never fill a gap between them by assumption.
 docs/arch/refactor/rev11/contracts/agent-orchestration.md:17:- **Orchestrator:** one coordinating agent/context that owns sequencing, program-state mutation, worker assignment, evidence collection, and stop/rescope reporting.
@@ -3357,7 +3357,7 @@ docs/arch/refactor/rev11/architecture.md:1042:Interners are request-, project/ge
 docs/arch/refactor/rev11/architecture.md:1192:Audit, tracing, provenance detail, and debug graph capture are request-scoped or disabled by default. When off, hot paths do not format strings, allocate event payloads, or retain audit graphs; fixed owner-local counters may remain only when measured overhead is negligible.
 
 exec
-/bin/zsh -lc 'wc -l docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/governance.md docs/arch/refactor/rev11/program.md docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md docs/arch/refactor/rev11/charters/BF1.md docs/arch/refactor/rev11/charters/BF2.md docs/arch/refactor/rev11/charters/BF3.md docs/arch/refactor/rev11/program-dag.toml 2>/dev/null' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'wc -l docs/arch/refactor/rev11/ORCHESTRATOR.md docs/arch/refactor/rev11/governance.md docs/arch/refactor/rev11/program.md docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md docs/arch/refactor/rev11/charters/BF1.md docs/arch/refactor/rev11/charters/BF2.md docs/arch/refactor/rev11/charters/BF3.md docs/arch/refactor/rev11/program-dag.toml 2>/dev/null' in <repo-root>
  succeeded in 0ms:
      157 docs/arch/refactor/rev11/ORCHESTRATOR.md
      378 docs/arch/refactor/rev11/governance.md
@@ -3370,7 +3370,7 @@ exec
     1845 total
 
 exec
-/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/ORCHESTRATOR.md && nl -ba docs/arch/refactor/rev11/charters/BF1.md && nl -ba docs/arch/refactor/rev11/charters/BF2.md && nl -ba docs/arch/refactor/rev11/charters/BF3.md' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'nl -ba docs/arch/refactor/rev11/ORCHESTRATOR.md && nl -ba docs/arch/refactor/rev11/charters/BF1.md && nl -ba docs/arch/refactor/rev11/charters/BF2.md && nl -ba docs/arch/refactor/rev11/charters/BF3.md' in <repo-root>
  succeeded in 0ms:
      1	# Verter Revision 11 — Orchestrator Entry Point
      2	
@@ -3666,7 +3666,7 @@ exec
     49	partial artifact.
 
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/governance.md | sed -n '1,280p'" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/governance.md | sed -n '1,280p'" in <repo-root>
  succeeded in 0ms:
      1	# Verter Revision 11 Program Governance
      2	
@@ -3950,7 +3950,7 @@ exec
    280	
 
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/governance.md | sed -n '281,410p' && nl -ba docs/arch/refactor/rev11/contracts/architecture-falsification.md | sed -n '1,125p' && nl -ba docs/arch/refactor/rev11/contracts/agent-orchestration.md | sed -n '130,180p'" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/governance.md | sed -n '281,410p' && nl -ba docs/arch/refactor/rev11/contracts/architecture-falsification.md | sed -n '1,125p' && nl -ba docs/arch/refactor/rev11/contracts/agent-orchestration.md | sed -n '130,180p'" in <repo-root>
  succeeded in 0ms:
    281	Three generic approvals do not satisfy the three distinct mandates.
    282	
@@ -4209,7 +4209,7 @@ exec
    164	A result created from a different SHA, tree, toolchain, profile, corpus, or stack base is not silently relabeled as current evidence.
 
 exec
-/bin/zsh -lc 'rg -n -C 4 -S "BV0|BF2|BF3|Svelte|Vue known|harness|oracle|reopen|accepted|scope" docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md | head -n 320' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'rg -n -C 4 -S "BV0|BF2|BF3|Svelte|Vue known|harness|oracle|reopen|accepted|scope" docs/arch/refactor/rev11/amendments/AMD-005-framework-compiler-conformance-rescope.md | head -n 320' in <repo-root>
  succeeded in 0ms:
 1:# AMD-005 — Framework compiler conformance rescope
 2-
@@ -4480,7 +4480,7 @@ exec
 354-product, or compatibility claim.
 
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/program-dag.toml | sed -n '45,125p' && nl -ba docs/arch/refactor/rev11/README.md | sed -n '78,102p' && rg -n -S \"BV0|BF2\" docs/arch/refactor/rev11/evidence/framework-conformance/program-state-transition.md docs/arch/refactor/rev11/evidence docs/arch/refactor/rev11/amendments | head -n 200" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/program-dag.toml | sed -n '45,125p' && nl -ba docs/arch/refactor/rev11/README.md | sed -n '78,102p' && rg -n -S \"BV0|BF2\" docs/arch/refactor/rev11/evidence/framework-conformance/program-state-transition.md docs/arch/refactor/rev11/evidence docs/arch/refactor/rev11/amendments | head -n 200" in <repo-root>
  succeeded in 0ms:
     45	[[block]]
     46	id = "A5"
@@ -4788,7 +4788,7 @@ docs/arch/refactor/rev11/evidence/framework-conformance/vue-official-cases.tsv:2
 docs/arch/refactor/rev11/evidence/framework-conformance/vue-official-cases.tsv:29:VUE-3D152AD3F78E95AC0E17	compiler-core	packages/compiler-core/__tests__/codegen.spec.ts:679:5	34386ce6930b81eeae3d9aec3a967a10b838ca44	single-declaration	StringLiteral	dc26c7f00d3e021689f224505bb0cde51028b8f8f7cea48c8c0b992b6cd9edea	blocked	BV1	BF2 must runner-enumerate profiles and attach imported/equivalent/not-applicable/unsupported evidence.	-
 
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/amendments/AMD-006-vue-known-defect-correction.md | sed -n '1,190p'" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/amendments/AMD-006-vue-known-defect-correction.md | sed -n '1,190p'" in <repo-root>
  succeeded in 0ms:
      1	# AMD-006 — Vue known-defect correction
      2	
@@ -4968,7 +4968,7 @@ exec
    176	preparer cannot ratify, review, or satisfy any independent mandate.
 
 exec
-/bin/zsh -lc 'rg -n -S "compileScript|inlineTemplate|templateOptions|vapor|ssr" docs/arch/refactor/rev11/evidence/framework-conformance docs/arch/refactor/rev11/contracts | head -n 400' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'rg -n -S "compileScript|inlineTemplate|templateOptions|vapor|ssr" docs/arch/refactor/rev11/evidence/framework-conformance docs/arch/refactor/rev11/contracts | head -n 400' in <repo-root>
  succeeded in 0ms:
 docs/arch/refactor/rev11/evidence/framework-conformance/reviews/conformance-challenge.md:121:| Vue | 2,003 | compiler-core 570; compiler-dom 137; compiler-sfc 509; compiler-ssr 134; compiler-vapor 653 |
 docs/arch/refactor/rev11/evidence/framework-conformance/reviews/conformance-challenge.md:194:| 9. server/SSR behavior | `ssr-hydration.md:5-13` |
@@ -5372,7 +5372,7 @@ docs/arch/refactor/rev11/evidence/framework-conformance/vue-official-cases.tsv:1
 docs/arch/refactor/rev11/evidence/framework-conformance/vue-official-cases.tsv:1269:VUE-FB95A1CB9A1CD1625206	compiler-ssr	packages/compiler-ssr/__tests__/ssrElement.spec.ts:74:5	504093f35340ee7ff950f0907e07fb2d8202eea2	single-declaration	StringLiteral	91a1bbc18962499158d514da38afcd3bc3c684b94c8d8656a9feec16710e0c35	blocked	BV1	BF2 must runner-enumerate profiles and attach imported/equivalent/not-applicable/unsupported evidence.	-
 
 exec
-/bin/zsh -lc "rg --files docs/arch/refactor/rev11/evidence/framework-conformance | rg -i 'option|profile|vue' | head -n 100" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "rg --files docs/arch/refactor/rev11/evidence/framework-conformance | rg -i 'option|profile|vue' | head -n 100" in <repo-root>
  succeeded in 0ms:
 docs/arch/refactor/rev11/evidence/framework-conformance/svelte-options.tsv
 docs/arch/refactor/rev11/evidence/framework-conformance/option-inventories.md
@@ -5382,7 +5382,7 @@ docs/arch/refactor/rev11/evidence/framework-conformance/oracles/vue/package.json
 docs/arch/refactor/rev11/evidence/framework-conformance/oracles/vue/closure.tsv
 
 exec
-/bin/zsh -lc 'rg -n -i -S "compileScript|inlineTemplate|templateOptions|vapor|ssr" docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv docs/arch/refactor/rev11/evidence/framework-conformance/option-inventories.md | head -n 250' in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc 'rg -n -i -S "compileScript|inlineTemplate|templateOptions|vapor|ssr" docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv docs/arch/refactor/rev11/evidence/framework-conformance/option-inventories.md | head -n 250' in <repo-root>
  succeeded in 0ms:
 docs/arch/refactor/rev11/evidence/framework-conformance/option-inventories.md:8:  `packages/compiler-sfc/src/{parse,compileScript,compileTemplate,compileStyle}.ts`,
 docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:41:compiler-core:TransformOptions	ssrCssVars	derived	Derived from analyzed SFC CSS variables for server products.
@@ -5406,7 +5406,7 @@ docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:86:compi
 docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:87:compiler-sfc:compileTemplate	ssrCssVars	derived	Derived from analyzed CSS variables.
 
 exec
-/bin/zsh -lc "rg --files | rg 'program-state\\.toml"'$|BF2.*reopen|reopen.*BF2|reopen'"' | head -n 200 && rg -n -S \"status.*REOPEN|REOPENED|reopen\" docs/arch/refactor/rev11/evidence/BF2 docs/arch/refactor/rev11/evidence | head -n 250" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "rg --files | rg 'program-state\\.toml"'$|BF2.*reopen|reopen.*BF2|reopen'"' | head -n 200 && rg -n -S \"status.*REOPEN|REOPENED|reopen\" docs/arch/refactor/rev11/evidence/BF2 docs/arch/refactor/rev11/evidence | head -n 250" in <repo-root>
  succeeded in 0ms:
 docs/arch/architecture-lock/ledger/program-state.toml
 docs/arch/refactor/rev11/evidence/BF2/reviews/reopen1-round2-adversarial.md
@@ -5528,7 +5528,7 @@ docs/arch/refactor/rev11/evidence/BF2/command-proofs/oracle-manifest-cells-reope
 codex
 The repository already contains a prior BF2 second-reopen ruling, so I’m using that precedent as the process model. It should tell us whether this must be a BF2 reopen, how comprehensive the repair must be, and what downstream evidence gets invalidated.
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md && nl -ba docs/arch/refactor/rev11/evidence/BF2/context-packet-reopen1.md | sed -n '1,130p' && nl -ba docs/arch/architecture-lock/ledger/program-state.toml | sed -n '250,360p'" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md && nl -ba docs/arch/refactor/rev11/evidence/BF2/context-packet-reopen1.md | sed -n '1,130p' && nl -ba docs/arch/architecture-lock/ledger/program-state.toml | sed -n '250,360p'" in <repo-root>
  succeeded in 0ms:
      1	# BF2 second-reopen ruling record
      2	
@@ -5806,7 +5806,7 @@ exec
    360	notes = ""
 
 exec
-/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/templates/program-state.template.toml | sed -n '35,58p' && rg -n -S \"REOPEN\" docs/arch/refactor/rev11/tools docs/arch/architecture-lock docs/arch/refactor/rev11/templates/program-state.template.toml | head -n 120" in /Users/carlosrodrigues/Documents/dev/verter
+/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/templates/program-state.template.toml | sed -n '35,58p' && rg -n -S \"REOPEN\" docs/arch/refactor/rev11/tools docs/arch/architecture-lock docs/arch/refactor/rev11/templates/program-state.template.toml | head -n 120" in <repo-root>
  succeeded in 0ms:
     35	provider = "REQUIRED_PROVIDER"
     36	fallback_or_substitution = false
@@ -5843,9 +5843,9 @@ The correct scope is a coordinated BF2→BV0 reopen, not one enlarged BV0 commit
 
 **Ruling: fixing `invoke-vue-oracle.mjs` and regenerating affected official goldens is BF2-owned work. It requires a formal BF2 reopen, not unilateral BV0 scope.**
 
-BF2 expressly owns “offline official compiler invocation and immutable golden generation,” Vue script/template assembly, runtime validation, and mutation tests ([BF2 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF2.md:11)). BV0 is a successor that consumes that evidence and owns compiler source corrections ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:13)). Letting the candidate-under-test repair and regenerate its own oracle inside BV0 would blur exactly that separation.
+BF2 expressly owns “offline official compiler invocation and immutable golden generation,” Vue script/template assembly, runtime validation, and mutation tests ([BF2 charter](docs/arch/refactor/rev11/charters/BF2.md:11)). BV0 is a successor that consumes that evidence and owns compiler source corrections ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:13)). Letting the candidate-under-test repair and regenerate its own oracle inside BV0 would blur exactly that separation.
 
-This is also the established BF2 reopen precedent: defects in the oracle/validator must be fixed in BF2 because later blocks are judged by it; deferring the correction poisons downstream evidence ([second-reopen ruling](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md:25)).
+This is also the established BF2 reopen precedent: defects in the oracle/validator must be fixed in BF2 because later blocks are judged by it; deferring the correction poisons downstream evidence ([second-reopen ruling](docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md:25)).
 
 The comprehensive BF2 correction must cover the entire option-propagation class:
 
@@ -5853,49 +5853,49 @@ The comprehensive BF2 correction must cover the entire option-propagation class:
 - Pass `vapor` and `templateOptions.ssr` correctly to `compileScript`.
 - Verify parse, `compileScript`, `compileTemplate`, assembly, golden provenance, and runtime all use the same requested axes.
 - Regenerate every affected official golden across the corpus. Because `ssr` was also omitted from `compileScript`, scope cannot be limited to Vapor: regenerate all Vapor and SSR/non-inline script-bearing products whose official output changes.
-- Add independent JS and TS controls for `__vapor`, `defineVaporComponent`, SSR behavior, VDOM negatives, and runtime interop. The adversarial report establishes that candidate and golden were wrong identically and that the existing test locks in the defect ([adversarial review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:103), [finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:252)).
+- Add independent JS and TS controls for `__vapor`, `defineVaporComponent`, SSR behavior, VDOM negatives, and runtime interop. The adversarial report establishes that candidate and golden were wrong identically and that the existing test locks in the defect ([adversarial review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:103), [finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:252)).
 
 **Acceptance effects:**
 
 - **BF2:** its historical acceptance record remains an historical fact, but its present authority and evidence are invalidated. Reopen BF2, mark its reviews/evidence invalid, repair it, and obtain fresh conformance, architecture, and adversarial PASS on one exact candidate. This is a real oracle-basis change, so use a full fresh review, not a narrow BV0 recheck.
-- **BF1:** do **not** reopen automatically. BF1 locked the domain and option contract before the harness existed and expressly did not implement the harness ([BF1 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF1.md:6)). Its inventory already says `compileScript.vapor` and `compileScript.templateOptions` are derived from the canonical request ([Vue options](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:72)). Thus BF2 violated the valid BF1 lock; the lock itself was not falsified. Audit and rerun only any BF1 evidence that actually consumed BF2-generated output, if any.
+- **BF1:** do **not** reopen automatically. BF1 locked the domain and option contract before the harness existed and expressly did not implement the harness ([BF1 charter](docs/arch/refactor/rev11/charters/BF1.md:6)). Its inventory already says `compileScript.vapor` and `compileScript.templateOptions` are derived from the canonical request ([Vue options](docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:72)). Thus BF2 violated the valid BF1 lock; the lock itself was not falsified. Audit and rerun only any BF1 evidence that actually consumed BF2-generated output, if any.
 - **BV0:** candidate `c40a1ca96` and all round-one evidence are obsolete. BV0 must be rebased onto the reaccepted BF2 oracle and evaluated afresh.
-- **BF3/BV1/other successors:** invalidate or restack any unaccepted work based on the old BF2 identity. If anything downstream has already been accepted, audit whether its proof consumed affected Vue Vapor/SSR results and reopen only the affected evidence/approval. Preserve independently valid work, as the falsification contract requires ([architecture-falsification contract](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/contracts/architecture-falsification.md:98)).
+- **BF3/BV1/other successors:** invalidate or restack any unaccepted work based on the old BF2 identity. If anything downstream has already been accepted, audit whether its proof consumed affected Vue Vapor/SSR results and reopen only the affected evidence/approval. Preserve independently valid work, as the falsification contract requires ([architecture-falsification contract](docs/arch/refactor/rev11/contracts/architecture-falsification.md:98)).
 
-Operationally, BF2 repair and BV0 correction may be developed as a bounded two-layer stack, but BF2 lands/reaccepts first; BV0 then restacks and revalidates. Governance permits contingent upper work but forbids acceptance before the predecessor lands ([governance](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/governance.md:6)).
+Operationally, BF2 repair and BV0 correction may be developed as a bounded two-layer stack, but BF2 lands/reaccepts first; BV0 then restacks and revalidates. Governance permits contingent upper work but forbids acceptance before the predecessor lands ([governance](docs/arch/refactor/rev11/governance.md:6)).
 
 ## Q2 — Svelte migration
 
 **Ruling: split it out. Mechanical inertness does not create charter authority.**
 
-BV0 is explicitly Vue-only. The architecture review confirms the Svelte migration is independent of the Vue pin, touches production Svelte constants and thousands of corpus/package files, and materially obscures the Vue review surface ([architecture review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:102)). BF3 was deliberately narrowed to Svelte and non-Vue-runtime work ([BF3 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF3.md:23)).
+BV0 is explicitly Vue-only. The architecture review confirms the Svelte migration is independent of the Vue pin, touches production Svelte constants and thousands of corpus/package files, and materially obscures the Vue review surface ([architecture review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:102)). BF3 was deliberately narrowed to Svelte and non-Vue-runtime work ([BF3 charter](docs/arch/refactor/rev11/charters/BF3.md:23)).
 
 Move the migration to a separate authorized Svelte-domain block/commit. Assign it to BF3 only if a scoped closure review confirms BF3 owns these corpus, dependency, and production-version changes; otherwise create a small dedicated Svelte oracle-alignment block. It must not be folded into BF2 because BF2 is test-only and cannot change production compiler files.
 
-This separation is mandatory even if every output byte is unchanged. Governance says one program block is not co-batched with unrelated changes in its landing delta ([governance](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/governance.md:283)).
+This separation is mandatory even if every output byte is unchanged. Governance says one program block is not co-batched with unrelated changes in its landing delta ([governance](docs/arch/refactor/rev11/governance.md:283)).
 
 ## Q3 — Items 2–5
 
 **Items 2–4 are wholly in BV0. Item 5’s acceptance obligation is in BV0, but shared-harness mechanism changes remain BF2-owned.**
 
-- **Item 2, VDOM regressions:** directly in scope. BV0 must restore both formerly passing routes and delete the two waiver rows. The charter requires proof that unaffected routes retain their previous successful contract and forbids substituting a waiver ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:32), [conformance finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:195)).
+- **Item 2, VDOM regressions:** directly in scope. BV0 must restore both formerly passing routes and delete the two waiver rows. The charter requires proof that unaffected routes retain their previous successful contract and forbids substituting a waiver ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:32), [conformance finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:195)).
 
-- **Item 3, obsolete SSR document:** directly in scope. Delete the document and clean its references; do not rewrite it again. Its own deletion criterion was satisfied, and retaining the contradiction violates BV0’s “no Vue tracking/backlog/waiver/retraction artifact” exit ([adversarial finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:265)).
+- **Item 3, obsolete SSR document:** directly in scope. Delete the document and clean its references; do not rewrite it again. Its own deletion criterion was satisfied, and retaining the contradiction violates BV0’s “no Vue tracking/backlog/waiver/retraction artifact” exit ([adversarial finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:265)).
 
-- **Item 4, candidate-caused corpus regressions:** directly in BV0’s required closure. “Preserving every public route’s existing successful result contract” is broader than the 36 positive seed cells ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:8)). Fix the candidate-introduced Vapor root-cause classes across every affected corpus cell; do not patch fixture rows individually or attempt to close all pre-existing BV1 divergences. Recompute attribution after the oracle repair—the present +318/+85% figure was measured against defective goldens and is evidence of a problem, not a stable acceptance baseline ([adversarial attribution](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:180)).
+- **Item 4, candidate-caused corpus regressions:** directly in BV0’s required closure. “Preserving every public route’s existing successful result contract” is broader than the 36 positive seed cells ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:8)). Fix the candidate-introduced Vapor root-cause classes across every affected corpus cell; do not patch fixture rows individually or attempt to close all pre-existing BV1 divergences. Recompute attribution after the oracle repair—the present +318/+85% figure was measured against defective goldens and is evidence of a problem, not a stable acceptance baseline ([adversarial attribution](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:180)).
 
-- **Item 5, skipped axes:** BV0 owns making its authoritative seed-matrix acceptance fail closed whenever any required link/runtime axis skips, and owns proving zero skips in CI/fresh-checkout evidence. That follows directly from its exit requiring the isolated install so link checks genuinely execute ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:44)). The demonstrated false-green behavior is blocking ([conformance finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:236)).  
+- **Item 5, skipped axes:** BV0 owns making its authoritative seed-matrix acceptance fail closed whenever any required link/runtime axis skips, and owns proving zero skips in CI/fresh-checkout evidence. That follows directly from its exit requiring the isolated install so link checks genuinely execute ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:44)). The demonstrated false-green behavior is blocking ([conformance finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:236)).  
   However, changing generic `check-candidate.mjs` skip semantics is BF2-owned. BV0 can—and must—reject the returned skip status in `official_seed_matrix.rs`. If a reusable authoritative/fail-closed harness mode is desired, include that in the authorized BF2 reopen.
 
 ## Q4 — Additional scope risks
 
 The reopen packet should also resolve these points:
 
-1. **Source-map acceptance was silently narrowed.** The architecture review found that candidate-vs-official mapping comparison became candidate self-consistency even though BV0 expressly owns source-map differences after harness artifacts are removed ([architecture review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:133)). Default ruling: remove the harness artifact and restore the promised comparison. Any narrowing requires explicit maintainer ratification; it cannot ride silently in the relanding.
+1. **Source-map acceptance was silently narrowed.** The architecture review found that candidate-vs-official mapping comparison became candidate self-consistency even though BV0 expressly owns source-map differences after harness artifacts are removed ([architecture review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:133)). Default ruling: remove the harness artifact and restore the promised comparison. Any narrowing requires explicit maintainer ratification; it cannot ride silently in the relanding.
 
 2. **Fix the full Vapor wrapper contract, including the TS branch.** Restoring `__vapor: true` for JS alone is incomplete; non-SSR TS Vapor uses `defineVaporComponent`. Invert/delete the wrong unit test and add positive and negative controls for both language branches.
 
-3. **Strengthen behavioral discrimination.** The Vapor runtime test missed wrong sibling insertion order even though the structural comparator caught it ([adversarial review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:281)). Assert exact DOM/order, not mere containment.
+3. **Strengthen behavioral discrimination.** The Vapor runtime test missed wrong sibling insertion order even though the structural comparator caught it ([adversarial review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:281)). Assert exact DOM/order, not mere containment.
 
 4. **Clear known false rationale.** Remove the incorrect production `/* CACHED */` explanation/branch and stale SSR `_ctx` comment identified by the reviewers; do not reland code or documentation already known to contradict the oracle.
 
@@ -5920,9 +5920,9 @@ The correct scope is a coordinated BF2→BV0 reopen, not one enlarged BV0 commit
 
 **Ruling: fixing `invoke-vue-oracle.mjs` and regenerating affected official goldens is BF2-owned work. It requires a formal BF2 reopen, not unilateral BV0 scope.**
 
-BF2 expressly owns “offline official compiler invocation and immutable golden generation,” Vue script/template assembly, runtime validation, and mutation tests ([BF2 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF2.md:11)). BV0 is a successor that consumes that evidence and owns compiler source corrections ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:13)). Letting the candidate-under-test repair and regenerate its own oracle inside BV0 would blur exactly that separation.
+BF2 expressly owns “offline official compiler invocation and immutable golden generation,” Vue script/template assembly, runtime validation, and mutation tests ([BF2 charter](docs/arch/refactor/rev11/charters/BF2.md:11)). BV0 is a successor that consumes that evidence and owns compiler source corrections ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:13)). Letting the candidate-under-test repair and regenerate its own oracle inside BV0 would blur exactly that separation.
 
-This is also the established BF2 reopen precedent: defects in the oracle/validator must be fixed in BF2 because later blocks are judged by it; deferring the correction poisons downstream evidence ([second-reopen ruling](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md:25)).
+This is also the established BF2 reopen precedent: defects in the oracle/validator must be fixed in BF2 because later blocks are judged by it; deferring the correction poisons downstream evidence ([second-reopen ruling](docs/arch/refactor/rev11/evidence/BF2/second-reopen-ruling.md:25)).
 
 The comprehensive BF2 correction must cover the entire option-propagation class:
 
@@ -5930,49 +5930,49 @@ The comprehensive BF2 correction must cover the entire option-propagation class:
 - Pass `vapor` and `templateOptions.ssr` correctly to `compileScript`.
 - Verify parse, `compileScript`, `compileTemplate`, assembly, golden provenance, and runtime all use the same requested axes.
 - Regenerate every affected official golden across the corpus. Because `ssr` was also omitted from `compileScript`, scope cannot be limited to Vapor: regenerate all Vapor and SSR/non-inline script-bearing products whose official output changes.
-- Add independent JS and TS controls for `__vapor`, `defineVaporComponent`, SSR behavior, VDOM negatives, and runtime interop. The adversarial report establishes that candidate and golden were wrong identically and that the existing test locks in the defect ([adversarial review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:103), [finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:252)).
+- Add independent JS and TS controls for `__vapor`, `defineVaporComponent`, SSR behavior, VDOM negatives, and runtime interop. The adversarial report establishes that candidate and golden were wrong identically and that the existing test locks in the defect ([adversarial review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:103), [finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:252)).
 
 **Acceptance effects:**
 
 - **BF2:** its historical acceptance record remains an historical fact, but its present authority and evidence are invalidated. Reopen BF2, mark its reviews/evidence invalid, repair it, and obtain fresh conformance, architecture, and adversarial PASS on one exact candidate. This is a real oracle-basis change, so use a full fresh review, not a narrow BV0 recheck.
-- **BF1:** do **not** reopen automatically. BF1 locked the domain and option contract before the harness existed and expressly did not implement the harness ([BF1 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF1.md:6)). Its inventory already says `compileScript.vapor` and `compileScript.templateOptions` are derived from the canonical request ([Vue options](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:72)). Thus BF2 violated the valid BF1 lock; the lock itself was not falsified. Audit and rerun only any BF1 evidence that actually consumed BF2-generated output, if any.
+- **BF1:** do **not** reopen automatically. BF1 locked the domain and option contract before the harness existed and expressly did not implement the harness ([BF1 charter](docs/arch/refactor/rev11/charters/BF1.md:6)). Its inventory already says `compileScript.vapor` and `compileScript.templateOptions` are derived from the canonical request ([Vue options](docs/arch/refactor/rev11/evidence/framework-conformance/vue-options.tsv:72)). Thus BF2 violated the valid BF1 lock; the lock itself was not falsified. Audit and rerun only any BF1 evidence that actually consumed BF2-generated output, if any.
 - **BV0:** candidate `c40a1ca96` and all round-one evidence are obsolete. BV0 must be rebased onto the reaccepted BF2 oracle and evaluated afresh.
-- **BF3/BV1/other successors:** invalidate or restack any unaccepted work based on the old BF2 identity. If anything downstream has already been accepted, audit whether its proof consumed affected Vue Vapor/SSR results and reopen only the affected evidence/approval. Preserve independently valid work, as the falsification contract requires ([architecture-falsification contract](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/contracts/architecture-falsification.md:98)).
+- **BF3/BV1/other successors:** invalidate or restack any unaccepted work based on the old BF2 identity. If anything downstream has already been accepted, audit whether its proof consumed affected Vue Vapor/SSR results and reopen only the affected evidence/approval. Preserve independently valid work, as the falsification contract requires ([architecture-falsification contract](docs/arch/refactor/rev11/contracts/architecture-falsification.md:98)).
 
-Operationally, BF2 repair and BV0 correction may be developed as a bounded two-layer stack, but BF2 lands/reaccepts first; BV0 then restacks and revalidates. Governance permits contingent upper work but forbids acceptance before the predecessor lands ([governance](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/governance.md:6)).
+Operationally, BF2 repair and BV0 correction may be developed as a bounded two-layer stack, but BF2 lands/reaccepts first; BV0 then restacks and revalidates. Governance permits contingent upper work but forbids acceptance before the predecessor lands ([governance](docs/arch/refactor/rev11/governance.md:6)).
 
 ## Q2 — Svelte migration
 
 **Ruling: split it out. Mechanical inertness does not create charter authority.**
 
-BV0 is explicitly Vue-only. The architecture review confirms the Svelte migration is independent of the Vue pin, touches production Svelte constants and thousands of corpus/package files, and materially obscures the Vue review surface ([architecture review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:102)). BF3 was deliberately narrowed to Svelte and non-Vue-runtime work ([BF3 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF3.md:23)).
+BV0 is explicitly Vue-only. The architecture review confirms the Svelte migration is independent of the Vue pin, touches production Svelte constants and thousands of corpus/package files, and materially obscures the Vue review surface ([architecture review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:102)). BF3 was deliberately narrowed to Svelte and non-Vue-runtime work ([BF3 charter](docs/arch/refactor/rev11/charters/BF3.md:23)).
 
 Move the migration to a separate authorized Svelte-domain block/commit. Assign it to BF3 only if a scoped closure review confirms BF3 owns these corpus, dependency, and production-version changes; otherwise create a small dedicated Svelte oracle-alignment block. It must not be folded into BF2 because BF2 is test-only and cannot change production compiler files.
 
-This separation is mandatory even if every output byte is unchanged. Governance says one program block is not co-batched with unrelated changes in its landing delta ([governance](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/governance.md:283)).
+This separation is mandatory even if every output byte is unchanged. Governance says one program block is not co-batched with unrelated changes in its landing delta ([governance](docs/arch/refactor/rev11/governance.md:283)).
 
 ## Q3 — Items 2–5
 
 **Items 2–4 are wholly in BV0. Item 5’s acceptance obligation is in BV0, but shared-harness mechanism changes remain BF2-owned.**
 
-- **Item 2, VDOM regressions:** directly in scope. BV0 must restore both formerly passing routes and delete the two waiver rows. The charter requires proof that unaffected routes retain their previous successful contract and forbids substituting a waiver ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:32), [conformance finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:195)).
+- **Item 2, VDOM regressions:** directly in scope. BV0 must restore both formerly passing routes and delete the two waiver rows. The charter requires proof that unaffected routes retain their previous successful contract and forbids substituting a waiver ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:32), [conformance finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:195)).
 
-- **Item 3, obsolete SSR document:** directly in scope. Delete the document and clean its references; do not rewrite it again. Its own deletion criterion was satisfied, and retaining the contradiction violates BV0’s “no Vue tracking/backlog/waiver/retraction artifact” exit ([adversarial finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:265)).
+- **Item 3, obsolete SSR document:** directly in scope. Delete the document and clean its references; do not rewrite it again. Its own deletion criterion was satisfied, and retaining the contradiction violates BV0’s “no Vue tracking/backlog/waiver/retraction artifact” exit ([adversarial finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:265)).
 
-- **Item 4, candidate-caused corpus regressions:** directly in BV0’s required closure. “Preserving every public route’s existing successful result contract” is broader than the 36 positive seed cells ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:8)). Fix the candidate-introduced Vapor root-cause classes across every affected corpus cell; do not patch fixture rows individually or attempt to close all pre-existing BV1 divergences. Recompute attribution after the oracle repair—the present +318/+85% figure was measured against defective goldens and is evidence of a problem, not a stable acceptance baseline ([adversarial attribution](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:180)).
+- **Item 4, candidate-caused corpus regressions:** directly in BV0’s required closure. “Preserving every public route’s existing successful result contract” is broader than the 36 positive seed cells ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:8)). Fix the candidate-introduced Vapor root-cause classes across every affected corpus cell; do not patch fixture rows individually or attempt to close all pre-existing BV1 divergences. Recompute attribution after the oracle repair—the present +318/+85% figure was measured against defective goldens and is evidence of a problem, not a stable acceptance baseline ([adversarial attribution](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:180)).
 
-- **Item 5, skipped axes:** BV0 owns making its authoritative seed-matrix acceptance fail closed whenever any required link/runtime axis skips, and owns proving zero skips in CI/fresh-checkout evidence. That follows directly from its exit requiring the isolated install so link checks genuinely execute ([BV0 charter](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:44)). The demonstrated false-green behavior is blocking ([conformance finding](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:236)).  
+- **Item 5, skipped axes:** BV0 owns making its authoritative seed-matrix acceptance fail closed whenever any required link/runtime axis skips, and owns proving zero skips in CI/fresh-checkout evidence. That follows directly from its exit requiring the isolated install so link checks genuinely execute ([BV0 charter](docs/arch/refactor/rev11/charters/BV0.md:44)). The demonstrated false-green behavior is blocking ([conformance finding](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-conformance.md:236)).  
   However, changing generic `check-candidate.mjs` skip semantics is BF2-owned. BV0 can—and must—reject the returned skip status in `official_seed_matrix.rs`. If a reusable authoritative/fail-closed harness mode is desired, include that in the authorized BF2 reopen.
 
 ## Q4 — Additional scope risks
 
 The reopen packet should also resolve these points:
 
-1. **Source-map acceptance was silently narrowed.** The architecture review found that candidate-vs-official mapping comparison became candidate self-consistency even though BV0 expressly owns source-map differences after harness artifacts are removed ([architecture review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:133)). Default ruling: remove the harness artifact and restore the promised comparison. Any narrowing requires explicit maintainer ratification; it cannot ride silently in the relanding.
+1. **Source-map acceptance was silently narrowed.** The architecture review found that candidate-vs-official mapping comparison became candidate self-consistency even though BV0 expressly owns source-map differences after harness artifacts are removed ([architecture review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-architecture.md:133)). Default ruling: remove the harness artifact and restore the promised comparison. Any narrowing requires explicit maintainer ratification; it cannot ride silently in the relanding.
 
 2. **Fix the full Vapor wrapper contract, including the TS branch.** Restoring `__vapor: true` for JS alone is incomplete; non-SSR TS Vapor uses `defineVaporComponent`. Invert/delete the wrong unit test and add positive and negative controls for both language branches.
 
-3. **Strengthen behavioral discrimination.** The Vapor runtime test missed wrong sibling insertion order even though the structural comparator caught it ([adversarial review](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:281)). Assert exact DOM/order, not mere containment.
+3. **Strengthen behavioral discrimination.** The Vapor runtime test missed wrong sibling insertion order even though the structural comparator caught it ([adversarial review](docs/arch/refactor/rev11/evidence/vue-known-defect-correction/reviews/round1-adversarial.md:281)). Assert exact DOM/order, not mere containment.
 
 4. **Clear known false rationale.** Remove the incorrect production `/* CACHED */` explanation/branch and stale SSR `_ctx` comment identified by the reviewers; do not reland code or documentation already known to contradict the oracle.
 

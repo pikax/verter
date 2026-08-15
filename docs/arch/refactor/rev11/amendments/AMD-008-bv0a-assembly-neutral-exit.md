@@ -5,7 +5,7 @@
 `a5a05c6fa487e2c8937341817bd4cfe6c37019ef`, tree
 `e6cf0c7085f3e1efe63868f6439c73d90ddff974`. The BV0A candidate at
 `work/bv0a-implementation` (worktree
-`/Users/carlosrodrigues/Documents/dev/verter-bv0a-implementation`) is
+`<worktree>/verter-bv0a-implementation`) is
 SUPERSEDED, not merely non-conforming: §2 deletes the violation-attribution
 mechanism that candidate implements, so none of it carries forward. Ratifying
 this amendment does not accept any BV0A candidate; a candidate implementing the

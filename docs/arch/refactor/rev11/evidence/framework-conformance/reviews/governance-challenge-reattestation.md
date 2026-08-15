@@ -105,7 +105,7 @@ The ledger adds three real, separately owned rows at
   explicitly forbidding a second session assembly owner.
 
 The cited paths were spot-checked read-only in the main checkout
-`/Users/carlosrodrigues/Documents/dev/verter` at
+`<repo-root>` at
 `e6035b433352b106957f27f3e97b71911f39f9ae`:
 
 - `crates/verter_session/src/compile.rs:21` defines
