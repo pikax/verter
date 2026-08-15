@@ -117,16 +117,72 @@ provably prior to and independent of both the reference and production
 implementations checked against it." Not satisfied by AMD-008's ratification
 alone. Owned by BV0A's own acceptance review, per the resolution gate above.
 
-## Current state (as of this record)
+## Resolution gate — verbatim disposition (supersedes "Current state" below)
 
-- AMD-008's layer-1/layer-2 split is ratified as a mechanism (once the
-  maintainer records ratification), not yet exercised by any real
-  implementation — no layer-1 artifact, JavaScript reference, or corrected
-  production implementation exists yet.
-- The seed vector artifact
-  (`packages/framework-conformance-harness/vectors/assembled-map-composition.vectors.json`)
-  is explicitly marked SEED/incomplete and non-normative pending layer-1
-  freeze; one vector (V4) that decided a layer-1-scoped question ahead of that
-  freeze is explicitly flagged provisional in-place, not treated as settled.
-- This debt row must be cited in Track B's (or whichever track builds BV0A)
-  dispatch brief as a required reading before implementation begins.
+This section is the definitive, dated closure record the resolution gate above requires —
+"record verbatim," not merely assert — covering layer 1 in FULL (revisions 1–7's original
+freeze AND revision 8/D-8's later amendment together, since both are now live authority a
+BV0A candidate is checked against).
+
+**Check 1 — Layer-1 completeness.** MET. `layer1-freeze-adoption.md` maps every requirement
+of AMD-008's umbrella description and this debt record's own text to the layer-1 section that
+answers it (its own §10 cross-reference), independently confirmed by the program orchestrator
+before that record was written. Revision 8/`DECISION` D-8 is a narrow, scoped, independently
+reviewed addendum (two full review rounds — see check 3) that does not reopen this check for
+the surrounding revision 1–7 text.
+
+**Check 2 — Non-retroactive chronology.** MET, independently re-verified on the actual
+candidate tree by THREE separate review rounds, not asserted once and carried forward:
+
+- Architecture (final package review): confirmed via direct `git merge-base --is-ancestor`
+  that all eight superseded-attempt commits (`26f1dae9d`, `db26cde00`, `ddcc255ba`,
+  `e7ca0e68b`, `1493b158e`, `64cfe9777`, `2b08cddd7`, `32efc149b`) are non-ancestors of the
+  candidate tip; confirmed the layer-1 freeze commit is the direct git parent of both
+  implementations' root commits, with wall-clock timestamps corroborating (freeze at
+  20:42:59, both implementations starting ~90 minutes later).
+- Adversarial (final package review): independently re-derived the same non-ancestor result
+  for all eight commits plus both superseded branch tips (`work/bv0a-implementation`,
+  `work/bv0-relanding`); confirmed zero occurrences of identifiers unique to the superseded
+  attribution-matching design (`violation_key`, `probe_fragments`, `violation_multiset`) in
+  the candidate diff.
+- Conformance (fresh review round, commit `115f176dc`): independently re-confirmed at the
+  D-8 layer specifically — both implementations were already built against revision 7 and had
+  independently exposed the `U8.1` gap BEFORE D-8 was drafted, so D-8 could not have shaped
+  either implementation's initial construction; separately confirmed (per the mandated
+  program-wide exclusion review) that BV0A's own 19 candidate commits touch none of the files
+  carrying pre-existing machine-path markers, closing a parallel chronology question raised in
+  that same round.
+
+No round found reuse of the superseded candidate's code paths, design, or derived evidence.
+This satisfies the resolution gate's explicit requirement to verify DIRECTLY via commit
+history (achieved, repeatedly, across independent reviewers) rather than merely noting
+ancestry looks correct.
+
+**Check 3 — Maintainer adoption.** MET. `layer1-freeze-adoption.md` (revisions 1–7, blob
+`0ea47424acfbd4913e11f16156baa597216c84fb`) and `layer1-d8-adoption.md` (revision 8/D-8, blob
+`085139c5267136ed0c2fa39d78ad48168c6e0e76`) are both present on the accepted candidate tree,
+each recording the exact adopted commit/blob identity distinct from ordinary review approval —
+closing the specific gap the original governance finding named (no maintainer lock record for
+layer 1 itself). Both records are independently re-verified as present, correctly cited, and
+digest-matched by the architecture, adversarial, and conformance rounds above.
+
+**Disposition: FC-VUE-003 is satisfied for layer 1 as a whole (revisions 1–8).** This debt row
+is CLOSED as of this record. It does not extend to layer 2, which is a separate artifact under
+its own acceptance track (`layer2-readiness-record.md` and, once complete, its own dedicated
+independent review — the same standard layer 1 itself received, not the incidental spot-checks
+layer 2 has absorbed as a side effect of whole-package reviews).
+
+## Current state (historical — superseded by the resolution gate disposition above)
+
+- AMD-008's layer-1/layer-2 split has been exercised by a real candidate.
+  Layer 1 is adopted through revision 8 (`layer1-freeze-adoption.md` for
+  revisions 1–7, `layer1-d8-adoption.md` for D-8). The independent JavaScript
+  reference and the corrected production Rust implementation both exist and
+  both reproduce the complete layer-2 vector suite (70/70 entries each),
+  cross-implementation equality holds with zero divergence, and the 36-cell
+  BF2 matrix passes against a genuinely historical code-byte baseline (see
+  `historical-baseline-provenance.md`).
+- The seed vector artifact is content-complete (`knownGaps: []`) and reproduced
+  end to end by both implementations; see `layer2-readiness-record.md` for its
+  own readiness status (freezing itself remains a maintainer action taken at
+  BV0A acceptance, not self-declared by that record).

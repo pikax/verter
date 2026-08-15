@@ -36,7 +36,13 @@ fn workspace_root() -> PathBuf {
 // +1 for the `pub mod binder_identity_facts;` module declaration (the
 // family-A `BinderIdentityFacts` substrate home — one irreducible
 // module-declaration line; all payload types live in the submodule).
-const LIB_RS_LINE_CEILING: usize = 856;
+// +1 for the second `pub use compile::{...}` re-export line. The Vue
+// assembler's typed code-plus-map result, its fail-closed outcome, and the
+// uncomposable-input-map taxonomy appear in its own public signature, so a
+// caller outside the crate cannot name its return type without them. Six
+// names do not fit one 100-column line; the payload types all live in the
+// `compile` submodule and only the re-export is irreducibly here.
+const LIB_RS_LINE_CEILING: usize = 857;
 
 #[test]
 fn lib_rs_stays_under_line_ceiling() {

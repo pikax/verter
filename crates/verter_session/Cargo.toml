@@ -69,6 +69,18 @@ oracle-lift = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:blake3"]
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
+# Opt-in: the BF2-backed Vue seed-matrix driver
+# (`src/compile/map_equality_tests/bf2_seed_matrix.rs`). It drives the genuine
+# production `assemble_vue_main_module` over the 36 committed seed cells and
+# hands each result to the conformance harness's authored-source oracle
+# (`packages/framework-conformance-harness/bin/check-candidate.mjs`), which
+# needs Node PLUS the harness's provisioned, gitignored oracle install
+# (`.oracle-checkouts` / `.oracle-npm-cache` / `.oracle-installs` — an isolated
+# npm realization of the pinned official framework packages). That install is
+# not part of a fresh checkout, so the default hermetic gate MUST NOT enable
+# this feature. Run it with
+# `cargo test -p verter_session --lib --features bf2-authoritative bf2_seed_matrix`.
+bf2-authoritative = []
 # Opt-in: enables the full trybuild compile-fail SEAL fixture suite
 # (`tests/cases/g_compile/compile_fail.rs` — workspace-accessor visibility,
 # the NoTypeExpr / NoStoredSpan marker seals, the sealed carrier/recursive-self

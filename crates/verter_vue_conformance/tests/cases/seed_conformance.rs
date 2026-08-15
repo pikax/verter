@@ -234,7 +234,9 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
         &bundle,
         &meta,
         &profile,
-    );
+    )
+    .expect("the seed harness compiles with maps disabled")
+    .code;
 
     VerterCell {
         code: module,

@@ -7,6 +7,36 @@ use super::code_transform::CodeTransform;
 use crate::cursor::position::{utf16_len, PositionResolver};
 use oxc_sourcemap::{SourceMap, Token};
 
+/// Advance a generated `(line, column)` position through `content`.
+///
+/// Lines advance one per `U+000A`; the column counts UTF-16 code units from the
+/// last `U+000A` (or, with no newline, from wherever the column already was).
+/// This is the SINGLE definition of generated-position advance shared by
+/// [`CodeTransform::generate_map`], by
+/// [`CodeTransform::chain_source_map`](CodeTransform::chain_source_map), and by
+/// out-of-crate assemblers that must track a write cursor in the same
+/// coordinate space — so a caller composing a map alongside its own output
+/// cannot end up with a second, subtly different advance model.
+///
+/// Successive calls compose: advancing through `a` then `b` lands where
+/// advancing through `a ++ b` lands.
+#[inline]
+pub fn advance_generated_position(content: &str, line: &mut u32, column: &mut u32) {
+    let bytes = content.as_bytes();
+    let mut prev = 0usize;
+    for nl_pos in memchr_iter(b'\n', bytes) {
+        *line += 1;
+        prev = nl_pos + 1;
+    }
+    if prev == 0 {
+        // No newlines at all — advance column by UTF-16 length
+        *column += utf16_len(content) as u32;
+    } else {
+        // Column is UTF-16 length from last newline to end
+        *column = utf16_len(&content[prev..]) as u32;
+    }
+}
+
 /// Options for source map generation
 #[derive(Debug, Clone)]
 pub struct SourceMapOptions<'a> {
@@ -158,11 +188,7 @@ impl<'a> CodeTransform<'a> {
                 None,
                 None,
             ));
-            Self::advance_generated_position(
-                self.intro(),
-                &mut generated_line,
-                &mut generated_column,
-            );
+            advance_generated_position(self.intro(), &mut generated_line, &mut generated_column);
             // The helper-import preamble may BE the module intro (the Svelte IDE projection prepends
             // its `@jsxImportSource`-led prelude as the intro so the pragma stays the leading output
             // bytes). When it is, capture the generated position immediately after it as the
@@ -221,7 +247,7 @@ impl<'a> CodeTransform<'a> {
                                 None,
                             ));
                         }
-                        Self::advance_generated_position(
+                        advance_generated_position(
                             content,
                             &mut generated_line,
                             &mut generated_column,
@@ -268,11 +294,7 @@ impl<'a> CodeTransform<'a> {
                         ));
                     }
 
-                    Self::advance_generated_position(
-                        content,
-                        &mut generated_line,
-                        &mut generated_column,
-                    );
+                    advance_generated_position(content, &mut generated_line, &mut generated_column);
                 }
                 Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     if content.is_empty() {
@@ -289,11 +311,7 @@ impl<'a> CodeTransform<'a> {
                         None,
                     ));
 
-                    Self::advance_generated_position(
-                        content,
-                        &mut generated_line,
-                        &mut generated_column,
-                    );
+                    advance_generated_position(content, &mut generated_line, &mut generated_column);
                     // The helper-import preamble is an unmapped insertion: capture the
                     // generated position immediately after it as the preamble-end boundary.
                     // First capture wins (the debug-assert catches accidental double-publication).
@@ -326,7 +344,7 @@ impl<'a> CodeTransform<'a> {
                             None,
                             None,
                         ));
-                        Self::advance_generated_position(
+                        advance_generated_position(
                             prefix,
                             &mut generated_line,
                             &mut generated_column,
@@ -346,7 +364,7 @@ impl<'a> CodeTransform<'a> {
                                 None,
                             ));
                         }
-                        Self::advance_generated_position(
+                        advance_generated_position(
                             rest,
                             &mut generated_line,
                             &mut generated_column,
@@ -373,11 +391,7 @@ impl<'a> CodeTransform<'a> {
                 None,
                 None,
             ));
-            Self::advance_generated_position(
-                self.outro(),
-                &mut generated_line,
-                &mut generated_column,
-            );
+            advance_generated_position(self.outro(), &mut generated_line, &mut generated_column);
         }
 
         (
@@ -548,8 +562,8 @@ impl<'a> CodeTransform<'a> {
             };
 
             let traversed = &content[prev..boundary];
-            Self::advance_generated_position(traversed, generated_line, generated_column);
-            Self::advance_generated_position(traversed, &mut source_line, &mut source_column);
+            advance_generated_position(traversed, generated_line, generated_column);
+            advance_generated_position(traversed, &mut source_line, &mut source_column);
             tokens.push(Token::new(
                 *generated_line,
                 *generated_column,
@@ -568,26 +582,7 @@ impl<'a> CodeTransform<'a> {
             }
         }
 
-        Self::advance_generated_position(&content[prev..], generated_line, generated_column);
-    }
-
-    /// Advance generated line/column position through a string using memchr.
-    /// Counts columns in UTF-16 code units for correct source map positions.
-    #[inline]
-    fn advance_generated_position(content: &str, line: &mut u32, column: &mut u32) {
-        let bytes = content.as_bytes();
-        let mut prev = 0usize;
-        for nl_pos in memchr_iter(b'\n', bytes) {
-            *line += 1;
-            prev = nl_pos + 1;
-        }
-        if prev == 0 {
-            // No newlines at all — advance column by UTF-16 length
-            *column += utf16_len(content) as u32;
-        } else {
-            // Column is UTF-16 length from last newline to end
-            *column = utf16_len(&content[prev..]) as u32;
-        }
+        advance_generated_position(&content[prev..], generated_line, generated_column);
     }
 
     /// Generate source map and return as JSON string

@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::assemble_vue_main_module;
+use crate::compile::{assemble_vue_main_module, AssembleMapFailure};
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
@@ -25,6 +25,21 @@ use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{
     CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
+
+/// Surface a fail-closed assembled-map outcome as a compile error.
+///
+/// A missing or uncomposable required input map produces NO successful result:
+/// not the code without a map, not the code with an empty map. Both would be
+/// the unmapped successful result this path exists to prevent, and both callers
+/// of the assembler require code and map together.
+fn assembled_map_failure_diagnostics(failure: AssembleMapFailure) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "HOST_UNCOMPOSABLE_MAIN_SOURCE_MAP".to_string(),
+        message: failure.to_string(),
+        span: None,
+    }])
+}
 
 pub(crate) fn vue_macro_output_matches_revision(
     output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
@@ -3001,18 +3016,30 @@ impl VerterHost {
         // `get_virtual_file(Main)` then reports missing until that carrier
         // emits a runtime surface.
         if compiled.has_runtime_surface() {
-            let main_code = match &compiled.main.body_code {
+            let (main_code, main_source_map) = match &compiled.main.body_code {
                 // A carrier that emits its own self-contained ESM body uses it
-                // verbatim (e.g. Svelte's official-shaped runtime output).
-                Some(body) => body.clone(),
-                // Vue: the host assembles the `_sfc_main` module from the
-                // neutral block fields (its virtual-file concern).
-                None => assemble_vue_main_module(
-                    &snapshot.canonical_id,
-                    &compiled,
-                    &snapshot.meta,
-                    profile,
+                // verbatim (e.g. Svelte's official-shaped runtime output),
+                // paired with the map that carrier produced for it.
+                Some(body) => (
+                    body.clone(),
+                    (!compiled.main.source_map.is_empty())
+                        .then(|| Arc::from(compiled.main.source_map.clone())),
                 ),
+                // Vue: the host assembles the `_sfc_main` module from the
+                // neutral block fields (its virtual-file concern) — and the map
+                // it composed while assembling them. The code and the map are
+                // one result of one assembly, so the map here always describes
+                // the exact code beside it.
+                None => {
+                    let assembled = assemble_vue_main_module(
+                        &snapshot.canonical_id,
+                        &compiled,
+                        &snapshot.meta,
+                        profile,
+                    )
+                    .map_err(assembled_map_failure_diagnostics)?;
+                    (assembled.code, assembled.source_map.map(Arc::from))
+                }
             };
             let main_lang = compiled.main.lang.clone().unwrap_or_else(|| {
                 if profile.force_js {
@@ -3030,11 +3057,7 @@ impl VerterHost {
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
                     code: Arc::from(main_code),
-                    source_map: if compiled.main.source_map.is_empty() {
-                        None
-                    } else {
-                        Some(Arc::from(compiled.main.source_map.clone()))
-                    },
+                    source_map: main_source_map,
                     lang: Some(main_lang),
                     meta: VirtualMeta {
                         scope_id: if compiled.scope_id.is_empty() {
@@ -3442,16 +3465,30 @@ impl VerterHost {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let main_code = match &compiled.main.body_code {
-            Some(body) => body.clone(),
+        let (main_code, main_source_map) = match &compiled.main.body_code {
+            Some(body) => (
+                body.clone(),
+                (!compiled.main.source_map.is_empty())
+                    .then(|| Arc::from(compiled.main.source_map.clone())),
+            ),
+            // Vue: code and map are one result of the host's own assembly.
             None => {
-                assemble_vue_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile)
+                let assembled = assemble_vue_main_module(
+                    &snapshot.canonical_id,
+                    &compiled,
+                    &snapshot.meta,
+                    profile,
+                )
+                .map_err(|failure| {
+                    HostError::CompileError(CompileFailure {
+                        diagnostics: assembled_map_failure_diagnostics(failure),
+                        requested_mode: profile.requested_mode,
+                        actual_mode: profile.requested_mode,
+                        downgrade_reason: None,
+                    })
+                })?;
+                (assembled.code, assembled.source_map.map(Arc::from))
             }
-        };
-        let main_source_map = if compiled.main.source_map.is_empty() {
-            None
-        } else {
-            Some(Arc::from(compiled.main.source_map.clone()))
         };
         // The `Main` language, derived IDENTICALLY to the HostBacked
         // `Main`-node path so the bundler consumer routes sub-requests the
