@@ -2,7 +2,7 @@
 
 **Charter:** `docs/arch/refactor/rev11/charters/BV0.md` (Immediate Vue known-defect correction)
 **Reviewer role:** CONFORMANCE (criterion-by-criterion against "Required exits")
-**Worktree:** `/Users/carlosrodrigues/Documents/dev/verter-review-bv0-conf`, HEAD `c40a1ca96`, `git status` clean before and after every run.
+**Worktree:** `<worktree>/verter-review-bv0-conf`, HEAD `c40a1ca96`, `git status` clean before and after every run.
 
 > **Environment caveat, stated up front:** a second (adversarial) reviewer agent is operating in this
 > same physical worktree and temporarily reverts production code for mutation testing. Every test run

@@ -6,6 +6,37 @@ use verter_compiler::framework_common::RuntimeCompileOutput;
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, VirtualNodeKind};
 
+mod map_compose;
+mod map_input;
+mod map_json;
+
+#[cfg(test)]
+mod compile_tests;
+#[cfg(test)]
+mod map_equality_tests;
+#[cfg(test)]
+mod map_tests;
+
+pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, UncomposableFamily};
+
+use map_compose::{FragmentWrite, MapComposer, ModuleWriter, SegmentOrigin};
+use map_input::{agree_source_root, validate_and_decode, DecodedFragmentMap};
+
+/// The assembled Vue runtime main module: the code, and the source map it was
+/// generated from, as ONE result.
+///
+/// `source_map` is `None` when no map was requested — positively absent, not an
+/// empty map and not a map with empty `mappings`. When a map WAS requested one
+/// is always produced, even for a module none of whose present fragments
+/// contributes a mapping: an empty artifact is the truthful description of such
+/// a module, and degrading it to "no map" would make a map-enabled compile
+/// indistinguishable from a map-disabled one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledVueModule {
+    pub code: String,
+    pub source_map: Option<String>,
+}
+
 /// Assemble the Vue `_sfc_main` runtime module from the framework-neutral
 /// [`RuntimeCompileOutput`] the Vue carrier produced.
 ///
@@ -16,20 +47,57 @@ use crate::types::{CompileProfile, FileMeta, HmrStrategy, VirtualNodeKind};
 /// the `_sfc_main` object. The output is byte-identical for the same blocks
 /// regardless of how the carrier produced them.
 ///
+/// The script fragment passes through two authorized rewrites — a global
+/// `__sfc__` → `_sfc_main` rename, then a global removal of
+/// `export default _sfc_main;\n` over the rename's output — both driven through
+/// real [`CodeTransform`](verter_compiler::code_transform::CodeTransform)
+/// transforms so the same chunk list produces the bytes AND the map. The
+/// template fragment is written verbatim and is not rewritten.
+///
+/// Assembly-owned bytes — the virtual imports, render attachment, custom-block
+/// invocation, `__file`, HMR, the SSR-context wrapper, and the export
+/// scaffolding — carry no mapping, because no authored source justifies one.
+///
 /// Public so conformance/test harnesses (`verter_vue_conformance`) compare
 /// against the GENUINE shipped runtime Main rather than a hand copy.
+///
+/// # Errors
+///
+/// [`AssembleMapFailure`] when a required input map is missing or a present one
+/// is structurally uncomposable. Either way there is NO successful result — not
+/// code without a map, not code with an empty map. With `profile.source_map`
+/// disabled no map is required and no failure is possible.
 pub fn assemble_vue_main_module(
     canonical_id: &str,
     compiled: &RuntimeCompileOutput,
     meta: &FileMeta,
     profile: &CompileProfile,
-) -> String {
+) -> Result<AssembledVueModule, AssembleMapFailure> {
     use std::fmt::Write;
+
+    // Validation runs to completion BEFORE any composition work begins. When no
+    // map was requested it does not run at all, and a fragment's non-empty map
+    // string is ignored rather than composed unasked.
+    let inputs = if profile.source_map {
+        Some(validate_inputs(compiled, meta)?)
+    } else {
+        None
+    };
+    let script_map = inputs.as_ref().and_then(|inputs| inputs.script.as_ref());
+    let template_map = inputs.as_ref().and_then(|inputs| inputs.template.as_ref());
+
+    // The two script rewrites run whether or not a map was requested: they
+    // determine the module's bytes.
+    let rewritten_script = compiled
+        .script
+        .as_ref()
+        .map(|script| map_compose::rewrite_script(&script.code, script_map));
 
     // Estimate capacity: script + template + overhead
     let script_len = compiled.script.as_ref().map_or(20, |s| s.code.len());
     let template_len = compiled.template.as_ref().map_or(0, |t| t.code.len());
-    let mut out = String::with_capacity(script_len + template_len + 256);
+    let mut out = ModuleWriter::with_capacity(script_len + template_len + 256);
+    let mut composer = MapComposer::default();
 
     for idx in 0..compiled.styles.len() {
         let (id, _) = render_ids(canonical_id, &VirtualNodeKind::Style { index: idx }, meta);
@@ -71,19 +139,24 @@ pub fn assemble_vue_main_module(
         }
     }
 
-    if let Some(script) = &compiled.script {
-        // The compiler-emitted script passes through UNCHANGED: setup-binding
-        // elision (type-only imports, unused setup imports) is owned by the
-        // compiler's `build_returned_object` (template_used_vars-driven), not
-        // by a text-level post-pass here — the old `filter_setup_return` was
+    if let Some((script_code, chained)) = &rewritten_script {
+        // The compiler-emitted script passes through UNCHANGED apart from the
+        // two authorized rewrites: setup-binding elision (type-only imports,
+        // unused setup imports) is owned by the compiler's
+        // `build_returned_object` (template_used_vars-driven), not by a
+        // text-level post-pass here — the old `filter_setup_return` was
         // removed: it keyed on a `return { ... };` shape the compiler has not
         // emitted since `__returned__` was introduced, so it was dead code on
         // the real production output (proven by canary).
-        let mut script_code = script.code.clone();
-
-        script_code = script_code.replace("__sfc__", "_sfc_main");
-        script_code = script_code.replace("export default _sfc_main;\n", "");
-        out.push_str(&script_code);
+        composer.write_fragment(
+            &mut out,
+            FragmentWrite {
+                code: script_code,
+                chained: chained.as_deref(),
+                map: script_map,
+                origin: SegmentOrigin::Script,
+            },
+        );
         if !script_code.ends_with('\n') {
             out.push('\n');
         }
@@ -96,7 +169,17 @@ pub fn assemble_vue_main_module(
 
     if let Some(template) = &compiled.template {
         out.push('\n');
-        out.push_str(&template.code);
+        composer.write_fragment(
+            &mut out,
+            FragmentWrite {
+                code: &template.code,
+                // The template is written verbatim and is never rewritten, so
+                // its map is placed directly with no chain step.
+                chained: template_map.map(|map| map.segments.as_slice()),
+                map: template_map,
+                origin: SegmentOrigin::Template,
+            },
+        );
         if !template.code.ends_with('\n') {
             out.push('\n');
         }
@@ -162,581 +245,98 @@ pub fn assemble_vue_main_module(
 
     out.push_str("export default _sfc_main");
 
-    out
+    let source_map = inputs.map(|inputs| composer.into_artifact(inputs.source_root));
+
+    Ok(AssembledVueModule {
+        code: out.into_string(),
+        source_map,
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The contributing maps, validated in the specified order.
+struct ValidatedInputs {
+    script: Option<DecodedFragmentMap>,
+    template: Option<DecodedFragmentMap>,
+    source_root: Option<String>,
+}
 
-    // ═══════════════════════════════════════════════════════════
-    // assemble_main_module tests
-    // ═══════════════════════════════════════════════════════════
+/// A fragment's map is REQUIRED iff the fragment is both AUTHORED and PRESENT.
+///
+/// Authorship comes from the pre-assembly authored-fragment inventory, never
+/// from the presence of a compiled block: a template-only cell whose compiler
+/// synthesised a script block is not missing a required map, it is synthetic
+/// sourceless code. Presence participates too, because the alternative would
+/// demand a map for a fragment that emits no bytes — the inline topology, where
+/// a template is authored but the render closure lives inside `setup()` and no
+/// template block exists.
+fn validate_inputs(
+    compiled: &RuntimeCompileOutput,
+    meta: &FileMeta,
+) -> Result<ValidatedInputs, AssembleMapFailure> {
+    let script_required = meta.has_script && compiled.script.is_some();
+    let template_required = meta.has_template && compiled.template.is_some();
 
-    use verter_compiler::framework_common::{
-        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-        RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
+    if script_required
+        && compiled
+            .script
+            .as_ref()
+            .is_some_and(|script| script.source_map.is_empty())
+    {
+        return Err(AssembleMapFailure::MissingRequiredInputMap {
+            fragment: MapFragment::Script,
+        });
+    }
+    if template_required
+        && compiled
+            .template
+            .as_ref()
+            .is_some_and(|template| template.source_map.is_empty())
+    {
+        return Err(AssembleMapFailure::MissingRequiredInputMap {
+            fragment: MapFragment::Template,
+        });
+    }
+
+    // The per-map checks run to completion for the SCRIPT map first, then for
+    // the template: a malformed script map and a dangling-index template map
+    // report the script's outcome.
+    let script = match &compiled.script {
+        Some(script) if !script.source_map.is_empty() => Some(
+            validate_and_decode(&script.source_map, &script.code).map_err(|code| {
+                AssembleMapFailure::UncomposableInputMap {
+                    fragment: MapFragment::Script,
+                    code,
+                }
+            })?,
+        ),
+        _ => None,
+    };
+    let template = match &compiled.template {
+        Some(template) if !template.source_map.is_empty() => Some(
+            validate_and_decode(&template.source_map, &template.code).map_err(|code| {
+                AssembleMapFailure::UncomposableInputMap {
+                    fragment: MapFragment::Template,
+                    code,
+                }
+            })?,
+        ),
+        _ => None,
     };
 
-    fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
-        RuntimeOutputDescriptor::generated(
-            code,
-            None,
-            &[("test:space", "test:artifact")],
-            SourceMapFidelity::Approximate,
-        )
-    }
+    // The cross-map agreement runs over the contributing set at ANY
+    // cardinality, including exactly one and zero — it is not conditional on
+    // both fragments carrying maps, which is how a single-fragment compile
+    // would otherwise skip it.
+    let source_root = agree_source_root(
+        script
+            .iter()
+            .map(|map| (MapFragment::Script, map))
+            .chain(template.iter().map(|map| (MapFragment::Template, map))),
+    )?;
 
-    fn basic_compiled_result() -> RuntimeCompileOutput {
-        let script_code = "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n";
-        let template_code = "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}";
-        RuntimeCompileOutput {
-            script: Some(RuntimeScriptBlock {
-                code: script_code.to_string(),
-                source_map: String::new(),
-                setup: true,
-                output_descriptor: test_output_descriptor(script_code),
-                generated_template_hole: None,
-                runtime_imports: Vec::new(),
-            }),
-            template: Some(RuntimeTemplateBlock {
-                code: template_code.to_string(),
-                source_map: String::new(),
-                imports: vec!["_openBlock".to_string(), "_createElementBlock".to_string()],
-                ssr_imports: vec![],
-                output_descriptor: test_output_descriptor(template_code),
-            }),
-            ..RuntimeCompileOutput::default()
-        }
-    }
-
-    /// @ai-generated - SSR profile skips HMR block
-    #[test]
-    fn assemble_main_module_ssr_skips_hmr() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: false,
-            ssr: true,
-            hmr_strategy: HmrStrategy::Vite,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(!result.contains("import.meta.hot"));
-        assert!(!result.contains("module.hot"));
-    }
-
-    /// SSR must register the module on `ssrContext.modules` so Vite can collect
-    /// CSS/JS assets for the render tree (drop-in parity with plugin-vue).
-    #[test]
-    fn assemble_main_module_ssr_registers_ssr_context_module() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: true,
-            ssr: true,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("src/Comp.vue", &compiled, &meta, &profile);
-        // Positive: wrap setup with useSSRContext + modules.add
-        assert!(
-            result.contains("useSSRContext as __vite_useSSRContext"),
-            "must import useSSRContext, got:\n{result}"
-        );
-        assert!(
-            result.contains("ssrContext.modules"),
-            "must register on ssrContext.modules, got:\n{result}"
-        );
-        assert!(
-            result.contains("\"src/Comp.vue\"") || result.contains("'src/Comp.vue'"),
-            "must add the component path to modules set, got:\n{result}"
-        );
-        assert!(
-            result.contains("const _sfc_setup = _sfc_main.setup"),
-            "must preserve original setup, got:\n{result}"
-        );
-        // Negative: client HMR must not appear in SSR assembly
-        assert!(!result.contains("import.meta.hot"));
-        assert!(!result.contains("module.hot"));
-    }
-
-    /// The registered id must match the ssr-manifest KEY FORM. When the
-    /// bundler supplies a root-relative `ssr_module_id`, an ABSOLUTE
-    /// canonical id (the real transform-time shape) must NOT be the
-    /// registered id — Vite's manifest keys are root-relative, so
-    /// registering the absolute path makes every `renderPreloadLinks`
-    /// lookup miss.
-    #[test]
-    fn assemble_main_module_ssr_registers_bundler_supplied_module_id() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: true,
-            ssr: true,
-            ssr_module_id: Some("src/Comp.vue".to_string()),
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        // Absolute canonical id — the shape real transforms pass.
-        let result =
-            assemble_vue_main_module("/home/user/app/src/Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            result.contains(".add(\"src/Comp.vue\")"),
-            "must register the bundler-supplied root-relative id, got:\n{result}"
-        );
-        assert!(
-            !result.contains(".add(\"/home/user/app/src/Comp.vue\")"),
-            "must NOT register the absolute canonical id when a module id is supplied, got:\n{result}"
-        );
-    }
-
-    /// Without a bundler-supplied module id, the canonical id is the
-    /// fallback registration.
-    #[test]
-    fn assemble_main_module_ssr_falls_back_to_canonical_id() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: true,
-            ssr: true,
-            ssr_module_id: None,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("/abs/src/Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            result.contains(".add(\"/abs/src/Comp.vue\")"),
-            "absent ssr_module_id must fall back to the canonical id, got:\n{result}"
-        );
-    }
-
-    /// Non-SSR assembly must NOT inject useSSRContext wrapping.
-    #[test]
-    fn assemble_main_module_client_no_ssr_context_wrap() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: false,
-            ssr: false,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("src/Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            !result.contains("useSSRContext"),
-            "client assembly must not wrap setup with useSSRContext, got:\n{result}"
-        );
-        assert!(!result.contains("ssrContext.modules"));
-    }
-
-    /// @ai-generated - Webpack HMR strategy uses module.hot
-    #[test]
-    fn assemble_main_module_webpack_hmr() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: false,
-            ssr: false,
-            hmr_strategy: HmrStrategy::Webpack,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(result.contains("module.hot"));
-        assert!(!result.contains("import.meta.hot"));
-    }
-
-    /// @ai-generated - No script and no template → bare `const _sfc_main = {}`
-    #[test]
-    fn assemble_main_module_no_script_no_template() {
-        let compiled = RuntimeCompileOutput::default();
-        let profile = CompileProfile::default();
-        let result =
-            assemble_vue_main_module("Comp.vue", &compiled, &FileMeta::default(), &profile);
-        assert!(result.contains("const _sfc_main = {}"));
-    }
-
-    /// @ai-generated - Custom blocks produce import + invocation lines
-    #[test]
-    fn assemble_main_module_custom_blocks() {
-        let compiled = RuntimeCompileOutput {
-            custom_blocks: vec![RuntimeCustomBlock {
-                block_type: "i18n".to_string(),
-                content: "{\"en\":{}}".to_string(),
-            }],
-            ..RuntimeCompileOutput::default()
-        };
-        let profile = CompileProfile::default();
-        let meta = FileMeta {
-            custom_types: vec!["i18n".to_string()],
-            custom_langs: vec![None],
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(result.contains("import block0 from"));
-        assert!(result.contains("if (typeof block0 === 'function') block0(_sfc_main)"));
-    }
-
-    /// @ai-generated - Production mode skips __file
-    #[test]
-    fn assemble_main_module_production_skips_file() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: true,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(!result.contains("__file"));
-    }
-
-    /// @ai-generated - assemble_main_module with styles produces import lines
-    #[test]
-    fn assemble_main_module_with_styles_produces_import_lines() {
-        let compiled = RuntimeCompileOutput {
-            styles: vec![
-                RuntimeStyleBlock {
-                    code: ".a{}".to_string(),
-                    source_map: None,
-                    lang: None,
-                    scope_hash: None,
-                    has_global: false,
-                    output_descriptor: test_output_descriptor(".a{}"),
-                },
-                RuntimeStyleBlock {
-                    code: ".b{}".to_string(),
-                    source_map: None,
-                    lang: Some("scss".to_string()),
-                    scope_hash: None,
-                    has_global: false,
-                    output_descriptor: test_output_descriptor(".b{}"),
-                },
-            ],
-            ..RuntimeCompileOutput::default()
-        };
-        let meta = FileMeta {
-            style_langs: vec![None, Some("scss".to_string())],
-            ..FileMeta::default()
-        };
-        let profile = CompileProfile::default();
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            result.contains("import \"Comp.vue?vue&type=style&index=0"),
-            "should import style 0: {}",
-            result
-        );
-        assert!(
-            result.contains("import \"Comp.vue?vue&type=style&index=1"),
-            "should import style 1: {}",
-            result
-        );
-    }
-
-    /// @ai-generated - Vite HMR code generation in dev mode
-    #[test]
-    fn assemble_main_module_vite_hmr() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile {
-            is_production: false,
-            ssr: false,
-            hmr_strategy: HmrStrategy::Vite,
-            ..CompileProfile::default()
-        };
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            result.contains("import.meta.hot"),
-            "should contain Vite HMR code"
-        );
-        assert!(
-            result.contains("HMR(vite)"),
-            "should contain HMR(vite) comment"
-        );
-    }
-
-    /// @ai-generated - Render function binding: _sfc_main.render = render
-    #[test]
-    fn assemble_main_module_render_function_binding() {
-        let compiled = basic_compiled_result();
-        let profile = CompileProfile::default();
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
-        assert!(
-            result.contains("_sfc_main.render = render"),
-            "should bind render function to component"
-        );
-    }
-
-    /// @ai-generated - Regression: template-only SFC must produce valid assembled output
-    /// with _sfc_main defined (no script block → fallback to empty object).
-    #[test]
-    fn assemble_main_module_template_only_sfc() {
-        use oxc_allocator::Allocator;
-        use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
-
-        // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
-        // so this end-to-end assembly test exercises the neutral bundle path.
-        let source = "<template><div>hello</div></template>";
-        let alloc = Allocator::new();
-        let compiler = VueCarrierCompiler::default();
-        // Route the carrier parse through the counted chokepoint (the dedup
-        // rail authority), not a raw `compiler.parse`.
-        let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-        let result = compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    force_js: true,
-                    ..RuntimeCompileOptions::default()
-                },
-                &alloc,
-            )
-            .expect("vue carrier produces a runtime bundle");
-
-        // script should be None for template-only SFC
-        assert!(
-            result.script.is_none(),
-            "template-only SFC should have no script block"
-        );
-        assert!(
-            result.template.is_some(),
-            "template-only SFC should have template block"
-        );
-
-        let profile = CompileProfile::default();
-        let meta = FileMeta {
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let assembled = assemble_vue_main_module("NoScript.vue", &result, &meta, &profile);
-
-        // Must contain _sfc_main definition (fallback empty object)
-        assert!(
-            assembled.contains("const _sfc_main = {}"),
-            "template-only SFC must define _sfc_main, got:\n{}",
-            assembled
-        );
-        // Must bind render function
-        assert!(
-            assembled.contains("_sfc_main.render = render"),
-            "template-only SFC must bind render, got:\n{}",
-            assembled
-        );
-        // Must export
-        assert!(
-            assembled.contains("export default _sfc_main"),
-            "template-only SFC must export, got:\n{}",
-            assembled
-        );
-    }
-
-    /// @ai-generated - Inline topology: assembly emits no standalone render
-    /// function — the render closure already lives inside `setup()`.
-    #[test]
-    fn assemble_main_module_inline_topology() {
-        use oxc_allocator::Allocator;
-        use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
-
-        let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
-        let alloc = Allocator::new();
-        let compiler = VueCarrierCompiler::default();
-        let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-        let result = compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    force_js: true,
-                    inline: Some(true),
-                    ..RuntimeCompileOptions::default()
-                },
-                &alloc,
-            )
-            .expect("vue carrier produces a runtime bundle");
-
-        // Inline compile: no separate template block, topology flag set.
-        assert!(result.inline, "bundle must carry the inline topology flag");
-        assert!(
-            result.template.is_none(),
-            "inline compile must not emit a template block"
-        );
-
-        let profile = CompileProfile::default();
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let assembled = assemble_vue_main_module("App.vue", &result, &meta, &profile);
-
-        // The render closure is inside setup — no standalone render attach.
-        assert!(
-            assembled.contains("return (_ctx,_cache) => {"),
-            "render must be inlined into setup, got:\n{}",
-            assembled
-        );
-        assert!(
-            !assembled.contains("function render("),
-            "inline assembly must not emit a standalone render fn, got:\n{}",
-            assembled
-        );
-        assert!(
-            !assembled.contains("_sfc_main.render = render"),
-            "inline assembly must not attach render, got:\n{}",
-            assembled
-        );
-        // No __returned__ bindings object in inline mode.
-        assert!(
-            !assembled.contains("__returned__"),
-            "inline assembly must not contain __returned__, got:\n{}",
-            assembled
-        );
-        // Component object + final export still present.
-        assert!(
-            assembled.contains("const _sfc_main = {"),
-            "assembled module must define _sfc_main, got:\n{}",
-            assembled
-        );
-        assert!(
-            assembled.trim_end().ends_with("export default _sfc_main"),
-            "assembled module must end with the default export, got:\n{}",
-            assembled
-        );
-    }
-
-    /// The runtime Main passes the compiler-emitted `__returned__` bindings
-    /// object through UNCHANGED: setup-binding elision (type-only imports,
-    /// unused setup imports) is owned by the compiler's `build_returned_object`
-    /// (template_used_vars-driven), not by a text-level post-pass on the
-    /// assembled module. (The old `filter_setup_return` was removed — it
-    /// keyed on a `return { ... };` shape the compiler has not emitted since
-    /// `__returned__` was introduced, so it was dead code on the real
-    /// production shape, proven by canary.)
-    #[test]
-    fn assemble_passes_compiler_returned_bindings_verbatim() {
-        use oxc_allocator::Allocator;
-        use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
-
-        // UnusedSetupImport must be elided by the COMPILER (not by any
-        // assembly-level text filtering); `msg` is template-used and stays.
-        let source = "<script setup>\nimport { ref } from 'vue'\nimport UnusedComp from './UnusedComp.vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
-        let alloc = Allocator::new();
-        let compiler = VueCarrierCompiler::default();
-        let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-        let result = compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    force_js: true,
-                    ..RuntimeCompileOptions::default()
-                },
-                &alloc,
-            )
-            .expect("vue carrier produces a runtime bundle");
-
-        let profile = CompileProfile::default();
-        let meta = FileMeta {
-            has_script: true,
-            has_template: true,
-            ..FileMeta::default()
-        };
-        let assembled = assemble_vue_main_module("App.vue", &result, &meta, &profile);
-
-        assert!(
-            assembled.contains("const __returned__ = { msg };"),
-            "the compiler-emitted __returned__ survives assembly verbatim, got:\n{}",
-            assembled
-        );
-        assert!(
-            !assembled.contains("return { msg, UnusedComp }")
-                && !assembled.contains("__returned__ = { msg, UnusedComp }"),
-            "unused setup import must already be elided by the compiler, got:\n{}",
-            assembled
-        );
-    }
-
-    /// @ai-generated - Multi-root template must use Fragment wrapping
-    #[test]
-    fn compile_multi_root_template_uses_fragment() {
-        use verter_compiler::compile::CodegenOptions;
-        use verter_compiler::compile::VerterCompileOptions;
-        use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
-
-        let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
-        let opts = CodegenOptions {
-            inline: Some(false),
-            ..CodegenOptions::default()
-        };
-        let vopts = VerterCompileOptions {
-            force_js: true,
-            ..Default::default()
-        };
-        let result = StandaloneCompiler.compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &opts,
-            &vopts,
-            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
-        );
-
-        let tpl = result.template.expect("should have template block");
-
-        // Multi-root template must use Fragment
-        assert!(
-            tpl.code.contains("_Fragment"),
-            "multi-root template should use _Fragment, got:\n{}",
-            tpl.code
-        );
-        // Must include _createTextVNode for the text node
-        assert!(
-            tpl.code.contains("_createTextVNode"),
-            "multi-root template should use _createTextVNode for text, got:\n{}",
-            tpl.code
-        );
-        // Imports must include Fragment
-        assert!(
-            tpl.imports.contains(&"_Fragment"),
-            "multi-root template imports must include _Fragment, got: {:?}",
-            tpl.imports
-        );
-    }
+    Ok(ValidatedInputs {
+        script,
+        template,
+        source_root,
+    })
 }

@@ -32,12 +32,14 @@
 //! ```
 
 mod batch_ops;
+mod chain;
 mod chunk;
 #[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
 mod fallible;
 mod source_map;
 
+pub use chain::SourceMapChainError;
 pub use code_transform::CodeTransform;
 pub use code_transform::GeneratedSourceRange;
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
@@ -45,7 +47,7 @@ pub use code_transform::GeneratedSourceRange;
 // module is private, so this is its only public path).
 #[allow(unused_imports)] // consumed by tests and by out-of-module callers
 pub use fallible::CodeTransformError;
-pub use source_map::SourceMapOptions;
+pub use source_map::{advance_generated_position, SourceMapOptions};
 
 #[cfg(test)]
 mod edit_semantics_tests;

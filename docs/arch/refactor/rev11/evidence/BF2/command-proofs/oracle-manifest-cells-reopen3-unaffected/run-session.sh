@@ -8,7 +8,7 @@
 # vs the committed manifests) on every run.
 set -euo pipefail
 
-REPO=/Users/carlosrodrigues/Documents/dev/verter-bf2-reopen3
+REPO=<worktree>/verter-bf2-reopen3
 SCRATCH=/tmp/bf2-reopen3-perf
 SANDBOX_PROFILE="$SCRATCH/deny-network.sb"
 VUE_SOURCE="$REPO/packages/framework-conformance-harness/.oracle-checkouts/vue"

@@ -2,7 +2,7 @@
 
 Charter: `docs/arch/refactor/rev11/charters/BV0.md`
 Reviewer posture: assume every test is weak until a real red/green plant proves otherwise.
-Worktree: `/Users/carlosrodrigues/Documents/dev/verter-review-bv0-adv`, left byte-identical to start
+Worktree: `<worktree>/verter-review-bv0-adv`, left byte-identical to start
 (`git status --porcelain` empty, `HEAD == c40a1ca96b73cf9b723fd7209516ea0462deaad2`).
 
 ---

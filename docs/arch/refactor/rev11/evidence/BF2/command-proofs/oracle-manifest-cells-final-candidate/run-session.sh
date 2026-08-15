@@ -9,7 +9,7 @@
 # byte-identical TSVs vs the committed manifests) on every run.
 set -euo pipefail
 
-REPO=/Users/carlosrodrigues/Documents/dev/verter-bf2-fix2
+REPO=<worktree>/verter-bf2-fix2
 SCRATCH=/tmp/bf2-perf-final
 SANDBOX_PROFILE="$SCRATCH/deny-network.sb"
 VUE_SOURCE="$REPO/packages/framework-conformance-harness/.oracle-checkouts/vue"

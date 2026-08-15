@@ -72,7 +72,8 @@ mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
-pub use compile::assemble_vue_main_module;
+pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
+pub use compile::{UncomposableCode, UncomposableFamily};
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]

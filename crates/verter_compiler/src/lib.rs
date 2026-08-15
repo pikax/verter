@@ -29,6 +29,13 @@ pub(crate) use verter_parser::utils;
 // compensating position map beside it.
 pub mod code_transform;
 
+// The source-map wire types are already part of `code_transform`'s public API
+// (`generate_map` returns a `SourceMap`, `chain_source_map` takes and returns
+// one). Re-exporting the crate itself lets an out-of-crate consumer name those
+// types and reuse the same canonical v3 encoder without pinning a second,
+// independently-drifting version of it.
+pub use oxc_sourcemap;
+
 pub mod css;
 pub mod js_number;
 pub mod strip_types;

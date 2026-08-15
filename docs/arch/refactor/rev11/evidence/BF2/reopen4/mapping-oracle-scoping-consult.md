@@ -10,7 +10,7 @@ authored SFC content, never against Vue/Svelte's own official compiler source ma
 session id: 019ffd29-182c-7fe3-ba2a-6f5533298914
 --------
 user
-You are investigating the blast radius of a binding maintainer direction for the Verter Revision 11 architecture-lock program, repo /Users/carlosrodrigues/Documents/dev/verter.
+You are investigating the blast radius of a binding maintainer direction for the Verter Revision 11 architecture-lock program, repo <repo-root>.
 
 BINDING MAINTAINER DIRECTION (verbatim, not up for debate — investigate its implications, do not question it): 'we do not need to golden sourcemap from vue or sveltejs, we just need to guarantee that the sfc code that the user writes is mapped correctly, nothing to do with vue or svelte official compiler.'
 
@@ -32,15 +32,15 @@ BF2’s charter is not defective; BF2’s accepted mapping implementation is. Th
 
 BF2’s charter does not mandate official-source-map equality.
 
-- Its objective is generic conformance infrastructure: [BF2.md:6](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF2.md:6).
-- Its owned scope says only “diagnostics, source-map, and TypeScript-observable product validation”: [BF2.md:20](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF2.md:20).
-- Its exits require “diagnostic/mapping discrimination,” not golden-map equality: [BF2.md:28](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BF2.md:28).
+- Its objective is generic conformance infrastructure: [BF2.md:6](docs/arch/refactor/rev11/charters/BF2.md:6).
+- Its owned scope says only “diagnostics, source-map, and TypeScript-observable product validation”: [BF2.md:20](docs/arch/refactor/rev11/charters/BF2.md:20).
+- Its exits require “diagnostic/mapping discrimination,” not golden-map equality: [BF2.md:28](docs/arch/refactor/rev11/charters/BF2.md:28).
 
 Nothing there requires identical `sources`, `sourcesContent`, `names`, or decoded segments relative to an official compiler map. The charter leaves full room for candidate-generated positions to be validated against the authored SFC.
 
-The official comparison was an implementation and review interpretation added later. The accepted evidence explicitly describes it as restored behavior in [BF2-reopen3-summary.md:26](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/evidence/BF2/BF2-reopen3-summary.md:26).
+The official comparison was an implementation and review interpretation added later. The accepted evidence explicitly describes it as restored behavior in [BF2-reopen3-summary.md:26](docs/arch/refactor/rev11/evidence/BF2/BF2-reopen3-summary.md:26).
 
-BV0’s wording is more ambiguous. “Source-map differences after harness artifacts are removed” at [BV0.md:20](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:20) does not identify the official map as the oracle, but reopen #3 interpreted it that way. That ambiguity should now be removed.
+BV0’s wording is more ambiguous. “Source-map differences after harness artifacts are removed” at [BV0.md:20](docs/arch/refactor/rev11/charters/BV0.md:20) does not identify the official map as the oracle, but reopen #3 interpreted it that way. That ambiguity should now be removed.
 
 ### 2. BF2 requires reopen #4
 
@@ -48,10 +48,10 @@ This is a genuine BF2-owned defect, not merely an opportunity for additional suc
 
 The current implementation:
 
-- defines official and candidate map fields as pairwise contractual operands: [compare.mjs:379](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:379);
-- compares decoded segment sets: [compare.mjs:397](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:397);
-- compares every map field candidate-versus-golden: [compare.mjs:430](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:430);
-- makes that comparison acceptance-bearing: [compare.mjs:526](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:526).
+- defines official and candidate map fields as pairwise contractual operands: [compare.mjs:379](packages/framework-conformance-harness/src/compare.mjs:379);
+- compares decoded segment sets: [compare.mjs:397](packages/framework-conformance-harness/src/compare.mjs:397);
+- compares every map field candidate-versus-golden: [compare.mjs:430](packages/framework-conformance-harness/src/compare.mjs:430);
+- makes that comparison acceptance-bearing: [compare.mjs:526](packages/framework-conformance-harness/src/compare.mjs:526).
 
 That implementation never receives the authored SFC content or checks whether a candidate generated position maps to the correct authored token. It can therefore:
 
@@ -103,7 +103,7 @@ The implementable checks are:
    - For a legitimate semantic rewrite where generated and source spelling differ, require an explicit independently authored relation identifying the exact generated token and exact original span. An arbitrary in-bounds mapping is not sufficient.
    - Every source-bearing segment must be covered by an exact-text relation or an explicit semantic relation. Unclassified mapped segments fail.
 
-   The existing repository helper already demonstrates the right basic technique—lookup a generated token and require matching original text at the mapped column—in [sourcemap_e2e_helpers.rs:115](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs:115), with a shifted-column discriminator at [sourcemap_e2e_helpers.rs:274](/Users/carlosrodrigues/Documents/dev/verter/crates/verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs:274).
+   The existing repository helper already demonstrates the right basic technique—lookup a generated token and require matching original text at the mapped column—in [sourcemap_e2e_helpers.rs:115](crates/verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs:115), with a shifted-column discriminator at [sourcemap_e2e_helpers.rs:274](crates/verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs:274).
 
 4. **Completeness and round trips**
 
@@ -113,7 +113,7 @@ The implementable checks are:
    - source-to-generated lookup includes the intended generated anchor;
    - the mapped source bytes equal the expected authored range.
 
-   This implements the existing Revision 11 requirement for bidirectional round trips in [mapping-products.md:44](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/contracts/mapping-products.md:44).
+   This implements the existing Revision 11 requirement for bidirectional round trips in [mapping-products.md:44](docs/arch/refactor/rev11/contracts/mapping-products.md:44).
 
 5. **Assembly composition**
 
@@ -135,17 +135,17 @@ The implementable checks are:
 
 #### (a) BF2 `compare.mjs`
 
-Replace the acceptance semantics at [compare.mjs:379](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:379) through [compare.mjs:450](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:450):
+Replace the acceptance semantics at [compare.mjs:379](packages/framework-conformance-harness/src/compare.mjs:379) through [compare.mjs:450](packages/framework-conformance-harness/src/compare.mjs:450):
 
 - retire `mappingsFieldEqual(goldenMappings, candidateMappings)`;
 - replace `compareMappings(goldenMap, candidateMap)` with an authored-source validator over candidate code/map, exact sources, anchors, and synthetic ranges;
 - stop treating official `sourceRoot`, `sources`, `sourcesContent`, `names`, or decoded segment sets as expected candidate values;
 - pass fixture identity/content and anchor policy through `compareArtifacts`;
-- at [compare.mjs:526](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/src/compare.mjs:526), invoke only candidate-to-authored-source validation.
+- at [compare.mjs:526](packages/framework-conformance-harness/src/compare.mjs:526), invoke only candidate-to-authored-source validation.
 
 `check-candidate.mjs` must load/pass the exact fixture content rather than only the golden map. The map-on/off decision comes from the requested cell, not golden-map presence.
 
-The mapping halves of `diagnostic-mapping-discrimination.spec.mjs`, `assembled-sourcemap.spec.mjs`, and mapping mutations must be rewritten. The decoder remains useful; the official assembled-map composer is no longer a candidate correctness oracle. The README’s “full-field source-map comparison” description at [README.md:62](/Users/carlosrodrigues/Documents/dev/verter/packages/framework-conformance-harness/README.md:62) also becomes stale.
+The mapping halves of `diagnostic-mapping-discrimination.spec.mjs`, `assembled-sourcemap.spec.mjs`, and mapping mutations must be rewritten. The decoder remains useful; the official assembled-map composer is no longer a candidate correctness oracle. The README’s “full-field source-map comparison” description at [README.md:62](packages/framework-conformance-harness/README.md:62) also becomes stale.
 
 #### (b) BF2 charter
 
@@ -159,14 +159,14 @@ That prevents another implementation-level misreading without changing BF2 owner
 
 #### (c) BV0 charter
 
-Rewrite [BV0.md:20](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:20) from “source-map differences” to, for example:
+Rewrite [BV0.md:20](docs/arch/refactor/rev11/charters/BV0.md:20) from “source-map differences” to, for example:
 
 > source-map correctness defects against the exact authored Vue SFC after harness artifacts are removed, including incorrect source identity/coordinates, missing required authored anchors, and fabricated provenance over synthetic output.
 
 Also qualify:
 
-- [BV0.md:34](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:34): official rc.3 reproduction applies to framework semantics; mapping defects reproduce through BF2’s authored-source oracle.
-- [BV0.md:40](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:40) and [BV0.md:46](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/charters/BV0.md:46): name the authored-source mapping oracle explicitly.
+- [BV0.md:34](docs/arch/refactor/rev11/charters/BV0.md:34): official rc.3 reproduction applies to framework semantics; mapping defects reproduce through BF2’s authored-source oracle.
+- [BV0.md:40](docs/arch/refactor/rev11/charters/BV0.md:40) and [BV0.md:46](docs/arch/refactor/rev11/charters/BV0.md:46): name the authored-source mapping oracle explicitly.
 
 #### (d) AMD-007 draft
 
@@ -186,7 +186,7 @@ AMD-007 must not proceed to review in its current form. Rewrite:
 - §7 lines 330–333: preserve official compiler oracles for the other conformance axes while explicitly excluding official maps from mapping correctness.
 - The ratification quotation at lines 341–351 must name the reaccepted authored-source oracle and must not promise that candidate-versus-official mapping remains unchanged.
 
-Because the draft is explicitly unratified at [AMD-007:3](/Users/carlosrodrigues/Documents/dev/verter/docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:3), correcting it now requires no superseding amendment—but its prepared commit/tree identities and review package must be regenerated.
+Because the draft is explicitly unratified at [AMD-007:3](docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md:3), correcting it now requires no superseding amendment—but its prepared commit/tree identities and review package must be regenerated.
 
 ### 5. AMD-007’s core proposal survives
 

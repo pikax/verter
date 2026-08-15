@@ -2,7 +2,7 @@ VERDICT: BLOCKING_FINDINGS
 
 # BF2 reopen re-review #2 — adversarial (perf/memory/stub-hunting)
 
-Candidate: `a7f1eb5d7` (detached HEAD, worktree `/Users/carlosrodrigues/Documents/dev/verter-bf2-rev2-adv`)
+Candidate: `a7f1eb5d7` (detached HEAD, worktree `<worktree>/verter-bf2-rev2-adv`)
 Package: `packages/framework-conformance-harness/`
 Method: criterion-by-criterion against `docs/arch/refactor/rev11/charters/BF2.md`, plus targeted mutation-proof stub-hunting.
 

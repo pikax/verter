@@ -8,7 +8,7 @@
 # vs the committed manifests) on every run.
 set -euo pipefail
 
-REPO=/Users/carlosrodrigues/Documents/dev/verter-bf1-perf
+REPO=<worktree>/verter-bf1-perf
 SCRATCH=/tmp/bf1-perf-measure
 SANDBOX_PROFILE="$SCRATCH/deny-network.sb"
 VUE_SOURCE=/private/tmp/verter-rescope.G7sDua/vue-core

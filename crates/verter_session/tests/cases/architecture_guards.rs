@@ -5653,7 +5653,15 @@ pub(crate) mod foundations_guards {
         // and session assembly tests drive the GENUINE shipped runtime-Main
         // assembly (compile → bundle → assemble) instead of a hand copy.
         // Test-support public API (consumer: verter_vue_conformance dev-dep).
-        "pub use compile::assemble_vue_main_module",
+        // Alongside it, the typed code-plus-map result and the fail-closed
+        // outcome it can return instead: both appear in the assembler's own
+        // signature, so a caller outside this crate cannot name its return
+        // type without them.
+        "pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment}",
+        // The exhaustive uncomposable-input-map taxonomy carried by
+        // `AssembleMapFailure`, so a caller can discriminate the exact sub-code
+        // and its family rather than matching on a rendered message.
+        "pub use compile::{UncomposableCode, UncomposableFamily}",
         // Stamped handoff callers hash code and maps with the host-owned domain.
         "pub use block_content::hash_block_content",
         // verter_napi::meta, verter_wasm::tests::audit
@@ -9314,6 +9322,14 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_vue_conformance/src/lib.rs",
             "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
+        ),
+        (
+            "crates/verter_session/src/compile/map_equality_tests/bf2_seed_matrix.rs",
+            "BF2 seed-matrix conformance harness (`#[cfg(test, feature = \"bf2-authoritative\")]`) — reads the committed golden manifest/records and Vue fixture TEST FIXTURES off disk, and reads/writes the committed per-cell code-digest baseline JSON (a TEST FIXTURE, not semantic/VFS state) for the assembled-map composition regression pin. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/compile/map_equality_tests/vector_inventory.rs",
+            "layer-2 vector-inventory reproduction (`#[cfg(test)]`) — reads the committed `assembled-map-composition.vectors.json` TEST FIXTURE off disk to drive every frozen vector through the production assembler. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
 ];
 

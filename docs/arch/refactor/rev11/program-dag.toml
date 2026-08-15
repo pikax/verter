@@ -79,10 +79,16 @@ class = "foundational-safety"
 predecessors = ["BF2"]
 
 [[block]]
+id = "BV0A"
+name = "Interim Vue assembled-module source map"
+class = "subsystem"
+predecessors = ["BF2"]
+
+[[block]]
 id = "BV0"
 name = "Immediate Vue known-defect correction"
 class = "subsystem"
-predecessors = ["BF2"]
+predecessors = ["BV0A"]
 
 [[block]]
 id = "B2"

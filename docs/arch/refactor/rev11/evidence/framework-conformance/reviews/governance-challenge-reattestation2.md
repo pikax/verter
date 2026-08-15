@@ -38,7 +38,7 @@ BLOCKING_FINDINGS
 ## Resolved findings and bounded checks
 
 1. **Stale B1 narrative — resolved.** The read-only canonical checkout
-   `/Users/carlosrodrigues/Documents/dev/verter` is clean on
+   `<repo-root>` is clean on
    `program/architecture-lock` at
    `b3249d13d07806a14a4307954dfcc459cf7301ac`, whose parent is the accepted B1 commit
    `03b2fdbfc6d12452824768d9e389a5f6f3d680df`, tree

@@ -9,7 +9,7 @@
 # combined SHA-256 of all 48 produced golden files) on every run.
 set -euo pipefail
 
-REPO=/Users/carlosrodrigues/Documents/dev/verter-bf2
+REPO=<worktree>/verter-bf2
 HARNESS="$REPO/packages/framework-conformance-harness"
 SCRATCH=/tmp/bf2-perf-measure
 SANDBOX_PROFILE="$SCRATCH/deny-network.sb"

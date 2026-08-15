@@ -1,0 +1,162 @@
+{
+  "note": "Per-cell digests of the assembled Vue runtime main module for the 36 BF2 seed cells, produced by the GENUINE pre-BV0A bare-String assemble_vue_main_module -- not by the current candidate hashing itself. See the doc comment on assembled_code_bytes_match_the_pinned_baseline and docs/arch/refactor/rev11/evidence/BV0A/historical-baseline-provenance.md.",
+  "provenance": {
+    "producerCommit": "6ecfcb7b59c371292f554c06be1d880861e435bc",
+    "producerBranch": "program/architecture-lock",
+    "assemblerFile": "crates/verter_session/src/compile.rs",
+    "assemblerBlob": "a1b8e5dc3df0a5cbc1b4806a661484e0d8acdf97",
+    "manifestBlob": "21248b98b64909c7daf5207d2ab94f8c46f2e38f",
+    "fixtureTreeBlob": "6ac86543ccea6219c99b915a377876427738ca4d",
+    "cargoLockBlob": "7ced7cf68af23883b12d76004ee9adc5cb2cc0a0",
+    "rustToolchainBlob": "27d6fdd1ac927948bafc650047c157b2369a4f9e",
+    "runner": "cargo test -p verter_session --lib compile::historical_dump::dump_historical_baseline, run in a throwaway detached worktree at the producer commit, patched only with an ephemeral test module that calls the OLD signature assemble_vue_main_module(canonical_id, compiled, meta, profile) -> String directly -- the assembler production code at that commit was not otherwise modified.",
+    "inputConstruction": "The current tree's exact compile_fixture/compile_cell logic (fixture bytes, 36 manifest axes, canonical IDs, compiled RuntimeCompileOutput/FileMeta/CompileProfile, full production/SSR/HMR/source-map profile) was ported verbatim into the historical worktree and used to build every cell's input -- only the assembler function itself is historical.",
+    "verifiedIdentical": "manifestBlob, fixtureTreeBlob, cargoLockBlob, and rustToolchainBlob were independently confirmed byte-identical between the producer commit and the candidate tree via git rev-parse <commit>:<path> on both sides before this baseline was trusted."
+  },
+  "cells": {
+    "vue/basic-interpolation__ssr__map0__prod0": {
+      "codeBytes": 1225,
+      "codeSha256": "77b3cb2f712b3b20a960802aa1db0fe8b86f0a2e5c558748904b5114522c60e7"
+    },
+    "vue/basic-interpolation__ssr__map0__prod1": {
+      "codeBytes": 1167,
+      "codeSha256": "01f2ea08afe83b82d67f86cab6649a6b65a39091b4a127469cd588ec9fe61e0e"
+    },
+    "vue/basic-interpolation__ssr__map1__prod0": {
+      "codeBytes": 1225,
+      "codeSha256": "77b3cb2f712b3b20a960802aa1db0fe8b86f0a2e5c558748904b5114522c60e7"
+    },
+    "vue/basic-interpolation__ssr__map1__prod1": {
+      "codeBytes": 1167,
+      "codeSha256": "01f2ea08afe83b82d67f86cab6649a6b65a39091b4a127469cd588ec9fe61e0e"
+    },
+    "vue/basic-interpolation__vapor__map0__prod0": {
+      "codeBytes": 1146,
+      "codeSha256": "5f0a470a21e2c2db13e8965fccb0428001b69d9da90b8a43ff20a1f67d6c091c"
+    },
+    "vue/basic-interpolation__vapor__map0__prod1": {
+      "codeBytes": 1014,
+      "codeSha256": "7a5f87059e42f6a426c5d37c790188151e2cf3b7b099124ae4ff56c5ede1097b"
+    },
+    "vue/basic-interpolation__vapor__map1__prod0": {
+      "codeBytes": 1146,
+      "codeSha256": "5f0a470a21e2c2db13e8965fccb0428001b69d9da90b8a43ff20a1f67d6c091c"
+    },
+    "vue/basic-interpolation__vapor__map1__prod1": {
+      "codeBytes": 1014,
+      "codeSha256": "7a5f87059e42f6a426c5d37c790188151e2cf3b7b099124ae4ff56c5ede1097b"
+    },
+    "vue/basic-interpolation__vdom__map0__prod0": {
+      "codeBytes": 1333,
+      "codeSha256": "0cb7417a5190a81e5ebacbcb728d0175166460aa60d367c5afb890ebadcce581"
+    },
+    "vue/basic-interpolation__vdom__map0__prod1": {
+      "codeBytes": 1158,
+      "codeSha256": "942cad3cd289a5c5ddb5497d782f8ddb2c54b0e9cfc54507f9026f7a41561ca1"
+    },
+    "vue/basic-interpolation__vdom__map1__prod0": {
+      "codeBytes": 1333,
+      "codeSha256": "0cb7417a5190a81e5ebacbcb728d0175166460aa60d367c5afb890ebadcce581"
+    },
+    "vue/basic-interpolation__vdom__map1__prod1": {
+      "codeBytes": 1158,
+      "codeSha256": "942cad3cd289a5c5ddb5497d782f8ddb2c54b0e9cfc54507f9026f7a41561ca1"
+    },
+    "vue/props-emit__ssr__map0__prod0": {
+      "codeBytes": 1152,
+      "codeSha256": "1bc982d640a1b1d366bfbb824ad72c6802299d4831b70ca35196bcab2ea8ca9f"
+    },
+    "vue/props-emit__ssr__map0__prod1": {
+      "codeBytes": 1103,
+      "codeSha256": "98f503249181ccf55b8e865db3f154cfb8a92d0ec2c8340010e4b7109e6b3311"
+    },
+    "vue/props-emit__ssr__map1__prod0": {
+      "codeBytes": 1152,
+      "codeSha256": "1bc982d640a1b1d366bfbb824ad72c6802299d4831b70ca35196bcab2ea8ca9f"
+    },
+    "vue/props-emit__ssr__map1__prod1": {
+      "codeBytes": 1103,
+      "codeSha256": "98f503249181ccf55b8e865db3f154cfb8a92d0ec2c8340010e4b7109e6b3311"
+    },
+    "vue/props-emit__vapor__map0__prod0": {
+      "codeBytes": 1172,
+      "codeSha256": "6913bbf2cfb53c5f8e9757699ad1dd61b5827ba8d68a6931fa2469a325bddbe5"
+    },
+    "vue/props-emit__vapor__map0__prod1": {
+      "codeBytes": 1049,
+      "codeSha256": "7889d48604c8dc91868c2db67eb38d19e8068d2a85ad4ce29b645dd817a1ff44"
+    },
+    "vue/props-emit__vapor__map1__prod0": {
+      "codeBytes": 1172,
+      "codeSha256": "6913bbf2cfb53c5f8e9757699ad1dd61b5827ba8d68a6931fa2469a325bddbe5"
+    },
+    "vue/props-emit__vapor__map1__prod1": {
+      "codeBytes": 1049,
+      "codeSha256": "7889d48604c8dc91868c2db67eb38d19e8068d2a85ad4ce29b645dd817a1ff44"
+    },
+    "vue/props-emit__vdom__map0__prod0": {
+      "codeBytes": 1064,
+      "codeSha256": "5308cdfe00314ade64f043da01fc3b482c75919c66cdd45a1ed97e573d9aa613"
+    },
+    "vue/props-emit__vdom__map0__prod1": {
+      "codeBytes": 923,
+      "codeSha256": "9fe35d33c0fc967c266c2ca2efbf8cece10567169c7ba53b9954b532ff789376"
+    },
+    "vue/props-emit__vdom__map1__prod0": {
+      "codeBytes": 1064,
+      "codeSha256": "5308cdfe00314ade64f043da01fc3b482c75919c66cdd45a1ed97e573d9aa613"
+    },
+    "vue/props-emit__vdom__map1__prod1": {
+      "codeBytes": 923,
+      "codeSha256": "9fe35d33c0fc967c266c2ca2efbf8cece10567169c7ba53b9954b532ff789376"
+    },
+    "vue/slots__ssr__map0__prod0": {
+      "codeBytes": 935,
+      "codeSha256": "d20a5123fb70c610d66e57f383870a83300b1474f54003a5dc73c6f54b8ef23e"
+    },
+    "vue/slots__ssr__map0__prod1": {
+      "codeBytes": 891,
+      "codeSha256": "207e817997c0a4f865dab965c20085afe53ea57392be25a21f447e57a0e3729d"
+    },
+    "vue/slots__ssr__map1__prod0": {
+      "codeBytes": 935,
+      "codeSha256": "d20a5123fb70c610d66e57f383870a83300b1474f54003a5dc73c6f54b8ef23e"
+    },
+    "vue/slots__ssr__map1__prod1": {
+      "codeBytes": 891,
+      "codeSha256": "207e817997c0a4f865dab965c20085afe53ea57392be25a21f447e57a0e3729d"
+    },
+    "vue/slots__vapor__map0__prod0": {
+      "codeBytes": 496,
+      "codeSha256": "93d8b89819e76382f78df507174f32e1eb01519c8c54ddc7f2595987513c7854"
+    },
+    "vue/slots__vapor__map0__prod1": {
+      "codeBytes": 378,
+      "codeSha256": "a37e786af8f46e9ce9eeeec64f5d335591c4b9c26c16c6792eb303efcac11f91"
+    },
+    "vue/slots__vapor__map1__prod0": {
+      "codeBytes": 496,
+      "codeSha256": "93d8b89819e76382f78df507174f32e1eb01519c8c54ddc7f2595987513c7854"
+    },
+    "vue/slots__vapor__map1__prod1": {
+      "codeBytes": 378,
+      "codeSha256": "a37e786af8f46e9ce9eeeec64f5d335591c4b9c26c16c6792eb303efcac11f91"
+    },
+    "vue/slots__vdom__map0__prod0": {
+      "codeBytes": 715,
+      "codeSha256": "e6220e5677bda37bc06d73f14ac9d50f43832c9e9410b829d7b374b95212e830"
+    },
+    "vue/slots__vdom__map0__prod1": {
+      "codeBytes": 597,
+      "codeSha256": "9b914b7a6b82fa119083bd21d9877e03f1a5d70eaabe6e352e061f1192bad78b"
+    },
+    "vue/slots__vdom__map1__prod0": {
+      "codeBytes": 715,
+      "codeSha256": "e6220e5677bda37bc06d73f14ac9d50f43832c9e9410b829d7b374b95212e830"
+    },
+    "vue/slots__vdom__map1__prod1": {
+      "codeBytes": 597,
+      "codeSha256": "9b914b7a6b82fa119083bd21d9877e03f1a5d70eaabe6e352e061f1192bad78b"
+    }
+  }
+}
