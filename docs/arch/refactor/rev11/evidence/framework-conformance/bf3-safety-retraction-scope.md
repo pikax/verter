@@ -1,5 +1,12 @@
 # BF3 initial safety-retraction scope
 
+> **UNRATIFIED supersession notice — do not implement:** AMD-009 proposes to
+> supersede the `BF3-RET-*` production-record scheme below with audit dispositions
+> and immediate correction-owner acceptance IDs. The amendment is UNRATIFIED, but
+> the settled BF3 consult prohibits implementing this disputed retraction mechanism
+> while ratification is pending. The text below remains only as historical scope
+> evidence.
+
 BF3 begins from all in-scope Svelte and non-Vue-runtime public/default requests that
 currently report success, not from a hand-picked feature list. B3 is not yet available,
 so the inventory must include each existing transport spelling that can reach the same
