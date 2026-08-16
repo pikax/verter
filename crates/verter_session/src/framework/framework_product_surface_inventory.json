@@ -1,0 +1,343 @@
+{
+  "note": "The reachable public/default request surface for framework PRODUCTS other than Vue runtime-render output. One row per SEMANTIC case; transport spellings that converge on the same typed host request are listed as routeAliases of that one case, never as separate cases. `hostEntryPoint` rows are proven live by the tests in framework_product_surface_tests.rs (calling them is the existence proof the compiler enforces); `routeAliases` are read-verified citations by default; the ones the feature-gated transport suite DRIVES are the NAPI and WASM host methods listed in NAPI_EXECUTED / WASM_EXECUTED (transport_route_equivalence_tests.rs) plus the NAPI free function `processStyle`, and the bundler `transform` hook. The bundler style / load / recompile / CSS-scoping lanes and the bundler runtime-render batch lane remain read-verified citations, not driven.",
+  "corpusProperties": [
+    "Every committed Svelte golden is generated with `sourceMap: true` (packages/framework-conformance-harness/bin/generate-goldens.mjs:196), so the maps-OFF axis is not an official cell at all — it is a property of the committed corpus, not a gap in this inventory. The maps-off axis IS driven, against the host's own answer rather than an official golden, by the_source_map_axis_reaches_the_products_it_currently_reaches, a_success_publishes_no_unrequested_source_map, the_batch_source_map_axis_publishes_only_what_was_requested and the transport probes."
+  ],
+  "outOfScope": [
+    "Vue VDOM / Vapor / SSR runtime-render OUTPUT correctness (owned elsewhere). The Vue Main and Template virtual nodes appear below only for their PUBLICATION contract; no assertion in this inventory or its tests concerns their rendered content."
+  ],
+  "semanticCases": [
+    {
+      "id": "virtual-node.read",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1040",
+      "requestType": "VirtualQuery { raw_id, canonical_id, node_kind, compile_profile }",
+      "route": "get_virtual_file -> ensure_compiled -> compile_entry -> CarrierCompilerRegistry::compile_bundle (virtual_file_pipeline.rs:2946); Vue Main additionally through assemble_vue_main_module (virtual_file_pipeline.rs:3033)",
+      "products": [
+        "virtual-node.main",
+        "virtual-node.script",
+        "virtual-node.template",
+        "virtual-node.style",
+        "virtual-node.custom",
+        "source-map",
+        "diagnostics"
+      ],
+      "profileAxes": [
+        "source_map",
+        "ssr",
+        "is_production",
+        "target",
+        "force_js",
+        "force_vapor",
+        "custom_element"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:1686",
+          "spelling": "VerterHost#getVirtualFile"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:384",
+          "spelling": "WasmVerterHost#getVirtualFile"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:68",
+          "spelling": "host.getVirtualFile (style lane)"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:668",
+          "spelling": "host.getVirtualFile (load lane)"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:803",
+          "spelling": "host.getVirtualFile (recompile lane)"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes — Main, Script, Template, Style{0} all serve",
+        "svelte": "partial — Main and Style{0} serve for a supported client component; Script and Template are structurally absent; Main refuses under ssr and for an unsupported runtime surface"
+      }
+    },
+    {
+      "id": "virtual-node.list",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2136",
+      "requestType": "canonical id",
+      "route": "list_virtual_files -> list_virtual_nodes (crates/verter_session/src/host_manage/analysis_io.rs:2132) -> HostSourceData.parse.meta.virtual_nodes()",
+      "products": [
+        "virtual-node.inventory"
+      ],
+      "profileAxes": [],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:1721",
+          "spelling": "VerterHost#listVirtualFiles"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:407",
+          "spelling": "WasmVerterHost#listVirtualFiles"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:63",
+          "spelling": "host.listVirtualFiles"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes — but the list is PARSE-derived, so it names Main even for a component whose runtime surface is refused"
+      }
+    },
+    {
+      "id": "ide.ensure",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2095",
+      "requestType": "(canonical id, CompileProfile)",
+      "route": "ensure_ide_compiled -> compile_entry -> CarrierCompiler::compile_bundle with want_ide (virtual_file_pipeline.rs:2874)",
+      "products": [
+        "ide-tsx",
+        "source-map",
+        "diagnostics"
+      ],
+      "profileAxes": [
+        "target",
+        "source_map",
+        "embed_ambient_types",
+        "strict_slots",
+        "conditional_root_narrowing"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:1912",
+          "spelling": "VerterHost#ensureIdeCompiled"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:522",
+          "spelling": "WasmVerterHost#ensureIdeCompiled"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes — including for a component whose runtime surface is refused"
+      }
+    },
+    {
+      "id": "ide.read",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2145",
+      "requestType": "(canonical id, CompileProfile)",
+      "route": "get_ide -> peek_tsx on the IDE-normalized compile slot (pure cached read, no compile)",
+      "products": [
+        "ide-tsx",
+        "source-map"
+      ],
+      "profileAxes": [
+        "target",
+        "source_map"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:1843",
+          "spelling": "VerterHost#getIde"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:468",
+          "spelling": "WasmVerterHost#getIde"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes"
+      }
+    },
+    {
+      "id": "public-api.render",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2363",
+      "requestType": "(canonical id, PublicApiMode, Option<&CompileProfile>)",
+      "route": "get_public_api_with_mode -> render_public_api_items -> FrameworkAdapterRegistry::api_projector_for (crates/verter_session/src/framework/registry.rs:420) -> VueComponentApiProjector (crates/verter_session/src/framework/api_projectors/vue.rs:16) | SvelteComponentApiProjector (crates/verter_session/src/framework/api_projectors/svelte.rs:97)",
+      "products": [
+        "public-api-declaration",
+        "source-map"
+      ],
+      "profileAxes": [
+        "mode:Public",
+        "mode:Testing",
+        "mode:Declaration"
+      ],
+      "hostSpellingsConverging": [
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2181 (get_public_api — Public mode, no profile)",
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2206 (get_public_api_batch — Public mode, batched)",
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2416 (get_public_api_projection — Public mode plus the composed contract)"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:1942",
+          "spelling": "VerterHost#getPublicApi(canonicalId, mode?)"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:552",
+          "spelling": "WasmVerterHost#getPublicApi"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes for Public, Testing and Declaration",
+        "svelte": "yes for Public and Declaration; Testing returns Ok(None) by design (crates/verter_session/src/framework/api_projectors/svelte.rs:130)"
+      }
+    },
+    {
+      "id": "public-api.declaration-carrier-path",
+      "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2340",
+      "requestType": "canonical id",
+      "route": "declaration_carrier_path -> FrameworkAdapterDescriptor::declaration_carrier_identity",
+      "products": [
+        "declaration-carrier-identity"
+      ],
+      "profileAxes": [],
+      "routeAliases": [],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes"
+      }
+    },
+    {
+      "id": "diagnostics.read",
+      "hostEntryPoint": "crates/verter_session/src/host_manage/analysis_io.rs:1947",
+      "requestType": "(canonical id, CompileProfile)",
+      "route": "get_diagnostics -> the compile slot's DiagnosticsSnapshot",
+      "products": [
+        "diagnostics"
+      ],
+      "profileAxes": [
+        "every CompileProfile axis, through the slot identity"
+      ],
+      "routeAliases": [],
+      "successForRepresentativeInput": {
+        "vue": "returns None for a carrier with no compiled slot yet; the same snapshot rides every VirtualFileResponse",
+        "svelte": "same"
+      }
+    },
+    {
+      "id": "compile.audited",
+      "hostEntryPoint": "crates/verter_session/src/host_compile_audit.rs:90",
+      "requestType": "(canonical id, CompileTarget)",
+      "route": "compile_with_audit -> compile_entry -> CarrierCompilerRegistry::compile_bundle",
+      "products": [
+        "audit-record",
+        "virtual-node.main",
+        "ide-tsx",
+        "tsc-declaration"
+      ],
+      "profileAxes": [
+        "target (BUNDLER / IDE / TSC / ANALYSIS bits)",
+        "source_map (through the options-taking spelling)"
+      ],
+      "hostSpellingsConverging": [
+        "crates/verter_session/src/host_compile_audit.rs:111 (compile_with_audit_options — the same request with an explicit VerterCompileOptions; the wrapper at :90 fixes source_map: true)"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:2526",
+          "spelling": "VerterHost#compileWithAudit"
+        },
+        {
+          "transport": "wasm",
+          "entryPoint": "crates/verter_wasm/src/lib.rs:875",
+          "spelling": "WasmVerterHost#compileWithAudit"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes"
+      },
+      "transportReturnDivergence": "The transport spellings return the AUDIT RECORD only, not the compiled product: crates/verter_napi/src/lib.rs:2525-2540 and crates/verter_wasm/src/lib.rs:874 encode `.audit()` and drop the result, projecting to null when no stored record was captured (crates/verter_napi/src/audit.rs:60-65). Driven on both transports on an audit-enabled host, the Vue carrier yields a stored record and the Svelte carrier yields null; both transports agree, so it is the shared host's capture behaviour, not a transport divergence. Pinned by the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports."
+    },
+    {
+      "id": "compile.batch",
+      "hostEntryPoint": "crates/verter_session/src/host_compile.rs:327",
+      "requestType": "(&[CompileManyInput], CompileManyOptions)",
+      "route": "compile_many -> the same compile_entry substrate as get_virtual_file",
+      "products": [
+        "virtual-node.main",
+        "source-map",
+        "diagnostics"
+      ],
+      "profileAxes": [
+        "the same CompileProfile axes"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:2355",
+          "spelling": "VerterHost#compileMany"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:101",
+          "spelling": "host.compileMany (runtime-render lane)"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes — driven in svelte_batch_route_tests (in-process, both lanes) and through the native transport in transport_route_equivalence_tests; the batch compiles .svelte inputs as Vue, recorded there"
+      }
+    },
+    {
+      "id": "css.process-style",
+      "hostEntryPoint": null,
+      "requestType": "(css bytes, ProcessStyleOptions)",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:157 calls verter_compiler::css::process_style directly; it never constructs or consults a VerterHost, so it carries no compile slot, no diagnostics snapshot and no publication relationship to any other product.",
+      "products": [
+        "css",
+        "source-map",
+        "css-module-classes",
+        "v-bind-vars"
+      ],
+      "profileAxes": [
+        "scoped",
+        "isModule",
+        "moduleName",
+        "filename",
+        "scopeId",
+        "sourcemap (ACCEPTED AND IGNORED: both return sites of crates/verter_compiler/src/css/mod.rs hard-code source_map: None at :110 and :145)"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:157",
+          "spelling": "processStyle (free function, not a host method)"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/core/compiler.ts:64",
+          "spelling": "processStyle -> loadNative().processStyle"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts:863",
+          "spelling": "processStyle (non-Vite CSS scoping lane)"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "n/a — the Vite/Vue style lane is its only caller"
+      }
+    }
+  ],
+  "typedRefusalsRecorded": [
+    {
+      "id": "wasm.analyze-with-audit",
+      "entryPoint": "crates/verter_wasm/src/lib.rs:899",
+      "outcome": "always throws a typed message; documented as unavailable on wasm32. NOT a success cell and NOT a silent partial."
+    }
+  ]
+}

@@ -9328,6 +9328,14 @@ pub(crate) mod foundations_guards {
             "BF2 seed-matrix conformance harness (`#[cfg(test, feature = \"bf2-authoritative\")]`) — reads the committed golden manifest/records and Vue fixture TEST FIXTURES off disk, and reads/writes the committed per-cell code-digest baseline JSON (a TEST FIXTURE, not semantic/VFS state) for the assembled-map composition regression pin. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
+            "crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_matrix.rs",
+            "Svelte official-conformance golden inventory (`#[cfg(test, feature = \"bf2-authoritative\")]`) — reads the committed golden manifest, each DIGEST-ADDRESSED record under `goldens/records/`, and the Svelte fixture source each record names, all TEST FIXTURES off disk. The record set is data-driven from the manifest at runtime, so the reads cannot be `include_str!` (a digest lookup is not a compile-time path); each read is followed by a SHA-256 verification, which is the point of reading the real bytes. Sibling of the `bf2_seed_matrix.rs` exemption above, whose Vue half does the same for the same reason. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/compile/map_equality_tests/public_api_typescript_observation.rs",
+            "PublicApi/TSC/declaration observation under the real TypeScript compiler (`#[cfg(test, feature = \"bf2-authoritative\")]`) — reads the committed golden manifest and the digest-addressed Vue records it names, TEST FIXTURES off disk, to assert every record pins the same official framework version the observation runs against. Data-driven from the manifest at runtime, so not expressible as `include_str!`. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
             "crates/verter_session/src/compile/map_equality_tests/vector_inventory.rs",
             "layer-2 vector-inventory reproduction (`#[cfg(test)]`) — reads the committed `assembled-map-composition.vectors.json` TEST FIXTURE off disk to drive every frozen vector through the production assembler. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
@@ -10482,7 +10490,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // Rows that stop matching any live OXC `Parser::new` site must be
     // DELETED, not kept as pre-authorization for future uncounted
     // parses (the anti-vacuity check below enforces this).
-    let allow_list: [(&str, usize); 9] = [
+    let allow_list: [(&str, usize); 11] = [
         // The `ParsedEvalProgram::parse` constructor IS the
         // scheduler-bound parse entry — the single eval-program parse
         // funnel; `host_manage::eval_program::parse_eval_program` is
@@ -10554,6 +10562,30 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         (
             "crates/verter_session/src/typeinfo/oracle_core/admission.rs",
             2,
+        ),
+        // The Svelte official-conformance gate's two STRUCTURAL readers of a
+        // CANDIDATE'S OWN GENERATED OUTPUT (`#[cfg(test, feature =
+        // "bf2-authoritative")]`): `each_flags_argument` resolves the local
+        // `svelte/internal/client` namespace binding and reads the `each` call's
+        // numeric flags argument; `imports_client_runtime` answers from the
+        // module's own import declarations. Both parse an emitted module the
+        // test just produced in memory — never a workspace file, no canonical
+        // id, no cache — precisely so the assertions read the AST instead of
+        // scanning generated text (the string-scan they replaced is what the
+        // typed-IR rules forbid). Not a file-processing path; the scheduler is
+        // not its authority.
+        (
+            "crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs",
+            2,
+        ),
+        // The same category in the Svelte golden inventory: the recorded `runes`
+        // axis is checked against what the shipped route INFERS, so the cell's
+        // carrier eval source is parsed once and handed to the production mode
+        // classifier. A test reading a carrier artifact it just built in memory,
+        // not a per-file materialise lane.
+        (
+            "crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_matrix.rs",
+            1,
         ),
         // The v4 relation tuple-wire probe (same oracle-core category as the
         // rows above): parses SMALL synthetic probe texts — the operand

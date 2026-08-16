@@ -130,6 +130,12 @@ describe("TypeScript observation — exact-domain capture", () => {
       moduleResolution: "Bundler",
       skipLibCheck: true,
       noEmit: true,
+      // The OBSERVATION-DOMAIN half of the identity. A domain-less observation
+      // enables no JSX and maps no package; a framework or workspace domain
+      // changes these, so two observations taken in different domains are never
+      // reported as comparable results of the same query.
+      jsx: null,
+      pathMappings: null,
     });
     expect(observation.libs.length).toBeGreaterThan(0);
     expect(observation.inputs).toEqual([

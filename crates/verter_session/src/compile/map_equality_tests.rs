@@ -3094,3 +3094,37 @@ mod bf2_full_axis_gate;
 /// vapor runtime build.
 #[cfg(feature = "bf2-authoritative")]
 mod nested_v_for_runtime_proof;
+
+/// The committed Svelte golden inventory, plus the genuine shipped `.svelte`
+/// compile route that produces a candidate for it. A CHILD module for the
+/// same reuse reason as its siblings: it reads the SAME committed manifest
+/// through the SAME digest-verification and subprocess plumbing rather than
+/// growing a second copy of either.
+///
+/// Gated on the same feature: it drives the same conformance harness CLI,
+/// which needs Node plus the harness's provisioned, gitignored oracle install.
+/// A sibling feature would have to either duplicate that plumbing — the exact
+/// common-mode error the shared reader exists to prevent — or widen the
+/// existing module's `cfg` to an `any(..)`, which makes that feature's meaning
+/// less precise for no gain.
+#[cfg(feature = "bf2-authoritative")]
+mod svelte_official_conformance_matrix;
+
+/// The authoritative full-axis gate over the six committed Svelte CLIENT
+/// cells, plus the recorded shipped-route behaviour of the six SERVER cells
+/// and the mutation-discrimination proof that the oracle behind it genuinely
+/// discriminates. Gated on the same feature for the same reason.
+#[cfg(feature = "bf2-authoritative")]
+mod svelte_official_conformance_gate;
+
+/// Every in-scope PublicApi / TSC / declaration cell, observed by the REAL
+/// TypeScript compiler inside the pinned framework closure the harness
+/// realizes. Gated on the same feature: it drives that realized install.
+#[cfg(feature = "bf2-authoritative")]
+mod public_api_typescript_observation;
+
+/// The IDE/TSX product family, observed by the REAL TypeScript compiler inside
+/// the workspace declaration domain (`@verter/svelte-jsx`, `@verter/types`).
+/// Gated on the same feature: it drives the same observation validator.
+#[cfg(feature = "bf2-authoritative")]
+mod ide_surface_typescript_observation;

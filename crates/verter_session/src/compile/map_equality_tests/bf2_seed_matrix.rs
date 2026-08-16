@@ -106,18 +106,18 @@ pub(super) struct SeedCell {
     pub(super) is_production: bool,
 }
 
-fn harness_root() -> PathBuf {
+pub(super) fn harness_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/framework-conformance-harness")
 }
 
-fn read_json(path: &Path) -> Value {
+pub(super) fn read_json(path: &Path) -> Value {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     serde_json::from_str(&text)
         .unwrap_or_else(|error| panic!("{} is not JSON: {error}", path.display()))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher
@@ -130,7 +130,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
-fn member<'a>(value: &'a Value, path: &[&str], context: &str) -> &'a Value {
+pub(super) fn member<'a>(value: &'a Value, path: &[&str], context: &str) -> &'a Value {
     let mut current = value;
     for key in path {
         current = current
@@ -140,13 +140,13 @@ fn member<'a>(value: &'a Value, path: &[&str], context: &str) -> &'a Value {
     current
 }
 
-fn bool_member(value: &Value, path: &[&str], context: &str) -> bool {
+pub(super) fn bool_member(value: &Value, path: &[&str], context: &str) -> bool {
     member(value, path, context)
         .as_bool()
         .unwrap_or_else(|| panic!("{context}: `{}` is not a boolean", path.join(".")))
 }
 
-fn str_member(value: &Value, path: &[&str], context: &str) -> String {
+pub(super) fn str_member(value: &Value, path: &[&str], context: &str) -> String {
     member(value, path, context)
         .as_str()
         .unwrap_or_else(|| panic!("{context}: `{}` is not a string", path.join(".")))

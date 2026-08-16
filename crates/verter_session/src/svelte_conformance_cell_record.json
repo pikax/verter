@@ -1,0 +1,448 @@
+{
+  "cells": {
+    "svelte/basic-runes__client__runes1__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "structural divergence at $.body[6].declaration.body.body[6].expression.arguments[1].value: 20 vs 21",
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-count-declaration: no segment maps to fixtures/svelte/basic-runes.svelte:1:6; anchor-span-coverage — anchor script-count-declaration: no segment falls within its authored span; anchor-missing — anchor template-count-condition: no segment maps to fixtures/svelte/basic-runes.svelte:6:7; anchor-span-coverage — anchor template-count-condition: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/basic-runes.svelte",
+        "generate": "client",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/basic-runes__client__runes1__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "structural divergence at $.body: length 8 vs 7",
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-count-declaration: no segment maps to fixtures/svelte/basic-runes.svelte:1:6; anchor-span-coverage — anchor script-count-declaration: no segment falls within its authored span; anchor-missing — anchor template-count-condition: no segment maps to fixtures/svelte/basic-runes.svelte:6:7; anchor-span-coverage — anchor template-count-condition: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/basic-runes.svelte",
+        "generate": "client",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/basic-runes__server__runes1__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/basic-runes.svelte",
+        "generate": "server",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/basic-runes__server__runes1__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/basic-runes.svelte",
+        "generate": "server",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/legacy-slots__client__runes0__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-title-declaration: no segment maps to fixtures/svelte/legacy-slots.svelte:1:13; anchor-span-coverage — anchor script-title-declaration: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/legacy-slots.svelte",
+        "generate": "client",
+        "runes": false
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/legacy-slots__client__runes0__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "structural divergence at $.body: length 6 vs 5",
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-title-declaration: no segment maps to fixtures/svelte/legacy-slots.svelte:1:13; anchor-span-coverage — anchor script-title-declaration: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/legacy-slots.svelte",
+        "generate": "client",
+        "runes": false
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/legacy-slots__server__runes0__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/legacy-slots.svelte",
+        "generate": "server",
+        "runes": false
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/legacy-slots__server__runes0__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/legacy-slots.svelte",
+        "generate": "server",
+        "runes": false
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/props-events__client__runes1__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-advanced-rune",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support the `$props() non-interpolation usage` rune form."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/props-events.svelte",
+        "generate": "client",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/props-events__client__runes1__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-advanced-rune",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support the `$props() non-interpolation usage` rune form."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": false
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/props-events.svelte",
+        "generate": "client",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/props-events__server__runes1__dev0": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "reachable",
+      "request": {
+        "dev": false,
+        "fixture": "fixtures/svelte/props-events.svelte",
+        "generate": "server",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    },
+    "svelte/props-events__server__runes1__dev1": {
+      "officialDomain": {
+        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+        "packageVersion": "5.56.8",
+        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "upstream": "https://github.com/sveltejs/svelte"
+      },
+      "outcome": {
+        "comparatorRun": false,
+        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
+        "diagnosticCode": "svelte-runtime-unsupported-server-generate",
+        "kind": "refused",
+        "message": "Svelte client emission does not yet support server-side rendering (`generate: 'server'`)."
+      },
+      "products": [
+        "virtual-node.main",
+        "virtual-node.style",
+        "source-map",
+        "diagnostics"
+      ],
+      "profile": {
+        "isProduction": false,
+        "sourceMap": true,
+        "ssr": true
+      },
+      "reachability": "no-spelling",
+      "request": {
+        "dev": true,
+        "fixture": "fixtures/svelte/props-events.svelte",
+        "generate": "server",
+        "runes": true
+      },
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+    }
+  },
+  "note": "Per-cell facts for the committed Svelte conformance goldens: the exact request, its route, its profile axes, the products the route can publish, the pinned official domain the golden was generated against, and the observed outcome. Facts only — no correction owner, no acceptance identifier, no disposition."
+}
