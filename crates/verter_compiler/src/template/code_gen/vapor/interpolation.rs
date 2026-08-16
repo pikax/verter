@@ -8,7 +8,9 @@
 //!    `_txt()` creation and `_renderEffect(() => _setText(...))` in the output.
 
 use crate::ast::types::InterpolationNode;
+use crate::code_transform::SegmentAnchor;
 use crate::template::code_gen::binding::BindingResolver;
+use crate::template::code_gen::expression::build_prefixed_expr_segments;
 use crate::template::code_gen::shared::helpers::{self, VaporHelper};
 use crate::template::code_gen::types::{
     CodeGenOutput, VaporCounters, VaporElementState, VaporTextPart,
@@ -41,18 +43,39 @@ pub fn process_interpolation<'a>(
     // and needs the raw range to correctly compute binding offsets relative to inner_start)
     let expr = &source[interp.inner_start as usize..interp.inner_end as usize];
 
-    // Build _toDisplayString(expr) into local buffer, then bump-allocate
-    let prefixed = build_prefixed_expr(expr, interp.inner_start, oxc, resolver, &[]);
-    let mut buf = String::with_capacity(helpers::TO_DISPLAY_STRING.len() + prefixed.len() + 2);
+    // Build the segmented plan (`.text` is byte-identical to
+    // `build_prefixed_expr`'s flat output — see `expression.rs`'s module
+    // doc) so the interpolation identifier's own authored anchor survives
+    // into the render function's segmented overwrite.
+    let prefixed_segments =
+        build_prefixed_expr_segments(expr, interp.inner_start, oxc, resolver, &[]);
+    let mut buf =
+        String::with_capacity(helpers::TO_DISPLAY_STRING.len() + prefixed_segments.text.len() + 2);
     buf.push_str(helpers::TO_DISPLAY_STRING);
     buf.push('(');
-    buf.push_str(&prefixed);
+    let wrap_offset = buf.len() as u32;
+    buf.push_str(&prefixed_segments.text);
     buf.push(')');
 
+    // Translate the plan's source-bearing segments into anchors relative to
+    // THIS part's own text start (shifted past the `_toDisplayString(` wrap).
+    let anchors: Vec<SegmentAnchor> = prefixed_segments
+        .segments
+        .iter()
+        .filter_map(|seg| {
+            seg.source_start.map(|source_pos| SegmentAnchor {
+                content_offset: wrap_offset + seg.generated_start,
+                length: seg.generated_end - seg.generated_start,
+                source_pos,
+            })
+        })
+        .collect();
+
     // Record dynamic text part (bump-allocated)
-    parent
-        .text_parts
-        .push(VaporTextPart::Dynamic(out.alloc_str(&buf)));
+    parent.text_parts.push(VaporTextPart::Dynamic(
+        out.alloc_str(&buf),
+        out.alloc_segment_anchors(&anchors),
+    ));
 
     // Ensure text node ref is allocated
     parent.ensure_text_ref(counters);
@@ -211,7 +234,8 @@ mod tests {
         );
 
         assert_eq!(parent.text_node_ref, Some(0));
-        assert_eq!(counters.x, 1);
+        // The text ref shares the node counter — no separate `x` counter.
+        assert_eq!(counters.n, 1);
     }
 
     #[test]

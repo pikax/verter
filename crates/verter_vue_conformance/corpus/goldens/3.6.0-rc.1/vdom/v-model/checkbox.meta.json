@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-model/checkbox.js",
-      "sha256": "00a6b509a6bf52e124981a7917c96c7c7da3fff6dd4f6206d5d4732dfedf626e",
+      "sha256": "9fc26505734f45ec33ff2aad761ed0892255438ee1e7f9923f848f5ee3de75a1",
       "bytes": 1058
     },
     "map": {

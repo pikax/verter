@@ -1,4 +1,3 @@
-import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 
 const _sfc_main = {
   __name: 'props-emits-runtime',
@@ -23,6 +22,7 @@ return __returned__
 }
 
 }
+import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("button", { onClick: $setup.onSave }, _toDisplayString($props.msg) + ":" + _toDisplayString($props.level), 1 /* TEXT */))
 }

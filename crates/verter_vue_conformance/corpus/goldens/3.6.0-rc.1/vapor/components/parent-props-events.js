@@ -1,4 +1,3 @@
-import { createComponent as _createComponent } from 'vue';
 import ChildComp from "./child-comp.vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { createComponent as _createComponent } from 'vue';
 function render(_ctx, $props, $emit, $attrs, $slots) {
   const n0 = _createComponent(_ctx.ChildComp, {
     label: "Pick",

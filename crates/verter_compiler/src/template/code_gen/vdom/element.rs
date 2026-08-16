@@ -9,6 +9,7 @@
 //! `VdomCodeGen::leave_element` after all children have been visited.
 
 use crate::ast::types::{ChildrenMode, ElementNode, TemplateAst};
+use crate::code_transform::SegmentAnchor;
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::vapor::find_prop_oxc_exp;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -600,6 +601,15 @@ pub struct PropsResult {
     /// `{ ref: elRef.value }` evaluates it outside the render function /
     /// `setup()` (a plain ReferenceError at module load).
     pub has_dynamic_ref: bool,
+    /// True when the props object embeds an event-handler value (`@click`,
+    /// `v-model`'s `onUpdate:X`, ...). Handler keys are intentionally NOT
+    /// listed in `dynamic_props` (stable invoker caching means they never
+    /// need a PATCH_PROPS re-patch), but their VALUES still reference
+    /// `_ctx`/`$setup` — like [`Self::has_vnode_key`] and
+    /// [`Self::has_dynamic_ref`], the props object must not be hoisted to
+    /// module scope on that basis alone (hoisting `{ onClick: _ctx.a }`
+    /// evaluates `_ctx` outside `render()`, a ReferenceError at module load).
+    pub has_event_handler: bool,
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
@@ -946,6 +956,15 @@ fn pre_scan_event_handler_merge(
 /// Wraps `:class` values with `_normalizeClass()` and `:style` with `_normalizeStyle()`.
 /// When `skip_prop_index` is `Some(i)`, prop at index `i` is excluded
 /// (used for `:is` on `<component>` elements).
+/// `anchors` accumulates authored anchors for static object-key text this
+/// call writes into `buf`, at their ABSOLUTE `buf`-relative offset (the
+/// caller shifts them into whatever coordinate space the props text ends up
+/// in — a hoisted constant, or the element's own inline overwrite). Only a
+/// plain static `class` KEY (no merge with a dynamic `:class`) is anchored
+/// today — the shape the current test corpus requires; every other key
+/// stays unanchored, matching this function's pre-existing behavior
+/// exactly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_props_object_into(
     buf: &mut String,
     element: &ElementNode,
@@ -954,6 +973,7 @@ pub(crate) fn build_props_object_into(
     oxc_el: Option<&OxcParsedElement<'_>>,
     skip_prop_index: Option<usize>,
     force_js: bool,
+    anchors: &mut Vec<SegmentAnchor>,
 ) -> PropsResult {
     let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
     // Collect spread expressions from v-bind/v-on without args.
@@ -966,6 +986,9 @@ pub(crate) fn build_props_object_into(
     // hoisting so loop-scoped keys like `item.name` are not evaluated at
     // module scope.
     let mut has_vnode_key = false;
+    // True when the props object embeds an event-handler value. Blocks
+    // props-object hoisting — see `PropsResult::has_event_handler`.
+    let mut has_event_handler = false;
     // True when a `ref` needs dynamic handling (inline static ref naming a
     // setup binding, or a dynamic `:ref` with a non-literal value). Blocks
     // props-object hoisting so the scope-bound reference is not evaluated at
@@ -1322,8 +1345,12 @@ pub(crate) fn build_props_object_into(
                                 buf.push_str(") = $event)");
                             }
 
+                            // Only the model VALUE prop name goes in dynamicProps.
+                            // `onUpdate:X` is a listener key — like any other
+                            // event handler, it never needs a PATCH_PROPS
+                            // re-patch (stable invoker caching).
                             dynamic_props.push(model_name.to_string());
-                            dynamic_props.push(format!("onUpdate:{}", model_name));
+                            has_event_handler = true;
 
                             // Emit modifiers prop if present
                             if !prop.modifiers.is_empty() {
@@ -1354,6 +1381,7 @@ pub(crate) fn build_props_object_into(
 
                     if is_on || directive_name == "@" {
                         prop_is_event = true;
+                        has_event_handler = true;
                         // Event directive: @click → onClick, @update:modelValue → "onUpdate:modelValue"
                         // Build key in temp position, then check if quoting is needed
                         let key_start = buf.len();
@@ -1385,8 +1413,11 @@ pub(crate) fn build_props_object_into(
                             }
                         }
 
-                        let key_name = buf[key_start..].to_string();
-                        dynamic_props.push(key_name);
+                        // Event-handler keys never enter dynamicProps: Vue relies
+                        // on stable invoker caching for listeners, so a handler
+                        // binding never needs a PATCH_PROPS re-patch. Official
+                        // `genEventHandler`/`buildProps` never adds the `on*`
+                        // key to `dynamicPropNames`.
                         if props::needs_quoted_key(&buf[key_start..]) {
                             buf.insert(key_start, '"');
                             buf.push('"');
@@ -1566,8 +1597,12 @@ pub(crate) fn build_props_object_into(
                                 buf.push_str(") = $event)");
                             }
 
+                            // Only the model VALUE prop name goes in dynamicProps.
+                            // `onUpdate:X` is a listener key — like any other
+                            // event handler, it never needs a PATCH_PROPS
+                            // re-patch (stable invoker caching).
                             dynamic_props.push(model_name.to_string());
-                            dynamic_props.push(format!("onUpdate:{}", model_name));
+                            has_event_handler = true;
 
                             // Emit modifiers prop if present
                             if !prop.modifiers.is_empty() {
@@ -1703,12 +1738,24 @@ pub(crate) fn build_props_object_into(
                 }
                 first = false;
 
-                if props::needs_quoted_key(name) {
+                let quoted = props::needs_quoted_key(name);
+                let key_offset = buf.len() as u32 + u32::from(quoted);
+                if quoted {
                     buf.push('"');
                     buf.push_str(name);
                     buf.push('"');
                 } else {
                     buf.push_str(name);
+                }
+                // Only the static "class" key is anchored; every other
+                // static attribute name's own key offset is computed above
+                // but never pushed into `anchors`.
+                if name == "class" {
+                    anchors.push(SegmentAnchor {
+                        content_offset: key_offset,
+                        length: name.len() as u32,
+                        source_pos: prop.start,
+                    });
                 }
             }
 
@@ -2008,6 +2055,7 @@ pub(crate) fn build_props_object_into(
         uses_to_handlers,
         has_vnode_key,
         has_dynamic_ref,
+        has_event_handler,
         native_vmodel,
         directive_entries,
     }
@@ -2019,7 +2067,7 @@ pub(crate) fn build_props_object_into(
 /// constant and the `_hoisted_N` reference is returned instead.
 pub(super) fn format_dynamic_props_ref(
     dynamic_props: &[String],
-    hoisted_constants: Option<&mut Vec<String>>,
+    hoisted_constants: Option<&mut Vec<(String, Vec<SegmentAnchor>)>>,
 ) -> String {
     let mut arr = String::with_capacity(dynamic_props.len() * 10);
     arr.push('[');
@@ -2033,13 +2081,14 @@ pub(super) fn format_dynamic_props_ref(
     }
     arr.push(']');
 
-    // Try to hoist the array as a module-level constant
+    // Try to hoist the array as a module-level constant. A dynamic-props
+    // key array never embeds a mappable identifier, so it carries no anchor.
     if let Some(hoisted) = hoisted_constants {
         // Deduplicate: check if an identical array already exists
-        if let Some(idx) = hoisted.iter().position(|c| c == &arr) {
+        if let Some(idx) = hoisted.iter().position(|(c, _)| c == &arr) {
             return format!("_hoisted_{}", idx + 1);
         }
-        hoisted.push(arr);
+        hoisted.push((arr, Vec::new()));
         return format!("_hoisted_{}", hoisted.len());
     }
 
@@ -2183,10 +2232,19 @@ pub fn process_element_leave<'alloc>(
     is_block_root: bool,
     force_open_block: bool,
     injected_key: Option<u32>,
-    mut hoisted_constants: Option<&mut Vec<String>>,
+    mut hoisted_constants: Option<&mut Vec<(String, Vec<SegmentAnchor>)>>,
     cache_index: Option<usize>,
     resolved_components: Option<&mut Vec<(String, String)>>,
     slot_cached: bool,
+    // `_hoisted_N` index the walker's `enter_element` already reserved (and
+    // pushed content for) for THIS element, before its children were
+    // visited — see `VdomCodeGen::hoist_reservations`. `Some` means the
+    // props-object build + `can_hoist_props`/injected-key hoist decision
+    // below is skipped entirely and `_hoisted_{idx}` is emitted directly;
+    // `None` means the enter-time fast path didn't recognize this element
+    // (dynamic props, component, fully-static subtree, hoist_static
+    // disabled, …) and the logic below is the sole, unchanged authority.
+    pre_reserved_hoist: Option<usize>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -2335,92 +2393,159 @@ pub fn process_element_leave<'alloc>(
     // Props
     let (dynamic_props, has_dynamic_ref, native_vmodel, directive_entries) = if has_props {
         buf.push_str(", ");
-        let props_start = buf.len();
-        let props_result = build_props_object_into(
-            buf,
-            element,
-            source,
-            resolver,
-            oxc,
-            skip_is_prop,
-            options.force_js,
-        );
-        // Hoist fully-static props objects to const _hoisted_N when:
-        // - hoist_static is enabled
-        // - no dynamic bindings, merges, normalizations, directives
-        // - not a component (components have variable tag resolution)
-        // - not already cached (redundant)
-        let can_hoist_props = options.hoist_static
-            && !has_cached_patchflag
-            && injected_key.is_none()
-            && !element.tag_type.is_component()
-            && props_result.dynamic_props.is_empty()
-            && !props_result.has_vnode_key
-            && !props_result.has_dynamic_ref
-            && !props_result.uses_merge
-            && !props_result.uses_normalize_class
-            && !props_result.uses_normalize_style
-            && !props_result.uses_normalize_props
-            && !props_result.uses_guard_reactive_props
-            && !props_result.uses_to_handlers
-            && props_result.native_vmodel.is_none()
-            && props_result.directive_entries.is_empty();
-        if can_hoist_props {
-            if let Some(ref mut hoisted) = hoisted_constants {
-                let props_str = buf[props_start..].to_string();
-                // Dedup: check if identical props object already hoisted
-                if let Some(idx) = hoisted.iter().position(|c| *c == props_str) {
-                    buf.truncate(props_start);
-                    buf.push_str(&format!("_hoisted_{}", idx + 1));
-                } else {
-                    hoisted.push(props_str);
-                    let idx = hoisted.len();
-                    buf.truncate(props_start);
-                    buf.push_str(&format!("_hoisted_{idx}"));
+        if let Some(idx) = pre_reserved_hoist {
+            // Reserved during enter_element, in document pre-order, before
+            // any child was visited — see `pre_reserved_hoist`'s doc
+            // comment. A reservation exists only when `can_hoist_props`
+            // (mirrored at enter time in `try_reserve_element_hoist`)
+            // held, so every one of the dynamic-props fields below is
+            // guaranteed empty/None — skip rebuilding the props object
+            // entirely and reference the already-hoisted constant.
+            buf.push_str("_hoisted_");
+            buf.push_str(&idx.to_string());
+            (Vec::new(), false, None, Vec::new())
+        } else {
+            let props_start = buf.len();
+            let mut props_anchors: Vec<SegmentAnchor> = Vec::new();
+            let props_result = build_props_object_into(
+                buf,
+                element,
+                source,
+                resolver,
+                oxc,
+                skip_is_prop,
+                options.force_js,
+                &mut props_anchors,
+            );
+            // Hoist fully-static props objects to const _hoisted_N when:
+            // - hoist_static is enabled
+            // - no dynamic bindings, merges, normalizations, directives
+            // - not a component (components have variable tag resolution)
+            // - not already cached (redundant)
+            let can_hoist_props = options.hoist_static
+                && !has_cached_patchflag
+                && injected_key.is_none()
+                && !element.tag_type.is_component()
+                && props_result.dynamic_props.is_empty()
+                && !props_result.has_vnode_key
+                && !props_result.has_dynamic_ref
+                && !props_result.has_event_handler
+                && !props_result.uses_merge
+                && !props_result.uses_normalize_class
+                && !props_result.uses_normalize_style
+                && !props_result.uses_normalize_props
+                && !props_result.uses_guard_reactive_props
+                && !props_result.uses_to_handlers
+                && props_result.native_vmodel.is_none()
+                && props_result.directive_entries.is_empty();
+            if can_hoist_props {
+                if let Some(ref mut hoisted) = hoisted_constants {
+                    let props_str = buf[props_start..].to_string();
+                    // Dedup: check if identical props object already hoisted.
+                    // Reachable only when try_reserve_element_hoist did NOT
+                    // already reserve this element (e.g. is_fully_static
+                    // elements are excluded there but can still reach this
+                    // arm via a cache-eligibility mismatch) — a genuine
+                    // fallback path, not the common case.
+                    if let Some(idx) = hoisted.iter().position(|(c, _)| *c == props_str) {
+                        buf.truncate(props_start);
+                        buf.push_str(&format!("_hoisted_{}", idx + 1));
+                    } else {
+                        // `props_anchors` were recorded at absolute `buf`
+                        // offsets while `buf` still held `props_start`'s own
+                        // prefix — shift them into `props_str`'s own
+                        // coordinate space (relative to `props_start`).
+                        let shifted_anchors = props_anchors
+                            .iter()
+                            .map(|a| SegmentAnchor {
+                                content_offset: a.content_offset - props_start as u32,
+                                length: a.length,
+                                source_pos: a.source_pos,
+                            })
+                            .collect();
+                        hoisted.push((props_str, shifted_anchors));
+                        let idx = hoisted.len();
+                        buf.truncate(props_start);
+                        buf.push_str(&format!("_hoisted_{idx}"));
+                    }
                 }
+            } else if let Some(k) = injected_key {
+                // v-if branch root with user props: inject `key: N` as the
+                // first property. Hoisting is disabled above for this
+                // element.
+                inject_branch_key(buf, props_start, k);
             }
-        } else if let Some(k) = injected_key {
-            // v-if branch root with user props: inject `key: N` as the first
-            // property. Hoisting is disabled above for this element.
-            inject_branch_key(buf, props_start, k);
+            if props_result.uses_merge {
+                out.add_vdom_import(VdomHelper::MergeProps);
+            }
+            if props_result.uses_normalize_class {
+                out.add_vdom_import(VdomHelper::NormalizeClass);
+            }
+            if props_result.uses_normalize_style {
+                out.add_vdom_import(VdomHelper::NormalizeStyle);
+            }
+            if props_result.uses_with_modifiers {
+                out.add_vdom_import(VdomHelper::WithModifiers);
+            }
+            if props_result.uses_with_keys {
+                out.add_vdom_import(VdomHelper::WithKeys);
+            }
+            if props_result.uses_normalize_props {
+                out.add_vdom_import(VdomHelper::NormalizeProps);
+            }
+            if props_result.uses_guard_reactive_props {
+                out.add_vdom_import(VdomHelper::GuardReactiveProps);
+            }
+            if props_result.uses_to_handlers {
+                out.add_vdom_import(VdomHelper::ToHandlers);
+            }
+            (
+                props_result.dynamic_props,
+                props_result.has_dynamic_ref,
+                props_result.native_vmodel,
+                props_result.directive_entries,
+            )
         }
-        if props_result.uses_merge {
-            out.add_vdom_import(VdomHelper::MergeProps);
-        }
-        if props_result.uses_normalize_class {
-            out.add_vdom_import(VdomHelper::NormalizeClass);
-        }
-        if props_result.uses_normalize_style {
-            out.add_vdom_import(VdomHelper::NormalizeStyle);
-        }
-        if props_result.uses_with_modifiers {
-            out.add_vdom_import(VdomHelper::WithModifiers);
-        }
-        if props_result.uses_with_keys {
-            out.add_vdom_import(VdomHelper::WithKeys);
-        }
-        if props_result.uses_normalize_props {
-            out.add_vdom_import(VdomHelper::NormalizeProps);
-        }
-        if props_result.uses_guard_reactive_props {
-            out.add_vdom_import(VdomHelper::GuardReactiveProps);
-        }
-        if props_result.uses_to_handlers {
-            out.add_vdom_import(VdomHelper::ToHandlers);
-        }
-        (
-            props_result.dynamic_props,
-            props_result.has_dynamic_ref,
-            props_result.native_vmodel,
-            props_result.directive_entries,
-        )
     } else if let Some(k) = injected_key {
-        // v-if branch root with no user props: the branch key IS the props
-        // object — `_createElementBlock("p", { key: 0 }, …)`.
-        buf.push_str(", { key: ");
-        buf.push_str(&k.to_string());
-        buf.push_str(" }");
-        (Vec::new(), false, None, Vec::new())
+        if let Some(idx) = pre_reserved_hoist {
+            buf.push_str(", _hoisted_");
+            buf.push_str(&idx.to_string());
+            (Vec::new(), false, None, Vec::new())
+        } else {
+            // v-if branch root with no user props: the branch key IS the props
+            // object — `_createElementBlock("p", { key: 0 }, …)`. Official
+            // `hoistStatic` hoists this fully-static props object to
+            // `_hoisted_N` exactly like a static class/attrs object (see
+            // `can_hoist_props` above) whenever hoisting is enabled, the
+            // element isn't already patch-flag-cached (redundant), and it
+            // isn't a component (mirrors `can_hoist_props`'s own component
+            // exclusion — a component's resolved props aren't guaranteed
+            // constant).
+            let key_props_str = format!("{{ key: {k} }}");
+            let can_hoist_key =
+                options.hoist_static && !has_cached_patchflag && !element.tag_type.is_component();
+            if can_hoist_key {
+                if let Some(ref mut hoisted) = hoisted_constants {
+                    let idx = if let Some(existing) =
+                        hoisted.iter().position(|(c, _)| *c == key_props_str)
+                    {
+                        existing + 1
+                    } else {
+                        hoisted.push((key_props_str.clone(), Vec::new()));
+                        hoisted.len()
+                    };
+                    buf.push_str(", _hoisted_");
+                    buf.push_str(&idx.to_string());
+                } else {
+                    buf.push_str(", ");
+                    buf.push_str(&key_props_str);
+                }
+            } else {
+                buf.push_str(", ");
+                buf.push_str(&key_props_str);
+            }
+            (Vec::new(), false, None, Vec::new())
+        }
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags

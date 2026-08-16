@@ -110,6 +110,65 @@ fn assemble_main_module_ssr_registers_ssr_context_module() {
     assert!(!result.contains("module.hot"));
 }
 
+/// `emit_ssr_module_registration: false` suppresses the whole
+/// `useSSRContext`/`ssrContext.modules` wrapper — the conformance
+/// harness's own candidate-generation shape (a bare `@vue/compiler-sfc`-
+/// equivalent assembly, matching goldens generated the same way, with no
+/// `@vitejs/plugin-vue` bundler-plugin glue at all). Every OTHER field
+/// stays at its default, proving this is a narrow, single-purpose knob —
+/// not a side effect of some other axis.
+#[test]
+fn assemble_main_module_ssr_registration_suppressed_when_requested() {
+    let compiled = basic_compiled_result();
+    let profile = CompileProfile {
+        is_production: true,
+        ssr: true,
+        emit_ssr_module_registration: false,
+        ..CompileProfile::default()
+    };
+    let meta = FileMeta {
+        has_script: true,
+        has_template: true,
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("src/Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(
+        !result.contains("useSSRContext"),
+        "emit_ssr_module_registration: false must suppress the useSSRContext \
+         wrapper entirely, got:\n{result}"
+    );
+    assert!(
+        !result.contains("ssrContext.modules"),
+        "emit_ssr_module_registration: false must suppress ssrContext.modules \
+         registration, got:\n{result}"
+    );
+    // Positive: the SSR render function itself is UNCHANGED — only the
+    // wrapper is suppressed, not SSR codegen as a whole.
+    assert!(
+        result.contains("export default _sfc_main"),
+        "the rest of assembly must proceed normally, got:\n{result}"
+    );
+}
+
+/// `emit_ssr_module_registration` defaults to `true` — every EXISTING
+/// caller (constructed via `..CompileProfile::default()`, which is every
+/// production call site in the codebase) keeps today's byte-identical
+/// wrapper behavior with zero changes required at the call site. This is
+/// the SAME assertion `assemble_main_module_ssr_registers_ssr_context_module`
+/// already makes; this test exists to name the discriminating contract
+/// explicitly (default-true vs explicit-false) in one place.
+#[test]
+fn assemble_main_module_ssr_registration_default_is_true() {
+    assert!(
+        CompileProfile::default().emit_ssr_module_registration,
+        "emit_ssr_module_registration must default to true — every \
+         existing production caller must keep the useSSRContext wrapper \
+         unless it explicitly opts out"
+    );
+}
+
 /// The registered id must match the ssr-manifest KEY FORM. When the
 /// bundler supplies a root-relative `ssr_module_id`, an ABSOLUTE
 /// canonical id (the real transform-time shape) must NOT be the
@@ -267,6 +326,63 @@ fn assemble_main_module_production_skips_file() {
         .expect("assembly with maps disabled cannot fail")
         .code;
     assert!(!result.contains("__file"));
+}
+
+/// Official `@vitejs/plugin-vue@6.0.7`'s real `transformMain` gates `__file`
+/// on `devToolsEnabled || (devServer && !isProduction)` — it is a live
+/// dev-server / devtools marker, not a bare dev-vs-prod split. Verter has no
+/// separate `devToolsEnabled` concept, but `hmr_strategy: None` already
+/// means "no dev-server tooling requested" (its own doc comment: "No HMR
+/// code is emitted") — a dev-mode assembly that explicitly opts out of HMR
+/// must ALSO skip `__file`, not just the HMR block itself. Confirmed
+/// against the pinned rc.3 golden for `basic-interpolation.vue`'s dev
+/// cell, which has neither `__file` nor HMR (the harness's golden-
+/// generation never runs inside a live dev server).
+#[test]
+fn assemble_main_module_no_hmr_strategy_skips_file_even_in_dev() {
+    let compiled = basic_compiled_result();
+    let profile = CompileProfile {
+        is_production: false,
+        hmr_strategy: HmrStrategy::None,
+        ..CompileProfile::default()
+    };
+    let meta = FileMeta {
+        has_script: true,
+        has_template: true,
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(
+        !result.contains("__file"),
+        "a dev-mode assembly with hmr_strategy: None must skip __file too, got:\n{result}"
+    );
+}
+
+/// Regression guard: a dev-mode assembly that DOES request an HMR strategy
+/// keeps `__file` — the fix above must not silently drop it whenever
+/// `is_production` is false.
+#[test]
+fn assemble_main_module_dev_with_hmr_strategy_keeps_file() {
+    let compiled = basic_compiled_result();
+    let profile = CompileProfile {
+        is_production: false,
+        hmr_strategy: HmrStrategy::Vite,
+        ..CompileProfile::default()
+    };
+    let meta = FileMeta {
+        has_script: true,
+        has_template: true,
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(
+        result.contains("__file"),
+        "a dev-mode assembly requesting an HMR strategy must still emit __file, got:\n{result}"
+    );
 }
 
 /// @ai-generated - assemble_main_module with styles produces import lines
@@ -549,8 +665,11 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
         .expect("assembly with maps disabled cannot fail")
         .code;
 
+    // `ref` is called in the script's own body (`ref('hello')`), so it is
+    // template-body-used and included after the local `msg` declaration
+    // (declared-bindings-first, imports-last — see `build_returned_object`).
     assert!(
-        assembled.contains("const __returned__ = { msg };"),
+        assembled.contains("const __returned__ = { msg, ref };"),
         "the compiler-emitted __returned__ survives assembly verbatim, got:\n{}",
         assembled
     );

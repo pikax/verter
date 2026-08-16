@@ -238,15 +238,12 @@ pub fn generate_template<'alloc>(
             r
         }
         CodeGenMode::Ssr => {
-            let mut r = BindingResolver::new_with_const_props(
-                bindings,
-                options.is_inline,
-                const_props_alloc,
-            );
-            // Non-inline ssrRender(_ctx, _push, _parent, _attrs) has no $setup
-            // param — bindings must go through the instance proxy as _ctx.*.
-            r.set_ssr(true);
-            r
+            // SSR takes no special BindingResolver mode — official routes
+            // non-inline SSR through the exact same $props./$setup./$data./
+            // $options. table as non-inline VDOM (see `binding.rs`
+            // `resolve_prefix`); the SSR codegen backend's own function
+            // signature carries the matching named parameters.
+            BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
         }
         CodeGenMode::Vdom => {
             let mut r = BindingResolver::new_with_const_props(

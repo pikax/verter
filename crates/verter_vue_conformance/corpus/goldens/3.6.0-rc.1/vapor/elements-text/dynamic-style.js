@@ -1,4 +1,3 @@
-import { setStyle as _setStyle, renderEffect as _renderEffect, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -17,6 +16,7 @@ return __returned__
 }
 
 }
+import { setStyle as _setStyle, renderEffect as _renderEffect, template as _template } from 'vue';
 const t0 = _template("<div>Styled", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

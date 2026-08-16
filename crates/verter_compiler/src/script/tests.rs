@@ -145,9 +145,17 @@ fn empty_script_setup_produces_wrapper() {
     assert!(!output.contains("_defineComponent"), "output: {}", output);
     assert!(!output.contains("Object.assign"), "output: {}", output);
     assert!(output.contains("__name: 'Test'"), "output: {}", output);
+    // Non-inline setup with no authored defineExpose() still binds
+    // `expose: __expose` and emits a bare `__expose();` call (official
+    // `hasDefineExposeCall || !inlineMode`).
     assert!(
-        output.contains("setup(__props)"),
-        "empty setup still emits the setup function, output: {}",
+        output.contains("setup(__props, { expose: __expose }) {"),
+        "empty setup still emits the setup function and binds expose, output: {}",
+        output
+    );
+    assert!(
+        output.contains("  __expose();\n"),
+        "empty setup with no authored defineExpose() still emits a bare call, output: {}",
         output
     );
     assert!(
@@ -1634,8 +1642,15 @@ fn async_setup_produces_async_wrapper() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("async setup(__props)"),
-        "should have async setup. output: {}",
+        output.contains("async setup(__props, { expose: __expose }) {"),
+        "should have async setup and bind expose (non-inline, no authored defineExpose()). \
+         output: {}",
+        output
+    );
+    assert!(
+        output.contains("  __expose();\n"),
+        "async non-inline setup with no authored defineExpose() still emits a bare call. \
+         output: {}",
         output
     );
 }

@@ -31,6 +31,39 @@ fn shared_parse_v_for_complex_iterable() {
     assert_eq!(iterable, "items.filter(x => x.active)");
 }
 
+// ==================== split_v_for_params ====================
+
+#[test]
+fn shared_split_v_for_params_value_only() {
+    assert_eq!(split_v_for_params("item"), [Some("item"), None, None]);
+}
+
+#[test]
+fn shared_split_v_for_params_value_and_key() {
+    assert_eq!(
+        split_v_for_params("item, index"),
+        [Some("item"), Some("index"), None]
+    );
+}
+
+#[test]
+fn shared_split_v_for_params_value_key_index() {
+    assert_eq!(
+        split_v_for_params("val, key, idx"),
+        [Some("val"), Some("key"), Some("idx")]
+    );
+}
+
+#[test]
+fn shared_split_v_for_params_respects_destructure_nesting() {
+    // The 2nd param's OWN destructuring commas must not be mistaken for
+    // top-level v-for param separators.
+    assert_eq!(
+        split_v_for_params("item, { id, name }"),
+        [Some("item"), Some("{ id, name }"), None]
+    );
+}
+
 // ==================== extract_directive_value ====================
 
 #[test]
@@ -164,24 +197,45 @@ fn escape_js_string_into_appends() {
 
 // ==================== Vapor HTML helpers ====================
 
+// Official `@vue/compiler-vapor`'s `genTemplates` (confirmed directly against
+// the vendored rc.3 source): `const flags = (root ? 1 : 0) | (isStatic ? 2 :
+// 0); if (flags || ns) args += ", ${flags}"` — a NUMERIC bitflag second
+// argument, omitted entirely when both bits are 0. Never the boolean `true`
+// this helper used to always emit.
+
 #[test]
-fn format_template_declaration_single_root() {
-    let result = format_template_declaration(0, "<div>hello</div>", true);
-    assert_eq!(result, "const t0 = _template(\"<div>hello</div>\", true)");
+fn format_template_declaration_neither_root_nor_static_omits_flags_arg() {
+    let result = format_template_declaration(0, "<p> ", false, false);
+    assert_eq!(result, "const t0 = _template(\"<p> \")");
 }
 
 #[test]
-fn format_template_declaration_multi_root() {
-    let result = format_template_declaration(1, "<div>text</div>", false);
-    assert_eq!(result, "const t1 = _template(\"<div>text</div>\")");
+fn format_template_declaration_root_only_emits_flag_1() {
+    let result = format_template_declaration(0, "<div>hello</div>", true, false);
+    assert_eq!(result, "const t0 = _template(\"<div>hello</div>\", 1)");
+}
+
+#[test]
+fn format_template_declaration_static_only_emits_flag_2() {
+    let result = format_template_declaration(1, "<div>text</div>", false, true);
+    assert_eq!(result, "const t1 = _template(\"<div>text</div>\", 2)");
+}
+
+#[test]
+fn format_template_declaration_root_and_static_emits_flag_3() {
+    let result = format_template_declaration(0, "<div>Static text</div>", true, true);
+    assert_eq!(
+        result,
+        "const t0 = _template(\"<div>Static text</div>\", 3)"
+    );
 }
 
 #[test]
 fn format_template_declaration_escapes_quotes() {
-    let result = format_template_declaration(0, r#"<div class="foo">text</div>"#, true);
+    let result = format_template_declaration(0, r#"<div class="foo">text</div>"#, true, true);
     assert_eq!(
         result,
-        r#"const t0 = _template("<div class=\"foo\">text</div>", true)"#
+        r#"const t0 = _template("<div class=\"foo\">text</div>", 3)"#
     );
 }
 

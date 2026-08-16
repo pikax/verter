@@ -20,16 +20,6 @@ pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
     is_vapor: bool,
-    /// SSR mode: Verter's non-inline `ssrRender(_ctx, _push, _parent, _attrs)`
-    /// has no `$setup`/`$props`/`$data`/`$options` parameters. Setup state,
-    /// props, data, and options are reached through the instance proxy as
-    /// `_ctx.*`. This is a RATIFIED INTERIM DIVERGENCE from official
-    /// non-inline `@vue/compiler-ssr` output (8-param signature, `$setup.*`
-    /// routing, `__isScriptSetup` marker) — see
-    /// `docs/arch/ssr-noninline-shape-divergence.md` for the runtime
-    /// evidence and compatibility consequences. Free `$setup` references in
-    /// this signature are a runtime `ReferenceError`.
-    is_ssr: bool,
     /// TSX mode: props use `__props.`, known bindings are bare, unresolved use
     /// `___VERTER___instance.` for instance property access. No `.value` suffix.
     /// Block scope `shallowUnwrapRef` handles unwrapping.
@@ -42,6 +32,20 @@ pub struct BindingResolver<'alloc> {
     /// template refs to these names bind `ref_key`/`ref: name`. Owned (tiny
     /// set, cloned from the codegen options).
     ref_bindable_imports: rustc_hash::FxHashSet<String>,
+    /// Stack of active v-for loop-variable rename maps — Vapor-only. Each
+    /// entry maps a v-for's raw loop-variable name (the item, or a
+    /// destructured sub-binding's leaf name) to its renamed accessor text
+    /// (`_for_item{depth}.value`, `_for_key{depth}.value`, ...), mirroring
+    /// official's real `context.withId(fn, idMap)` scoping (confirmed
+    /// directly against the vendored rc.3 `@vue/compiler-vapor` source:
+    /// `genFor`'s `itemVar = _for_item${depth}` + `buildDestructureIdMap`).
+    /// VDOM/SSR/IDE never push here — official's VDOM `genFor` does not
+    /// rename loop variables at all, only Vapor does (`Two Template Codegen
+    /// Paths`). Pushed/popped by Vapor's own `enter`/`leave` of a v-for
+    /// element around the SAME extent as the loop body's own AST subtree —
+    /// never touched by v-slot scoped-slot locals, which official does not
+    /// rename either.
+    for_scope_stack: Vec<FxHashMap<String, String>>,
 }
 
 impl<'alloc> BindingResolver<'alloc> {
@@ -51,10 +55,10 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
-            is_ssr: false,
             is_tsx: false,
             const_props: None,
             ref_bindable_imports: rustc_hash::FxHashSet::default(),
+            for_scope_stack: Vec::new(),
         }
     }
 
@@ -71,11 +75,40 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
-            is_ssr: false,
             is_tsx: false,
             const_props,
             ref_bindable_imports: rustc_hash::FxHashSet::default(),
+            for_scope_stack: Vec::new(),
         }
+    }
+
+    /// Push a v-for scope's loop-variable rename map — see
+    /// `for_scope_stack`'s doc comment. Called by Vapor codegen only,
+    /// around the SAME extent as the v-for's own item-body AST subtree.
+    pub fn push_for_scope(&mut self, map: FxHashMap<String, String>) {
+        self.for_scope_stack.push(map);
+    }
+
+    /// Pop the innermost v-for scope's rename map. Must be called exactly
+    /// once per `push_for_scope`, in matching enter/leave order.
+    pub fn pop_for_scope(&mut self) {
+        self.for_scope_stack.pop();
+    }
+
+    /// Resolve a v-for loop-variable name to its renamed accessor text,
+    /// searching from the INNERMOST active scope outward (nested v-for
+    /// shadowing — an inner loop's own `item` shadows an outer loop's
+    /// same-named variable, matching official's real nested-scope
+    /// resolution). Returns `None` for any identifier that isn't a
+    /// currently-active v-for loop variable (including v-slot scoped-slot
+    /// locals, which are never pushed here and so always fall through to
+    /// the existing bare-passthrough behavior).
+    pub(crate) fn resolve_for_local(&self, name: &str) -> Option<&str> {
+        self.for_scope_stack
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .map(String::as_str)
     }
 
     /// Whether `name` is a user import official marks `setup-maybe-ref` —
@@ -94,12 +127,6 @@ impl<'alloc> BindingResolver<'alloc> {
     #[inline]
     pub fn set_vapor(&mut self, vapor: bool) {
         self.is_vapor = vapor;
-    }
-
-    /// Set the SSR mode flag. Non-inline SSR binds through `_ctx.` only.
-    #[inline]
-    pub fn set_ssr(&mut self, ssr: bool) {
-        self.is_ssr = ssr;
     }
 
     /// Set the TSX mode flag. When true, unresolved bindings use
@@ -169,10 +196,15 @@ impl<'alloc> BindingResolver<'alloc> {
     /// - **TSX mode**: props use `__props.`, known bindings are bare (no prefix),
     ///   unresolved identifiers use `___VERTER___instance.` (matches Vue's `_ctx.` behavior),
     ///   globals and keywords remain bare
-    /// - **Vapor mode**: all bindings use `_ctx.` (matching Vue's official vapor compiler)
-    /// - **SSR non-inline**: setup/props/data/options all use `_ctx.` — the
-    ///   `ssrRender(_ctx, _push, _parent, _attrs)` signature has no `$setup`
-    ///   parameter, so `$setup.*` would be a free reference / runtime error
+    /// - **Vapor mode**: props use `$props.`; every other binding (setup, data,
+    ///   options) and any unresolved identifier use `_ctx.` — official
+    ///   `@vue/compiler-vapor`'s non-inline expression transform is the
+    ///   binary `type === "props" ? "$props" : "_ctx"` (`compiler-vapor.cjs.js`),
+    ///   not the richer `$setup.`/`$data.`/`$options.` table VDOM/SSR use
+    /// - **SSR non-inline**: same table as VDOM non-inline below — official's
+    ///   `processExpression` does not special-case SSR, and the SSR
+    ///   `ssrRender` signature declares the matching `$props`/`$setup`/
+    ///   `$data`/`$options` parameters whenever a script exists
     /// - **VDOM mode**:
     ///   - Props: `__props.` (inline) or `$props.` (standalone)
     ///   - Setup bindings: `""` (inline) or `$setup.` (standalone)
@@ -199,18 +231,14 @@ impl<'alloc> BindingResolver<'alloc> {
             };
         }
         if self.is_vapor {
-            return "_ctx.";
-        }
-        // Non-inline SSR: instance proxy only. Inline SSR still uses bare /
-        // __props. because the render closes over setup locals.
-        if self.is_ssr && !self.is_inline {
             return match self.bindings.get(ident) {
-                Some(BindingType::PropsDestructured) => "",
-                Some(_) => "_ctx.",
-                None if ident == "$event" => "",
-                None => "_ctx.",
+                Some(bt) if bt.is_props() => "$props.",
+                _ => "_ctx.",
             };
         }
+        // SSR takes NO special branch here — official routes non-inline SSR
+        // through the exact same table as non-inline VDOM below (see the
+        // doc comment on `resolve_prefix` above).
         // Inline template mode: `$attrs`/`$slots` resolve to the setup-context
         // destructure (official `buildDestructureElements` injects them into
         // `setup(__props, { attrs: $attrs, slots: $slots })` on template use),

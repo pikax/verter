@@ -72,6 +72,23 @@ pub(super) enum Chunk<'a> {
         anchor: u32,
         affinity: InsertAffinity,
     },
+    /// Replaced content carrying MULTIPLE per-offset authored anchors —
+    /// produced ONLY by the crate-private, opt-in
+    /// [`CodeTransform::try_overwrite_segmented`](super::code_transform::CodeTransform::try_overwrite_segmented).
+    /// Unlike `Overwritten` (ONE token at `start`, no character
+    /// correspondence — MagicString convention), each entry in `anchors`
+    /// is a REAL, checked correspondence: a byte span inside `content`
+    /// that is an AUTHORED lexeme copied verbatim, mapping to its own
+    /// authored source position. Bytes outside every anchor (including
+    /// before the first and after the last) are synthetic scaffolding and
+    /// carry no source-map token. See `code_transform/segmented.rs`'s
+    /// module doc for the full contract.
+    OverwrittenSegmented {
+        start: u32,
+        end: u32,
+        content: &'a str,
+        anchors: &'a [super::segmented::SegmentAnchor],
+    },
 }
 
 impl<'a> Chunk<'a> {
@@ -136,6 +153,24 @@ impl<'a> Chunk<'a> {
             content,
             anchor,
             affinity,
+        }
+    }
+
+    /// Create a segmented-overwrite chunk — see `OverwrittenSegmented`'s
+    /// own doc comment. Crate-private: only
+    /// [`CodeTransform::try_overwrite_segmented`](super::code_transform::CodeTransform::try_overwrite_segmented)
+    /// constructs one.
+    pub(super) fn overwritten_segmented(
+        start: u32,
+        end: u32,
+        content: &'a str,
+        anchors: &'a [super::segmented::SegmentAnchor],
+    ) -> Self {
+        Self::OverwrittenSegmented {
+            start,
+            end,
+            content,
+            anchors,
         }
     }
 

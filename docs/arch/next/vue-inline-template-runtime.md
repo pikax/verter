@@ -61,6 +61,9 @@ topology; the inline backlog is tracked in
 - **Vapor inline:** Vapor's always-`_ctx.` binding model conflicts with the
   inline closure-over-bindings shape; a separate follow-on.
 - **Inline SSR:** official has `hasInlinedSsrRenderFn`; Verter's SSR is
-  non-inline (see `docs/arch/ssr-noninline-shape-divergence.md`).
+  non-inline, but now matches official's real non-inline shape exactly —
+  8-param `ssrRender`, `$setup.*` routing, and the `__isScriptSetup` marker
+  are all present (the earlier interim divergence recorded in the
+  now-deleted `docs/arch/ssr-noninline-shape-divergence.md` is retired).
 - **HMR:** Verter's HMR suffixes are topology-agnostic; official prod HMR
   wrapper nuances are out of scope.

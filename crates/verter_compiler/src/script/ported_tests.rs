@@ -1379,11 +1379,13 @@ const x = SOME_CONST
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
     let return_section = &script.code[return_pos..=return_end];
     // SOME_CONST is an import not referenced in the template (only used as
-    // `const x = SOME_CONST` in script), so it should NOT be in __returned__.
-    // The bundler's tree-shaking handles the unused import.
+    // `const x = SOME_CONST` in script). Official's non-inline
+    // genSetupReturn includes every setup-scope value binding
+    // unconditionally (no template-usage filter).
     assert!(
-        !return_section.contains("SOME_CONST"),
-        "Import not used in template should NOT be in __returned__, got section: {}",
+        return_section.contains("SOME_CONST"),
+        "A value import should be in __returned__ per official's \
+         unconditional-inclusion rule even when unused in the template, got section: {}",
         return_section
     );
     // x (SetupConst) should still be returned since it's used in the template
@@ -1499,11 +1501,14 @@ function increment() {}
         "Imported component Header should be in return (used in template), got: {}",
         return_section
     );
-    // `ref` is imported but not referenced in the template, so it should NOT
-    // appear in __returned__. The bundler handles the unused import.
+    // `ref` is imported but not referenced in the template — still included
+    // per official's unconditional-inclusion rule. This is the exact shape
+    // the `basic-interpolation.vue` seed fixture exercises
+    // (`import { ref } from "vue"`, unreferenced in the template).
     assert!(
-        !return_section.contains("ref"),
-        "Import `ref` (not used in template) should NOT be in return, got: {}",
+        return_section.contains("ref"),
+        "Import `ref` should be in __returned__ per official's unconditional-inclusion \
+         rule even when unused in the template, got: {}",
         return_section
     );
     assert!(
@@ -1547,11 +1552,13 @@ const x = CONST_VAL
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
     let return_section = &script.code[return_pos..=return_end];
-    // CONST_VAL is an import not referenced in the template (only used as
-    // `const x = CONST_VAL` in script), so it should NOT be in __returned__.
+    // CONST_VAL is a value import not referenced in the template (only used
+    // as `const x = CONST_VAL` in script) — still included per official's
+    // unconditional-inclusion rule.
     assert!(
-        !return_section.contains("CONST_VAL"),
-        "Import CONST_VAL (not used in template) should NOT be in return, got section: {}",
+        return_section.contains("CONST_VAL"),
+        "CONST_VAL (a value import) should be in __returned__ per official's \
+         unconditional-inclusion rule, got section: {}",
         return_section
     );
     assert!(

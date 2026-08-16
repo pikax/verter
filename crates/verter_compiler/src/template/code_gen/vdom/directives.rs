@@ -6,11 +6,13 @@
 //! These are pure helper functions that build output strings. The caller
 //! (VdomCodeGen enter_element/leave_element) integrates them into overwrites.
 
+use oxc_ast::ast::Expression;
+
 use crate::ast::types::{AstNodeKind, ElementNode, ElementNodeConditionKind, TemplateAst};
 use crate::template::oxc::types::OxcParsedElement;
 use crate::types::{NodeId, NodeProp};
 
-use super::super::binding::BindingResolver;
+use super::super::binding::{BindingResolver, ReactivityLevel};
 use super::super::shared::helpers::{extract_directive_value, parse_v_for_expression, VdomHelper};
 use super::super::types::{CodeGenOutput, ConditionBranchClose, ScopeClose};
 
@@ -31,6 +33,37 @@ pub fn condition_scope_close(kind: &ElementNodeConditionKind) -> ScopeClose {
 }
 
 // ======================== v-for ========================
+
+/// Whether a `v-for`'s iterable source is a document-order-stable
+/// expression, mirroring official `@vue/compiler-core`'s `transformFor`:
+/// `isStableFragment = forNode.source.type === SIMPLE_EXPRESSION &&
+/// forNode.source.constType > 0`.
+///
+/// Restricted to the narrow, syntactically-certain case: the iterable is a
+/// BARE identifier resolving to a binding whose `reactivity_level()` is
+/// `Static` (`BindingType::SetupConst` / `SetupImport` / `LiteralConst` — a
+/// plain, never-reassigned, non-ref-wrapped `<script setup>` value). Any
+/// more complex iterable (member access, call expression) conservatively
+/// stays unstable, exactly like official falls back to `constType === 0`
+/// for anything its own analysis can't prove constant.
+///
+/// The SOLE authority for this predicate — [`build_for_prefix`] (which
+/// decides the `_openBlock()`/`_openBlock(true)` prefix and the fragment
+/// patch flag) and `VdomCodeGen::leave_element`'s `is_block_root`
+/// computation (which decides whether the v-for's item element gets its own
+/// block wrap) both call this SAME function, so they can never diverge.
+pub fn is_stable_for_source<'alloc>(
+    oxc: Option<&OxcParsedElement<'alloc>>,
+    resolver: &BindingResolver<'alloc>,
+) -> bool {
+    oxc.and_then(|oxc_el| oxc_el.v_for.as_ref())
+        .and_then(|oxc_vfor| oxc_vfor.parsed.result.right.as_ref())
+        .and_then(|right| match right {
+            Expression::Identifier(ident) => resolver.get(ident.name.as_str()),
+            _ => None,
+        })
+        .is_some_and(|bt| bt.reactivity_level() == ReactivityLevel::Static)
+}
 
 /// Build the scope prefix string for a v-for directive.
 ///
@@ -105,6 +138,12 @@ pub fn build_for_prefix<'alloc>(
         resolver.resolve_simple_expr(iterable)
     };
 
+    // A v-for that shares its element with a v-if/v-else-if/v-else branch
+    // (`branch_key.is_some()`) always treats its source as non-stable,
+    // regardless of the source expression's own shape: the stability check
+    // only runs on the plain, branch-key-less path.
+    let is_stable = branch_key.is_none() && is_stable_for_source(oxc, resolver);
+
     let mut prefix = String::with_capacity(128);
     // When a v-for shares its element with a v-if/v-else-if/v-else branch, the
     // outer `_renderList` Fragment receives the branch `{ key: n }` (official
@@ -114,6 +153,8 @@ pub fn build_for_prefix<'alloc>(
         prefix.push_str("(_openBlock(true), _createElementBlock(_Fragment, { key: ");
         prefix.push_str(&k.to_string());
         prefix.push_str(" }, _renderList(");
+    } else if is_stable {
+        prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, null, _renderList(");
     } else {
         prefix.push_str("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList(");
     }
@@ -134,7 +175,14 @@ pub fn build_for_prefix<'alloc>(
         prefix.push_str(") => {return ");
     }
 
-    (prefix, ScopeClose::For { is_keyed }, iterable_source_start)
+    (
+        prefix,
+        ScopeClose::For {
+            is_keyed,
+            is_stable,
+        },
+        iterable_source_start,
+    )
 }
 
 /// Build a prefixed iterable string using v-for reference spans.
@@ -272,14 +320,28 @@ pub fn condition_branch_index(ast: &TemplateAst, id: NodeId) -> Option<u32> {
 /// - `IfTernary` → ` : _createCommentVNode("v-if", true)`
 /// - `ElseIfTernary` → ` : `
 /// - `Else` → (empty — no suffix needed)
-/// - `For { is_keyed: true }` → `}), 128 /* KEYED_FRAGMENT */))`
-/// - `For { is_keyed: false }` → `}), 256 /* UNKEYED_FRAGMENT */))`
+/// - `For { is_stable: true, .. }` → `}), 64 /* STABLE_FRAGMENT */))` (takes
+///   priority over `is_keyed` — see `ScopeClose::For`'s doc comment)
+/// - `For { is_keyed: true, is_stable: false }` → `}), 128 /* KEYED_FRAGMENT */))`
+/// - `For { is_keyed: false, is_stable: false }` → `}), 256 /* UNKEYED_FRAGMENT */))`
 pub fn format_scope_close(close: &ScopeClose, is_production: bool) -> &'static str {
     match close {
         ScopeClose::IfTernary => " : _createCommentVNode(\"v-if\", true)",
         ScopeClose::ElseIfTernary => " : ",
         ScopeClose::Else => "",
-        ScopeClose::For { is_keyed } => match (is_keyed, is_production) {
+        ScopeClose::For {
+            is_stable: true, ..
+        } => {
+            if is_production {
+                "}), 64))"
+            } else {
+                "}), 64 /* STABLE_FRAGMENT */))"
+            }
+        }
+        ScopeClose::For {
+            is_keyed,
+            is_stable: false,
+        } => match (is_keyed, is_production) {
             (true, false) => "}), 128 /* KEYED_FRAGMENT */))",
             (true, true) => "}), 128))",
             (false, false) => "}), 256 /* UNKEYED_FRAGMENT */))",
@@ -321,12 +383,23 @@ pub fn format_scope_close(close: &ScopeClose, is_production: bool) -> &'static s
 }
 
 /// Collect runtime helper imports needed for scope directives.
+///
+/// Official `createCodegenNodeForBranch` (`@vue/compiler-core`) builds
+/// `cond ? children : createCommentVNode("v-if", true)` for EVERY branch
+/// that carries a `branch.condition` — both `v-if` (`IfTernary`) AND
+/// `v-else-if` (`ElseIfTernary`), not only a trailing else-less `v-if`. That
+/// placeholder alternate is later overwritten by the next branch's real
+/// codegen node when one follows (`v-else-if`/`v-else`), but
+/// `context.helper(CREATE_COMMENT)` already ran as a side effect of
+/// constructing it, so the helper import survives the overwrite. Only the
+/// final `v-else` branch (`Else`, no condition) skips
+/// `createCodegenNodeForBranch`'s comment-vnode path entirely.
 pub fn collect_scope_imports(close: &ScopeClose, out: &mut CodeGenOutput<'_>) {
     match close {
-        ScopeClose::IfTernary => {
+        ScopeClose::IfTernary | ScopeClose::ElseIfTernary => {
             out.add_vdom_import(VdomHelper::CreateCommentVNode);
         }
-        ScopeClose::ElseIfTernary | ScopeClose::Else => {}
+        ScopeClose::Else => {}
         ScopeClose::For { .. } => {
             out.add_vdom_import(VdomHelper::OpenBlock);
             out.add_vdom_import(VdomHelper::CreateElementBlock);
@@ -338,7 +411,10 @@ pub fn collect_scope_imports(close: &ScopeClose, out: &mut CodeGenOutput<'_>) {
             out.add_vdom_import(VdomHelper::CreateElementBlock);
             out.add_vdom_import(VdomHelper::Fragment);
             out.add_vdom_import(VdomHelper::RenderList);
-            if matches!(condition, ConditionBranchClose::IfTernary) {
+            if matches!(
+                condition,
+                ConditionBranchClose::IfTernary | ConditionBranchClose::ElseIfTernary
+            ) {
                 out.add_vdom_import(VdomHelper::CreateCommentVNode);
             }
         }
@@ -486,7 +562,13 @@ mod tests {
         assert!(prefix.contains("items"));
         assert!(prefix.contains("(item)"));
         assert!(prefix.ends_with("{return "));
-        assert!(matches!(close, ScopeClose::For { is_keyed: false }));
+        assert!(matches!(
+            close,
+            ScopeClose::For {
+                is_keyed: false,
+                is_stable: false
+            }
+        ));
         // "item in items" — iterable "items" starts at offset 7 + 8 = 15
         assert_eq!(iterable_src, Some(15));
     }
@@ -497,7 +579,13 @@ mod tests {
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
         let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver, None, None);
-        assert!(matches!(close, ScopeClose::For { is_keyed: true }));
+        assert!(matches!(
+            close,
+            ScopeClose::For {
+                is_keyed: true,
+                is_stable: false
+            }
+        ));
     }
 
     #[test]
@@ -537,31 +625,61 @@ mod tests {
 
     #[test]
     fn scope_close_for_unkeyed_dev() {
-        let result = format_scope_close(&ScopeClose::For { is_keyed: false }, false);
+        let result = format_scope_close(
+            &ScopeClose::For {
+                is_keyed: false,
+                is_stable: false,
+            },
+            false,
+        );
         assert_eq!(result, "}), 256 /* UNKEYED_FRAGMENT */))");
     }
 
     #[test]
     fn scope_close_for_keyed_dev() {
-        let result = format_scope_close(&ScopeClose::For { is_keyed: true }, false);
+        let result = format_scope_close(
+            &ScopeClose::For {
+                is_keyed: true,
+                is_stable: false,
+            },
+            false,
+        );
         assert_eq!(result, "}), 128 /* KEYED_FRAGMENT */))");
     }
 
     #[test]
     fn scope_close_for_unkeyed_production() {
-        let result = format_scope_close(&ScopeClose::For { is_keyed: false }, true);
+        let result = format_scope_close(
+            &ScopeClose::For {
+                is_keyed: false,
+                is_stable: false,
+            },
+            true,
+        );
         assert_eq!(result, "}), 256))");
     }
 
     #[test]
     fn scope_close_for_keyed_production() {
-        let result = format_scope_close(&ScopeClose::For { is_keyed: true }, true);
+        let result = format_scope_close(
+            &ScopeClose::For {
+                is_keyed: true,
+                is_stable: false,
+            },
+            true,
+        );
         assert_eq!(result, "}), 128))");
     }
 
     #[test]
     fn scope_close_returns_static_str() {
-        let result = format_scope_close(&ScopeClose::For { is_keyed: false }, false);
+        let result = format_scope_close(
+            &ScopeClose::For {
+                is_keyed: false,
+                is_stable: false,
+            },
+            false,
+        );
         assert_eq!(result, "}), 256 /* UNKEYED_FRAGMENT */))");
     }
 
@@ -625,18 +743,44 @@ mod tests {
     fn imports_for_for_scope() {
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
-        collect_scope_imports(&ScopeClose::For { is_keyed: false }, &mut out);
+        collect_scope_imports(
+            &ScopeClose::For {
+                is_keyed: false,
+                is_stable: false,
+            },
+            &mut out,
+        );
         assert!(out.vdom_imports().has(VdomHelper::OpenBlock));
         assert!(out.vdom_imports().has(VdomHelper::CreateElementBlock));
         assert!(out.vdom_imports().has(VdomHelper::Fragment));
         assert!(out.vdom_imports().has(VdomHelper::RenderList));
     }
 
+    // Official `createCodegenNodeForBranch` (@vue/compiler-core) builds
+    // `cond ? children : createCommentVNode("v-if", true)` for EVERY branch
+    // that carries a `branch.condition` (both `v-if` AND `v-else-if`), not
+    // only a trailing else-less `v-if`. The comment-vnode alternate is a
+    // placeholder later overwritten by the next branch's real codegen node
+    // when one follows, but `context.helper(CREATE_COMMENT)` already ran as
+    // a side effect of constructing it, so the import survives regardless.
+    // `ElseIfTernary` denotes a `v-else-if` branch (which always has a
+    // condition), so it must register the helper exactly like `IfTernary`.
     #[test]
-    fn imports_for_else_if_empty() {
+    fn imports_for_else_if_registers_comment_vnode() {
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
         collect_scope_imports(&ScopeClose::ElseIfTernary, &mut out);
+        assert!(out.vdom_imports().has(VdomHelper::CreateCommentVNode));
+    }
+
+    // The final `v-else` branch has no `branch.condition`, so
+    // `createCodegenNodeForBranch` takes the `createChildrenCodegenNode`
+    // path directly and never touches `CREATE_COMMENT`.
+    #[test]
+    fn imports_for_else_are_empty() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        collect_scope_imports(&ScopeClose::Else, &mut out);
         assert!(out.vdom_imports().is_empty());
     }
 

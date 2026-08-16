@@ -1335,6 +1335,20 @@ pub struct CompileProfile {
     /// `@vitejs/plugin-vue` registers). `None` falls back to the canonical
     /// id — correct only when the caller's manifest keys are canonical.
     pub ssr_module_id: Option<String>,
+    /// Whether SSR assembly wraps `setup()` with the `useSSRContext`/
+    /// `ssrContext.modules` registration (real `@vitejs/plugin-vue`
+    /// `transformMain` behavior — confirmed directly against its source:
+    /// unconditional on `ssr`, NOT gated on a live dev server, so it is
+    /// correct for BOTH dev and production bundled SSR builds). Defaults
+    /// to `true` — every existing production caller keeps today's byte-
+    /// identical output. Set `false` only by a caller assembling a BARE
+    /// `@vue/compiler-sfc`-equivalent module with no bundler-plugin glue
+    /// at all (the conformance harness's own candidate generation,
+    /// matching goldens generated the same way — see `bf2_seed_matrix`'s
+    /// `compile_cell`, which already overrides `hmr_strategy` for the
+    /// identical reason). This is NOT a general "disable SSR asset
+    /// tracking" production knob.
+    pub emit_ssr_module_registration: bool,
     /// HMR code injection strategy.
     pub hmr_strategy: HmrStrategy,
     /// Explicit component ID for scoped style hashing (auto-generated if `None`).
@@ -1418,6 +1432,7 @@ impl Default for CompileProfile {
             custom_element: false,
             ssr: false,
             ssr_module_id: None,
+            emit_ssr_module_registration: true,
             hmr_strategy: HmrStrategy::None,
             component_id: None,
             delimiters: None,

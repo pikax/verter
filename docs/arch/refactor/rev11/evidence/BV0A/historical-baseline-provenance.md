@@ -1,8 +1,21 @@
 # 36-cell code-byte baseline — historical provenance
 
-**Baseline file:** `crates/verter_session/src/compile/map_equality_tests/bf2_seed_matrix_code_baseline.json`
-**Consumed by:** `assembled_code_bytes_match_the_pinned_baseline`
+**Baseline file (retired):** `crates/verter_session/src/compile/map_equality_tests/bf2_seed_matrix_code_baseline.json`
+**Formerly consumed by:** `assembled_code_bytes_match_the_pinned_baseline`
 (`crates/verter_session/src/compile/map_equality_tests/bf2_seed_matrix.rs`)
+
+**Disposition:** the baseline file and its consuming test are deleted. The
+zero-byte-drift claim this record proves is a completed migration proof, not
+a standing correctness contract — every legitimate compiler correction after
+the migration moves these bytes on purpose, so re-anchoring the pin to a new
+baseline on every such change would convert a one-time migration check into a
+permanent, self-derived byte-level ABI. This record is retained as the
+durable proof the migration itself was byte-neutral; standing protection
+against unintended drift is now `enabling_source_maps_perturbs_no_assembled_code_byte`
+(map-on/map-off parity within the current tree) and
+`every_seed_matrix_cell_composes_identically_to_the_independent_reference`
+(agreement with the independently derived write grammar), both in the same
+module.
 
 ## The finding this repairs
 

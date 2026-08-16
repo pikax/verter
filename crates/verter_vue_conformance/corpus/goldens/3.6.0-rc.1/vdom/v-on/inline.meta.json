@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-on/inline.js",
-      "sha256": "c06bcbc7017050ac7c24dba7b1af64136b4b2057857df28bff90d2dcf17da94a",
+      "sha256": "0e55656273ce462bc50349b31a128666a1e45995830c7fa2a984012269c1009d",
       "bytes": 729
     },
     "map": {

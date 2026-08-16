@@ -36,8 +36,8 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/static-class-style.js",
-      "sha256": "c7cd681371e6583d83b7d1404011b35cb9d67b0088e72a7608fb97f5d8ba9f83",
-      "bytes": 322
+      "sha256": "009e89ab7892bb024db8b9a69781fdf7f2319ea930ab8b6fa629b6aed95decf8",
+      "bytes": 337
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/static-class-style.map.json",

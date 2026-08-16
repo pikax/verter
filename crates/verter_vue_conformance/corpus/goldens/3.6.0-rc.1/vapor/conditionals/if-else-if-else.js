@@ -1,4 +1,3 @@
-import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createIf as _createIf, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createIf as _createIf, template as _template } from 'vue';
 const t0 = _template("<p>Loading", 3)
 const t1 = _template("<p>Failed", 3)
 const t2 = _template("<p> ", 1)

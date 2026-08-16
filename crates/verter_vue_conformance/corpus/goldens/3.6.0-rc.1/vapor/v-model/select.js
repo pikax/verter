@@ -1,4 +1,3 @@
-import { applySelectModel as _applySelectModel, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { applySelectModel as _applySelectModel, template as _template } from 'vue';
 const t0 = _template("<select><option value=a>A</option><option value=b>B", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

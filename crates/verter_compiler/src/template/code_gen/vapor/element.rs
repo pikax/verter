@@ -165,7 +165,15 @@ pub fn finalize_root_element<'a>(
         out.add_vapor_import(VaporHelper::Child);
         out.add_vapor_import(VaporHelper::Next);
     }
-    if !state.child_text_creations.is_empty() {
+    // `state.text_node_ref` is the root's OWN direct text extraction — set by
+    // `finalize_text_parts` above whenever the root's dynamic text is its own
+    // (not bubbled up from a child via `child_text_creations`, e.g. a bare
+    // `<button>{{ label }}</button>` whose interpolation is the root's ONLY
+    // content). It needs the SAME `_txt()`/`_setText()` imports and its own
+    // `const x{ref} = _txt(n{node_ref})` statement — omitting either produced
+    // a `ReferenceError` at runtime (both the statement and the imports were
+    // silently dropped when a root's text never went through child bubbling).
+    if !state.child_text_creations.is_empty() || state.text_node_ref.is_some() {
         out.add_vapor_import(VaporHelper::Txt);
         out.add_vapor_import(VaporHelper::SetText);
     }
@@ -179,6 +187,7 @@ pub fn finalize_root_element<'a>(
         node_ref,
         nav: state.child_nav,
         text_creations: state.child_text_creations,
+        own_text_ref: state.text_node_ref,
         effects: all_effects,
         statements: state.child_statements,
         v_once: false,
@@ -447,7 +456,7 @@ mod tests {
         state.text_node_ref = Some(0);
         state.text_parts = vec![
             VaporTextPart::Static("\"hello \""),
-            VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)"),
+            VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[]),
         ];
 
         finalize_text_parts(&mut state, true);
@@ -498,13 +507,40 @@ mod tests {
 
         let mut state = VaporElementState::new();
         state.html = "<div> </div>".to_string();
-        state.text_node_ref = Some(counters.next_text());
-        state.text_parts = vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)")];
+        state.text_node_ref = Some(counters.next_node());
+        state.text_parts = vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[])];
 
         let root = finalize_root_element(state, &mut counters, &mut out, true);
 
         assert_eq!(root.effects.len(), 1);
         assert!(out.vapor_imports().has(VaporHelper::RenderEffect));
+        // The root's OWN direct text ref (never routed through
+        // `child_text_creations`, unlike a bubbled child's text) must still
+        // surface its `_txt()` extraction and get the Txt/SetText imports —
+        // a bare `_setText(x0, …)` reference with no `const x0 = _txt(n0)`
+        // statement and no import is a runtime `ReferenceError`, not merely
+        // a missing optimization.
+        assert_eq!(root.own_text_ref, Some(0));
+        assert!(out.vapor_imports().has(VaporHelper::Txt));
+        assert!(out.vapor_imports().has(VaporHelper::SetText));
+    }
+
+    #[test]
+    fn finalize_root_static_only_has_no_own_text_ref() {
+        // Negative control: a root with no dynamic text at all must not
+        // fabricate a text ref or import Txt/SetText.
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+
+        let mut state = VaporElementState::new();
+        state.html = "<div>hello</div>".to_string();
+
+        let root = finalize_root_element(state, &mut counters, &mut out, false);
+
+        assert_eq!(root.own_text_ref, None);
+        assert!(!out.vapor_imports().has(VaporHelper::Txt));
+        assert!(!out.vapor_imports().has(VaporHelper::SetText));
     }
 
     // ==================== merge_into_parent ====================
@@ -545,10 +581,10 @@ mod tests {
 
         // Second dynamic child at dom_child_index=1
         let mut dynamic_child = VaporElementState::new();
-        dynamic_child.text_node_ref = Some(counters.next_text());
+        dynamic_child.text_node_ref = Some(counters.next_node());
         dynamic_child.own_effects = vec![VaporEffect::SetText {
             text_ref: 0,
-            parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)")],
+            parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[])],
         }];
 
         let _ = merge_into_parent(dynamic_child, &mut parent, &mut counters, 1, true, &mut out);
@@ -574,10 +610,10 @@ mod tests {
 
         let mut child = VaporElementState::new();
         child.html = "<span> </span>".to_string();
-        child.text_node_ref = Some(counters.next_text());
+        child.text_node_ref = Some(counters.next_node());
         child.own_effects = vec![VaporEffect::SetText {
             text_ref: 0,
-            parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)")],
+            parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[])],
         }];
 
         // dom_child_index=0 (first child), has dynamic text

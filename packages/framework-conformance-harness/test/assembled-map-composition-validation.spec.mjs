@@ -23,6 +23,7 @@ function scriptInput(sourceMap, code = "const x = 1\n", overrides = {}) {
     isProduction: false,
     ssr: false,
     ssrModuleId: null,
+    emitSsrModuleRegistration: true,
     hmrStrategy: "none",
     sourceMapRequested: true,
     authored: { script: true, template: false },

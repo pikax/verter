@@ -1,4 +1,3 @@
-import { applyTextModel as _applyTextModel, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { applyTextModel as _applyTextModel, template as _template } from 'vue';
 const t0 = _template("<input placeholder=\"Type here\">", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

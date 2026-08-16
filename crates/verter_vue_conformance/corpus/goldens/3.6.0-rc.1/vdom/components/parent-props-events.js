@@ -1,4 +1,3 @@
-import { openBlock as _openBlock, createBlock as _createBlock } from "vue"
 import ChildComp from "./child-comp.vue"
 
 
@@ -15,6 +14,7 @@ return __returned__
 }
 
 }
+import { openBlock as _openBlock, createBlock as _createBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createBlock($setup["ChildComp"], {
     label: "Pick",

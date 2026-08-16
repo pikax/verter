@@ -1,4 +1,3 @@
-import { child as _child, applyCheckboxModel as _applyCheckboxModel, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { child as _child, applyCheckboxModel as _applyCheckboxModel, template as _template } from 'vue';
 const t0 = _template("<label><input type=checkbox> Agree", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

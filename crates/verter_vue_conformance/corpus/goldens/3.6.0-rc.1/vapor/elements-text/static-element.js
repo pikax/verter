@@ -1,5 +1,5 @@
+const _sfc_main = { __vapor: true }
 import { template as _template } from 'vue';
-const _sfc_main = {}
 const t0 = _template("<div id=app title=Hello data-role=root><p>Static text", 3)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

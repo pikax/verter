@@ -136,11 +136,19 @@ pub(crate) fn write_prefixed_expr<S: ExprSink>(
 
     // Single binding spanning the whole simple identifier → simple resolution.
     // An ignored single binding (v-for/v-slot local) stays a bare mapped
-    // identifier with no prefix.
+    // identifier with no prefix — UNLESS it's a Vapor v-for loop variable
+    // with an active rename (`item` → `_for_item0.value`), in which case
+    // the renamed accessor is synthetic scaffolding, not authored source
+    // (mirrors official's real `context.withId(fn, idMap)` substitution).
     if bindings.bindings.len() == 1 && is_simple_ident(expr) {
         if bindings.bindings[0].ignore {
+            let trimmed = expr.trim();
+            if let Some(renamed) = resolver.resolve_for_local(trimmed) {
+                sink.push_synthetic(renamed);
+                return;
+            }
             let trim_offset = (expr.len() - expr.trim_start().len()) as u32;
-            sink.push_source(expr.trim(), inner_start + trim_offset);
+            sink.push_source(trimmed, inner_start + trim_offset);
             return;
         }
         return write_simple_expr(sink, resolver, expr, inner_start);
@@ -187,9 +195,20 @@ pub(crate) fn write_prefixed_expr<S: ExprSink>(
     };
 
     for binding in &bindings.bindings {
-        if binding.ignore {
-            continue;
-        }
+        // An ignored binding (v-for/v-slot local) normally passes through
+        // untouched inside a later verbatim chunk — UNLESS it's a Vapor
+        // v-for loop variable with an active rename, in which case it needs
+        // the SAME chunk-before + replacement-text + `last_end` handling as
+        // a normal binding, just with synthetic renamed text instead of
+        // `prefix + source + suffix`.
+        let for_local_rename = if binding.ignore {
+            let Some(renamed) = resolver.resolve_for_local(binding.name) else {
+                continue;
+            };
+            Some(renamed)
+        } else {
+            None
+        };
 
         // Convert file-relative pos to expr-trimmed-relative offset.
         let rel_pos = (binding.pos as usize)
@@ -211,6 +230,12 @@ pub(crate) fn write_prefixed_expr<S: ExprSink>(
                 inner_start,
                 trim_offset,
             );
+        }
+
+        if let Some(renamed) = for_local_rename {
+            sink.push_synthetic(renamed);
+            last_end = rel_pos + binding.name.len();
+            continue;
         }
 
         let prefix = resolver.resolve_prefix(binding.name);

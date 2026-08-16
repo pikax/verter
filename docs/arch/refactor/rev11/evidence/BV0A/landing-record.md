@@ -77,8 +77,8 @@ table-bounds step 1.23/`U6.3`) plus doc corrections, but never running the promi
    still stated a hardcoded "75 total" next to its own "no count hardcoded" claim). Fixed directly
    (`09e0b1f76`).
 4. **Full canonical gate** (`node scripts/gate.mjs`) on `work/bv0a-integration`'s tip: SURFACE 1
-   failed — 22 evidence files under `docs/arch/refactor/rev11/` carried `/Users/carlosrodrigues`
-   machine-path markers. Root cause: the branch had forked from `program/architecture-lock` before
+   failed — 22 evidence files under `docs/arch/refactor/rev11/` carried absolute macOS
+   home-directory path markers. Root cause: the branch had forked from `program/architecture-lock` before
    an unrelated commit (`f15fa5376`, landed by a separate session) sanitized those exact files on
    the mainline. Confirmed via `git merge-base --is-ancestor` and direct diff inspection — not a
    BV0A defect.

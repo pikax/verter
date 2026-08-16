@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.js",
-      "sha256": "e42d68e89b298219ad6fb497b3b7d6f0fb1e2fa8eefa6e4fad65015e2ea2a777",
+      "sha256": "bb0bbbe0787b4dfe1a13f1dfd726be432d1ebfabe227d79a1ed2810176566f1e",
       "bytes": 1239
     },
     "map": {

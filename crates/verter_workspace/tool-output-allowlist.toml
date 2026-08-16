@@ -122,3 +122,7 @@ rationale = "BF2 seed-matrix conformance harness (#[cfg(test, feature = \"bf2-au
 [[entries]]
 path = "crates/verter_session/src/compile/map_equality_tests/vector_inventory.rs"
 rationale = "layer-2 vector-inventory reproduction (#[cfg(test)]) — reads the committed assembled-map-composition.vectors.json TEST FIXTURE off disk to drive every frozen vector through the production assembler. Never workspace/semantic state."
+
+[[entries]]
+path = "crates/verter_session/src/compile/map_equality_tests/nested_v_for_runtime_proof.rs"
+rationale = "nested v-for/v-if runtime-execution proof (#[cfg(test, feature = \"bf2-authoritative\")]) — writes the compiled module's own generated code to a scratch temp file so an EXTERNAL Node/jsdom subprocess can read it off real disk (a subprocess cannot read Verter's in-memory VFS), then removes it; sibling of the `oracle_gen_spike.rs`/`vue_assets.rs` external-tool-scaffolding category. Never workspace/semantic state."

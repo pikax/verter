@@ -36,8 +36,8 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/multi-root.js",
-      "sha256": "a9180efa9faedb739bc0ce2cd3361492524735b98ef1530124155dbea2bc373f",
-      "bytes": 373
+      "sha256": "cfb6b9f08e0b1e7667350d3bf09b0c5d8e88b4ea697d4270ceb8540e6341301f",
+      "bytes": 388
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/multi-root.map.json",

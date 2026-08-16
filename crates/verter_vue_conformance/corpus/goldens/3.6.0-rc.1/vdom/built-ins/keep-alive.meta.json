@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/built-ins/keep-alive.js",
-      "sha256": "aaf55785aa6b1255a7cc5ef612de3826971c5196e3b3ac7588708f4489713b39",
+      "sha256": "4a1b95aa0a56bc9e5281786cc767fe912b1b652c417ccf09aaea2f84f15cc1aa",
       "bytes": 840
     },
     "map": {

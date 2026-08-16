@@ -317,7 +317,7 @@ fn ide_virtual_output_for_fixture_sfc_is_byte_stable() {
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hash_hex, "fdcc6de32cbf81bc593cdd9c50c47892",
+        hash_hex, "999ab15ddca5440126060c25b9b8bad4",
         "runtime (Main) virtual output drifted byte-wise; content:\n{content}"
     );
 }

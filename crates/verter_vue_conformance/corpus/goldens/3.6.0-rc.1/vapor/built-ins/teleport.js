@@ -1,4 +1,3 @@
-import { VaporTeleport as _VaporTeleport, createComponent as _createComponent, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { VaporTeleport as _VaporTeleport, createComponent as _createComponent, template as _template } from 'vue';
 const t0 = _template("<p class=overlay>Overlay", 2)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

@@ -1,4 +1,3 @@
-import { withModifiers as _withModifiers, createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 
 const _sfc_main = {
   __name: 'modifiers',
@@ -15,6 +14,7 @@ return __returned__
 }
 
 }
+import { withModifiers as _withModifiers, createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("div", {
     onClick: _withModifiers($setup.save, ["self"])

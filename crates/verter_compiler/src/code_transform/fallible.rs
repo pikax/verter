@@ -308,7 +308,7 @@ impl<'a> CodeTransform<'a> {
 
     /// A usable edit offset: within the original source and on a UTF-8
     /// character boundary.
-    fn check_offset(&self, offset: u32) -> Result<(), CodeTransformError> {
+    pub(super) fn check_offset(&self, offset: u32) -> Result<(), CodeTransformError> {
         let len = self.original.len();
         if offset as usize > len {
             return Err(CodeTransformError::OutOfRange {
@@ -323,7 +323,7 @@ impl<'a> CodeTransform<'a> {
     }
 
     /// Validate a `[start, end)` range: both offsets usable and not reversed.
-    fn check_range(&self, start: u32, end: u32) -> Result<(), CodeTransformError> {
+    pub(super) fn check_range(&self, start: u32, end: u32) -> Result<(), CodeTransformError> {
         self.check_offset(start)?;
         self.check_offset(end)?;
         if start > end {

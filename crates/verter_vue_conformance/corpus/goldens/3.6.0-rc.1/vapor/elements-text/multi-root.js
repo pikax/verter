@@ -1,5 +1,5 @@
+const _sfc_main = { __vapor: true }
 import { template as _template } from 'vue';
-const _sfc_main = {}
 const t0 = _template("<header>Header", 2)
 const t1 = _template("<main>Body", 2)
 const t2 = _template("<footer>Footer", 2)

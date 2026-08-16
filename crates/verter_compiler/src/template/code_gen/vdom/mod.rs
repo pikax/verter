@@ -64,6 +64,8 @@ pub mod text;
 
 use rustc_hash::FxHashMap;
 
+use crate::code_transform::SegmentAnchor;
+
 use crate::ast::types::{
     AstNodeKind, CommentNode, ElementNode, ElementNodeCondition, ElementNodeConditionKind,
     InterpolationNode, TagType, TemplateAst, TextNode,
@@ -77,6 +79,7 @@ use super::expression::{build_prefixed_expr_segments, resolve_simple_expr_segmen
 use super::shared::helpers::{self, VdomHelper};
 use super::types::{
     ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, MappedGeneratedText, ScopeClose,
+    SegmentedOverwriteAuthority,
 };
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
@@ -120,10 +123,18 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Set in `enter_template`, used by `leave_element` to determine if a root
     /// element should be a block root (`_createElementBlock` / `_createBlock`).
     single_root: bool,
-    /// Hoisted constant strings (e.g., `["id"]`) collected during codegen.
-    /// Emitted as `const _hoisted_N = ...` before the render function.
-    /// Deduplicated: identical arrays share the same `_hoisted_N` reference.
-    hoisted_constants: Vec<String>,
+    /// Hoisted constant strings (e.g., `["id"]`) collected during codegen,
+    /// each paired with its OWN authored anchors (relative to the string's
+    /// own start) — a hoisted static-props object can embed a static
+    /// attribute's own key (e.g. `class`), and that anchor must survive
+    /// into the hoisted-preamble insertion (see
+    /// `code_transform::segmented`'s module doc). Empty when the string
+    /// carries no mappable key (the common case — most hoisted constants
+    /// are `["id"]`-style arrays or `{ key: N }` branch markers). Emitted as
+    /// `const _hoisted_N = ...` before the render function. Deduplicated:
+    /// identical strings share the same `_hoisted_N` reference (first
+    /// occurrence's anchors win — see `reserve_hoist`).
+    hoisted_constants: Vec<(String, Vec<SegmentAnchor>)>,
     /// Cache index counter for `_cache[N]` static element wrapping.
     /// Incremented each time a fully-static element is cached.
     cache_index: usize,
@@ -141,6 +152,41 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// index are computed) and applied in `leave_element` in place of the normal
     /// `_renderList` fragment close.
     memo_for_suffixes: FxHashMap<usize, String>,
+    /// `_hoisted_N` index reserved during `enter_element` for an element's
+    /// own props/injected-key hoist, keyed by AST node index.
+    ///
+    /// Official `_hoisted_N` numbering comes from `cacheStatic`, a SEPARATE
+    /// pass over the transformed tree that walks in document PRE-order — a
+    /// node's own hoistable props register before recursing into its
+    /// children (`@vue/compiler-core`: the parent's `walk()` call hoists
+    /// each child's props before descending into that child). Verter's
+    /// codegen is necessarily bottom-up (`leave_element` fires child before
+    /// parent, since parent content depends on built children), so without
+    /// this, any element that is both an ancestor of a hoistable descendant
+    /// AND itself hoistable gets the wrong (too-late) index — confirmed on
+    /// `basic-interpolation.vue`: golden hoists `{ class: "root" }` as
+    /// `_hoisted_1` (the root, an ancestor) then the `v-if`/`v-else` branch
+    /// keys as `_hoisted_2`/`_hoisted_3` (descendants) — reserving the
+    /// ancestor's slot before descending is what keeps that order right.
+    ///
+    /// `try_reserve_element_hoist` (called from `enter_element`, BEFORE
+    /// children are visited) computes and reserves the slot for the two
+    /// cases `process_element_leave` already hoists — a fully-literal props
+    /// object, and a `v-if`/`v-else` branch's synthetic `{ key: N }` — using
+    /// only facts available without visiting children (`element.props`,
+    /// `element.is_fully_static`, structural AST lookups). It deliberately
+    /// does NOT replicate the `_cache[N]`/`slot_cached` parent-lookup
+    /// eligibility logic: restricting to `!element.is_fully_static`
+    /// structurally guarantees `has_cached_patchflag` is false for the
+    /// plain-props case (an element with a dynamic descendant can never be
+    /// `is_fully_static`), and a `v-if`/`v-else` branch can never be
+    /// `cache_idx`-eligible at all (that mechanism requires
+    /// `v_condition.is_none()`). Every case this fast path does NOT
+    /// recognize (dynamic props, components, fully-static subtrees) falls
+    /// through untouched to `process_element_leave`'s existing bottom-up
+    /// logic, which remains the sole authority for them — this map is
+    /// purely additive, never a second hoist-decision engine.
+    hoist_reservations: FxHashMap<usize, usize>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -179,7 +225,106 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             in_slot_context_stack: Vec::new(),
             resolved_components: Vec::new(),
             memo_for_suffixes: FxHashMap::default(),
+            hoist_reservations: FxHashMap::default(),
         }
+    }
+
+    /// Reserve a document-pre-order `_hoisted_N` slot for `id`'s own props
+    /// or injected branch key, BEFORE any of its children are visited. See
+    /// [`Self::hoist_reservations`] for the full rationale and scope.
+    fn try_reserve_element_hoist(
+        &mut self,
+        id: NodeId,
+        element: &ElementNode,
+        oxc: Option<&OxcParsedElement<'alloc>>,
+        source: &'alloc str,
+    ) {
+        // Whole-subtree-static elements route through `_createStaticVNode`
+        // / `_cache[N]` instead — restrict to elements with at least one
+        // dynamic descendant, where `has_cached_patchflag` is structurally
+        // guaranteed false (see the field doc comment).
+        if element.is_fully_static || element.tag_type.is_component() {
+            return;
+        }
+        // A slot outlet (`<slot>`) never reaches `process_element_leave` —
+        // `leave_element` routes it to `process_slot_outlet`, which builds
+        // its own `_renderSlot(...)` props string and never consults
+        // `pre_reserved_hoist`. Same for ANY `<template>` element — both
+        // `v-slot` (`process_template_slot`) and `v-if`/`v-for`
+        // (`leave_template_fragment`) route to their own separate
+        // functions. Reserving for either here would push an orphaned,
+        // unreferenced `_hoisted_N` (confirmed as a regression on
+        // `slots.vue`'s `<slot name="header">` during development).
+        if element.tag_type.is_slot_outlet() || element.tag_type == TagType::Template {
+            return;
+        }
+
+        let has_props = !element.props.is_empty() || element.v_ref.is_some();
+        if has_props {
+            // Any directive makes the props object non-constant; bail to
+            // the unchanged leave-time path, which resolves the dynamic
+            // shape correctly.
+            if element.props.iter().any(|p| p.is_directive) {
+                return;
+            }
+            let mut buf = String::new();
+            let mut anchors: Vec<SegmentAnchor> = Vec::new();
+            let props_result = element::build_props_object_into(
+                &mut buf,
+                element,
+                source,
+                &self.resolver,
+                oxc,
+                None,
+                self.options.force_js,
+                &mut anchors,
+            );
+            // Mirrors `can_hoist_props`'s guard set in
+            // `element::process_element_leave`, minus
+            // `injected_key.is_none()` (a `has_props` element never carries
+            // one — injected keys only apply on the props-less branch) and
+            // `!has_cached_patchflag` (structurally false here already).
+            let can_hoist = props_result.dynamic_props.is_empty()
+                && !props_result.has_vnode_key
+                && !props_result.has_dynamic_ref
+                && !props_result.uses_merge
+                && !props_result.uses_normalize_class
+                && !props_result.uses_normalize_style
+                && !props_result.uses_normalize_props
+                && !props_result.uses_guard_reactive_props
+                && !props_result.uses_to_handlers
+                && props_result.native_vmodel.is_none()
+                && props_result.directive_entries.is_empty();
+            if can_hoist {
+                self.reserve_hoist(id, buf, anchors);
+            }
+        } else if element.v_condition.is_some()
+            && element.v_for.is_none()
+            && !directives::element_has_vnode_key(element, source)
+        {
+            if let Some(k) = directives::condition_branch_index(self.ast, id) {
+                self.reserve_hoist(id, format!("{{ key: {k} }}"), Vec::new());
+            }
+        }
+    }
+
+    /// Push (or dedup-reuse) a hoisted constant now and remember its index
+    /// for `id`, so `process_element_leave` can reference it directly
+    /// instead of pushing again at leave time. `anchors` are `content`'s own
+    /// embedded authored anchors (relative to `content`'s own start) — see
+    /// `hoisted_constants`'s field doc.
+    fn reserve_hoist(&mut self, id: NodeId, content: String, anchors: Vec<SegmentAnchor>) {
+        let idx = if let Some(existing) = self
+            .hoisted_constants
+            .iter()
+            .position(|(c, _)| *c == content)
+        {
+            existing + 1
+        } else {
+            self.hoisted_constants.push((content, anchors));
+            self.hoisted_constants.len()
+        };
+        self.hoist_reservations.insert(id.0, idx);
     }
 
     /// Build child records from AST children (O(n) scan).
@@ -414,17 +559,32 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // Strip comments/text between v-if chain members (at root level too)
         element::strip_interstitial_condition_nodes(&mut children, out, true);
 
-        // Build hoisted constant preamble (e.g., `const _hoisted_1 = ["id"]\n`)
+        // Build hoisted constant preamble (e.g., `const _hoisted_1 = ["id"]\n`),
+        // tracking each constant's own embedded anchors (shifted to their
+        // absolute position within `hoisted_preamble`) — the opt-in
+        // segmented-overwrite primitive's anchor shape (see
+        // `code_transform::segmented`'s module doc). Consumed ONLY by the
+        // single-root, non-v-if/v-memo `leave_template` branch below (the
+        // shape the current test corpus requires); every other branch
+        // keeps splicing `hoisted_preamble` through the pre-existing
+        // unmapped `overwrite_or_root_prefix` path.
+        let mut hoisted_preamble_anchors: Vec<SegmentAnchor> = Vec::new();
         let hoisted_preamble = if self.hoisted_constants.is_empty() {
             String::new()
         } else {
             let mut preamble = String::with_capacity(self.hoisted_constants.len() * 30);
-            for (i, constant) in self.hoisted_constants.iter().enumerate() {
+            for (i, (constant, constant_anchors)) in self.hoisted_constants.iter().enumerate() {
                 preamble.push_str("const _hoisted_");
                 preamble.push_str(&(i + 1).to_string());
                 preamble.push_str(" = ");
+                let base = preamble.len() as u32;
                 preamble.push_str(constant);
                 preamble.push('\n');
+                hoisted_preamble_anchors.extend(constant_anchors.iter().map(|a| SegmentAnchor {
+                    content_offset: base + a.content_offset,
+                    length: a.length,
+                    source_pos: a.source_pos,
+                }));
             }
             preamble.push('\n');
             preamble
@@ -568,7 +728,24 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 24);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return (_openBlock(), ");
-                    out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    // `hoisted_preamble_anchors` apply at THEIR OWN recorded
+                    // offsets only when `hoisted_preamble` was folded
+                    // unshifted into `full_prefix`'s own start — exactly the
+                    // `!is_inline` case (see `full_prefix`'s own
+                    // construction above); the inline case emits
+                    // `hoisted_preamble` through a SEPARATE module-scope
+                    // prepend instead, so its anchors do not apply here.
+                    if !self.options.is_inline && !hoisted_preamble_anchors.is_empty() {
+                        out.overwrite_or_root_prefix_segmented(
+                            tag_open.start,
+                            child.start,
+                            &prefix,
+                            &hoisted_preamble_anchors,
+                            SegmentedOverwriteAuthority::new(),
+                        );
+                    } else {
+                        out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    }
                     out.overwrite_or_root_suffix(close_start, close_end, ")\n}");
                 }
             }
@@ -852,16 +1029,27 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             self.v_for_prefixes.push(None);
         }
 
-        // Track slot context: components and <template v-slot> create slot
-        // contexts where children should use grouped caching instead of
-        // individual _cache[N] wrapping. Teleport/KeepAlive take raw VNode-array
-        // children (not slot objects), so they stay OUT of slot context.
+        // Track slot context: components, <template v-slot>, and native <slot>
+        // outlet fallback content create slot contexts where children should
+        // use grouped caching instead of individual _cache[N] wrapping.
+        // Teleport/KeepAlive take raw VNode-array children (not slot
+        // objects), so they stay OUT of slot context. A <slot> outlet's
+        // fallback content is itself a slot function body (`() => [...]`,
+        // official `buildSlots`/fallback compilation), so it takes the same
+        // grouped-caching path as any other slot content.
         let tag_name =
             &source[element.tag_open.start as usize + 1..element.tag_open.name_end as usize];
         let is_slot_parent = (element.tag_type.is_component()
             && !helpers::is_raw_children_builtin(tag_name))
-            || (element.tag_type == TagType::Template && element.v_slot.is_some());
+            || (element.tag_type == TagType::Template && element.v_slot.is_some())
+            || element.tag_type.is_slot_outlet();
         self.in_slot_context_stack.push(is_slot_parent);
+
+        // Reserve this element's own `_hoisted_N` slot (if any) BEFORE
+        // descending into children — see `hoist_reservations`.
+        if self.options.hoist_static {
+            self.try_reserve_element_hoist(id, element, oxc, source);
+        }
 
         super::WalkAction::Continue
     }
@@ -981,8 +1169,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // v-if/v-for (reka-ui CheckboxRoot pattern): the resolved target can
         // be any shape, so the runtime needs the block boundary.
         let is_dynamic_component = component::is_dynamic_component_tag(el, source);
+        // A v-for item on a document-order-stable source (see
+        // `directives::is_stable_for_source`) is NOT forced into its own
+        // block — official's `shouldUseBlock = !isStableFragment ||
+        // childBlock.isBlockRequired`. `branch_key` is irrelevant here (only
+        // the plain v-for path, no v-if combined) since a v-if+v-for
+        // element already has `v_condition.is_some()` forcing block-root
+        // through the FIRST disjunct regardless.
+        let v_for_is_stable =
+            el.v_for.is_some() && directives::is_stable_for_source(oxc, &self.resolver);
         let is_block_root = el.v_condition.is_some()
-            || el.v_for.is_some()
+            || (el.v_for.is_some() && !v_for_is_stable)
             || is_single_template_root
             || raw_children_builtin
             || native_memo
@@ -1126,6 +1323,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 })
                 .unwrap_or(false);
 
+        let pre_reserved_hoist = self.hoist_reservations.remove(&_id.0);
         let record = element::process_element_leave(
             el,
             oxc,
@@ -1144,6 +1342,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             cache_idx,
             Some(&mut self.resolved_components),
             slot_cached,
+            pre_reserved_hoist,
         );
         buf.clear();
         self.buf = buf;

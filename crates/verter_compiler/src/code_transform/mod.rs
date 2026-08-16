@@ -37,6 +37,7 @@ mod chunk;
 #[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
 mod fallible;
+mod segmented;
 mod source_map;
 
 pub use chain::SourceMapChainError;
@@ -48,6 +49,12 @@ pub use code_transform::GeneratedSourceRange;
 #[allow(unused_imports)] // consumed by tests and by out-of-module callers
 pub use fallible::CodeTransformError;
 pub use source_map::{advance_generated_position, SourceMapOptions};
+// The additive, opt-in segmented-overwrite primitive's plain data carrier.
+// `pub` only because it rides inside otherwise-`pub` types elsewhere in the
+// crate (see `SegmentAnchor`'s own doc) — the OPERATIONS that produce a
+// `SegmentAnchor`-bearing chunk stay crate-private, reserved for the
+// authorized Vue runtime template emitters; see the static call-site guard.
+pub use segmented::SegmentAnchor;
 
 #[cfg(test)]
 mod edit_semantics_tests;

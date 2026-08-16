@@ -1,4 +1,3 @@
-import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { computed, ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("p", null, " Count: " + _toDisplayString($setup.count) + " / Doubled: " + _toDisplayString($setup.doubled) + " / Upper: " + _toDisplayString("hi".toUpperCase()) + " / Sign: " + _toDisplayString($setup.count > 1 ? "many" : "one"), 1 /* TEXT */))
 }

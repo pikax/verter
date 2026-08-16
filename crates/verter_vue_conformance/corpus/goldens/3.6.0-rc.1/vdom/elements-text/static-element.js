@@ -1,5 +1,5 @@
-import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 const _sfc_main = {}
+import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 const _hoisted_1 = {
   id: "app",
   title: "Hello",

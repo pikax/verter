@@ -113,32 +113,16 @@ pub fn assemble_vue_main_module(
         out.push('\n');
     }
 
-    // Template runtime imports must come before script code (ESM requirement)
-    if let Some(template) = &compiled.template {
-        if !template.imports.is_empty() {
-            let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
-            let _ = write!(out, "import {{ ");
-            for (i, name) in template.imports.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(out, " }} from \"{}\"", runtime);
-        }
-        // SSR helpers are imported from "vue/server-renderer"
-        if !template.ssr_imports.is_empty() {
-            let _ = write!(out, "import {{ ");
-            for (i, name) in template.ssr_imports.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(out, " }} from \"vue/server-renderer\"");
-        }
-    }
-
+    // Script output comes BEFORE the template's own runtime imports. Official
+    // `@vitejs/plugin-vue`/`@vue/compiler-sfc` write the authored script's own
+    // imports (and the rest of the script block) first, then the template's
+    // runtime helper imports immediately before the render function — proven
+    // against the exact rc.3 goldens (e.g. `vue/basic-interpolation__vdom__*`:
+    // `import { ref } from "vue"` / `const _sfc_main = {...}` precede the
+    // template's own `import { toDisplayString as _toDisplayString, ... }`).
+    // ESM does not require import statements to precede other statements
+    // (every import is hoisted regardless of source position), so there was
+    // no correctness reason for the prior order — only a conformance defect.
     if let Some((script_code, chained)) = &rewritten_script {
         // The compiler-emitted script passes through UNCHANGED apart from the
         // two authorized rewrites: setup-binding elision (type-only imports,
@@ -168,6 +152,28 @@ pub fn assemble_vue_main_module(
     }
 
     if let Some(template) = &compiled.template {
+        if !template.imports.is_empty() {
+            let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
+            let _ = write!(out, "import {{ ");
+            for (i, name) in template.imports.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format_import_specifier(name));
+            }
+            let _ = writeln!(out, " }} from \"{}\"", runtime);
+        }
+        // SSR helpers are imported from "vue/server-renderer"
+        if !template.ssr_imports.is_empty() {
+            let _ = write!(out, "import {{ ");
+            for (i, name) in template.ssr_imports.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format_import_specifier(name));
+            }
+            let _ = writeln!(out, " }} from \"vue/server-renderer\"");
+        }
         out.push('\n');
         composer.write_fragment(
             &mut out,
@@ -198,7 +204,14 @@ pub fn assemble_vue_main_module(
         );
     }
 
-    if !profile.is_production {
+    // Official `@vitejs/plugin-vue`'s real `transformMain` gates `__file` on
+    // `devToolsEnabled || (devServer && !isProduction)` — a live dev-server
+    // / devtools marker, not a bare dev-vs-prod split. Verter has no
+    // separate `devToolsEnabled` concept, but `hmr_strategy: None` already
+    // means "no dev-server tooling requested" (its own doc comment: "No HMR
+    // code is emitted"); a dev-mode assembly that explicitly opts out of
+    // HMR must skip `__file` too, not just the HMR block below.
+    if !profile.is_production && profile.hmr_strategy != HmrStrategy::None {
         let _ = writeln!(out, "_sfc_main.__file = {:?}", canonical_id);
     }
 
@@ -222,8 +235,13 @@ pub fn assemble_vue_main_module(
     // registered id must match the ssr-manifest KEY FORM — root-relative
     // under Vite — so the bundler-supplied `ssr_module_id` wins; the
     // canonical id is only a fallback for callers whose manifest keys are
-    // canonical.
-    if profile.ssr {
+    // canonical. Real `@vitejs/plugin-vue` `transformMain` emits this
+    // unconditionally on `ssr` (confirmed directly against its source —
+    // no dev-server gate, dev AND production both get it), so
+    // `emit_ssr_module_registration` defaults `true` and this is NOT
+    // gated on `hmr_strategy`/production the way `__file`/HMR are above —
+    // see the field's own doc comment for the one narrow exception.
+    if profile.ssr && profile.emit_ssr_module_registration {
         let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
         let _ = writeln!(
             out,

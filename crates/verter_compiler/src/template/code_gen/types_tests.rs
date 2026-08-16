@@ -105,6 +105,120 @@ fn apply_to_preserves_same_position_prepend_order() {
     );
 }
 
+// ==================== overwrite_or_root_prefix / _suffix mapping truthfulness ====================
+//
+// A nonzero-width tag (`<script setup>`, `<template>`) replaced by wholly
+// synthetic wrapper code has NO character-level correspondence to that tag
+// — confirmed directly against the pinned rc.3 oracle's own mapping (real
+// `@vue/compiler-sfc`/`compiler-vapor` never touch the tag text at all;
+// their `prependLeft`-based wrapper insertion carries no mapping either).
+// A plain `overwrite()` for the nonzero-width branch would produce an
+// `Overwritten` chunk that claims ONE source position (the replaced span's
+// own start) for the ENTIRE synthetic replacement — a false claim the
+// mapping oracle's `segment-provenance` rule rejects
+// (`packages/framework-conformance-harness/src/mapping-oracle.mjs`). The
+// zero-width branch is already correct (an unmapped `Inserted` chunk);
+// these tests pin the nonzero-width branch to the SAME unmapped shape.
+
+#[test]
+fn overwrite_or_root_prefix_nonzero_width_emits_no_source_token() {
+    let alloc = Allocator::default();
+    let mut out = CodeGenOutput::new(&alloc);
+    // "<script setup>" is 15 bytes wide — a real, nonzero-width tag.
+    let source = "<script setup>\nbody\n</script>";
+    out.overwrite_or_root_prefix(0, 15, "const _sfc_main = {\n");
+
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    let result = ct.build_string();
+    assert_eq!(result, "const _sfc_main = {\nbody\n</script>");
+
+    let map =
+        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+    // dst_line 0 is entirely the synthetic wrapper text ("const _sfc_main =
+    // {"); it must carry no SOURCE-BEARING token (the surviving original
+    // "body\n</script>" tail on later lines legitimately keeps its own
+    // truthful line-by-line mapping).
+    assert!(
+        !map.get_tokens()
+            .any(|t| t.get_dst_line() == 0 && t.get_source_id().is_some()),
+        "synthetic wrapper text replacing a nonzero-width tag must carry NO \
+         source-map token (it has no authored counterpart), got tokens: {:?}",
+        map.get_tokens().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn overwrite_or_root_suffix_nonzero_width_emits_no_source_token() {
+    let alloc = Allocator::default();
+    let mut out = CodeGenOutput::new(&alloc);
+    let source = "body\n</script>";
+    // "</script>" starts at byte 5, 9 bytes wide — a real, nonzero-width tag.
+    out.overwrite_or_root_suffix(5, 14, "}}");
+
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    let result = ct.build_string();
+    assert_eq!(result, "body\n}}");
+
+    let map =
+        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+    // dst_line 1 is entirely the synthetic "}}" close text; it must carry no
+    // source-bearing token (dst_line 0's "body" is genuine original text and
+    // legitimately keeps its truthful mapping).
+    assert!(
+        !map.get_tokens()
+            .any(|t| t.get_dst_line() == 1 && t.get_source_id().is_some()),
+        "synthetic wrapper-close text replacing a nonzero-width tag must \
+         carry NO source-map token, got tokens: {:?}",
+        map.get_tokens().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn overwrite_or_root_prefix_zero_width_still_inserts_unmapped_at_start() {
+    // The pre-existing zero-width branch's behavior is unchanged: content
+    // still lands at `start` and stays unmapped.
+    let alloc = Allocator::default();
+    let mut out = CodeGenOutput::new(&alloc);
+    let source = "rest";
+    out.overwrite_or_root_prefix(0, 0, "<root>");
+
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    assert_eq!(ct.build_string(), "<root>rest");
+}
+
+// ==================== add_sourcemap_location ====================
+//
+// An `Original`/`Moved` chunk's default mapping (`emit_mapped_content`)
+// tokens only its own start and newline boundaries — a mid-line identifier
+// (e.g. `count` in `const count = ref(0)`) gets no token of its own unless
+// its offset is explicitly registered. This is exactly what the mapping
+// oracle's `verbatim-carry` anchors require: a segment landing EXACTLY on a
+// declaration's own identifier, not merely on its line's start.
+
+#[test]
+fn add_sourcemap_location_produces_a_mid_line_token_at_the_declaration_name() {
+    let alloc = Allocator::default();
+    let mut out = CodeGenOutput::new(&alloc);
+    let source = "const count = ref(0);\nconst items = [];";
+    let count_offset = source.find("count").expect("fixture contains count") as u32;
+    out.add_sourcemap_location(count_offset);
+
+    let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+    out.apply_to(&mut ct);
+    let map =
+        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+
+    let token = map
+        .get_tokens()
+        .find(|t| t.get_dst_line() == 0 && t.get_dst_col() == 6)
+        .expect("a token must land exactly at the declaration name's generated column");
+    assert_eq!((token.get_src_line(), token.get_src_col()), (0, 6));
+    assert!(token.get_source_id().is_some());
+}
+
 // ==================== Imports ====================
 
 #[test]
@@ -173,11 +287,22 @@ fn vapor_counters_increment() {
     let mut c = VaporCounters::default();
     assert_eq!(c.next_node(), 0);
     assert_eq!(c.next_node(), 1);
-    assert_eq!(c.next_text(), 0);
-    assert_eq!(c.next_text(), 1);
     assert_eq!(c.next_path(), 0);
     assert_eq!(c.next_template(), 0);
     assert_eq!(c.next_template(), 1);
+}
+
+/// `n`/`x` declarations share ONE counter (`next_node`) — official has no
+/// separate id space for text-accessor vs element ids (see `VaporCounters`
+/// doc). There is no `next_text()`.
+#[test]
+fn vapor_counters_have_no_separate_text_counter() {
+    let mut c = VaporCounters::default();
+    assert_eq!(c.next_node(), 0);
+    // A text-accessor id allocated after 2 prior node ids continues the
+    // SAME sequence, not its own independent one.
+    assert_eq!(c.next_node(), 1);
+    assert_eq!(c.next_node(), 2);
 }
 
 // ==================== VaporTextPart ====================
@@ -191,7 +316,7 @@ fn vapor_text_part_static() {
 
 #[test]
 fn vapor_text_part_dynamic() {
-    let part = VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)");
+    let part = VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[]);
     assert_eq!(part.to_js(), "_toDisplayString(_ctx.msg)");
     assert!(part.is_dynamic());
 }
@@ -204,7 +329,7 @@ fn vapor_effect_set_text() {
         text_ref: 0,
         parts: vec![
             VaporTextPart::Static("\"hello \""),
-            VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)"),
+            VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[]),
         ],
     };
     assert_eq!(
@@ -217,7 +342,7 @@ fn vapor_effect_set_text() {
 fn vapor_effect_set_text_single_part() {
     let effect = VaporEffect::SetText {
         text_ref: 1,
-        parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.count)")],
+        parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.count)", &[])],
     };
     assert_eq!(
         effect.to_code(),
@@ -333,7 +458,36 @@ fn vapor_element_state_ensure_text_ref() {
     assert_eq!(r1, 0);
     let r2 = state.ensure_text_ref(&mut counters);
     assert_eq!(r2, 0);
-    assert_eq!(counters.x, 1);
+    // ensure_text_ref shares the node counter — no separate `x` counter.
+    assert_eq!(counters.n, 1);
+}
+
+/// Official has no separate id space for `xN` (text-accessor) vs `nN`
+/// (element) declarations — both print the SAME `dynamic.id` (confirmed
+/// against the vendored rc.3 compiler and every pinned golden emitting
+/// both, e.g. `const n2 = t0()` paired with `const x2 = _txt(n2)`, never a
+/// distinct number). An element that needs BOTH a node ref (e.g. for a prop
+/// binding) and a text ref must get the SAME number for both.
+#[test]
+fn vapor_element_state_node_and_text_ref_share_the_same_id() {
+    let mut counters = VaporCounters::default();
+    let mut state = VaporElementState::new();
+    let node_ref = state.ensure_node_ref(&mut counters);
+    let text_ref = state.ensure_text_ref(&mut counters);
+    assert_eq!(node_ref, text_ref);
+    // Still only ONE id consumed for this element, not two.
+    assert_eq!(counters.n, 1);
+}
+
+/// Same guarantee requesting the text ref FIRST (order-independent).
+#[test]
+fn vapor_element_state_text_ref_first_then_node_ref_shares_id() {
+    let mut counters = VaporCounters::default();
+    let mut state = VaporElementState::new();
+    let text_ref = state.ensure_text_ref(&mut counters);
+    let node_ref = state.ensure_node_ref(&mut counters);
+    assert_eq!(node_ref, text_ref);
+    assert_eq!(counters.n, 1);
 }
 
 // ==================== Mapped Prepends ====================
@@ -779,4 +933,25 @@ fn mapped_generated_text_wrapped_shifts_inner_and_keeps_wrapper_unmapped() {
     );
     // The inner `count` segment shifted right by one byte (the `(`).
     assert_eq!(wrapped.segments[1].generated_start, 1);
+}
+
+/// `SegmentedOverwriteAuthority::new()` — the production constructor,
+/// `pub(in crate::template::code_gen)` — must compile and construct from
+/// WITHIN `template::code_gen` (this test file is a descendant module of
+/// it). This is the positive half of the static call-site guard: if the
+/// constructor's visibility were ever tightened past this module (breaking
+/// the legitimate VDOM/Vapor/SSR callers this primitive exists to serve),
+/// this test — and every VDOM/Vapor/SSR interpolation/attribute test that
+/// exercises `CodeGenOutput::apply_to`'s call to it — would stop compiling.
+/// See `SegmentedOverwriteAuthority`'s own doc comment for why the negative
+/// half (excluding `crate::ide`/`crate::svelte`) has no automated test:
+/// Rust's privacy model gives no way to write one that discriminates this
+/// token's narrower restriction from the crate's own pre-existing
+/// `pub(crate) mod template`/`ide` boundary, and it is enforced
+/// unconditionally by every `cargo build` regardless.
+#[test]
+fn segmented_overwrite_authority_constructs_from_within_template_code_gen() {
+    let _authority = SegmentedOverwriteAuthority::new();
+    // Purely a compile-time capability proof — zero runtime footprint.
+    assert_eq!(std::mem::size_of::<SegmentedOverwriteAuthority>(), 0);
 }

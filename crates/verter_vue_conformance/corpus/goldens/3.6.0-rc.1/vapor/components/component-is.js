@@ -1,4 +1,3 @@
-import { createDynamicComponent as _createDynamicComponent } from 'vue';
 import { ref } from "vue"
 import ChildComp from "./child-comp.vue"
 
@@ -17,6 +16,7 @@ return __returned__
 }
 
 }
+import { createDynamicComponent as _createDynamicComponent } from 'vue';
 function render(_ctx, $props, $emit, $attrs, $slots) {
   const n0 = _createDynamicComponent(() => (_ctx.current), { label: "Dynamic" }, null, 1 /* SINGLE_ROOT */)
   return n0

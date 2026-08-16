@@ -36,8 +36,8 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/components/dynamic-multi-root.js",
-      "sha256": "9edc1ad37b4d89accafb3bb82ca341b4c097e3da459647f8cc51cad4753c4d08",
-      "bytes": 530
+      "sha256": "e81a15eb69516bcbe8e6e680c350d3a44422e89dee6f30364ae447a7cef72d48",
+      "bytes": 545
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/components/dynamic-multi-root.map.json",

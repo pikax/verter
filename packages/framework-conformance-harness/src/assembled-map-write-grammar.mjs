@@ -135,18 +135,18 @@ export function assembleModule(input, rewrittenScriptCode) {
   // W-03
   if (input.styleCount > 0 || input.customBlockCount > 0) writer.write("\n");
 
-  // W-04
-  if (templatePresent && input.template.imports.length > 0) {
-    const specifiers = input.template.imports.map(importSpecifier).join(", ");
-    writer.write(`import { ${specifiers} } from "${raw(runtimeModule)}"\n`);
-  }
-
-  // W-05
-  if (templatePresent && input.template.ssrImports.length > 0) {
-    const specifiers = input.template.ssrImports.map(importSpecifier).join(", ");
-    writer.write(`import { ${specifiers} } from "vue/server-renderer"\n`);
-  }
-
+  // W-06/W-07/W-08/W-09 — script output comes BEFORE the template's own
+  // runtime imports (W-04/W-05, below). Official `@vitejs/plugin-vue`/
+  // `@vue/compiler-sfc` write the authored script's own imports (and the
+  // rest of the script block) first, then the template's runtime helper
+  // imports immediately before the render function — proven against the
+  // exact rc.3 goldens (e.g. `vue/basic-interpolation__vdom__*`:
+  // `import { ref } from "vue"` / `const _sfc_main = {...}` precede the
+  // template's own `import { toDisplayString as _toDisplayString, ... }`).
+  // ESM does not require import statements to precede other statements
+  // (every import is hoisted regardless of source position), so the prior
+  // W-04/W-05-before-script order was a conformance defect, not a
+  // requirement.
   if (scriptPresent) {
     // T1 — into the script. W-06: the rewritten script code, byte for byte (A).
     scriptPlacement = writer.placement();
@@ -164,6 +164,18 @@ export function assembleModule(input, rewrittenScriptCode) {
   }
 
   if (templatePresent) {
+    // W-04
+    if (input.template.imports.length > 0) {
+      const specifiers = input.template.imports.map(importSpecifier).join(", ");
+      writer.write(`import { ${specifiers} } from "${raw(runtimeModule)}"\n`);
+    }
+
+    // W-05
+    if (input.template.ssrImports.length > 0) {
+      const specifiers = input.template.ssrImports.map(importSpecifier).join(", ");
+      writer.write(`import { ${specifiers} } from "vue/server-renderer"\n`);
+    }
+
     // W-10
     writer.write("\n");
     // T3 — into the template. W-11: the template code, byte for byte (A).
@@ -187,7 +199,16 @@ export function assembleModule(input, rewrittenScriptCode) {
   }
 
   // W-15
-  if (!input.isProduction) writer.write(`_sfc_main.__file = ${dbg(input.canonicalId)}\n`);
+  //
+  // Official `@vitejs/plugin-vue`'s real `transformMain` gates `__file` on
+  // `devToolsEnabled || (devServer && !isProduction)` — a live dev-server /
+  // devtools marker, not a bare dev-vs-prod split. Verter has no separate
+  // `devToolsEnabled` concept, but `hmrStrategy === "none"` already means
+  // "no dev-server tooling requested"; a dev-mode assembly that explicitly
+  // opts out of HMR skips `__file` too, not just the HMR block below.
+  if (!input.isProduction && input.hmrStrategy !== "none") {
+    writer.write(`_sfc_main.__file = ${dbg(input.canonicalId)}\n`);
+  }
 
   // W-16 / W-16′
   if (!input.isProduction && !input.ssr) {
@@ -198,8 +219,11 @@ export function assembleModule(input, rewrittenScriptCode) {
     }
   }
 
-  // W-17
-  if (input.ssr) {
+  // W-17 — gated on `emitSsrModuleRegistration` too: a bare
+  // `@vue/compiler-sfc`-equivalent assembly with no bundler-plugin glue
+  // (`emitSsrModuleRegistration: false`) never wraps `setup()` with the
+  // `useSSRContext`/`ssrContext.modules` registration, regardless of `ssr`.
+  if (input.ssr && input.emitSsrModuleRegistration) {
     writer.write(
       `import { useSSRContext as __vite_useSSRContext } from "${raw(runtimeModule)}"\n` +
         "const _sfc_setup = _sfc_main.setup\n" +

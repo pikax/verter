@@ -1,6 +1,6 @@
 use std::cell::OnceCell;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::chunk::Chunk;
@@ -79,6 +79,17 @@ pub struct CodeTransform<'a> {
     /// Pointer identity makes markers disappear naturally when a later edit
     /// removes their owning chunk.
     generated_unmapped_boundaries: FxHashMap<(usize, usize), SmallVec<[u32; 2]>>,
+    /// Content identity (pointer, length) of `Overwritten` chunks created via
+    /// [`overwrite_unmapped`](Self::overwrite_unmapped) — wholly synthetic
+    /// replacement text with no character-level correspondence to the span
+    /// it replaces, so `generate_map` must emit no source-map token for it.
+    /// A side-table keyed by content identity (the same pattern as
+    /// `generated_unmapped_boundaries`) rather than a new `Chunk::Overwritten`
+    /// field: `overwrite_unmapped` reuses the exact same splice engine as
+    /// `overwrite` (so every ordering interaction with other operations at
+    /// the same position — moves, prepends — is unchanged), differing only
+    /// in whether `generate_map` treats the resulting chunk as source-bearing.
+    pub(super) unmapped_overwrite_contents: FxHashSet<(usize, usize)>,
     /// Test-only: the token-buffer capacity reserved by the most recent
     /// `generate_map`, captured at the reservation point. Lets tests assert the
     /// reservation covers every emitted token (no reallocation during
@@ -205,6 +216,7 @@ impl<'a> CodeTransform<'a> {
             resolver: OnceCell::new(),
             sourcemap_locations: Vec::new(),
             generated_unmapped_boundaries: FxHashMap::default(),
+            unmapped_overwrite_contents: FxHashSet::default(),
             #[cfg(test)]
             last_reserved_token_capacity: std::cell::Cell::new(0),
             helper_preamble_content: None,
@@ -444,7 +456,9 @@ impl<'a> CodeTransform<'a> {
     #[inline]
     fn chunk_position(chunk: &Chunk) -> Option<u32> {
         match chunk {
-            Chunk::Original { start, .. } | Chunk::Overwritten { start, .. } => Some(*start),
+            Chunk::Original { start, .. }
+            | Chunk::Overwritten { start, .. }
+            | Chunk::OverwrittenSegmented { start, .. } => Some(*start),
             Chunk::Inserted { .. }
             | Chunk::Moved { .. }
             | Chunk::InsertedMapped { .. }
@@ -511,7 +525,8 @@ impl<'a> CodeTransform<'a> {
                         return SplitResult::PastTarget { chunk_index: i };
                     }
                 }
-                Chunk::Overwritten { start: s, .. } => {
+                Chunk::Overwritten { start: s, .. }
+                | Chunk::OverwrittenSegmented { start: s, .. } => {
                     // Only match at the exact start boundary. If `index` falls
                     // inside the Overwritten range (s < index < end), we skip
                     // past it — Overwritten chunks cannot be split, and inserting
@@ -644,7 +659,8 @@ impl<'a> CodeTransform<'a> {
                     }
                     return true;
                 }
-                Chunk::Overwritten { start: s, .. } => {
+                Chunk::Overwritten { start: s, .. }
+                | Chunk::OverwrittenSegmented { start: s, .. } => {
                     if s > start {
                         return false; // Past target
                     }
@@ -683,6 +699,39 @@ impl<'a> CodeTransform<'a> {
         } else {
             self.allocator.alloc_str(content)
         };
+
+        self.replace_range_impl(start, end, content_ref, false);
+        self
+    }
+
+    /// Overwrite a range with wholly synthetic replacement text that has no
+    /// character-level correspondence to the span it replaces — so the
+    /// resulting `Overwritten` chunk must emit NO source-map token, unlike
+    /// [`overwrite`](Self::overwrite) (which claims the replaced span's
+    /// start as the replacement's source position, truthful for genuine 1:1
+    /// substitutions but false for e.g. a whole synthesized wrapper object
+    /// literal replacing a `<script setup>` tag).
+    ///
+    /// Reuses the exact same splice engine as `overwrite` — every ordering
+    /// interaction with other operations at the same position (prepends,
+    /// moves) is IDENTICAL to a regular overwrite; only `generate_map`
+    /// treats the resulting chunk as unmapped, via a content-identity
+    /// side-table (the same pattern `generated_unmapped_boundaries` uses).
+    pub fn overwrite_unmapped(&mut self, start: u32, end: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
+        if start >= end {
+            return self;
+        }
+
+        let content_ref = if content.is_empty() {
+            ""
+        } else {
+            self.allocator.alloc_str(content)
+        };
+        if !content_ref.is_empty() {
+            self.unmapped_overwrite_contents
+                .insert((content_ref.as_ptr() as usize, content_ref.len()));
+        }
 
         self.replace_range_impl(start, end, content_ref, false);
         self
@@ -856,6 +905,12 @@ impl<'a> CodeTransform<'a> {
                     start: chunk_start,
                     end: chunk_end,
                     content,
+                }
+                | Chunk::OverwrittenSegmented {
+                    start: chunk_start,
+                    end: chunk_end,
+                    content,
+                    ..
                 } => {
                     if chunk_end <= start {
                         continue;
@@ -919,7 +974,9 @@ impl<'a> CodeTransform<'a> {
                     | Chunk::InsertedAnchored { content, .. } => {
                         removed_output += content.len() as i64;
                     }
-                    Chunk::Original { .. } | Chunk::Overwritten { .. } => {}
+                    Chunk::Original { .. }
+                    | Chunk::Overwritten { .. }
+                    | Chunk::OverwrittenSegmented { .. } => {}
                 }
             }
             self.chunks.splice(first..=last, replacement_chunks);
@@ -1139,6 +1196,9 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Overwritten {
                     start: os, end: oe, ..
+                }
+                | Chunk::OverwrittenSegmented {
+                    start: os, end: oe, ..
                 } => {
                     if oe <= start {
                         current_pos = oe;
@@ -1192,6 +1252,19 @@ impl<'a> CodeTransform<'a> {
                     content,
                     ..
                 } => {
+                    chunks_to_move.push(Chunk::moved_replacement(start, end, content));
+                }
+                Chunk::OverwrittenSegmented {
+                    start,
+                    end,
+                    content,
+                    ..
+                } => {
+                    // Moved content loses its fine-grained anchor mapping
+                    // (the anchors were relative to the original replacement
+                    // site) and travels as a plain replacement move, matching
+                    // `InsertedMapped`/`InsertedAnchored`'s own moved-content
+                    // degradation below.
                     chunks_to_move.push(Chunk::moved_replacement(start, end, content));
                 }
                 Chunk::Moved {
@@ -1317,6 +1390,7 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. }
                 | Chunk::Moved { content, .. }
                 | Chunk::InsertedMapped { content, .. }
                 | Chunk::InsertedAnchored { content, .. } => {
@@ -1357,6 +1431,7 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. }
                 | Chunk::Moved { content, .. }
                 | Chunk::InsertedMapped { content, .. }
                 | Chunk::InsertedAnchored { content, .. } => *content,
@@ -1391,6 +1466,7 @@ impl<'a> CodeTransform<'a> {
                 Chunk::Original { .. } => None,
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. }
                 | Chunk::Moved { content, .. }
                 | Chunk::InsertedMapped { content, .. }
                 | Chunk::InsertedAnchored { content, .. } => Some(*content),
@@ -1482,6 +1558,27 @@ impl<'a> CodeTransform<'a> {
                     }
                     generated += len;
                 }
+                Chunk::OverwrittenSegmented {
+                    content, anchors, ..
+                } => {
+                    // One `GeneratedSourceRange` per authored anchor — bytes
+                    // outside every anchor are synthetic scaffolding and
+                    // contribute no range, matching `OverwrittenSegmented`'s
+                    // own contract (see `segmented.rs`'s module doc).
+                    for anchor in *anchors {
+                        if anchor.length == 0 {
+                            continue;
+                        }
+                        ranges.push(GeneratedSourceRange {
+                            generated_start: generated + anchor.content_offset,
+                            generated_end: generated + anchor.content_offset + anchor.length,
+                            source_start: anchor.source_pos,
+                            source_end: anchor.source_pos + anchor.length,
+                            replacement: true,
+                        });
+                    }
+                    generated += content.len() as u32;
+                }
                 Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     generated += content.len() as u32;
                 }
@@ -1509,6 +1606,7 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. }
                 | Chunk::Moved { content, .. }
                 | Chunk::InsertedMapped { content, .. }
                 | Chunk::InsertedAnchored { content, .. } => {

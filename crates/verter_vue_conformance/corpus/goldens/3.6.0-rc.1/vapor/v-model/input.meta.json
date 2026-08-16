@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-model/input.js",
-      "sha256": "c470c5f86631d335dabf4154982789606fc0de57928d385d3fd6c4a9587b7198",
+      "sha256": "9cba0b7500603889272cdcc2e282f09b2ec0aadf17cecad8fc6bd7c3e732d0b2",
       "bytes": 666
     },
     "map": {

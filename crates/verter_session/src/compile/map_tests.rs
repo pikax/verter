@@ -683,9 +683,11 @@ fn an_empty_present_fragment_receives_no_boundary_segment() {
     );
 
     assert_eq!(
-        code, "\n_sfc_main.__file = \"Comp.vue\"\nexport default _sfc_main",
+        code, "\nexport default _sfc_main",
         "the fragment rewrites to empty, so the newline patch fires over a line \
-         with no characters at all — the module's first byte is that newline"
+         with no characters at all — the module's first byte is that newline. \
+         (mapping_profile() defaults to hmr_strategy: None, so __file is \
+         correctly absent — see assemble_main_module_no_hmr_strategy_skips_file_even_in_dev.)"
     );
     assert_eq!(
         artifact.segments,

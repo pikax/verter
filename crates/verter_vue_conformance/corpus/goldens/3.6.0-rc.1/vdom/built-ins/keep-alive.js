@@ -1,4 +1,3 @@
-import { resolveDynamicComponent as _resolveDynamicComponent, openBlock as _openBlock, createBlock as _createBlock, KeepAlive as _KeepAlive } from "vue"
 import { ref } from "vue"
 import ChildComp from "../components/child-comp.vue"
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { resolveDynamicComponent as _resolveDynamicComponent, openBlock as _openBlock, createBlock as _createBlock, KeepAlive as _KeepAlive } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createBlock(_KeepAlive, { max: 2 }, [
     (_openBlock(), _createBlock(_resolveDynamicComponent($setup.current), { label: "Cached" }))

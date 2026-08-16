@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-bind/same-name-shorthand.js",
-      "sha256": "0ba487a27bc0af90a70816df530ce790320272ebc5d67d4383b6e32d6de6fcdb",
+      "sha256": "7026ae7db750c7cbd03e2c40b087256998090e3c1a3d04259c012f984941acab",
       "bytes": 717
     },
     "map": {

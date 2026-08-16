@@ -1,4 +1,3 @@
-import { applyVShow as _applyVShow, template as _template } from 'vue';
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { applyVShow as _applyVShow, template as _template } from 'vue';
 const t0 = _template("<p>Peekaboo", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

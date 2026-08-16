@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.js",
-      "sha256": "8a306143a79b8d4dffd24ef87c34a0fb76b39fa1204d84a56dbc81c933d12f29",
+      "sha256": "c959f2da376b640ebc0b7e806ef98a3e353e47b5dd77033a08a3f59546089a1f",
       "bytes": 1392
     },
     "map": {

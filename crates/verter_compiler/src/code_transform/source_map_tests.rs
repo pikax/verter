@@ -1,5 +1,6 @@
 use super::*;
 use crate::code_transform::CodeTransformError;
+use crate::template::code_gen::types::SegmentedOverwriteAuthority;
 use oxc_allocator::Allocator;
 
 #[test]
@@ -39,6 +40,20 @@ fn explicit_sourcemap_location_rejects_mid_codepoint_offsets_without_mutation() 
 /// changes are allocation-only and must not alter emitted source-map bytes.
 /// The expected string is the JSON produced for this representative case
 /// (overwrite + a mapped insertion across a multi-line source).
+/// Legacy byte-equivalence proof for `SegmentedOverwriteAuthority`'s
+/// introduction: this fixture exercises ONLY the pre-existing, non-opt-in
+/// operations (`overwrite`, `batch_prepend_left_with_source_map`) — no
+/// `try_overwrite_segmented` call anywhere — and pins both `content` and the
+/// serialized map to an exact byte string. This TEST FUNCTION's own body
+/// (the fixture and the pinned strings below) is unchanged, byte for byte,
+/// from before the segmented-overwrite primitive existed to today — only
+/// this doc comment and this file's OTHER contents (imports, sibling
+/// tests) have moved. The pinned strings themselves have therefore been
+/// asserted unchanged both BEFORE and AFTER that primitive's introduction
+/// — durable evidence, not a "the suite stays green" claim. See
+/// [`segmented_overwrite_channel_does_not_perturb_sibling_overwrite_bytes`]
+/// for the complementary mixed-channel case (a document using BOTH the
+/// legacy and the new opt-in channel together).
 #[test]
 fn source_map_json_is_byte_identical_for_representative_case() {
     let allocator = Allocator::default();
@@ -54,6 +69,61 @@ fn source_map_json_is_byte_identical_for_representative_case() {
     assert_eq!(
         json,
         "{\"version\":3,\"file\":\"golden.ts.map\",\"names\":[],\"sources\":[\"golden.ts\"],\"sourcesContent\":[\"const x = 1;\\nconst y = 2;\\nconst z = 3;\"],\"mappings\":\"AAAA,MAAM,GAAC;AAAD,SACN;AACA\"}"
+    );
+}
+
+/// Companion to the proof above: a document using the legacy `overwrite`
+/// channel for one range and the new opt-in `try_overwrite_segmented`
+/// channel for a DISJOINT range must produce byte-identical `content` and
+/// map output for the legacy range as an equivalent document that never
+/// touches the segmented channel at all — i.e. adding the new channel does
+/// not perturb the pre-existing one it sits alongside. Both variants below
+/// are asserted against the SAME exact pinned string.
+#[test]
+fn segmented_overwrite_channel_does_not_perturb_sibling_overwrite_bytes() {
+    let source = "const x = 1;\nconst y = 2;\nconst z = 3;";
+    const EXPECTED: &str = "const XXX = 1;\nconst y = 2;\nconst z = 3;";
+
+    // Variant A: only the legacy channel touches the source at all.
+    let allocator_a = Allocator::default();
+    let mut ct_a = CodeTransform::new(source, &allocator_a);
+    ct_a.overwrite(6, 7, "XXX");
+    assert_eq!(ct_a.build_string(), EXPECTED);
+    let json_a = ct_a.generate_map_json(SourceMapOptions::new().with_source("a.ts"));
+
+    // Variant B: the SAME legacy overwrite, plus an unrelated, disjoint
+    // segmented-overwrite entry elsewhere in the same document.
+    let allocator_b = Allocator::default();
+    let mut ct_b = CodeTransform::new(source, &allocator_b);
+    ct_b.overwrite(6, 7, "XXX");
+    ct_b.try_overwrite_segmented(
+        32,
+        33,
+        "9",
+        &[],
+        SegmentedOverwriteAuthority::new_for_test(),
+    )
+    .expect("disjoint segmented overwrite with no anchors must succeed");
+    let content_b = ct_b.build_string();
+    assert_eq!(
+        content_b, "const XXX = 1;\nconst y = 2;\nconst 9 = 3;",
+        "the legacy overwrite's own bytes must be unaffected by an unrelated segmented entry"
+    );
+    // Re-derive variant A's expected bytes as a substring check: everything
+    // outside the segmented entry's range is byte-identical to variant A.
+    assert_eq!(&content_b[..14], &EXPECTED[..14]);
+    let json_b = ct_b.generate_map_json(SourceMapOptions::new().with_source("a.ts"));
+
+    // The legacy overwrite's own mapping token set is unchanged by the
+    // sibling segmented entry: both maps carry the same token at the
+    // legacy overwrite's generated position.
+    let token_a = json_a.split("\"mappings\":\"").nth(1).unwrap();
+    let token_b = json_b.split("\"mappings\":\"").nth(1).unwrap();
+    assert_eq!(
+        token_a.split(';').next(),
+        token_b.split(';').next(),
+        "the first mapping segment (the legacy overwrite's own line) must be identical \
+         whether or not a sibling segmented entry exists elsewhere in the document"
     );
 }
 

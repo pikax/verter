@@ -3933,7 +3933,12 @@ fn html_entities_in_bind_value_decoded() {
 
 // ==================== Dynamic props array ====================
 
-// @ai-generated - TDD tests for dynamicProps output with PROPS patchFlag
+// Event-handler keys never enter dynamicProps: Vue relies on stable invoker
+// caching for listeners, so a handler binding never needs a PATCH_PROPS
+// re-patch. Confirmed directly against the real `@vue/compiler-sfc` (rc.3)
+// oracle — `@click`-only props objects emit neither a dynamicProps array nor
+// the 8 /* PROPS */ flag, and `@click` never appears in a mixed array
+// alongside a genuinely dynamic prop like `:disabled`.
 #[test]
 fn element_with_event_handler_has_dynamic_props_array() {
     let result = compile_sfc(
@@ -3941,27 +3946,30 @@ fn element_with_event_handler_has_dynamic_props_array() {
 <script setup>const handler = () => {};</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    // When patchFlag includes PROPS (8), the dynamicProps array must be present.
-    // Vue expects: createElementVNode("button", { onClick: handler }, "text", 8, ["onClick"])
     assert!(
-        tpl.code.contains("[\"onClick\"]"),
-        "event handler should produce dynamicProps array [\"onClick\"], got:\n{}",
+        !tpl.code.contains("[\"onClick\"]") && !tpl.code.contains("8 /* PROPS */"),
+        "an @click-only props object must not produce a dynamicProps array \
+         or a PROPS patch flag, got:\n{}",
         tpl.code
     );
 }
 
 #[test]
 fn element_with_dynamic_bind_and_event_has_dynamic_props_array() {
-    // Use both :disabled and @click so PATCH_PROPS is set (events trigger it)
+    // :disabled is genuinely dynamic (needs PATCH_PROPS); @click never does.
     let result = compile_sfc(
         r#"<template><button :disabled="isDisabled" @click="handler">go</button></template>
 <script setup>const isDisabled = true; const handler = () => {};</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    // Dynamic bind + event should produce dynamicProps array with both
     assert!(
-        tpl.code.contains("\"disabled\"") && tpl.code.contains("\"onClick\""),
-        "dynamic bind + event should produce dynamicProps array, got:\n{}",
+        tpl.code.contains("[\"disabled\"]"),
+        "dynamicProps array should contain only the genuinely dynamic \"disabled\" prop, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("\"onClick\""),
+        "onClick must not appear in dynamicProps, got:\n{}",
         tpl.code
     );
 }
@@ -3973,10 +3981,14 @@ fn element_with_multiple_dynamic_props_has_all_in_array() {
 <script setup>const handler = () => {}; const off = false;</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    // Both onClick and disabled should be in the dynamicProps array
     assert!(
-        tpl.code.contains("\"onClick\"") && tpl.code.contains("\"disabled\""),
-        "multiple dynamic props should all be in dynamicProps array, got:\n{}",
+        tpl.code.contains("[\"disabled\"]"),
+        "dynamicProps array should contain only the genuinely dynamic \"disabled\" prop, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("\"onClick\""),
+        "onClick must not appear in dynamicProps, got:\n{}",
         tpl.code
     );
 }
@@ -7061,6 +7073,14 @@ fn title_attr_with_newline_produces_valid_js() {
 
 // ==================== Vapor mode: __vapor flag and _ctx. prefix ====================
 
+/// Official `@vue/compiler-sfc`'s non-TS `compileScript` branch builds
+/// `__vapor: true` into the SAME accumulated `runtimeOptions` string as
+/// `__name`/`props`/`emits` — spliced into the object literal as ONE
+/// inline property, never a separate trailing `__sfc__.__vapor = true`
+/// assignment (confirmed directly against the vendored rc.3 compiler
+/// source, and against the pinned rc.3 golden for
+/// `basic-interpolation.vue`'s vapor cell: `{ __name: '…', __vapor: true,
+/// setup(…) {…} }`).
 #[test]
 fn vapor_script_contains_vapor_flag() {
     let result = compile_sfc_vapor(
@@ -7068,8 +7088,14 @@ fn vapor_script_contains_vapor_flag() {
     );
     let script = result.script.as_ref().expect("should have script");
     assert!(
-        script.code.contains("__vapor = true") || script.code.contains("__vapor: true"),
-        "Vapor script should contain __vapor flag, got:\n{}",
+        script.code.contains("__vapor: true,"),
+        "Vapor script's __vapor flag must be an inline object-literal \
+         property (after __name, before setup), got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("__sfc__.__vapor ="),
+        "__vapor must not be a separate trailing assignment, got:\n{}",
         script.code
     );
 }
@@ -7131,8 +7157,14 @@ fn vapor_with_template_vapor_attr_contains_vapor_flag() {
     );
     let script = result.script.as_ref().expect("should have script");
     assert!(
-        script.code.contains("__vapor = true") || script.code.contains("__vapor: true"),
-        "Component with <template vapor> should contain __vapor flag, got:\n{}",
+        script.code.contains("__vapor: true,"),
+        "Component with <template vapor> should contain an inline __vapor \
+         object-literal property, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("__sfc__.__vapor ="),
+        "__vapor must not be a separate trailing assignment, got:\n{}",
         script.code
     );
 }
@@ -7604,6 +7636,68 @@ fn template_only_scoped_style_emits_scope_id_in_script() {
     assert!(
         script.code.contains("export default __sfc__"),
         "script should export __sfc__, got:\n{}",
+        script.code
+    );
+}
+
+/// A template-only Vapor component (no `<script>`/`<script setup>` at
+/// all — `slots.vue`'s exact shape) emits `__vapor: true` as an INLINE
+/// property of the `_sfc_main` object literal, not a separate trailing
+/// `__sfc__.__vapor = true;` statement — confirmed directly against the
+/// pinned rc.3 golden (`const _sfc_main = { __vapor: true }`) and against
+/// `@vue/compiler-sfc`'s own `runtimeOptions` string-building convention
+/// (every dev-time property, `__name`/`props`/`emits`/`__vapor`/etc., is
+/// accumulated into ONE string spliced into the object literal, never a
+/// post-hoc assignment).
+#[test]
+fn template_only_vapor_inlines_vapor_flag_in_object_literal() {
+    let result = compile_sfc_vapor("<template><div>x</div></template>");
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result
+        .script
+        .as_ref()
+        .expect("template-only vapor component should emit a synthetic script block");
+    assert!(
+        script.code.contains("const __sfc__ = { __vapor: true };"),
+        "__vapor: true must be an inline object-literal property, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("__sfc__.__vapor = true"),
+        "__vapor must not be a separate trailing assignment, got:\n{}",
+        script.code
+    );
+}
+
+/// The SAME template-only Vapor case, but ALSO with a scoped style. Real
+/// `@vitejs/plugin-vue`'s `__scopeId` is a COMPLETELY DIFFERENT mechanism
+/// from `__vapor` — it flows through `attachedProps` + the bundler-level
+/// `_export_sfc(_sfc_main, [['__scopeId', …]])` helper, not
+/// `compileScript`'s inline `runtimeOptions` string `__vapor` uses
+/// (confirmed directly against the real vendored `@vitejs/plugin-vue@6.0.7`
+/// source) — so `__scopeId`'s existing emission shape is left untouched
+/// here (no seed fixture exercises scoped styles, so there is no confirmed
+/// target shape to match here regardless). This test only pins that
+/// `__vapor` stays correctly inlined when a scopeId assignment is ALSO
+/// present, leaving `__scopeId`'s own emission unaffected.
+#[test]
+fn template_only_vapor_with_scoped_style_still_inlines_vapor_flag() {
+    let result = compile_sfc_vapor(
+        "<template><div class=\"app\">x</div></template>\n<style scoped>.app { color: red; }</style>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect(
+        "template-only vapor component with scoped style should emit a synthetic script block",
+    );
+    assert!(
+        script.code.contains("__vapor: true"),
+        "__vapor must be an inline object-literal property even alongside \
+         a scopeId assignment, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("__sfc__.__vapor ="),
+        "__vapor must not be a separate trailing assignment, got:\n{}",
         script.code
     );
 }
@@ -8198,10 +8292,13 @@ doSomething();
         "doSomething should remain in imports (used at runtime), got:\n{}",
         script.code
     );
-    // doSomething should NOT be in __returned__ (not referenced in template)
+    // doSomething IS in __returned__: official's non-inline genSetupReturn
+    // includes every setup-scope binding unconditionally (no template-usage
+    // filter) (matching official's unconditional-inclusion rule).
     assert!(
-        !returned_obj.contains("doSomething"),
-        "doSomething should not be in __returned__ (not used in template), got:\n{}",
+        returned_obj.contains("doSomething"),
+        "doSomething (a value import) should be in __returned__ per official's \
+         unconditional-inclusion rule, got:\n{}",
         returned_obj
     );
     // import type should be fully stripped
@@ -8250,10 +8347,17 @@ import { helperFn } from "./helpers";
         "MyComponent (used in template) should be in __returned__, got:\n{}",
         returned_obj
     );
-    // helperFn is NOT used in the template — should be excluded
+    // helperFn is used NOWHERE — not the script body, not the template — so
+    // it was already dropped from the import statement itself by
+    // `filter_import_specifiers`; __returned__ must not reference a name
+    // that isn't actually imported. `build_returned_object`'s
+    // unconditional-inclusion rule widens what counts as used (script-body
+    // usage, not just template usage) — it never resurrects a genuinely
+    // dead import that was already elided.
     assert!(
         !returned_obj.contains("helperFn"),
-        "helperFn (not used in template) should NOT be in __returned__, got:\n{}",
+        "helperFn (unused anywhere) must not be in __returned__ — it was already \
+         dropped from the import statement, got:\n{}",
         returned_obj
     );
 }
@@ -8336,24 +8440,37 @@ function doStuff() {
         returned_obj
     );
 
-    // computed and defineComponent are from vue and not used in template.
-    // Should NOT be in __returned__.
+    // `computed` is a companion import used NOWHERE (not the companion
+    // script body, not the template, not setup) — genuinely dead, so it was
+    // already dropped from the import statement; __returned__ must not
+    // reference it. The unconditional-inclusion rule widens what counts as
+    // used (script-body usage too, not just template usage), but never
+    // resurrects a genuinely dead import.
     assert!(
         !returned_obj.contains("computed"),
-        "computed (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        "computed (unused anywhere) must not be in __returned__, got:\n{}",
         returned_obj
     );
+    // `defineComponent` IS used in the companion script body
+    // (`export default defineComponent({})`), so official's rule would
+    // include it — but `build_returned_object`'s `runtime_text` param is the
+    // SETUP block's own stripped body only (`compute_runtime_text` in
+    // `process_script_setup`), so a companion-script-BODY-only usage is
+    // currently invisible to that check and stays excluded. Closing this
+    // fully needs the companion script's own runtime text threaded in too.
     assert!(
         !returned_obj.contains("defineComponent"),
-        "defineComponent (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        "defineComponent: companion-script-body-only usage is not yet detected \
+         by build_returned_object (documented residual gap), got:\n{}",
         returned_obj
     );
 
-    // isArray is used in setup body but NOT in template.
-    // Should NOT be in __returned__ (matches Vue's behavior).
+    // isArray is used in setup body (`isArray(props.items)`) but NOT in the
+    // template — still included per D6 (script-body usage counts).
     assert!(
-        !returned_obj.contains("isArray"),
-        "isArray (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj.contains("isArray"),
+        "isArray (used in the setup script body) should be in __returned__ per \
+         official's unconditional-inclusion rule, got:\n{}",
         returned_obj
     );
 
@@ -8374,7 +8491,9 @@ function doStuff() {
 
 #[test]
 fn companion_script_import_used_in_template_in_returned() {
-    // Companion <script> imports that ARE used in the template should be in __returned__.
+    // Companion <script> value imports are in __returned__ regardless of
+    // template usage (official's unconditional-inclusion rule) — including
+    // ones used in the template, which this test also covers.
     let result = compile_sfc(
         r#"<script lang="ts">
 import { formatCurrency } from "./utils";
@@ -8411,10 +8530,13 @@ const msg = "hello";
         returned_obj
     );
 
-    // unusedHelper is NOT used in template — should NOT be in __returned__
+    // unusedHelper is used NOWHERE (not the companion script body, not the
+    // template) — genuinely dead, already dropped from the import statement,
+    // so it must not appear in __returned__. The unconditional-inclusion
+    // rule widens inclusion to script-body-only usage, not to dead imports.
     assert!(
         !returned_obj.contains("unusedHelper"),
-        "unusedHelper (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        "unusedHelper (unused anywhere) must not be in __returned__, got:\n{}",
         returned_obj
     );
 }
@@ -8501,10 +8623,11 @@ defineProps<{ class?: string }>()
 </template>"#,
         runtime,
     );
-    // Vapor uses _ctx prefix; must use bracket notation for "class"
+    // Vapor props use $props prefix (official: type === "props" ? "$props" : "_ctx");
+    // must use bracket notation for the keyword "class".
     assert!(
-        code.contains(r#"_ctx["class"]"#),
-        "Expected _ctx[\"class\"] in Vapor output, got:\n{}",
+        code.contains(r#"$props["class"]"#),
+        "Expected $props[\"class\"] in Vapor output, got:\n{}",
         code
     );
 }
@@ -13549,6 +13672,115 @@ fn static_hoist_v_if_not_hoisted() {
     assert!(
         !code.contains("_createStaticVNode"),
         "element with v-if should NOT be hoisted\n--- code ---\n{}",
+        code
+    );
+}
+
+/// A `v-if`/`v-else` branch root with NO user props (just the synthetic
+/// branch `key`) still hoists its `{ key: N }` props object to a
+/// `_hoisted_N` constant, exactly like a static class/attrs object. Official
+/// `@vue/compiler-core`'s `hoistStatic` transform treats the injected key
+/// property the same as any other fully-static props object — it is not
+/// exempted just because it originated from `injectProp` rather than an
+/// authored attribute. Verter's `process_element_leave` special-cased the
+/// no-other-props branch (`injected_key.is_some()` with `has_props ==
+/// false`) as a separate code path that always inlined the key object,
+/// bypassing `can_hoist_props` entirely — this is the whole-object hoist
+/// mechanism (`_hoisted_N` consts), a DIFFERENT optimization from the
+/// whole-subtree `_createStaticVNode`/`_cache[N]` mechanism the sibling
+/// tests above cover.
+#[test]
+fn static_hoist_v_if_branch_key_object_hoisted() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div><p v-if="count > 0">{{ count }}</p><p v-else>zero</p></div></template>"#,
+    );
+    assert!(
+        code.contains("const _hoisted_1 = { key: 0 }"),
+        "v-if branch's synthetic key object should hoist to _hoisted_1\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("const _hoisted_2 = { key: 1 }"),
+        "v-else branch's synthetic key object should hoist to _hoisted_2\n--- code ---\n{}",
+        code
+    );
+    assert!(
+        !code.contains("{ key: 0 }") || code.matches("{ key: 0 }").count() == 1,
+        "the inline `{{ key: 0 }}` object should appear only once — in the \
+         hoisted const declaration itself, not again inline in the branch\n\
+         --- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_hoisted_1)") || code.contains("_hoisted_1,"),
+        "the v-if branch should reference the hoisted const, not inline the key object\n\
+         --- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("_hoisted_2)") || code.contains("_hoisted_2,"),
+        "the v-else branch should reference the hoisted const, not inline the key object\n\
+         --- code ---\n{}",
+        code
+    );
+}
+
+/// An ANCESTOR's own hoistable static props (e.g. a root `class="root"`)
+/// must number BEFORE a hoistable DESCENDANT's props (e.g. a nested
+/// `v-if`/`v-else` branch's synthetic key), matching official's separate
+/// document-pre-order `cacheStatic` hoist-numbering pass — even though
+/// Verter's codegen itself is bottom-up (child `leave` before parent
+/// `leave`). Exact basic-interpolation.vue shape: the official rc.3 golden
+/// hoists `{ class: "root" }` as `_hoisted_1` (the root, an ancestor), then
+/// the branch keys as `_hoisted_2`/`_hoisted_3` (descendants) — NOT the
+/// other way around, which is what a naive bottom-up push order would
+/// produce.
+#[test]
+fn static_hoist_ancestor_props_number_before_descendant_branch_keys() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div class="root"><p v-if="count > 0">{{ count }}</p><p v-else>zero</p></div></template>"#,
+    );
+    assert!(
+        code.contains(r#"const _hoisted_1 = { class: "root" }"#),
+        "the root's own class object must be _hoisted_1 (registered before its \
+         descendants, matching official's pre-order cacheStatic numbering)\n\
+         --- code ---\n{}",
+        code
+    );
+    assert!(
+        code.contains("const _hoisted_2 = { key: 0 }"),
+        "the v-if branch's synthetic key object must be _hoisted_2, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("const _hoisted_3 = { key: 1 }"),
+        "the v-else branch's synthetic key object must be _hoisted_3, got:\n{}",
+        code
+    );
+}
+
+/// A `<slot>` outlet's own static props (e.g. `name="header"`) must NOT be
+/// pre-order-reserved as a `_hoisted_N` — `leave_element` routes slot
+/// outlets to `process_slot_outlet`, an entirely separate function that
+/// builds its own `_renderSlot(...)` call and never consults a hoist
+/// reservation. Reserving one anyway orphans it: declared, pushed into the
+/// preamble, and never referenced anywhere in the render body — exactly
+/// the regression this test caught during development of the ancestor/
+/// descendant hoist-ordering fix, on `slots.vue`'s `<slot name="header">`.
+#[test]
+fn static_hoist_slot_outlet_props_are_never_reserved() {
+    let code = compile_and_validate_hoisted(
+        r#"<template><div class="panel"><header><slot name="header">Untitled</slot></header><main><slot /></main></div></template>"#,
+    );
+    assert!(
+        code.contains(r#"const _hoisted_1 = { class: "panel" }"#),
+        "the root's own class object must still hoist to _hoisted_1, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_hoisted_2"),
+        "the slot outlet's `name` prop must NOT produce an orphaned _hoisted_2 \
+         (renderSlot builds its own props argument, never a hoisted const), got:\n{}",
         code
     );
 }

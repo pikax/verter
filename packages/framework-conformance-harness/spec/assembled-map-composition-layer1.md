@@ -184,8 +184,8 @@ script_code = script_code.replace("export default _sfc_main;\n", "");
 - Both patterns are pure ASCII, so every match boundary is a UTF-8 character boundary (§5.2's
   boundary lemma).
 - Both rewrites apply to the **script fragment only**. The template fragment's code is written
-  verbatim (`compile.rs:99`) and is never rewritten (§5.7).
-- The module's own trailing `export default _sfc_main` (`compile.rs:163`) carries no `;` and no
+  verbatim (`compile.rs:178-188`) and is never rewritten (§5.7).
+- The module's own trailing `export default _sfc_main` (`compile.rs:252`) carries no `;` and no
   trailing newline, so it is not an instance of pass 2's pattern.
 
 ### 2.6 The emission standard
@@ -286,25 +286,25 @@ pub fn assemble_vue_main_module(
 ) -> String
 ```
 
-(`compile.rs:21-26`.) The body reads exactly the following, and nothing else:
+(`compile.rs:70-75`.) The body reads exactly the following, and nothing else:
 
 | Read | Site |
 |---|---|
-| `canonical_id` | `compile.rs:35`, `:40` (via `render_ids`), `:119` (`__file`), `:153` (SSR fallback id) |
-| `compiled.styles.len()` | `compile.rs:34`, `:44` |
-| `compiled.custom_blocks.len()` | `compile.rs:39`, `:44`, `:110` |
-| `compiled.template.imports` | `compile.rs:50-60` |
-| `compiled.template.ssr_imports` | `compile.rs:62-71` |
-| `compiled.template.code` | `compile.rs:99-107` (written; also text-scanned at `:103`, `:105`) |
-| `compiled.script.code` | `compile.rs:82-89` |
-| `compiled.scope_id` | `compile.rs:92-93` (no-script branch only) |
-| `meta.style_langs[idx]` | `id.rs:201-215`, reached from `compile.rs:35` |
-| `meta.custom_types[idx]` | `id.rs:216-226`, reached from `compile.rs:40` |
-| `profile.runtime_module_name` | `compile.rs:51`, `:144` |
-| `profile.is_production` | `compile.rs:118`, `:122` |
-| `profile.ssr` | `compile.rs:122`, `:143` |
-| `profile.hmr_strategy` | `compile.rs:123` |
-| `profile.ssr_module_id` | `compile.rs:153` |
+| `canonical_id` | `compile.rs:103`, `:108` (via `render_ids`), `:208` (`__file`), `:242` (SSR fallback id) |
+| `compiled.styles.len()` | `compile.rs:102`, `:112` |
+| `compiled.custom_blocks.len()` | `compile.rs:107`, `:112`, `:199` |
+| `compiled.template.imports` | `compile.rs:154-165` |
+| `compiled.template.ssr_imports` | `compile.rs:167-176` |
+| `compiled.template.code` | `compile.rs:178-196` (written; also text-scanned at `:192`, `:194`) |
+| `compiled.script.code` | `compile.rs:94` (read), `:126-146` (written) |
+| `compiled.scope_id` | `compile.rs:149-150` (no-script branch only) |
+| `meta.style_langs[idx]` | `id.rs:201-215`, reached from `compile.rs:103` |
+| `meta.custom_types[idx]` | `id.rs:216-226`, reached from `compile.rs:108` |
+| `profile.runtime_module_name` | `compile.rs:156`, `:233` |
+| `profile.is_production` | `compile.rs:207`, `:211` |
+| `profile.ssr` | `compile.rs:211`, `:232` |
+| `profile.hmr_strategy` | `compile.rs:212` |
+| `profile.ssr_module_id` | `compile.rs:242` |
 
 No other field of `RuntimeCompileOutput` (`carrier_compiler.rs:601-642`), `FileMeta`
 (`types.rs:2523-2541`) or `CompileProfile` (`types.rs:1322-1397`) is read.
@@ -325,6 +325,7 @@ AssembleInput := {
   isProduction         : boolean                      // (C)
   ssr                  : boolean                      // (C)
   ssrModuleId          : string | null                // (C)
+  emitSsrModuleRegistration : boolean                 // (C)  meaningful only when ssr
   hmrStrategy          : "vite" | "webpack" | "none"  // (C)
   sourceMapRequested   : boolean                      // (M)
   authored             : { script: boolean, template: boolean }   // (M)
@@ -347,7 +348,7 @@ Field notes:
 
 1. **`styleCount` / `customBlockCount` are separate from `styleLangs` / `customTypes`.** The
    assembler iterates `0..compiled.styles.len()` and `0..compiled.custom_blocks.len()`
-   (`compile.rs:34`, `:39`, `:110`), while `render_ids` indexes `meta.style_langs` and
+   (`compile.rs:102`, `:107`, `:199`), while `render_ids` indexes `meta.style_langs` and
    `meta.custom_types` with `.get(idx)` and falls back to `"css"` / `"custom"` when the index is
    absent (`id.rs:202-207`, `:217-221`). The two lengths can legitimately differ and the emitted
    bytes depend on both.
@@ -396,7 +397,7 @@ non-empty `sourceMap` string is ignored.
 Six DTO strings are embedded verbatim or Debug-quoted into the assembled module's bytes:
 `canonicalId`, `ssrModuleId`, `scopeId`, `runtimeModuleName`, each `styleLangs[i]`, and each
 `customTypes[i]` (§6.2). Two of the embedding sites use Rust's `{:?}` `str` formatting
-(`compile.rs:119`, `:156`), whose escaping beyond the five two-character escapes is driven by the
+(`compile.rs:208`, `:245`), whose escaping beyond the five two-character escapes is driven by the
 standard library's Unicode printability and grapheme-extended tables — a table this specification
 deliberately does not reproduce, because reproducing it in a second language is a
 Unicode-version-coupled hazard, not a semantic decision.
@@ -991,8 +992,8 @@ requirement (BV0A.md:19-22) forces the input-segment ingredient of rule (a).
 
 ### 5.7 The template fragment is not rewritten
 
-Neither pass applies to the template fragment: `compile.rs:99` writes `template.code` verbatim and the
-two `replace` calls at `compile.rs:84-85` operate on the script's clone only. The template's map is
+Neither pass applies to the template fragment: `compile.rs:178-188` writes `template.code` verbatim and
+the two `replace` calls at `compile.rs:84-85` operate on the script's clone only. The template's map is
 therefore **placed directly** (§6.3), with no chain step. Modelling the template as passing through an
 identity `CodeTransform` would be a no-op under §5.3 (no replaced ranges ⇒ no emission points beyond
 the input segments themselves), but stating it as "no chain step" removes any doubt.
@@ -1056,33 +1057,37 @@ Two derived id renderings, from `render_ids` (`id.rs:183-228`):
 
 `dec(i)` is the decimal rendering of a `usize` with no separators or sign.
 
-Every write performed by `assemble_vue_main_module` (`compile.rs:21-166`), in execution order:
+Every write performed by `assemble_vue_main_module` (`compile.rs:70-260`), in execution order. Script
+output now precedes the template's own runtime imports (the assembler writes the authored script's own
+imports and body first, then the template's runtime-helper imports immediately before the render
+function), matching official `@vitejs/plugin-vue`/`@vue/compiler-sfc` order — proven against the rc.3
+goldens; W-04/W-05 accordingly sit after W-06/W-07 (or W-08/W-09) below, not before them:
 
 | Site | Lines | Condition | Exact bytes | Class |
 |---|---|---|---|---|
-| W-01 | `:34-37` | for each `i` in `0..styleCount` | `import "` ++ `styleId(i)` ++ `"\n` | B |
-| W-02 | `:39-42` | for each `i` in `0..customBlockCount` | `import block` ++ `dec(i)` ++ ` from "` ++ `customId(i)` ++ `"\n` | B |
-| W-03 | `:44-46` | `styleCount > 0 ∨ customBlockCount > 0` | `\n` | B |
-| W-04 | `:49-60` | template present ∧ `imports` non-empty | `import { ` ++ join(`", "`, map(spec, imports)) ++ ` } from "` ++ `raw(R)` ++ `"\n` | B |
-| W-05 | `:62-71` | template present ∧ `ssrImports` non-empty | `import { ` ++ join(`", "`, map(spec, ssrImports)) ++ ` } from "vue/server-renderer"\n` | B |
-| **W-06** | `:74-86` | script present | **the rewritten script code, byte for byte** | **A** |
-| W-07 | `:87-89` | script present ∧ rewritten code does not end LF | `\n` | B |
-| W-08 | `:90-91` | script absent | `const _sfc_main = {}\n` | B |
-| W-09 | `:92-94` | script absent ∧ `scopeId` non-empty | `_sfc_main.__scopeId = "` ++ `raw(scopeId)` ++ `"\n` | B |
-| W-10 | `:97-98` | template present | `\n` | B |
-| **W-11** | `:99` | template present | **the template code, byte for byte** | **A** |
-| W-12 | `:100-102` | template present ∧ code does not end LF | `\n` | B |
-| W-13 | `:103-107` | template present ∧ its code contains `function ssrRender(` | `_sfc_main.ssrRender = ssrRender\n` | B |
-| W-13′ | `:105-107` | template present ∧ not W-13 ∧ its code contains `function render(` | `_sfc_main.render = render\n` | B |
-| W-14 | `:110-116` | for each `i` in `0..customBlockCount` | `if (typeof block` ++ `dec(i)` ++ ` === 'function') block` ++ `dec(i)` ++ `(_sfc_main)\n` | B |
-| W-15 | `:118-120` | `¬isProduction` | `_sfc_main.__file = ` ++ `dbg(canonicalId)` ++ `\n` | B |
-| W-16 | `:122-134` | `¬isProduction ∧ ¬ssr ∧ hmrStrategy = vite` | `/* HMR(vite) */\nif (import.meta.hot) { import.meta.hot.accept(() => {}) }\n` | B |
-| W-16′ | `:122-134` | `¬isProduction ∧ ¬ssr ∧ hmrStrategy = webpack` | `/* HMR(webpack) */\nif (module.hot) { module.hot.accept(() => {}) }\n` | B |
-| W-17 | `:143-161` | `ssr` | `import { useSSRContext as __vite_useSSRContext } from "` ++ `raw(R)` ++ `"\n` ++ `const _sfc_setup = _sfc_main.setup\n` ++ `_sfc_main.setup = (props, ctx) => {\n` ++ `  const ssrContext = __vite_useSSRContext()\n` ++ `  ;(ssrContext.modules \|\| (ssrContext.modules = new Set())).add(` ++ `dbg(S)` ++ `)\n` ++ `  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n` ++ `}\n` | B |
-| W-18 | `:163` | always | `export default _sfc_main` (no trailing LF) | B |
+| W-01 | `:102-105` | for each `i` in `0..styleCount` | `import "` ++ `styleId(i)` ++ `"\n` | B |
+| W-02 | `:107-110` | for each `i` in `0..customBlockCount` | `import block` ++ `dec(i)` ++ ` from "` ++ `customId(i)` ++ `"\n` | B |
+| W-03 | `:112-114` | `styleCount > 0 ∨ customBlockCount > 0` | `\n` | B |
+| **W-06** | `:126-143` | script present | **the rewritten script code, byte for byte** | **A** |
+| W-07 | `:144-146` | script present ∧ rewritten code does not end LF | `\n` | B |
+| W-08 | `:147-148` | script absent | `const _sfc_main = {}\n` | B |
+| W-09 | `:149-151` | script absent ∧ `scopeId` non-empty | `_sfc_main.__scopeId = "` ++ `raw(scopeId)` ++ `"\n` | B |
+| W-04 | `:154-165` | template present ∧ `imports` non-empty | `import { ` ++ join(`", "`, map(spec, imports)) ++ ` } from "` ++ `raw(R)` ++ `"\n` | B |
+| W-05 | `:167-176` | template present ∧ `ssrImports` non-empty | `import { ` ++ join(`", "`, map(spec, ssrImports)) ++ ` } from "vue/server-renderer"\n` | B |
+| W-10 | `:177` | template present | `\n` | B |
+| **W-11** | `:178-188` | template present | **the template code, byte for byte** | **A** |
+| W-12 | `:189-191` | template present ∧ code does not end LF | `\n` | B |
+| W-13 | `:192-196` | template present ∧ its code contains `function ssrRender(` | `_sfc_main.ssrRender = ssrRender\n` | B |
+| W-13′ | `:194-196` | template present ∧ not W-13 ∧ its code contains `function render(` | `_sfc_main.render = render\n` | B |
+| W-14 | `:199-205` | for each `i` in `0..customBlockCount` | `if (typeof block` ++ `dec(i)` ++ ` === 'function') block` ++ `dec(i)` ++ `(_sfc_main)\n` | B |
+| W-15 | `:207-209` | `¬isProduction` | `_sfc_main.__file = ` ++ `dbg(canonicalId)` ++ `\n` | B |
+| W-16 | `:211-223` | `¬isProduction ∧ ¬ssr ∧ hmrStrategy = vite` | `/* HMR(vite) */\nif (import.meta.hot) { import.meta.hot.accept(() => {}) }\n` | B |
+| W-16′ | `:211-223` | `¬isProduction ∧ ¬ssr ∧ hmrStrategy = webpack` | `/* HMR(webpack) */\nif (module.hot) { module.hot.accept(() => {}) }\n` | B |
+| W-17 | `:232-250` | `ssr ∧ emitSsrModuleRegistration` | `import { useSSRContext as __vite_useSSRContext } from "` ++ `raw(R)` ++ `"\n` ++ `const _sfc_setup = _sfc_main.setup\n` ++ `_sfc_main.setup = (props, ctx) => {\n` ++ `  const ssrContext = __vite_useSSRContext()\n` ++ `  ;(ssrContext.modules \|\| (ssrContext.modules = new Set())).add(` ++ `dbg(S)` ++ `)\n` ++ `  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n` ++ `}\n` | B |
+| W-18 | `:252` | always | `export default _sfc_main` (no trailing LF) | B |
 
-where `R` = `runtimeModuleName` if non-null else `"vue"` (`compile.rs:51`, `:144`); `S` =
-`ssrModuleId` if non-null else `canonicalId` (`compile.rs:153`); and `spec(n)` is
+where `R` = `runtimeModuleName` if non-null else `"vue"` (`compile.rs:156`, `:233`); `S` =
+`ssrModuleId` if non-null else `canonicalId` (`compile.rs:242`); and `spec(n)` is
 `format_import_specifier` (`crates/verter_compiler/src/compile/helpers.rs:148-158`): for a name
 beginning with `_` and longer than one character, `raw(n[1..]) ++ " as " ++ raw(n)`; otherwise
 `raw(n)`.
@@ -1094,7 +1099,7 @@ script (immediately after W-06's last byte, i.e. **before** W-07), **T3** into t
 
 Notes:
 
-- W-13's choice is made by a **text scan of the template code** (`compile.rs:103`, `:105`); it is a
+- W-13's choice is made by a **text scan of the template code** (`compile.rs:192`, `:194`); it is a
   code-shape decision only and contributes no segment either way.
 - W-07 and W-12 test the **final** fragment bytes, so a script whose trailing
   `export default _sfc_main;\n` was removed by pass 2 and now ends without LF receives W-07's newline.
@@ -1853,8 +1858,8 @@ stated wrongly:
    are false, and §6.4 case 4′ shows that fragment must **not** receive a boundary segment. Two
    independent round-2 reviews constructed that input from scratch and reached the same conclusion. The
    cursor-column formulation is deleted; "ends with LF" and "the newline patch does not fire" are
-   genuinely equivalent — the patch's own condition is `!code.ends_with('\n')` (`compile.rs:87`,
-   `:100`) — and either may be used.
+   genuinely equivalent — the patch's own condition is `!code.ends_with('\n')` (`compile.rs:144`,
+   `:189`) — and either may be used.
 2. **The rule applies to contributing maps only.** A present fragment with no map contributes no
    segments at all, so there is nothing on its lines for a boundary segment to protect; emitting one
    would fail the emission standard (§5.8).

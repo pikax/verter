@@ -1,4 +1,3 @@
-import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { defineComponent as _defineComponent } from "vue";
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "props-type-withdefaults",
@@ -18,6 +17,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
+import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("div", {
     onClick: _cache[0] || (_cache[0] = $event => ($setup.emit('pick', $setup.props.item)))

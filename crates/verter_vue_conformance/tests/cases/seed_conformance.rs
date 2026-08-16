@@ -469,5 +469,40 @@ fn known_divergences_file_is_well_formed() {
                 cell.case_id
             );
         }
+        // A curated `note` must not claim a divergence CLASS its own
+        // `reasons` array does not actually contain — the exact drift a
+        // prior regeneration pass introduced (a note copied forward from a
+        // DIFFERENT cell's boilerplate, describing a reason category this
+        // cell's comparator never reported). Two stock phrases are common
+        // enough to guard mechanically: "module item count differs" is only
+        // true of a TOP-LEVEL `Program` child-count reason (a NESTED
+        // `Program[...]/...` child-count reason is a structural difference
+        // somewhere INSIDE one module item, not a module-item-COUNT
+        // difference); "private binding"/"ordinal" language is only true
+        // when an `[identifier]` reason is actually present. Both checks
+        // read the reason strings' own `[tag] path —` prefix — the same
+        // wire shape `DiffReason::summary()` produces — never free-text
+        // matching on the detail half.
+        if cell.note.contains("module item count differs") {
+            let has_program_level_structure_reason = cell.reasons.iter().any(|r| {
+                r.strip_prefix("[structure] ")
+                    .is_some_and(|rest| rest.starts_with("Program —"))
+            });
+            assert!(
+                has_program_level_structure_reason,
+                "{} [{:?} {:?}]: note claims \"module item count differs\" but no reason is a \
+                 top-level `[structure] Program —` child-count difference — reasons: {:?}",
+                cell.case_id, cell.backend, cell.topology, cell.reasons
+            );
+        }
+        if cell.note.contains("private binding") || cell.note.to_lowercase().contains("ordinal") {
+            let has_identifier_reason = cell.reasons.iter().any(|r| r.starts_with("[identifier] "));
+            assert!(
+                has_identifier_reason,
+                "{} [{:?} {:?}]: note claims a private-binding/ordinal shift but no `[identifier]` \
+                 reason is present — reasons: {:?}",
+                cell.case_id, cell.backend, cell.topology, cell.reasons
+            );
+        }
     }
 }

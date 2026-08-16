@@ -95,6 +95,11 @@ struct AssembleInput {
     is_production: bool,
     ssr: bool,
     ssr_module_id: Option<String>,
+    /// Mirrors `CompileProfile::emit_ssr_module_registration` (see that
+    /// field's own doc comment) — whether SSR assembly wraps `setup()` with
+    /// the `useSSRContext`/`ssrContext.modules` registration. Only
+    /// meaningful when `ssr` is `true`.
+    emit_ssr_module_registration: bool,
     hmr_strategy: HmrStrategy,
     source_map_requested: bool,
     /// The pre-assembly AUTHORED-fragment inventory (§3.4), never the presence
@@ -120,6 +125,9 @@ impl Default for AssembleInput {
             is_production: false,
             ssr: false,
             ssr_module_id: None,
+            // Matches `CompileProfile::default()` — every existing caller not
+            // exercising this knob keeps today's byte-identical output.
+            emit_ssr_module_registration: true,
             hmr_strategy: HmrStrategy::None,
             source_map_requested: true,
             authored_script: false,
@@ -197,6 +205,7 @@ impl AssembleInput {
             "isProduction": self.is_production,
             "ssr": self.ssr,
             "ssrModuleId": self.ssr_module_id,
+            "emitSsrModuleRegistration": self.emit_ssr_module_registration,
             "hmrStrategy": match self.hmr_strategy {
                 HmrStrategy::Vite => "vite",
                 HmrStrategy::Webpack => "webpack",
@@ -267,6 +276,7 @@ impl AssembleInput {
             is_production: self.is_production,
             ssr: self.ssr,
             ssr_module_id: self.ssr_module_id.clone(),
+            emit_ssr_module_registration: self.emit_ssr_module_registration,
             hmr_strategy: self.hmr_strategy,
             runtime_module_name: self.runtime_module_name.clone(),
             source_map: self.source_map_requested,
@@ -314,6 +324,7 @@ impl AssembleInput {
             is_production: profile.is_production,
             ssr: profile.ssr,
             ssr_module_id: profile.ssr_module_id.clone(),
+            emit_ssr_module_registration: profile.emit_ssr_module_registration,
             hmr_strategy: profile.hmr_strategy,
             source_map_requested: profile.source_map,
             authored_script: meta.has_script,
@@ -2572,9 +2583,9 @@ fn genuine_compiler_output_agrees_across_implementations() {
 /// producing genuinely out-of-bounds (`U7`) coordinates on the inline
 /// topology. Both implementations agree it fails closed — this is a
 /// composition-correctness agreement, not a divergence — but the underlying
-/// carrier map/code mismatch is a real defect BV0 (or the emitter's true
-/// owner) should fix. It is scoped here rather than filed loosely so a
-/// future fix has a discriminating test to turn green.
+/// carrier map/code mismatch is a real defect the emitter's true owner
+/// should fix. It is scoped here rather than filed loosely so a future fix
+/// has a discriminating test to turn green.
 #[test]
 fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_tracked() {
     use oxc_allocator::Allocator;
@@ -2662,9 +2673,9 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
 // Everything above compares two implementations and passes when they agree.
 // That is silent about the comparator itself: a [`ComparedArtifact`] that
 // stopped reading `sourceRoot`, or a comparison that dropped a member, would
-// let both sides "agree" on a divergence neither of them has. AMD-008 requires
-// that failure mode be provably caught — "a comparator that silently ignores
-// one field must be provably caught".
+// let both sides "agree" on a divergence neither of them has. That failure
+// mode must be provably caught: a comparator that silently ignores one
+// field must be provably caught.
 //
 // The cases below supply the missing direction. Each takes ONE real production
 // artifact, perturbs exactly ONE member of the emitted document, runs BOTH
@@ -2977,8 +2988,8 @@ fn a_mappings_divergence_is_caught_even_when_the_decoded_segments_agree() {
 
 /// The chained script map carries BOTH passes, composed in sequence.
 ///
-/// AMD-008 requires the two authorized rewrites be applied "SEQUENTIALLY, pass
-/// two on pass one's output coordinate space". The failure mode that wording
+/// The two authorized rewrites must be applied SEQUENTIALLY — pass two on
+/// pass one's output coordinate space. The failure mode that requirement
 /// exists to exclude is a chain whose second pass is applied to the ORIGINAL
 /// fragment map instead of pass one's output: the code still comes out right,
 /// because the code is built by the transforms themselves, but the map silently
@@ -3065,3 +3076,21 @@ mod vector_inventory;
 /// fresh checkout does not have.
 #[cfg(feature = "bf2-authoritative")]
 mod bf2_seed_matrix;
+
+/// The full-axis gate over the same 36-cell seed matrix: unlike
+/// [`bf2_seed_matrix`], which deliberately does NOT gate on the oracle's
+/// non-wire mapping verdict, this module requires the FULL verdict (parse,
+/// link, structural, diagnostics, mapping, runtime) to pass for every cell.
+#[cfg(feature = "bf2-authoritative")]
+mod bf2_full_axis_gate;
+
+/// Genuine runtime-execution proof that a nested `v-for`/`v-if`/`v-for`
+/// whose inner source references an outer loop variable mounts without a
+/// scope error: mounts the compiled module through the pinned official
+/// with-vapor runtime instead of only string-matching the generated text.
+/// A CHILD module for the same reuse reason as its siblings above (the
+/// real-fixture compile + assembler bridge), reusing `bf2_seed_matrix`'s
+/// subprocess runner. Gated the same way: it needs the provisioned oracle
+/// vapor runtime build.
+#[cfg(feature = "bf2-authoritative")]
+mod nested_v_for_runtime_proof;

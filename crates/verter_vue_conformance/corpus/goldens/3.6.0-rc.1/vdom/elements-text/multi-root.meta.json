@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/elements-text/multi-root.js",
-      "sha256": "6507f3c8a2f1d633739977ccbd38e083ff5e1f25d919503674c406a096ea6c3c",
+      "sha256": "8364a71a4253eab18e68a1bb5caf371ca03a69c0a412b2dae21793c470807b89",
       "bytes": 636
     },
     "map": {

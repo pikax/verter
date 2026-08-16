@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.js",
-      "sha256": "8f2d121ffa134af45ed842c683f030fb9d594be64b0ad36fa03c2f51160314bb",
+      "sha256": "717c8b81a934601e9e5cacad06927fc1c770cfad5d8f223fa3879028387ea452",
       "bytes": 761
     },
     "map": {

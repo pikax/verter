@@ -137,7 +137,8 @@ impl<'a> CodeTransform<'a> {
 
                     result.push(chunk);
                 }
-                Chunk::Overwritten { start: cp, .. } => {
+                Chunk::Overwritten { start: cp, .. }
+                | Chunk::OverwrittenSegmented { start: cp, .. } => {
                     // For positioned non-original chunks, emit items at/before position
                     while item_idx < items.len() && items[item_idx].0 <= cp {
                         result.push(Chunk::inserted(items[item_idx].1));
@@ -232,7 +233,8 @@ impl<'a> CodeTransform<'a> {
 
                     result.push(chunk);
                 }
-                Chunk::Overwritten { start: cp, .. } => {
+                Chunk::Overwritten { start: cp, .. }
+                | Chunk::OverwrittenSegmented { start: cp, .. } => {
                     while item_idx < items.len() && items[item_idx].0 <= cp {
                         let (_, source_info, content) = items[item_idx];
                         result.push(Self::make_insert_chunk(content, source_info));
@@ -360,7 +362,8 @@ impl<'a> CodeTransform<'a> {
 
                     result.push(chunk);
                 }
-                Chunk::Overwritten { start: cp, .. } => {
+                Chunk::Overwritten { start: cp, .. }
+                | Chunk::OverwrittenSegmented { start: cp, .. } => {
                     while merge.peek_pos().is_some_and(|p| p <= cp) {
                         result.push(merge.take_chunk());
                     }
@@ -487,6 +490,7 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Inserted { .. }
                 | Chunk::Overwritten { .. }
+                | Chunk::OverwrittenSegmented { .. }
                 | Chunk::Moved { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {

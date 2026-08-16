@@ -1,4 +1,3 @@
-import { withKeys as _withKeys, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 
 const _sfc_main = {
   __name: 'key-modifiers',
@@ -14,6 +13,7 @@ return __returned__
 }
 
 }
+import { withKeys as _withKeys, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("input", {
     onKeyup: _withKeys($setup.onEnter, ["enter"]),

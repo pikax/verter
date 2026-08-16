@@ -84,6 +84,12 @@ pub struct ScriptContext<'alloc> {
     pub source: &'alloc str,
     pub out: CodeGenOutput<'alloc>,
     pub bindings: FxHashMap<&'alloc str, BindingType>,
+    /// `bindings`' keys, in FIRST-SEEN declaration order (parse-order,
+    /// deduplicated) — official's non-inline `__returned__` (`genSetupReturn`)
+    /// preserves `allBindings`' insertion order (JS object key order), not an
+    /// alphabetical sort; `bindings` itself is an `FxHashMap` and cannot
+    /// recover that order on its own. See `build_returned_object`.
+    pub binding_order: Vec<&'alloc str>,
     pub imports: Vec<&'static str>,
     pub inline_inject_pos: Option<u32>,
     pub alloc: &'alloc Allocator,
@@ -132,6 +138,7 @@ pub fn generate_script<'alloc>(
         source,
         out: CodeGenOutput::new(alloc),
         bindings: FxHashMap::default(),
+        binding_order: Vec::new(),
         imports: Vec::new(),
         inline_inject_pos: None,
         alloc,

@@ -1,4 +1,3 @@
-import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createComponent as _createComponent, template as _template } from 'vue';
 import ChildComp from "./child-comp.vue"
 
 const _sfc_main = {
@@ -14,6 +13,7 @@ return __returned__
 }
 
 }
+import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createComponent as _createComponent, template as _template } from 'vue';
 const t0 = _template("<h1>Title", 2)
 const t1 = _template("<p> ")
 const t2 = _template("<span> ")

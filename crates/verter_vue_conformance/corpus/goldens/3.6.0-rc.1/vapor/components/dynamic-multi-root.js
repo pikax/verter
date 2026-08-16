@@ -1,5 +1,5 @@
+const _sfc_main = { __vapor: true }
 import { createSlot as _createSlot, extend as _extend, createDynamicComponent as _createDynamicComponent, template as _template } from 'vue';
-const _sfc_main = {}
 const t0 = _template("<input type=checkbox>", 2)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {
