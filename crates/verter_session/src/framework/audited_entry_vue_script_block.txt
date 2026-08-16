@@ -1,0 +1,24 @@
+const __sfc__ = {
+  __name: 'App',
+  props: {
+  label: { type: String, required: true },
+  disabled: { type: Boolean, default: false },
+},
+  emits: ["toggle"],
+  setup(__props, { expose: __expose, emit: __emit }) {
+  __expose();
+
+
+const props = __props;
+const emit = __emit;
+
+function onClick() {
+  emit("toggle", !props.disabled);
+}
+
+const __returned__ = { props, emit, onClick };
+Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+return __returned__;
+
+}};
+export default __sfc__;

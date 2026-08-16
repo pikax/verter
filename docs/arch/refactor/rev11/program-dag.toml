@@ -74,9 +74,33 @@ predecessors = ["BF1"]
 
 [[block]]
 id = "BF3"
-name = "Known-wrong successful-cell safety retraction"
-class = "foundational-safety"
+name = "Conformance exhaustion and correction dispatch audit"
+class = "foundational"
 predecessors = ["BF2"]
+
+[[block]]
+id = "BA0"
+name = "Immediate request and result atomicity"
+class = "foundational-atomic"
+predecessors = ["BF3"]
+
+[[block]]
+id = "BS0"
+name = "Immediate Svelte correction"
+class = "subsystem"
+predecessors = ["BF3"]
+
+[[block]]
+id = "BCSS0"
+name = "Standalone CSS source-map product correction"
+class = "subsystem"
+predecessors = ["BF3"]
+
+[[block]]
+id = "BRT0"
+name = "Immediate route and transport parity"
+class = "subsystem"
+predecessors = ["BF3"]
 
 [[block]]
 id = "BV0A"
@@ -94,13 +118,13 @@ predecessors = ["BV0A"]
 id = "B2"
 name = "Framework parsing recovery diagnostics and stable identities"
 class = "foundational"
-predecessors = ["BV0", "BF3"]
+predecessors = ["BV0", "BF3", "BA0", "BS0", "BCSS0", "BRT0"]
 
 [[block]]
 id = "B3"
 name = "Canonical typed compiler request and prerequisite planner"
 class = "foundational"
-predecessors = ["BV0", "BF3"]
+predecessors = ["BV0", "BF3", "BA0", "BS0", "BCSS0", "BRT0"]
 
 [[block]]
 id = "B4"

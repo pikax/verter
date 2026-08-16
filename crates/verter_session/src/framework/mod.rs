@@ -26,6 +26,17 @@ pub mod svelte_jsx_assets;
 pub mod synth;
 pub mod virtual_file_naming_ts;
 
+/// The framework PRODUCT/route evidence suites. They live under the substrate
+/// they characterize — the reachable product surface, the carrier the batch
+/// route selects, and the public transports over both — rather than on the
+/// crate root, which stays a thin re-export shell.
+#[cfg(test)]
+pub(crate) mod framework_product_surface_tests;
+#[cfg(test)]
+mod svelte_batch_route_tests;
+#[cfg(all(test, feature = "transport-authoritative"))]
+mod transport_route_equivalence_tests;
+
 pub use api_projector::{ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx};
 pub use ctx::FrameworkAdapterCtx;
 pub use descriptor::{

@@ -1,0 +1,5 @@
+{
+  "sourceSha256": "de42571d96a50ced47bfa3c8144e53b3c316a68e8c75036a6d50705259e3a4b7",
+  "distSha256": "5735c184ac8106c94aed2f8c769305e35a034f83f781ab6bc1686a3cf059bf1c",
+  "producer": "pnpm --filter @verter/unplugin build"
+}

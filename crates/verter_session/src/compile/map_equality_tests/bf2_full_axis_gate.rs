@@ -70,18 +70,22 @@ fn harness_root_for_gate() -> PathBuf {
 }
 
 /// One cell's full report, straight off the CLI's own stdout JSON.
-struct CellReport {
-    exit_code: Option<i32>,
-    verdict: String,
-    reasons: Vec<String>,
-    axes: BTreeMap<String, (String, Option<String>)>,
+///
+/// `pub(super)` so the sibling Svelte conformance gate drives the SAME CLI
+/// through the SAME report reader instead of growing a second copy of this
+/// subprocess handling and JSON projection.
+pub(super) struct CellReport {
+    pub(super) exit_code: Option<i32>,
+    pub(super) verdict: String,
+    pub(super) reasons: Vec<String>,
+    pub(super) axes: BTreeMap<String, (String, Option<String>)>,
 }
 
 /// Run `check-candidate.mjs --authoritative` over one `(code, map)` pair
 /// against one golden. `map` is `None` for a map-disabled cell — the
 /// candidate JSON then carries `"map": null`, exactly like
 /// [`bf2_seed_matrix::bf2_authored_source_oracle_runs_over_every_seed_matrix_cell`].
-fn check_candidate(golden_name: &str, code: &str, map: Option<&str>) -> CellReport {
+pub(super) fn check_candidate(golden_name: &str, code: &str, map: Option<&str>) -> CellReport {
     let map_value: Value = match map {
         Some(raw) => serde_json::from_str(raw)
             .unwrap_or_else(|error| panic!("{golden_name}: the emitted map is not JSON: {error}")),
