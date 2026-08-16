@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/built-ins/teleport.js",
-      "sha256": "ec26286991fc7d21c56dcca7a14c0ec95e866bfc4074bb88d94f339bbec91f0c",
+      "sha256": "bb1bc5ecbb82a61cfd8bf2a64af26a021b6f5fbe782c264f77ab37eb885aa6fe",
       "bytes": 801
     },
     "map": {

@@ -1,4 +1,3 @@
-import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, template as _template } from 'vue';
 import { computed, ref } from "vue"
 
 
@@ -17,6 +16,7 @@ return __returned__
 }
 
 }
+import { txt as _txt, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, template as _template } from 'vue';
 const t0 = _template("<p> ", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

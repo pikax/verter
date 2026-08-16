@@ -206,15 +206,15 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 }
             }
 
-            // Add child separators
-            children::add_children_separators_array(
-                &children,
-                out,
-                &self.options,
-                source,
-                self.ast,
-                el_children,
-            );
+            // Add child separators + wrap static fallback children in slot
+            // cache groups. A <slot> outlet's fallback content is a slot
+            // function body like any other (official `buildSlots`), so it
+            // takes the SAME grouped-caching path component default slots
+            // and `<template v-slot>` bodies already use — never the
+            // separators-only path, which drops static fallback content out
+            // of `_cache[N]` entirely and its `-1` CACHED patch-flag
+            // optimization.
+            self.emit_slot_children_with_cache(&children, out, source, el_children);
 
             // Close: ])
             buf.clear();
@@ -631,6 +631,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         {
             props_buf.push_str(", ");
             let props_start = props_buf.len();
+            // Component props are never hoisted (components have variable
+            // tag resolution) and this call site produces no mapped anchors at
+            // all today, so the anchors are discarded.
+            let mut props_anchors = Vec::new();
             let props_result = element::build_props_object_into(
                 &mut props_buf,
                 el,
@@ -639,6 +643,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 oxc,
                 skip_prop,
                 self.options.force_js,
+                &mut props_anchors,
             );
             // v-if branch root (component) with user props: inject `key: N` as
             // the first property (unless the user authored an explicit :key).
@@ -1154,6 +1159,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         {
             props_buf.push_str(", ");
             let props_start = props_buf.len();
+            // Component props are never hoisted (components have variable
+            // tag resolution) and this call site produces no mapped anchors at
+            // all today, so the anchors are discarded.
+            let mut props_anchors = Vec::new();
             let props_result = element::build_props_object_into(
                 &mut props_buf,
                 el,
@@ -1162,6 +1171,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 oxc,
                 skip_prop,
                 self.options.force_js,
+                &mut props_anchors,
             );
             // v-if branch root (component) with user props: inject `key: N` as
             // the first property (unless the user authored an explicit :key).
@@ -1739,7 +1749,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // Single static child: _cache[N] || (_cache[N] = <child>)
                     let child = &children[run_start];
                     if child.kind == ChildKind::Text {
-                        // Single static text: wrap in _createTextVNode inside cache
+                        // Single static text: wrap in _createTextVNode inside
+                        // cache, with the CACHED patch flag — matching the
+                        // individual-element cache wrapper's own `-1`
+                        // handling (`element.rs`'s `has_cached_patchflag`
+                        // suffix), since `_createTextVNode` has no other way
+                        // to carry the "statically cached" marker a nested
+                        // element's own trailing patch-flag argument would.
                         out.add_vdom_import(VdomHelper::CreateTextVNode);
                         out.prepend_fmt(
                             child.start,
@@ -1747,7 +1763,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                                 "_cache[{cache_idx}] || (_cache[{cache_idx}] = _createTextVNode(\""
                             ),
                         );
-                        out.prepend_static(child.end, "\"))");
+                        let close = if self.options.is_production {
+                            "\", -1))"
+                        } else {
+                            "\", -1 /* CACHED */))"
+                        };
+                        out.prepend_static(child.end, close);
                     } else {
                         out.prepend_fmt(
                             child.start,

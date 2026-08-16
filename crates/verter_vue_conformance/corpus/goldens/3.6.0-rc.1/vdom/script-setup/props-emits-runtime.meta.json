@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-emits-runtime.js",
-      "sha256": "cfd42f3c88ee612719bbe627208b8509c8b457c2cdc86ad0b0e9a5323d53845d",
+      "sha256": "1c9b7e136071a8ff3e5f06a1d47247ae81a41b5b8bec8b9d26ed4ab81ae9151d",
       "bytes": 913
     },
     "map": {

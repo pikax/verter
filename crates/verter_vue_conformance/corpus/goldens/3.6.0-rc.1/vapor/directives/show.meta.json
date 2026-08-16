@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/directives/show.js",
-      "sha256": "aabfb0e997fe64def4b6b5d8eec38f46f239b849c5e0a6e6619c06c3f2882d08",
+      "sha256": "d88b668d7f95f93a932a1b89350e7d9afe743a8408498fcfb1e6a4c77a29b00d",
       "bytes": 610
     },
     "map": {

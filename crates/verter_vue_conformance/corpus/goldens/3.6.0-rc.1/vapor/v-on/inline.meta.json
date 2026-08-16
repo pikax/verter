@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-on/inline.js",
-      "sha256": "d9fd7c456a32cef519202eefa7b3f21e551adad1dee90216992993402624227a",
+      "sha256": "7f1157940a243c7c4acebaa5480ad3da316897f18f69d6e68bf23f10bd87f23b",
       "bytes": 885
     },
     "map": {

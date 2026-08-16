@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-on/modifiers.js",
-      "sha256": "65d547aca324c64a405cfd039bc827c2399d9873c3356f02d30ce56b24f2d681",
+      "sha256": "45b771cf70be9a0236bb0fb535bdf95afcb419537a4024473ca9a78816424b18",
       "bytes": 957
     },
     "map": {

@@ -809,29 +809,43 @@ pub use verter_parser::common::html_entities::has_html_entities;
 
 // ======================== Vapor HTML helpers ========================
 
-/// Write a `_template("...", true)` declaration directly into a buffer.
+/// Write a `_template("...", flags)` declaration directly into a buffer.
+///
+/// `flags` is official `@vue/compiler-vapor`'s numeric bitflag second
+/// argument (`genTemplates`, confirmed directly against the vendored rc.3
+/// source): `(root ? 1 : 0) | (isStatic ? 2 : 0)`, omitted entirely when both
+/// bits are 0 — never the boolean `true` this used to always emit.
+///
+/// `is_root`: this is the SFC template's own single top-level root element
+/// (never true for a v-if/v-for/slot-fallback closure's own template — those
+/// are never the document root). `is_static`: this template's own subtree
+/// registered NO effects, navigation, text extractions, or statements — i.e.
+/// it is 100% static markup with no dynamic bindings anywhere inside it.
 pub fn write_template_declaration_into(
     buf: &mut String,
     idx: u32,
     html: &str,
-    is_single_root: bool,
+    is_root: bool,
+    is_static: bool,
 ) {
     buf.push_str("const t");
     push_u32(buf, idx);
     buf.push_str(" = _template(\"");
     escape_js_string_into(buf, html);
     buf.push('"');
-    if is_single_root {
-        buf.push_str(", true");
+    let flags = u8::from(is_root) | (u8::from(is_static) << 1);
+    if flags != 0 {
+        buf.push_str(", ");
+        push_u32(buf, u32::from(flags));
     }
     buf.push(')');
 }
 
-/// Wrap a Vapor HTML string in a `_template("...", true)` call.
+/// Wrap a Vapor HTML string in a `_template("...", flags)` call.
 #[cfg(test)]
-pub fn format_template_declaration(idx: u32, html: &str, is_single_root: bool) -> String {
+pub fn format_template_declaration(idx: u32, html: &str, is_root: bool, is_static: bool) -> String {
     let mut buf = String::with_capacity(html.len() + 32);
-    write_template_declaration_into(&mut buf, idx, html, is_single_root);
+    write_template_declaration_into(&mut buf, idx, html, is_root, is_static);
     buf
 }
 
@@ -1030,6 +1044,47 @@ pub fn parse_v_for_expression(expr: &str) -> (&str, &str) {
         .unwrap_or(params_raw);
 
     (params, iterable)
+}
+
+/// Split a v-for `params` string (the first element of
+/// [`parse_v_for_expression`]'s return, parens already stripped) into up to
+/// 3 top-level, comma-separated pieces (value / key / index — official's
+/// own `parseFor` positional assignment), respecting bracket/brace/paren
+/// nesting so a destructured value like `{ id, name }` isn't split on its
+/// OWN internal comma. A 4th-or-later piece is folded into the 3rd slot
+/// verbatim (malformed input; not Verter's job to diagnose here).
+pub fn split_v_for_params(params: &str) -> [Option<&str>; 3] {
+    let mut out: [Option<&str>; 3] = [None, None, None];
+    let mut slot = 0usize;
+    let mut start = 0usize;
+    let mut depth_paren = 0i32;
+    let mut depth_bracket = 0i32;
+    let mut depth_brace = 0i32;
+    let bytes = params.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth_paren += 1,
+            b')' => depth_paren -= 1,
+            b'[' => depth_bracket += 1,
+            b']' => depth_bracket -= 1,
+            b'{' => depth_brace += 1,
+            b'}' => depth_brace -= 1,
+            b',' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                let piece = params[start..i].trim();
+                if !piece.is_empty() && slot < 3 {
+                    out[slot] = Some(piece);
+                    slot += 1;
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = params[start..].trim();
+    if !tail.is_empty() && slot < 3 {
+        out[slot] = Some(tail);
+    }
+    out
 }
 
 /// Find ` in ` or ` of ` separator in a v-for expression, respecting nesting.

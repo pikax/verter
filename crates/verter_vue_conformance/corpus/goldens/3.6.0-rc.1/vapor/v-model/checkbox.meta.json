@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.js",
-      "sha256": "116b8cc21c847f588e61f4c7225dfb6c7c294c3d9c78183b78e369e861e857a3",
+      "sha256": "637ce4123e5dd2279e87540706f4ba59228cda76bef31e3e183dd8d6ee3d2503",
       "bytes": 734
     },
     "map": {

@@ -3967,6 +3967,7 @@ dependencies = [
  "smallvec",
  "syn 2.0.117",
  "tempfile",
+ "trybuild",
  "verter_audit",
  "verter_css_syntax",
  "verter_ecma",

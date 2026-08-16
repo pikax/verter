@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-on/method-ref.js",
-      "sha256": "b3b415ef218882768d90130617b5561459d175eb335129cf4719d08b2a395b43",
+      "sha256": "0d83d146298f47f9d291b3543d001f1e42160a9a7ccd68d1af52f6bcaf6c3e9d",
       "bytes": 740
     },
     "map": {

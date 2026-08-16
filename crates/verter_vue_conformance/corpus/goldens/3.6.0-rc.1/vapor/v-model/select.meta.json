@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-model/select.js",
-      "sha256": "bbde32b27c6c96967acfa1566e03c4e7e4903ea68c9f46e5b0c8295d80e2fba5",
+      "sha256": "6445bfc8e3e16cda7e1191d94219786212566c912d07675d1fa8080201fc8933",
       "bytes": 700
     },
     "map": {

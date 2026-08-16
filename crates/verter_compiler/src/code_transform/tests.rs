@@ -1526,10 +1526,13 @@ fn test_batch_overwrite_preserves_unaffected_chunks() {
 #[test]
 fn test_chunk_size() {
     use super::chunk::Chunk;
-    // 4 explicit variants — largest (Overwritten/Moved) is u32 + u32 + &str = 24 bytes + tag = 32
+    // Largest variant is now `OverwrittenSegmented` (u32 + u32 + &str + &[SegmentAnchor]
+    // = 8 + 16 + 16 = 40 bytes + tag = 48), added for the opt-in segmented-overwrite
+    // primitive (`try_overwrite_segmented`). Previously 32 bytes with Overwritten/Moved
+    // (u32 + u32 + &str = 24 bytes + tag) as the largest variant.
     assert_eq!(
         std::mem::size_of::<Chunk>(),
-        32,
+        48,
         "Chunk enum size changed unexpectedly — update this test if intentional"
     );
 }

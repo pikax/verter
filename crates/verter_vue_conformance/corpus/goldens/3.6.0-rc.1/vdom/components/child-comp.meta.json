@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/components/child-comp.js",
-      "sha256": "a98928a09fcaedc8bc73fc19f90d04b875b372869ec276ee4b9ebf395aae975b",
+      "sha256": "e528cbd1cb363579abaa4f6116d87ba22dae18095edc6fbc07340f20c81f3f9d",
       "bytes": 1146
     },
     "map": {

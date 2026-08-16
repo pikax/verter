@@ -1,4 +1,3 @@
-import { openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 const _hoisted_1 = [".text-content", "^data-x"]
 
 function render(_ctx, _cache, $props, $setup, $data, $options) {

@@ -1,5 +1,5 @@
+const _sfc_main = { __vapor: true }
 import { template as _template } from 'vue';
-const _sfc_main = {}
 const t0 = _template("<div class=\"card elevated\"style=\"color: red; margin-top: 4px\"><span class=label>Label", 3)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

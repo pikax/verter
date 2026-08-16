@@ -1,4 +1,3 @@
-import { createElementVNode as _createElementVNode, toDisplayString as _toDisplayString, withCtx as _withCtx, openBlock as _openBlock, createBlock as _createBlock } from "vue"
 import ChildComp from "./child-comp.vue"
 
 const _sfc_main = {
@@ -13,6 +12,7 @@ return __returned__
 }
 
 }
+import { createElementVNode as _createElementVNode, toDisplayString as _toDisplayString, withCtx as _withCtx, openBlock as _openBlock, createBlock as _createBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createBlock($setup["ChildComp"], { label: "Slotted" }, {
     header: _withCtx(() => [...(_cache[0] || (_cache[0] = [

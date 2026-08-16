@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.js",
-      "sha256": "b678b537973ade3718db42c0390575d75d0a7143db62e30f3467316322bed144",
+      "sha256": "b8e5828d930a195336f4e2c3ad8eaeeacdcf0eb50ac88ea21b31a7f76839ceab",
       "bytes": 1020
     },
     "map": {

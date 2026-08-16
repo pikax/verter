@@ -9331,6 +9331,10 @@ pub(crate) mod foundations_guards {
             "crates/verter_session/src/compile/map_equality_tests/vector_inventory.rs",
             "layer-2 vector-inventory reproduction (`#[cfg(test)]`) — reads the committed `assembled-map-composition.vectors.json` TEST FIXTURE off disk to drive every frozen vector through the production assembler. Not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
+        (
+            "crates/verter_session/src/compile/map_equality_tests/nested_v_for_runtime_proof.rs",
+            "nested v-for/v-if runtime-execution proof (`#[cfg(test, feature = \"bf2-authoritative\")]`) — writes the compiled module's own generated code to a scratch temp file so an EXTERNAL Node/jsdom subprocess can read it off real disk (a subprocess cannot read Verter's in-memory VFS), then removes it. External-tool scaffolding, sibling of the `oracle_gen_spike.rs`/`vue_assets.rs` entries above — not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
 ];
 
     /// Predicate the test reuses: does this file's source contain

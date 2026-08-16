@@ -7,7 +7,7 @@
 //! that update the DOM via setter functions inside `_renderEffect`.
 
 use crate::ast::types::{ElementNode, PropFlags};
-use crate::template::code_gen::binding::BindingResolver;
+use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::shared::helpers::{
     self, is_member_expression, is_multi_statement_handler, VaporHelper, DELEGATABLE_EVENTS,
 };
@@ -101,7 +101,9 @@ pub fn process_dynamic_props(
             stmt.push_str(", () => (");
             stmt.push_str(&resolved);
             stmt.push_str("))");
-            ctx.state.child_statements.push(ctx.out.alloc_str(&stmt));
+            ctx.state
+                .child_statements
+                .push((ctx.out.alloc_str(&stmt), &[]));
             ctx.out.add_vapor_import(VaporHelper::ApplyVShow);
             continue;
         }
@@ -141,6 +143,20 @@ pub fn process_dynamic_props(
             _ => None,
         };
 
+        // `:key` (or `v-bind:key`) is VNode-identity metadata, never a real
+        // DOM attribute — official never emits a prop-setter for it.
+        // `build_v_for_root`'s `extract_key_expr` already reads it
+        // separately for `_createFor`'s trailing key callback
+        // (`(item) => (item)`); processing it again here as an ordinary
+        // dynamic prop double-handles it, emitting a bogus
+        // `_setProp(nN, "key", …)` that renders a literal `key="…"` DOM
+        // attribute (confirmed as the exact cause of the runtime HTML
+        // mismatch — `<li key="[object Object]">` — on a nested `v-for`
+        // with `:key`).
+        if (name == ":" || name == "v-bind") && arg == Some("key") {
+            continue;
+        }
+
         if value.is_empty() && arg.is_none() {
             continue; // Skip directives without values
         }
@@ -178,7 +194,7 @@ pub fn process_dynamic_props(
                 if is_const {
                     ctx.state
                         .child_statements
-                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                        .push((ctx.out.alloc_str(&effect.to_statement()), &[]));
                 } else {
                     ctx.state.own_effects.push(effect);
                 }
@@ -192,7 +208,7 @@ pub fn process_dynamic_props(
                 if is_const {
                     ctx.state
                         .child_statements
-                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                        .push((ctx.out.alloc_str(&effect.to_statement()), &[]));
                 } else {
                     ctx.state.own_effects.push(effect);
                 }
@@ -207,7 +223,7 @@ pub fn process_dynamic_props(
                 if is_const {
                     ctx.state
                         .child_statements
-                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                        .push((ctx.out.alloc_str(&effect.to_statement()), &[]));
                 } else {
                     ctx.state.own_effects.push(effect);
                 }
@@ -222,7 +238,7 @@ pub fn process_dynamic_props(
                 if is_const {
                     ctx.state
                         .child_statements
-                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                        .push((ctx.out.alloc_str(&effect.to_statement()), &[]));
                 } else {
                     ctx.state.own_effects.push(effect);
                 }
@@ -273,6 +289,7 @@ fn process_event(
     let mut has_capture = false;
     let mut has_passive = false;
     let mut has_once = false;
+    let mut has_delegate = false;
 
     for modifier in &prop.modifiers {
         let mod_name = &ctx.source[modifier.start as usize..modifier.end as usize];
@@ -280,6 +297,7 @@ fn process_event(
             "capture" => has_capture = true,
             "passive" => has_passive = true,
             "once" => has_once = true,
+            "delegate" => has_delegate = true,
             m if RUNTIME_MODIFIERS.contains(&m) => runtime_mods.push(m),
             m if KEY_MODIFIERS.contains(&m) => key_mods.push(m),
             _ => {}
@@ -293,7 +311,13 @@ fn process_event(
     let resolver = ctx.resolver;
     let force_js = ctx.force_js;
 
-    if !non_delegatable && DELEGATABLE_EVENTS.contains(&event_name) {
+    // Official rc.3 (`@vue/compiler-vapor` `transformVOn`): delegation is now
+    // OPT-IN via an explicit `.delegate` modifier (`isDelegatableEvent =
+    // !!delegateModifier && arg.isStatic && delegatedEvents(arg.content)`) —
+    // a bare `@click="handler"` with no modifier binds directly through
+    // `_on()`, matching the rc.3 seed goldens exactly. Delegation is no
+    // longer automatic for known-delegatable event names.
+    if has_delegate && !non_delegatable && DELEGATABLE_EVENTS.contains(&event_name) {
         // Delegatable event: n{ref}.$evt{event} = _createInvoker(handler)
         let event_alloc = ctx.out.alloc_str(event_name);
         if ctx.delegated_events_set.insert(event_alloc) {
@@ -317,7 +341,9 @@ fn process_event(
             force_js,
         );
         line.push(')');
-        ctx.state.child_statements.push(ctx.out.alloc_str(&line));
+        ctx.state
+            .child_statements
+            .push((ctx.out.alloc_str(&line), &[]));
         ctx.out.add_vapor_import(VaporHelper::DelegateEvents);
         ctx.out.add_vapor_import(VaporHelper::CreateInvoker);
     } else {
@@ -363,7 +389,9 @@ fn process_event(
         }
 
         line.push(')');
-        ctx.state.child_statements.push(ctx.out.alloc_str(&line));
+        ctx.state
+            .child_statements
+            .push((ctx.out.alloc_str(&line), &[]));
         ctx.out.add_vapor_import(VaporHelper::On);
     }
 }
@@ -384,16 +412,32 @@ fn write_handler_expression(
     let is_member = is_member_expression(handler);
     let resolved = resolve_expr(handler, value_start, oxc_exp, resolver, force_js);
 
+    // Official (`genEventHandler`'s `isConstantBinding`, confirmed directly
+    // against the vendored rc.3 source): the arrow-wrap is skipped ONLY for
+    // a BARE identifier (no dots — `value.ast === null`; a genuine dotted
+    // path like `foo.bar` always parses a sub-expression and is therefore
+    // ALWAYS wrapped, regardless of `foo`'s own binding type) that resolves
+    // to a `SETUP_CONST` binding — Vue's own `analyzeScriptBindings`
+    // classifies function/class/enum declarations and imports as
+    // `SETUP_CONST`, so `@click="onClick"` referencing a `function onClick
+    // () {}` declaration emits the bare `_ctx.onClick`, never a wrapper —
+    // confirmed against the pinned rc.3 golden for `props-emit.vue`.
+    let is_constant_binding =
+        !handler.contains('.') && resolver.get(handler) == Some(BindingType::SetupConst);
+    let should_wrap = is_member && !is_constant_binding;
+
     // Whether the handler body is a statement LIST, read from the parse fact —
     // never probed out of the raw source text.
     let is_statement_list = is_multi_statement_handler(oxc_exp);
 
     if runtime_mods.is_empty() && key_mods.is_empty() {
-        // Vue 3.6: wraps member expressions as arrow functions
-        if is_member {
+        if should_wrap {
             buf.push_str("e => ");
             buf.push_str(&resolved);
             buf.push_str("(e)");
+        } else if is_member {
+            // Constant-binding member reference — bare, unwrapped.
+            buf.push_str(&resolved);
         } else {
             push_inline_handler(buf, &resolved, is_statement_list);
         }
@@ -405,10 +449,12 @@ fn write_handler_expression(
     }
     if !runtime_mods.is_empty() {
         buf.push_str("_withModifiers(");
-        if is_member {
+        if should_wrap {
             buf.push_str("e => ");
             buf.push_str(&resolved);
             buf.push_str("(e)");
+        } else if is_member {
+            buf.push_str(&resolved);
         } else {
             push_inline_handler(buf, &resolved, is_statement_list);
         }
@@ -422,10 +468,12 @@ fn write_handler_expression(
             buf.push('"');
         }
         buf.push_str("])");
-    } else if is_member {
+    } else if should_wrap {
         buf.push_str("e => ");
         buf.push_str(&resolved);
         buf.push_str("(e)");
+    } else if is_member {
+        buf.push_str(&resolved);
     } else {
         push_inline_handler(buf, &resolved, is_statement_list);
     }
@@ -517,7 +565,9 @@ fn process_v_model(
 
     stmt.push(')');
 
-    ctx.state.child_statements.push(ctx.out.alloc_str(&stmt));
+    ctx.state
+        .child_statements
+        .push((ctx.out.alloc_str(&stmt), &[]));
 
     match helper {
         "_applyTextModel" => ctx.out.add_vapor_import(VaporHelper::ApplyTextModel),
@@ -577,7 +627,7 @@ fn process_template_ref<'a>(
         stmt.push_str(", \"");
         stmt.push_str(ref_name);
         stmt.push_str("\")");
-        state.child_statements.push(out.alloc_str(&stmt));
+        state.child_statements.push((out.alloc_str(&stmt), &[]));
         out.add_vapor_import(VaporHelper::CreateTemplateRefSetter);
     }
 }

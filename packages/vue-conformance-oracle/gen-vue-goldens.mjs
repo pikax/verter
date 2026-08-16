@@ -410,30 +410,53 @@ async function compileInlineCell({ caseId, source }) {
 }
 
 /**
- * Assemble the official NON-inline module in the shape a bundler host (and
- * Verter's `assemble_vue_main_module`) ships: the template helper import
- * line first, then the component object, then the separate render function,
- * then the attach + default export. This is the apples-to-apples counterpart
- * of Verter's shipped runtime Main — the official `inlineTemplate: true`
- * topology (setup returns the render closure) is a DIFFERENT, behaviorally
- * equivalent shape that is not what Verter emits (tracked as a future
- * feature in `docs/arch/next/vue-inline-template-runtime.md`).
+ * Assemble the official NON-inline module in the shape official Vue's own
+ * bundler integration ships: the component object FIRST, then the whole
+ * template block (its helper import line included), then the attach +
+ * default export. This is the apples-to-apples counterpart of Verter's
+ * shipped runtime Main — the official `inlineTemplate: true` topology (setup
+ * returns the render closure) is a DIFFERENT, behaviorally equivalent shape
+ * that is not what Verter emits (tracked as a future feature in
+ * `docs/arch/next/vue-inline-template-runtime.md`).
  *
- * - `renderCode` is a full `compileTemplate` module; its import line is
- *   hoisted to the top and its `export function render` becomes the
- *   attachable `function render`.
+ * MODULE-ITEM ORDER. Authority, read verbatim from the installed package:
+ * `@vitejs/plugin-vue@6.0.7`, `dist/index.mjs:1319`, `transformMain`:
+ *
+ *     const output = [ scriptCode, templateCode, … ]
+ *
+ * `templateCode` is `compileTemplate`'s output, which BEGINS with its own
+ * `import { … } from "vue"` line — so official's assembled module carries
+ * that import AFTER the `_sfc_main` declaration, not before it. This
+ * generator previously hoisted the render fragment's import line to the top
+ * of the module, which put every golden's first two module items in the
+ * opposite order from the real thing; module-item order is in contract under
+ * Compiled-Output Conformance, so the hoist was a modelling defect and is
+ * removed. (ESM hoists imports regardless of textual position, so both
+ * orders execute identically — only the recorded structure differs.)
+ *
+ * - `renderCode` is a full `compileTemplate` module; its `export function
+ *   render` becomes the attachable `function render` and its import line
+ *   stays where official leaves it, at the head of the template block.
  * - `scriptCode` (when present) has its `export default` rebound to
  *   `const _sfc_main =`.
  */
-function assembleNonInline({ importLine, body, scriptCode }) {
+function assembleNonInline({ importLine, body, scriptCode, vapor }) {
   const renderBody = body.replace("export function render(", "function render(");
   const parts = [];
-  if (importLine) parts.push(importLine);
   if (scriptCode != null) {
     parts.push(scriptCode.replace("export default", "const _sfc_main ="));
   } else {
-    parts.push("const _sfc_main = {}");
+    // A script-less SFC has no `compileScript` output at all (official
+    // throws for one), so the component object is synthesised — and for a
+    // vapor build official's bundler integration puts the runtime-interop
+    // marker in it, since nothing else can carry it. Same authority as the
+    // module-item order above: `@vitejs/plugin-vue@6.0.7`,
+    // `dist/index.mjs:1424`, `genScriptCode`:
+    //
+    //     let scriptCode = `const ${scriptIdentifier} = { ${descriptor.vapor ? "__vapor: true" : ""} }`;
+    parts.push(vapor ? "const _sfc_main = { __vapor: true }" : "const _sfc_main = {}");
   }
+  if (importLine) parts.push(importLine);
   parts.push(renderBody, "_sfc_main.render = render", "export default _sfc_main");
   return parts.join("\n");
 }
@@ -506,7 +529,7 @@ async function compileCell({ caseId, source, backend }) {
         };
       }
       const { importLine, body } = splitRenderImport(render.code);
-      code = assembleNonInline({ importLine, body, scriptCode });
+      code = assembleNonInline({ importLine, body, scriptCode, vapor });
       // compileTemplate original positions are template-content-relative;
       // re-anchor them SFC-absolute (the same offset the bundler applies).
       map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);
@@ -525,7 +548,7 @@ async function compileCell({ caseId, source, backend }) {
         pushDiagnostic(diagnostics, "returned-error", error);
       }
       const { importLine, body } = splitRenderImport(render.code);
-      code = assembleNonInline({ importLine, body, scriptCode: null });
+      code = assembleNonInline({ importLine, body, scriptCode: null, vapor });
       // compileTemplate original positions are template-content-relative;
       // re-anchor them SFC-absolute (the same offset the bundler applies).
       map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);

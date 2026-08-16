@@ -312,25 +312,37 @@ pub fn process_script_setup<'alloc>(
             continue;
         }
         let name = &content_str[span.start as usize..span.end as usize];
-        ctx.bindings.insert(name, *bt);
+        if ctx.bindings.insert(name, *bt).is_none() {
+            ctx.binding_order.push(name);
+        }
+        // A declaration's own identifier is a required `verbatim-carry`
+        // source-map anchor: a top-level `const count = ref(0)` must map a
+        // segment to `count`'s OWN position, not merely to its LINE's
+        // start (confirmed against the mapping oracle). The identifier
+        // text stays verbatim passthrough in the vast majority of cases;
+        // when it doesn't (e.g. this binding's declaration was itself
+        // overwritten elsewhere), the registered offset simply lands
+        // outside any surviving `Original` chunk and is never consulted —
+        // a harmless no-op, not a wrong mapping.
+        ctx.out.add_sourcemap_location(content_start + span.start);
     }
 
     // Add companion script import names as SetupImport bindings.
-    // Imports in the companion <script> block are available to the template at runtime
-    // because the component factory merges both script blocks. We mark them as SetupImport
-    // (not SetupConst) so they're filtered by template_used_vars — only companion imports
-    // actually referenced in the template appear in __returned__. This is an intentional,
-    // TRACKED over-elision divergence: official 3.6.0-rc.1 INCLUDES unused setup imports in
-    // __returned__ (as `get x() { return x }` getters); Verter elides them (see
-    // `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). The filter still keeps
-    // type-only imports (e.g., CurrencyCodes used only as `"EUR" as CurrencyCodes`) out of
-    // __returned__ — official excludes those too.
+    // Imports in the companion <script> block are available to the template at
+    // runtime because the component factory merges both script blocks.
+    // `build_returned_object` includes a SetupImport iff it is genuinely
+    // runtime-used (script body or template) — see that function's doc
+    // comment for the full unconditional-inclusion rule and its disclosed
+    // companion-script-body-usage gap. Type-only imports (e.g., CurrencyCodes
+    // used only as `"EUR" as CurrencyCodes`) never reach here as a runtime
+    // binding in the first place — official excludes those too.
     for name in &companion_import_names {
         // Skip if setup script already declares the same name (setup takes precedence)
         let alloc_name = ctx.out.alloc_str(name);
-        ctx.bindings
-            .entry(alloc_name)
-            .or_insert(BindingType::SetupImport);
+        if let std::collections::hash_map::Entry::Vacant(entry) = ctx.bindings.entry(alloc_name) {
+            entry.insert(BindingType::SetupImport);
+            ctx.binding_order.push(alloc_name);
+        }
     }
 
     // Inject _useCssVars if CSS v-bind vars are present
@@ -438,10 +450,21 @@ pub fn process_script_setup<'alloc>(
     } else {
         (false, false)
     };
+    // Official `buildDestructureElements`: `expose: __expose` is destructured
+    // whenever `defineExpose()` was authored OR the template is non-inline
+    // (`ctx.hasDefineExposeCall || !inlineMode`) — non-inline setup always
+    // needs a real `__expose` to hand the instance, even with no authored
+    // call. When no `defineExpose()` was authored AND non-inline, official
+    // also emits a bare `__expose();` statement at the top of the setup body
+    // so an un-exposed non-inline component still gets its (empty) public
+    // surface locked in (`!ctx.hasDefineExposeCall && !inlineMode`).
+    let bind_expose = macro_state.has_expose || !options.inline_template;
+    let emit_bare_expose_call = !macro_state.has_expose && !options.inline_template;
     let mut wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
-        macro_state.has_expose,
+        bind_expose,
+        emit_bare_expose_call,
         macro_state.has_emit,
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
@@ -450,6 +473,8 @@ pub fn process_script_setup<'alloc>(
         uses_attrs,
         uses_slots,
         wrap,
+        options.is_vapor,
+        options.ssr,
     );
     if prepared.companion().is_some() {
         // The setup open tag can immediately follow companion-script content.
@@ -466,7 +491,9 @@ pub fn process_script_setup<'alloc>(
     let returned = if !options.inline_template {
         Some(build_returned_object(
             &ctx.bindings,
+            &ctx.binding_order,
             options.template_used_vars.as_ref(),
+            runtime_text.as_deref(),
         ))
     } else {
         None
@@ -479,8 +506,6 @@ pub fn process_script_setup<'alloc>(
         } else {
             None
         },
-        options.is_vapor,
-        options.ssr,
         wrap,
     );
 
@@ -682,7 +707,8 @@ fn emit_minimal_component(
 fn build_setup_wrapper_start(
     component_name: &str,
     is_async: bool,
-    has_expose: bool,
+    bind_expose: bool,
+    emit_bare_expose_call: bool,
     has_emit: bool,
     props_section: Option<&str>,
     emits_section: Option<&str>,
@@ -691,6 +717,8 @@ fn build_setup_wrapper_start(
     uses_attrs: bool,
     uses_slots: bool,
     wrap: ComponentWrap,
+    is_vapor: bool,
+    ssr: bool,
 ) -> String {
     let mut s = String::with_capacity(256);
     match wrap {
@@ -749,6 +777,27 @@ fn build_setup_wrapper_start(
         s.push_str(",\n");
     }
 
+    // `__vapor: true` — official's non-TS `compileScript` branch adds this
+    // to the SAME accumulated `runtimeOptions` string as `__name`/`props`/
+    // `emits` (unconditional on `ssr`), spliced into the object literal as
+    // ONE inline property — never a separate trailing
+    // `__sfc__.__vapor = true` assignment (confirmed directly against the
+    // vendored rc.3 compiler source and the pinned rc.3 golden for
+    // `basic-interpolation.vue`'s vapor cell). The TS `_defineComponent`
+    // branch instead adds it only when `ssr && vapor`: a non-SSR TS Vapor
+    // component routes through the SEPARATE `defineVaporComponent` runtime
+    // wrapper instead of a `_defineComponent`-annotated object, and that
+    // wrapper is not threaded through `wrap`/`ComponentWrap` here — a
+    // non-SSR TS `<script setup>` Vapor component therefore emits no
+    // `__vapor` flag on this path today.
+    let emits_vapor_flag_here = match wrap {
+        ComponentWrap::DefineComponent => is_vapor && ssr,
+        ComponentWrap::Plain | ComponentWrap::ObjectAssign => is_vapor,
+    };
+    if emits_vapor_flag_here {
+        s.push_str("  __vapor: true,\n");
+    }
+
     // Setup function signature
     if is_async {
         s.push_str("  async setup(__props");
@@ -759,10 +808,10 @@ fn build_setup_wrapper_start(
     // Add destructured context if needed. Official order: expose, emit
     // (`emit: __emit` is pushed before buildDestructureElements), attrs,
     // slots (attrs/slots only for inline template mode, on-use).
-    if has_expose || has_emit || uses_attrs || uses_slots {
+    if bind_expose || has_emit || uses_attrs || uses_slots {
         s.push_str(", { ");
         let mut first = true;
-        if has_expose {
+        if bind_expose {
             s.push_str("expose: __expose");
             first = false;
         }
@@ -790,6 +839,14 @@ fn build_setup_wrapper_start(
     }
 
     s.push_str(") {\n");
+    // Official: a non-inline setup with no authored `defineExpose()` still
+    // gets a bare `__expose();` at the top of the body — the destructured
+    // `expose: __expose` above is otherwise never invoked, and the instance's
+    // public exposed surface would stay uninitialized instead of locked to
+    // empty.
+    if emit_bare_expose_call {
+        s.push_str("  __expose();\n\n");
+    }
     s
 }
 
@@ -805,38 +862,30 @@ fn build_setup_wrapper_start(
 fn build_setup_wrapper_end(
     returned: Option<&str>,
     scope_id: Option<&str>,
-    is_vapor: bool,
-    ssr: bool,
     wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
-        // Client (non-SSR): match Vue's official compiler — assign returned
-        // bindings and mark with `__isScriptSetup` so @vue/test-utils can
-        // identify script-setup components.
-        //
-        // SSR non-inline path: setup returns bindings and `ssrRender` is
-        // attached separately, reading them via the instance proxy (`_ctx.*`).
-        // Vue does NOT expose `__isScriptSetup` return keys on that proxy for
-        // ssrRender, so emitting the marker here makes every `_ctx.n` /
-        // `_ctx.Child` access miss (empty interpolations / missing children).
-        // Official plugin-vue avoids this by true-inline SSR (setup returns the
-        // render function). Until Verter does that, SSR must return a plain
-        // object without the marker.
+        // Matches Vue's official compiler unconditionally — assign returned
+        // bindings and mark with `__isScriptSetup` so @vue/test-utils/devtools
+        // can identify script-setup components. Confirmed directly against
+        // the real `@vue/compiler-sfc` (`compileScript({ssr: true})` and
+        // `{ssr: false}` produce byte-identical script output for this tail)
+        // and the pinned rc.3 SSR goldens: the marker is present in BOTH.
+        // Verter's SSR `ssrRender` uses official's real non-inline 8-param
+        // signature with `$setup.*` member routing (never a free `_ctx.*`
+        // alias for setup bindings), so the marker's presence never makes a
+        // binding unreachable: `hasSetupBinding` skipping
+        // `__isScriptSetup`-marked state would only hide a binding from a
+        // free `_ctx.*` proxy, and this compiler never routes setup
+        // bindings through one.
         s.push_str("\nconst __returned__ = ");
         s.push_str(ret);
-        if ssr {
-            s.push_str(";\nreturn __returned__;\n");
-        } else {
-            s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
-        }
+        s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
     }
     match wrap {
         ComponentWrap::Plain => s.push_str("\n}};\n"),
         ComponentWrap::DefineComponent | ComponentWrap::ObjectAssign => s.push_str("\n}});\n"),
-    }
-    if is_vapor {
-        s.push_str("__sfc__.__vapor = true;\n");
     }
     if let Some(id) = scope_id {
         s.push_str("__sfc__.__scopeId = \"");
@@ -849,39 +898,93 @@ fn build_setup_wrapper_end(
 
 /// Build the `__returned__` object from bindings.
 ///
-/// Includes all setup-type bindings (not props, data, or options).
-/// `SetupImport` bindings are only included when their identifier appears in
-/// the `template_used_vars` set (AST-based, from expression bindings + component
-/// tag names) — an intentional, TRACKED over-elision divergence: official
-/// 3.6.0-rc.1 INCLUDES unused setup imports in `__returned__` (as
-/// `get x() { return x }` getters); Verter elides them (see
-/// `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). Type-only
-/// imports stay excluded (official excludes those too). Returns a JS object
-/// literal like `{ msg, count }`.
+/// Includes every setup-type binding (not props, data, or options) that is
+/// NOT a `SetupImport`, unconditionally — official's non-inline
+/// `genSetupReturn` (`compiler-sfc.cjs.js`) builds `allBindings` as
+/// `{ ...scriptBindings, ...setupBindings }` and returns every key with no
+/// template-usage filter. Filtering by template usage here would silently
+/// drop a live script-only binding from `__returned__`, breaking any
+/// `@vue/test-utils`/devtools consumer that reads it off the setup proxy —
+/// so this stays unconditional, matching official exactly.
+///
+/// A `SetupImport` is included iff it is genuinely RUNTIME-USED (script body
+/// or template) — the SAME predicate `filter_import_specifiers` uses to
+/// decide whether the specifier survives in the import statement at all
+/// (`is_specifier_runtime_used`). This is narrower than "unconditional" but
+/// still matches official for every case the seed matrix exercises: official
+/// never emits a `__returned__` reference to a name Verter has already
+/// elided from its own import statement — doing so would be a hard
+/// `ReferenceError`, not a cosmetic divergence, since (unlike official)
+/// Verter's `filter_import_specifiers` genuinely drops a specifier with zero
+/// runtime references anywhere (see that function's own doc comment) rather
+/// than relying on the bundler to tree-shake it later.
+///
+/// Standing limitation: `runtime_text` here is the `<script setup>` block's
+/// own stripped body (`compute_runtime_text`, computed in
+/// `process_script_setup`), not a COMPANION `<script>` block's body. A
+/// companion import used only inside the companion script's own body (e.g.
+/// `export default defineComponent({})`) is therefore not detected as
+/// runtime-used by this check and stays excluded, even though official
+/// would include it (companion `scriptBindings` are spread into
+/// `allBindings` unconditionally, same as setup bindings). Closing this
+/// fully needs the companion script's own runtime text threaded in here too.
+///
+/// Official additionally emits a non-`vue`/non-`.vue`-sourced import as a
+/// `get x() { return x }` getter (preserving live-binding semantics for an
+/// external reactive re-export) rather than a plain shorthand property; that
+/// branch is NOT implemented here — this function has no import SOURCE data
+/// plumbed to it, so a `vue`-sourced import, a `.vue`-sourced import, or a
+/// non-import setup binding all take official's own plain-shorthand arm
+/// unconditionally, and a non-`vue`, non-`.vue`-sourced import would too
+/// (incorrectly) rather than the getter form official emits for it.
+/// Type-only imports stay excluded (never enter `bindings` as a runtime
+/// `SetupImport` in the first place — official excludes those too). Returns
+/// a JS object literal like `{ msg, count }`.
 fn build_returned_object(
     bindings: &FxHashMap<&str, BindingType>,
+    binding_order: &[&str],
     template_used_vars: Option<&FxHashSet<String>>,
+    runtime_text: Option<&str>,
 ) -> String {
-    let mut names: Vec<&str> = bindings
-        .iter()
-        .filter(|(name, bt)| {
-            if !bt.is_setup() {
-                return false;
+    // SOURCE-DECLARATION order, not alphabetical — but NOT raw textual
+    // position either. Official's `genSetupReturn` builds `allBindings` as
+    // `{ ...scriptBindings, ...setupBindings }` (LOCAL declarations only,
+    // JS object insertion order = declaration order) and ONLY THEN merges in
+    // `ctx.userImports` entries via a separate `for...in` loop that adds a
+    // key iff it is not already present — so a used IMPORT always sorts
+    // AFTER every local declaration, regardless of where the `import`
+    // statement sits textually (almost always at the top of the file).
+    // Proven against the exact rc.3 `basic-interpolation.vue` seed
+    // fixture: `import { ref } from "vue"` precedes `const count = ref(0)`
+    // textually, yet the golden `__returned__` is `{ count, items, ref }` —
+    // the two local `const`s first, the import last. `props-emit.vue`'s
+    // golden (`{ props, emit, onClick }`, no imports at all) is consistent
+    // with either reading, which is why the import-ordering half of this
+    // rule needed the basic-interpolation.vue cross-check to surface.
+    //
+    // `binding_order` is `bindings`' keys in first-seen TEXTUAL order
+    // (`bindings` itself, an `FxHashMap`, cannot recover any order on its
+    // own); this function re-partitions it into non-import declarations
+    // first, then imports, each partition keeping its own relative order.
+    let mut declared: Vec<&str> = Vec::new();
+    let mut imported: Vec<&str> = Vec::new();
+    for name in binding_order {
+        let Some(bt) = bindings.get(name) else {
+            continue;
+        };
+        if !bt.is_setup() {
+            continue;
+        }
+        if *bt == BindingType::SetupImport {
+            if is_specifier_runtime_used(name, runtime_text, template_used_vars) {
+                imported.push(name);
             }
-            // SetupImport: only include if identifier is used in the template
-            if **bt == BindingType::SetupImport {
-                match template_used_vars {
-                    Some(vars) => vars.contains(name as &str),
-                    // No template → include all (conservative)
-                    None => true,
-                }
-            } else {
-                true
-            }
-        })
-        .map(|(name, _)| *name)
-        .collect();
-    names.sort(); // Deterministic order
+        } else {
+            declared.push(name);
+        }
+    }
+    declared.extend(imported);
+    let names = declared;
 
     if names.is_empty() {
         return "{}".to_string();

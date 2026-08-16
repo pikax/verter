@@ -1,4 +1,3 @@
-import { on as _on, template as _template } from 'vue';
 
 const _sfc_main = {
   __name: 'method-ref',
@@ -14,6 +13,7 @@ return __returned__
 }
 
 }
+import { on as _on, template as _template } from 'vue';
 const t0 = _template("<form><button>Send", 1)
 
 function render(_ctx, $props, $emit, $attrs, $slots) {

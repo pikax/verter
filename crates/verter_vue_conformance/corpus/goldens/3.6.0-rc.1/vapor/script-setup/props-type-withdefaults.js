@@ -1,4 +1,3 @@
-import { txt as _txt, createInvoker as _createInvoker, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, delegateEvents as _delegateEvents, template as _template } from 'vue';
 import { defineVaporComponent as _defineVaporComponent } from "vue";
 const _sfc_main = /* @__PURE__ */ _defineVaporComponent({
   __name: "props-type-withdefaults",
@@ -18,6 +17,7 @@ const _sfc_main = /* @__PURE__ */ _defineVaporComponent({
   }
 });
 
+import { txt as _txt, createInvoker as _createInvoker, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, delegateEvents as _delegateEvents, template as _template } from 'vue';
 const t0 = _template("<div> ", 1)
 _delegateEvents("click")
 

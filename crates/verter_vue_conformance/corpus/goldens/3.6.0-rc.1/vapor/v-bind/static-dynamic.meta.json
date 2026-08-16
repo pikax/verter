@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-bind/static-dynamic.js",
-      "sha256": "14fc83b432a6f00b15a7da511d773b92d75c2adc5d7b35ea257710ac4109a037",
+      "sha256": "8dd7d06c4417fe961735030b896f051dc4a9c44bff8e6709a8593cfb51614ec2",
       "bytes": 764
     },
     "map": {

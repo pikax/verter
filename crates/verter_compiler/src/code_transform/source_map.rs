@@ -278,7 +278,17 @@ impl<'a> CodeTransform<'a> {
                     // position. Unlike Original/Moved chunks, there is no character-level
                     // correspondence between replacement content and the source, so
                     // per-line tokens would be misleading. This matches MagicString behavior.
-                    if let Some(source_id) = source_id {
+                    //
+                    // Content produced via `overwrite_unmapped` has NO correspondence to
+                    // the replaced span AT ALL (wholly synthetic wrapper text, e.g. a
+                    // generated object literal replacing a `<script setup>` tag) — even
+                    // the single "original start" claim below is false for it, so it is
+                    // looked up by content identity and skipped entirely rather than
+                    // mapped.
+                    let is_unmapped = self
+                        .unmapped_overwrite_contents
+                        .contains(&(content.as_ptr() as usize, content.len()));
+                    if let (Some(source_id), false) = (source_id, is_unmapped) {
                         let (src_line_1, src_col_1) =
                             resolver.offset_to_line_and_col(*orig_start as usize);
                         let source_line = (src_line_1 - 1) as u32;
@@ -295,6 +305,81 @@ impl<'a> CodeTransform<'a> {
                     }
 
                     advance_generated_position(content, &mut generated_line, &mut generated_column);
+                }
+                Chunk::OverwrittenSegmented {
+                    content, anchors, ..
+                } => {
+                    if content.is_empty() {
+                        continue;
+                    }
+                    // Multi-anchor replacement — see `segmented.rs`'s module
+                    // doc. Bytes outside every anchor (before the first,
+                    // between two, after the last) are synthetic scaffolding:
+                    // emitted as an unmapped token, exactly like a pure
+                    // `Inserted` run. Each anchor's own byte span is an
+                    // AUTHORED lexeme: emitted as a mapped token at the
+                    // anchor's source position, then the generated cursor
+                    // advances through EXACTLY the anchor's own length before
+                    // the next gap starts — this is what stops the mapping
+                    // from bleeding into trailing synthetic bytes (a source
+                    // map token is a point that applies until the next one).
+                    let mut cursor = 0u32;
+                    for anchor in *anchors {
+                        if anchor.content_offset > cursor {
+                            let gap = &content[cursor as usize..anchor.content_offset as usize];
+                            tokens.push(Token::new(
+                                generated_line,
+                                generated_column,
+                                0,
+                                0,
+                                None,
+                                None,
+                            ));
+                            advance_generated_position(
+                                gap,
+                                &mut generated_line,
+                                &mut generated_column,
+                            );
+                        }
+                        if anchor.length > 0 {
+                            let anchor_text = &content[anchor.content_offset as usize
+                                ..(anchor.content_offset + anchor.length) as usize];
+                            if let Some(source_id) = source_id {
+                                let (src_line_1, src_col_1) =
+                                    resolver.offset_to_line_and_col(anchor.source_pos as usize);
+                                tokens.push(Token::new(
+                                    generated_line,
+                                    generated_column,
+                                    (src_line_1 - 1) as u32,
+                                    (src_col_1 - 1) as u32,
+                                    Some(source_id),
+                                    None,
+                                ));
+                            }
+                            advance_generated_position(
+                                anchor_text,
+                                &mut generated_line,
+                                &mut generated_column,
+                            );
+                        }
+                        cursor = anchor.content_offset + anchor.length;
+                    }
+                    if (cursor as usize) < content.len() {
+                        let tail = &content[cursor as usize..];
+                        tokens.push(Token::new(
+                            generated_line,
+                            generated_column,
+                            0,
+                            0,
+                            None,
+                            None,
+                        ));
+                        advance_generated_position(
+                            tail,
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
+                    }
                 }
                 Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     if content.is_empty() {
@@ -444,6 +529,10 @@ impl<'a> CodeTransform<'a> {
                 Chunk::Moved { .. } => 0,
                 Chunk::Overwritten { content: "", .. } => 0,
                 Chunk::Overwritten { .. } => usize::from(has_source),
+                Chunk::OverwrittenSegmented { content: "", .. } => 0,
+                Chunk::OverwrittenSegmented {
+                    content, anchors, ..
+                } => Self::segmented_token_count(content, anchors, has_source),
                 Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     usize::from(!content.is_empty())
                 }
@@ -485,6 +574,33 @@ impl<'a> CodeTransform<'a> {
             .count();
 
         1 + interior_line_starts + authored_boundaries
+    }
+
+    /// Exact token count for one `OverwrittenSegmented` chunk — variant-for-
+    /// variant with the emission walk's `OverwrittenSegmented` arm above: one
+    /// unconditional token per non-empty gap (before/between/after anchors,
+    /// matching a pure `Inserted` run) plus one token per non-empty anchor
+    /// ONLY when a source is present (matching `Overwritten`).
+    fn segmented_token_count(
+        content: &str,
+        anchors: &[super::segmented::SegmentAnchor],
+        has_source: bool,
+    ) -> usize {
+        let mut count = 0usize;
+        let mut cursor = 0u32;
+        for anchor in anchors {
+            if anchor.content_offset > cursor {
+                count += 1;
+            }
+            if anchor.length > 0 {
+                count += usize::from(has_source);
+            }
+            cursor = anchor.content_offset + anchor.length;
+        }
+        if (cursor as usize) < content.len() {
+            count += 1;
+        }
+        count
     }
 
     #[cfg(test)]

@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.js",
-      "sha256": "f66dfe70d3190efa0d05bb93c8e0eac81d623fb7c99b686b3029ec1591c9d5e7",
+      "sha256": "73f0642b1e91abfac936ad6cdeeea266853c81343052e71689ae382f2613e94a",
       "bytes": 809
     },
     "map": {

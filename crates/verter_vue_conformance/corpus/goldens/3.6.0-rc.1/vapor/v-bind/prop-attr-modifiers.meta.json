@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.js",
-      "sha256": "1afb427aad7b2fe2ef67bb5cf62190aa24a19b9c1c84da4fae44c650cfc1ac18",
+      "sha256": "8b14d43f2d8b33a9c929d9e0d21aa50c0f0668728ed5ee6e44b7d3bd37ec1322",
       "bytes": 773
     },
     "map": {

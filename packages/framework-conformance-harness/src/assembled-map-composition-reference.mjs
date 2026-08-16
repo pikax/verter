@@ -64,6 +64,7 @@ const ASSEMBLE_INPUT_FIELDS = [
   "isProduction",
   "ssr",
   "ssrModuleId",
+  "emitSsrModuleRegistration",
   "hmrStrategy",
   "sourceMapRequested",
   "authored",
@@ -156,6 +157,7 @@ export function assertValidAssembleInput(input) {
   assertBoolean(input.isProduction, "isProduction");
   assertBoolean(input.ssr, "ssr");
   if (input.ssrModuleId !== null) assertString(input.ssrModuleId, "ssrModuleId");
+  assertBoolean(input.emitSsrModuleRegistration, "emitSsrModuleRegistration");
   if (!HMR_STRATEGIES.includes(input.hmrStrategy)) {
     malformed('hmrStrategy must be one of "vite", "webpack", "none"');
   }

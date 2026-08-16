@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-style.js",
-      "sha256": "2242ec9468ce6e878278d9288e724640420f93c0a8dee840d173c497801405c9",
+      "sha256": "f40ffebf19af0a2cffdfd45157b3386a801f8904c730572691396b7492b93dae",
       "bytes": 716
     },
     "map": {

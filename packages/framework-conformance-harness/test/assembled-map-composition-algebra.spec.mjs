@@ -67,6 +67,7 @@ function input(overrides) {
     isProduction: false,
     ssr: false,
     ssrModuleId: null,
+    emitSsrModuleRegistration: true,
     hmrStrategy: "none",
     sourceMapRequested: true,
     authored: { script: true, template: true },
@@ -621,8 +622,8 @@ describe("§6.2 — the exact byte grammar", () => {
       'import "src/Comp.vue?vue&type=style&index=0&lang.css"\n' +
         'import block0 from "src/Comp.vue?vue&type=i18n&index=0"\n' +
         "\n" +
-        'import { createElementVNode, ctx as _ctx } from "vue"\n' +
         "const _sfc_main = {}\n" +
+        'import { createElementVNode, ctx as _ctx } from "vue"\n' +
         "\n" +
         "function render() {}\n" +
         "_sfc_main.render = render\n" +
@@ -634,13 +635,13 @@ describe("§6.2 — the exact byte grammar", () => {
     );
     // §6.3 — placement DERIVED from the write cursor, never supplied.
     const assembled = assembleModule(dto, "const _sfc_main = {}\n");
-    expect(assembled.scriptPlacement).toEqual({ lineOffset: 4, columnOffset: 0 });
+    expect(assembled.scriptPlacement).toEqual({ lineOffset: 3, columnOffset: 0 });
     expect(assembled.templatePlacement).toEqual({ lineOffset: 6, columnOffset: 0 });
     // …and the segments land accordingly.
     expect(result.segments).toEqual([
-      segment(4, 6, 1, 6),
-      segment(4, 15, 1, 6),
-      sourceless(5, 0),
+      segment(3, 6, 1, 6),
+      segment(3, 15, 1, 6),
+      sourceless(4, 0),
       { ...segment(0, 9, 9, 2), genLine: 6, srcIdx: 1 },
       sourceless(7, 0),
     ]);
@@ -663,9 +664,9 @@ describe("§6.2 — the exact byte grammar", () => {
       authored: { script: false, template: false },
     });
     expect(composeAssembledVueMainModule(dto).code).toBe(
-      'import { ssrRenderAttrs } from "vue/server-renderer"\n' +
-        "const _sfc_main = {}\n" +
+      "const _sfc_main = {}\n" +
         '_sfc_main.__scopeId = "data-v-1"\n' +
+        'import { ssrRenderAttrs } from "vue/server-renderer"\n' +
         "\n" +
         "function ssrRender() {}\n" +
         "_sfc_main.ssrRender = ssrRender\n" +
@@ -751,13 +752,20 @@ describe("§6.2 — the exact byte grammar", () => {
     expect(code).not.toContain("_sfc_main.render = render\n");
   });
 
-  it('`hmrStrategy: "none"` writes neither W-16 nor W-16′', () => {
+  // `hmrStrategy: "none"` (the `input()` default) means "no dev-server
+  // tooling requested" — official `@vitejs/plugin-vue`'s real
+  // `transformMain` gates W-15 (`__file`) on `devToolsEnabled ||
+  // (devServer && !isProduction)`, a live dev-server/devtools marker, not a
+  // bare dev-vs-prod split. Verter has no separate `devToolsEnabled`
+  // concept, so `hmrStrategy: "none"` suppresses W-15 too, not just W-16/
+  // W-16′ — confirmed against the pinned rc.3 BF2 golden for
+  // `basic-interpolation.vue`'s dev cell, which has neither `__file` nor
+  // HMR.
+  it('`hmrStrategy: "none"` writes neither W-15, W-16, nor W-16′', () => {
     const code = composeAssembledVueMainModule(
       input({ script: null, template: null, authored: { script: false, template: false } }),
     ).code;
-    expect(code).toBe(
-      'const _sfc_main = {}\n_sfc_main.__file = "Comp.vue"\nexport default _sfc_main',
-    );
+    expect(code).toBe("const _sfc_main = {}\nexport default _sfc_main");
   });
 
   it("§6.2 `dbg` — the five two-character escapes, on a P1-admissible id", () => {
@@ -767,6 +775,7 @@ describe("§6.2 — the exact byte grammar", () => {
         script: null,
         template: null,
         authored: { script: false, template: false },
+        hmrStrategy: "vite",
       }),
     ).code;
     // W-15 is `{:?}`-quoted; W-09's `raw` is not.
@@ -780,10 +789,11 @@ describe("§6.2 — the exact byte grammar", () => {
       authored: { script: false, template: false },
     });
     // Line 0 is the newline patch alone: the script wrote zero bytes, so W-07's
-    // LF terminates a line containing no characters whatsoever.
-    expect(composeAssembledVueMainModule(dto).code).toBe(
-      '\n_sfc_main.__file = "Comp.vue"\nexport default _sfc_main',
-    );
+    // LF terminates a line containing no characters whatsoever. `__file`
+    // stays out of scope for this case (the `input()` default `hmrStrategy:
+    // "none"` correctly omits it — see the W-15/W-16/W-16′ case above); this
+    // test is about the newline patch, not W-15.
+    expect(composeAssembledVueMainModule(dto).code).toBe("\nexport default _sfc_main");
   });
 
   it("W-18 has no trailing newline and is the module's last write", () => {

@@ -26,10 +26,12 @@
     "boundary, cross-fragment `sourceRoot` absent-vs-`null` agreement, and the write-manifest's",
     "SSR context wrapper (W-17). No existing `expected` value changed — the same review",
     "independently re-derived all 70 pre-existing vectors from layer 1 alone and found every one",
-    "correct."
+    "correct.",
+    "",
+    "Revision 4 adds the `emitSsrModuleRegistration` member to AssembleInput (layer 1 §3.3), reflecting a new production CompileProfile field (`emit_ssr_module_registration`) that the schema had not yet caught up to: W-17's SSR-registration wrapper is now gated on `ssr ∧ emitSsrModuleRegistration` instead of `ssr` alone, so a bare `@vue/compiler-sfc`-equivalent SSR assembly (no bundler-plugin glue) composes without the wrapper. Every existing vector's input carries `emitSsrModuleRegistration: true` (the production default, matching the pre-revision-4 behavior byte for byte for every one of them); no existing vector's `expected` value changed. This is a schema-completeness fix catching the vectors up to an already-shipped production capability, not a settlement of any existing layer-1 rule."
   ],
   "artifact": "assembled-map-composition-vectors",
-  "revision": 3,
+  "revision": 4,
   "status": [
     "SEED — COMPLETE against frozen layer 1. 75 total entries (the `vectors` array holds 23,",
     "`failClosedVectors` holds 52, of which F7 is itself a composed/non-rejection case placed",
@@ -510,6 +512,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -519,10 +522,38 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 15, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 15,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -599,10 +630,38 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -625,6 +684,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -634,11 +694,46 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 15, "nameIdx": null },
-          { "genLine": 2, "genCol": 6, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 15,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -690,12 +785,54 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null },
-          { "genLine": 2, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -718,6 +855,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -727,8 +865,22 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 5, "srcCol": 5, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 5,
+            "srcCol": 5,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -771,9 +923,30 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 5, "srcCol": 5, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 5,
+            "srcCol": 5,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -801,6 +974,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -810,10 +984,24 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": 0 }
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": 0
+          }
         ],
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": 0 }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": 0
+          }
         ]
       },
       "derivation": [
@@ -897,11 +1085,46 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": 0 },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": 0 },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 2, "genCol": 9, "srcIdx": 1, "srcLine": 9, "srcCol": 2, "nameIdx": 1 },
-          { "genLine": 3, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": 0
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": 0
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 9,
+            "srcIdx": 1,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": 1
+          },
+          {
+            "genLine": 3,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -924,6 +1147,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -933,8 +1157,22 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 11, "srcIdx": 0, "srcLine": 1, "srcCol": 11, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 11,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 11,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -979,10 +1217,38 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 11, "srcIdx": 0, "srcLine": 1, "srcCol": 11, "nameIdx": null },
-          { "genLine": 0, "genCol": 20, "srcIdx": 0, "srcLine": 1, "srcCol": 11, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 11,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 11,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 20,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 11,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1005,6 +1271,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1014,9 +1281,30 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 12, "srcIdx": 0, "srcLine": 1, "srcCol": 12, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 12,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 12,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1073,11 +1361,46 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 12, "srcIdx": 0, "srcLine": 1, "srcCol": 12, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": null },
-          { "genLine": 2, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 12,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 12,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1100,6 +1423,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1109,8 +1433,22 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 3, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 3,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1160,11 +1498,46 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 3, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 3,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1187,6 +1560,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1196,11 +1570,46 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 4, "srcIdx": 0, "srcLine": 1, "srcCol": 4, "nameIdx": null },
-          { "genLine": 0, "genCol": 11, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 26, "srcIdx": 0, "srcLine": 2, "srcCol": 15, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 4,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 4,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 11,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 26,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 15,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1253,11 +1662,46 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 4, "srcIdx": 0, "srcLine": 1, "srcCol": 4, "nameIdx": null },
-          { "genLine": 0, "genCol": 11, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 0, "genCol": 17, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 4,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 4,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 11,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 17,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1280,6 +1724,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1289,12 +1734,54 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 15, "nameIdx": null },
-          { "genLine": 2, "genCol": 0, "srcIdx": 0, "srcLine": 3, "srcCol": 0, "nameIdx": null },
-          { "genLine": 2, "genCol": 6, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 15,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1344,12 +1831,54 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 3, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 3, "srcCol": 6, "nameIdx": null },
-          { "genLine": 2, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 3,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1372,6 +1901,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1381,10 +1911,38 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 7, "srcIdx": 0, "srcLine": 1, "srcCol": 7, "nameIdx": null },
-          { "genLine": 0, "genCol": 10, "srcIdx": 0, "srcLine": 1, "srcCol": 10, "nameIdx": null },
-          { "genLine": 0, "genCol": 14, "srcIdx": 0, "srcLine": 1, "srcCol": 14, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 7,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 7,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 10,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 10,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 14,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 14,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1431,11 +1989,46 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 10, "nameIdx": null },
-          { "genLine": 0, "genCol": 16, "srcIdx": 0, "srcLine": 1, "srcCol": 14, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 10,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 16,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 14,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1458,6 +2051,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1467,9 +2061,30 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 16, "srcIdx": 0, "srcLine": 1, "srcCol": 16, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 16,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 16,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1513,12 +2128,54 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 0, "genCol": 18, "srcIdx": 0, "srcLine": 1, "srcCol": 16, "nameIdx": null },
-          { "genLine": 0, "genCol": 27, "srcIdx": 0, "srcLine": 1, "srcCol": 16, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 18,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 16,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 27,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 16,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1541,6 +2198,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1550,9 +2208,30 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 4, "srcCol": 4, "nameIdx": null },
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 7, "srcCol": 7, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 4,
+            "srcCol": 4,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 7,
+            "srcCol": 7,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1603,9 +2282,30 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 7, "srcCol": 7, "nameIdx": null },
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 7, "srcCol": 7, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 7,
+            "srcCol": 7,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 7,
+            "srcCol": 7,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1630,6 +2330,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1639,8 +2340,22 @@
       },
       "inputMapsDecoded": {
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 20, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 20,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1695,9 +2410,30 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 3, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 4, "genCol": 0, "srcIdx": 0, "srcLine": 20, "srcCol": 0, "nameIdx": null },
-          { "genLine": 4, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 3,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 4,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 20,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 4,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1720,6 +2456,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1729,9 +2466,30 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 15, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 15,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1794,7 +2552,14 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -1822,6 +2587,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -1831,11 +2597,32 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 7, "srcIdx": 1, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": 0 }
+          {
+            "genLine": 0,
+            "genCol": 7,
+            "srcIdx": 1,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": 0
+          }
         ],
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -1911,18 +2698,60 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 7, "srcIdx": 1, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 6, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": 0 },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 6, "nameIdx": 0 },
-          { "genLine": 2, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 3, "genCol": 9, "srcIdx": 2, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 4, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 7,
+            "srcIdx": 1,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": 0
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 6,
+            "nameIdx": 0
+          },
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 3,
+            "genCol": 9,
+            "srcIdx": 2,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 4,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
     {
       "id": "V16",
-      "intent": "PLACEMENT IS DERIVED FROM THE WRITE GRAMMAR, not fixed at line 0. Style and custom-block imports, a runtime import, the custom-block invocation, __file and HMR writes are all present, so the script's placement is line 4 and the template's is line 6. Exercises W-01, W-02, W-03, W-04, W-13', W-14, W-15, W-16 and the import-specifier rendering.",
+      "intent": "PLACEMENT IS DERIVED FROM THE WRITE GRAMMAR, not fixed at line 0. Style and custom-block imports, a runtime import, the custom-block invocation, __file and HMR writes are all present, so the script's placement is line 3 and the template's is line 6. Exercises W-01, W-02, W-03, W-04, W-13', W-14, W-15, W-16 and the import-specifier rendering.",
       "input": {
         "canonicalId": "Comp.vue",
         "styleCount": 1,
@@ -1951,6 +2780,7 @@
         "isProduction": false,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "vite",
         "sourceMapRequested": true,
         "authored": {
@@ -1960,18 +2790,53 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 0, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": 0, "srcLine": 2, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 15, "srcIdx": 0, "srcLine": 2, "srcCol": 15, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 0,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 2,
+            "srcCol": 15,
+            "nameIdx": null
+          }
         ],
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
         "Every other assembly vector places the script at line 0, so none of them can",
-        "detect an implementation that hardcodes it. Here the script is preceded by four",
+        "detect an implementation that hardcodes it. Here the script is preceded by three",
         "written lines and the template by six.",
         "",
         "WRITE GRAMMAR (§6.2), in execution order:",
@@ -1980,13 +2845,14 @@
         "  W-02 line 1  import block0 from \"Comp.vue?vue&type=i18n&index=0\"",
         "               customId(0) takes the block type from customTypes[0] = 'i18n'.",
         "  W-03 line 2  a single LF, because styleCount > 0.",
-        "  W-04 line 3  import { createElementVNode as _createElementVNode, Fragment } from \"vue\"",
+        "  W-06 line 3  the rewritten script -> PLACEMENT (3,0).",
+        "  W-07 skipped: the rewritten script ends with LF.",
+        "  W-04 line 4  import { createElementVNode as _createElementVNode, Fragment } from \"vue\"",
         "               spec() renders a leading-underscore name longer than one character",
         "               as 'name-without-underscore as name' and any other name verbatim,",
-        "               and runtimeModuleName is null so R is 'vue'.",
+        "               and runtimeModuleName is null so R is 'vue'. Script output comes",
+        "               BEFORE the template's own runtime imports (official write order).",
         "  W-05 skipped (ssrImports empty).",
-        "  W-06 line 4  the rewritten script -> PLACEMENT (4,0).",
-        "  W-07 skipped: the rewritten script ends with LF.",
         "  W-10 line 5  the separator LF.",
         "  W-11 line 6  the template code -> PLACEMENT (6,0).",
         "  W-12 skipped. W-13 skipped (no 'function ssrRender(').",
@@ -1999,19 +2865,19 @@
         "  W-17 skipped (not ssr).  W-18 line 12  export default _sfc_main, no trailing LF.",
         "",
         "SEGMENTS. The script's chain is V1's, so its three segments sit at fragment (0,0),",
-        "(0,6) and (0,15); placement adds 4 to the line and, because columnOffset is 0 at",
+        "(0,6) and (0,15); placement adds 3 to the line and, because columnOffset is 0 at",
         "T1 (invariant F-c: every write that can precede a fragment ends with LF), leaves",
         "the columns alone. The template's single segment lands at (6,9) with srcIdx",
         "shifted to 1 by the append offset.",
         "",
-        "BOTH BR-3 SEGMENTS FIRE, at module lines 5 and 7 — and line 7 carries W-13's",
+        "BOTH BR-3 SEGMENTS FIRE, at module lines 4 and 7 — and line 7 carries W-13's",
         "bytes, so the template's boundary segment is doing real work here.",
-        "Every B write contributes no segment of its own (BR-1), which is why lines 0-3 and",
-        "8-12 are empty groups in the encoding: `mappings` begins with four semicolons."
+        "Every B write contributes no segment of its own (BR-1), which is why lines 0-2 and",
+        "8-12 are empty groups in the encoding: `mappings` begins with three semicolons."
       ],
       "expected": {
         "outcome": "composed",
-        "code": "import \"Comp.vue?vue&type=style&index=0&lang.scss\"\nimport block0 from \"Comp.vue?vue&type=i18n&index=0\"\n\nimport { createElementVNode as _createElementVNode, Fragment } from \"vue\"\nconst _sfc_main = {}\n\nfunction render() {}\n_sfc_main.render = render\nif (typeof block0 === 'function') block0(_sfc_main)\n_sfc_main.__file = \"Comp.vue\"\n/* HMR(vite) */\nif (import.meta.hot) { import.meta.hot.accept(() => {}) }\nexport default _sfc_main",
+        "code": "import \"Comp.vue?vue&type=style&index=0&lang.scss\"\nimport block0 from \"Comp.vue?vue&type=i18n&index=0\"\n\nconst _sfc_main = {}\nimport { createElementVNode as _createElementVNode, Fragment } from \"vue\"\n\nfunction render() {}\n_sfc_main.render = render\nif (typeof block0 === 'function') block0(_sfc_main)\n_sfc_main.__file = \"Comp.vue\"\n/* HMR(vite) */\nif (import.meta.hot) { import.meta.hot.accept(() => {}) }\nexport default _sfc_main",
         "map": {
           "version": 3,
           "names": [],
@@ -2019,7 +2885,7 @@
             "Comp.vue",
             "Comp.vue"
           ],
-          "mappings": ";;;;AACA,MAAM,SAAA;A;SCQJ;A"
+          "mappings": ";;;AACA,MAAM,SAAA;A;;SCQJ;A"
         },
         "mapAbsentMembers": [
           "file",
@@ -2029,12 +2895,54 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 4, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null },
-          { "genLine": 4, "genCol": 6, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 4, "genCol": 15, "srcIdx": 0, "srcLine": 1, "srcCol": 6, "nameIdx": null },
-          { "genLine": 5, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 6, "genCol": 9, "srcIdx": 1, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 7, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 3,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 3,
+            "genCol": 6,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 3,
+            "genCol": 15,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 6,
+            "nameIdx": null
+          },
+          {
+            "genLine": 4,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 6,
+            "genCol": 9,
+            "srcIdx": 1,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 7,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -2062,6 +2970,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": false,
         "authored": {
@@ -2119,6 +3028,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2198,6 +3108,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2207,7 +3118,14 @@
       },
       "inputMapsDecoded": {
         "template": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -2260,7 +3178,14 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 2, "genCol": 0, "srcIdx": 0, "srcLine": 1, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 2,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 1,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -2283,6 +3208,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2343,7 +3269,14 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -2366,6 +3299,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2375,7 +3309,14 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -2432,7 +3373,14 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -2460,6 +3408,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2469,10 +3418,24 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ],
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -2522,10 +3485,38 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null },
-          { "genLine": 2, "genCol": 9, "srcIdx": 1, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 3, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          },
+          {
+            "genLine": 2,
+            "genCol": 9,
+            "srcIdx": 1,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 3,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     },
@@ -2548,6 +3539,7 @@
         "isProduction": true,
         "ssr": true,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2557,7 +3549,14 @@
       },
       "inputMapsDecoded": {
         "script": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -2617,8 +3616,22 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 0, "genCol": 0, "srcIdx": 0, "srcLine": 0, "srcCol": 0, "nameIdx": null },
-          { "genLine": 1, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 0,
+            "srcIdx": 0,
+            "srcLine": 0,
+            "srcCol": 0,
+            "nameIdx": null
+          },
+          {
+            "genLine": 1,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     }
@@ -2643,6 +3656,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2686,6 +3700,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2726,6 +3741,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2767,6 +3783,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2808,6 +3825,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2848,6 +3866,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2888,6 +3907,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2928,6 +3948,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -2969,6 +3990,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3006,6 +4028,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3044,6 +4067,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3083,6 +4107,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3124,6 +4149,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3163,6 +4189,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3201,6 +4228,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3242,6 +4270,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3280,6 +4309,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3320,6 +4350,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3358,6 +4389,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3400,6 +4432,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3441,6 +4474,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3482,6 +4516,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3524,6 +4559,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3561,6 +4597,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3599,6 +4636,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3639,6 +4677,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3679,6 +4718,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3718,6 +4758,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3760,6 +4801,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3802,6 +4844,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3843,6 +4886,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3887,6 +4931,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3929,6 +4974,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -3970,6 +5016,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4007,6 +5054,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4048,6 +5096,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4086,6 +5135,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4128,6 +5178,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4169,6 +5220,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4211,6 +5263,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4251,6 +5304,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4295,6 +5349,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4336,6 +5391,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4382,6 +5438,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4429,6 +5486,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4469,6 +5527,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4512,6 +5571,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4555,6 +5615,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4598,6 +5659,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4637,6 +5699,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4683,6 +5746,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4729,6 +5793,7 @@
         "isProduction": true,
         "ssr": false,
         "ssrModuleId": null,
+        "emitSsrModuleRegistration": true,
         "hmrStrategy": "none",
         "sourceMapRequested": true,
         "authored": {
@@ -4738,7 +5803,14 @@
       },
       "inputMapsDecoded": {
         "template": [
-          { "genLine": 0, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null }
+          {
+            "genLine": 0,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          }
         ]
       },
       "derivation": [
@@ -4794,8 +5866,22 @@
           "debugId"
         ],
         "segments": [
-          { "genLine": 2, "genCol": 9, "srcIdx": 0, "srcLine": 9, "srcCol": 2, "nameIdx": null },
-          { "genLine": 3, "genCol": 0, "srcIdx": null, "srcLine": null, "srcCol": null, "nameIdx": null }
+          {
+            "genLine": 2,
+            "genCol": 9,
+            "srcIdx": 0,
+            "srcLine": 9,
+            "srcCol": 2,
+            "nameIdx": null
+          },
+          {
+            "genLine": 3,
+            "genCol": 0,
+            "srcIdx": null,
+            "srcLine": null,
+            "srcCol": null,
+            "nameIdx": null
+          }
         ]
       }
     }

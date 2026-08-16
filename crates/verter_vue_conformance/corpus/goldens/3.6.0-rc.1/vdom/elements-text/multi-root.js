@@ -1,5 +1,5 @@
-import { createElementVNode as _createElementVNode, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 const _sfc_main = {}
+import { createElementVNode as _createElementVNode, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache) {
   return (_openBlock(), _createElementBlock(_Fragment, null, [
     _cache[0] || (_cache[0] = _createElementVNode("header", null, "Header", -1 /* CACHED */)),

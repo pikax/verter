@@ -1,4 +1,3 @@
-import { normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { ref } from "vue"
 
 
@@ -16,6 +15,7 @@ return __returned__
 }
 
 }
+import { normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("div", {
     style: _normalizeStyle({ color: $setup.color, marginTop: $setup.top + 'px' })

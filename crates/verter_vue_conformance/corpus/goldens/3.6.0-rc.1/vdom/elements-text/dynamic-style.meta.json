@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/elements-text/dynamic-style.js",
-      "sha256": "141d307ab4aad3ad9f7f3d869b53be50cb0270200822bf0b94eeae5fae319db5",
+      "sha256": "435eccf61a0e5c0971b2f2d42d704f53b5c09781c357dcc87f206e64531a62d6",
       "bytes": 742
     },
     "map": {

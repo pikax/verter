@@ -1,4 +1,3 @@
-import { vModelText as _vModelText, withDirectives as _withDirectives, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { ref } from "vue"
 
 
@@ -15,6 +14,7 @@ return __returned__
 }
 
 }
+import { vModelText as _vModelText, withDirectives as _withDirectives, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return _withDirectives((_openBlock(), _createElementBlock("input", {
     "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => (($setup.text) = $event)),

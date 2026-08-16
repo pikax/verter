@@ -1,4 +1,3 @@
-import { renderSlot as _renderSlot, toDisplayString as _toDisplayString, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 
 const _sfc_main = {
   __name: 'child-comp',
@@ -23,6 +22,7 @@ return __returned__
 }
 
 }
+import { renderSlot as _renderSlot, toDisplayString as _toDisplayString, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 function render(_ctx, _cache, $props, $setup, $data, $options) {
   return (_openBlock(), _createElementBlock("button", {
     class: "child-comp",

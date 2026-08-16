@@ -1,4 +1,3 @@
-import { VaporKeepAlive as _VaporKeepAlive, createDynamicComponent as _createDynamicComponent, extend as _extend, createComponent as _createComponent } from 'vue';
 import { ref } from "vue"
 import ChildComp from "../components/child-comp.vue"
 
@@ -17,6 +16,7 @@ return __returned__
 }
 
 }
+import { VaporKeepAlive as _VaporKeepAlive, createDynamicComponent as _createDynamicComponent, extend as _extend, createComponent as _createComponent } from 'vue';
 function render(_ctx, $props, $emit, $attrs, $slots) {
   const n1 = _createComponent(_VaporKeepAlive, { max: 2 }, _extend(() => {
     const n0 = _createDynamicComponent(() => (_ctx.current), { label: "Cached" }, null, 4 /* SLOT_ROOT */)

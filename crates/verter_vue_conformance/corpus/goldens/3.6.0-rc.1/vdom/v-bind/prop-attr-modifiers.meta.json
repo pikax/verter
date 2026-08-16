@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/v-bind/prop-attr-modifiers.js",
-      "sha256": "03b9976325431ffca69bfeb05298e05184fb4ccba7a2936be676e2ab96444c12",
+      "sha256": "c99d7d95f5520138a7717d5a11013a680ff81d7e2a1464de640c9fbbe6060e43",
       "bytes": 772
     },
     "map": {

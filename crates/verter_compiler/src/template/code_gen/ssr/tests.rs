@@ -567,15 +567,27 @@ fn ssr_component() {
 // ══════════════════════════════════════════════════════════════════
 // Script SSR flags (non-inline: attached ssrRender, plain setup return)
 //
-// Verter's SSR shape (4-param ssrRender, all-`_ctx.` routing, no
-// `__isScriptSetup`) is a RATIFIED INTERIM DIVERGENCE from official
-// non-inline output — see docs/arch/ssr-noninline-shape-divergence.md.
+// Verter's SSR `ssrRender` uses official's real non-inline shape — the
+// 8-param signature (`_ctx, _push, _parent, _attrs, $props, $setup, $data,
+// $options`) with `$setup.*`/`$props.*` member routing, never a free
+// `_ctx.*` alias for setup bindings (see `ssr_setup_bindings_route_through_setup_param`
+// below). The EARLIER 4-param/all-`_ctx.`-routing shape this comment block
+// used to describe as a "ratified interim divergence" (with the
+// `__isScriptSetup` marker withheld to avoid `hasSetupBinding` hiding
+// bindings from that proxy) has been superseded — confirmed directly
+// against the real `@vue/compiler-sfc` (`compileScript({ssr:true})` and
+// `{ssr:false}` produce a byte-identical script tail, marker included) and
+// the pinned rc.3 SSR goldens (`vue/*__ssr__*`, all of which carry the
+// marker). `docs/arch/ssr-noninline-shape-divergence.md` is deleted in the
+// same change — its own stated exit criterion (8-param `ssrRender`,
+// `$setup.*` routing, and the `__isScriptSetup` marker all present) is met.
 // ══════════════════════════════════════════════════════════════════
 
 /// Non-inline SSR must NOT set `__ssrInlineRender` (that flag means setup
-/// returns the render function). It also must NOT mark the setup return with
-/// `__isScriptSetup` — Vue withholds those keys from the instance proxy that
-/// `ssrRender(_ctx, …)` reads, so every `_ctx.*` access would miss.
+/// returns the render function — true-inline SSR, which Verter doesn't do).
+/// It MUST still mark the setup return with `__isScriptSetup`, matching
+/// official exactly — see the module doc comment above for why the
+/// earlier "must not" version of this assertion was wrong.
 #[test]
 fn ssr_script_non_inline_no_false_inline_flags() {
     let source =
@@ -587,8 +599,9 @@ fn ssr_script_non_inline_no_false_inline_flags() {
         script
     );
     assert!(
-        !script.contains("__isScriptSetup"),
-        "non-inline SSR must not mark setup return with __isScriptSetup, got:\n{}",
+        script.contains("__isScriptSetup"),
+        "non-inline SSR must mark setup return with __isScriptSetup, matching \
+         official exactly, got:\n{}",
         script
     );
     // Positive: still returns the bindings object
@@ -602,6 +615,45 @@ fn ssr_script_non_inline_no_false_inline_flags() {
         !script.contains("__vapor"),
         "SSR script should not have __vapor, got:\n{}",
         script
+    );
+}
+
+/// The `ssrRender` function body routes every setup binding through the
+/// `$setup` POSITIONAL PARAMETER (`$setup.msg`), never a free `_ctx.*`
+/// alias — official's real non-inline `ssrRender(_ctx, _push, _parent,
+/// _attrs, $props, $setup, $data, $options)` shape, confirmed directly
+/// against the real `@vue/compiler-sfc` and every pinned rc.3 SSR golden.
+/// This is WHY the setup-return marker (see
+/// `ssr_setup_return_carries_script_setup_marker` below) is safe to keep:
+/// nothing here depends on `_ctx`'s instance-proxy exposure of setup keys.
+#[test]
+fn ssr_setup_bindings_route_through_setup_param() {
+    let template = gen_ssr_template(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    assert!(
+        template.contains("$setup.msg"),
+        "setup bindings must route through the $setup parameter, got:\n{template}"
+    );
+    assert!(
+        !template.contains("_ctx.msg"),
+        "setup bindings must never route through a free _ctx.* alias, got:\n{template}"
+    );
+}
+
+/// The setup return marker `__isScriptSetup` is present in non-inline SSR
+/// script output — matching official exactly (confirmed directly against
+/// the real `@vue/compiler-sfc`: `compileScript({ssr:true})` and
+/// `{ssr:false}` produce a byte-identical script tail, marker included).
+#[test]
+fn ssr_setup_return_carries_script_setup_marker() {
+    let script = gen_ssr_script(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    assert!(
+        script.contains("Object.defineProperty(__returned__, '__isScriptSetup'"),
+        "non-inline SSR setup return must carry the __isScriptSetup marker, \
+         got:\n{script}"
     );
 }
 
@@ -829,8 +881,9 @@ const msg = ref('hello')
         script.code
     );
     assert!(
-        !script.code.contains("__isScriptSetup"),
-        "non-inline SSR must not mark setup return with __isScriptSetup, got:\n{}",
+        script.code.contains("__isScriptSetup"),
+        "non-inline SSR must mark setup return with __isScriptSetup, matching \
+         official exactly, got:\n{}",
         script.code
     );
 
@@ -1767,8 +1820,8 @@ import MyComp from './MyComp.vue'
 <template><MyComp msg="hello" /></template>"#;
     let code = gen_ssr_template(source);
     assert!(
-        code.contains("_ctx.MyComp"),
-        "imported component should use _ctx ref, got:\n{}",
+        code.contains("$setup[\"MyComp\"]"),
+        "imported component should use $setup bracket ref, got:\n{}",
         code
     );
     // Negative: should NOT have _resolveComponent
@@ -1788,8 +1841,8 @@ import MyComp from './MyComp.vue'
 <template><my-comp msg="hello" /></template>"#;
     let code = gen_ssr_template(source);
     assert!(
-        code.contains("_ctx.MyComp"),
-        "kebab-case tag with PascalCase import should use _ctx ref, got:\n{}",
+        code.contains("$setup[\"MyComp\"]"),
+        "kebab-case tag with PascalCase import should use $setup bracket ref, got:\n{}",
         code
     );
     // Negative: should NOT have _resolveComponent
@@ -2077,7 +2130,7 @@ fn ssr_slot_stable_flag() {
 // $setup dot notation (SSR uses _ctx.x like VDOM)
 // ══════════════════════════════════════════════════════════════════
 
-/// @ai-generated — SSR setup binding uses _ctx. (non-inline ssrRender).
+/// @ai-generated — SSR setup binding uses $setup. (non-inline ssrRender).
 #[test]
 fn ssr_setup_binding_dot_notation() {
     let code = gen_ssr_template(
@@ -2088,13 +2141,13 @@ const msg = ref('hello')
 <template><div>{{ msg }}</div></template>"#,
     );
     assert!(
-        code.contains("_ctx.msg"),
-        "SSR should use dot notation _ctx.msg, got:\n{}",
+        code.contains("$setup.msg"),
+        "SSR should use dot notation $setup.msg, got:\n{}",
         code
     );
 }
 
-/// @ai-generated — SSR props use _ctx. (non-inline ssrRender).
+/// @ai-generated — SSR props use $props. (non-inline ssrRender).
 #[test]
 fn ssr_props_dot_notation() {
     let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
@@ -2115,7 +2168,7 @@ defineProps<{ msg: string }>()
         runtime,
     );
     assert!(
-        code.contains("_ctx.msg"),
+        code.contains("$props.msg"),
         "SSR props should use dot notation, got:\n{}",
         code
     );
@@ -2135,21 +2188,14 @@ const foo = computed(() => 1)
 <template><div>{{ foo }}</div></template>"#,
     );
     assert!(
-        code.contains("_ctx.foo"),
-        "multi-script: setup computed should use _ctx.foo, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$setup.foo"),
-        "multi-script: must not emit free $setup.foo in ssrRender, got:\n{}",
+        code.contains("$setup.foo"),
+        "multi-script: setup computed should use $setup.foo, got:\n{}",
         code
     );
 }
 
 /// @ai-generated — SSR multi-script: angle bracket type assertion in setup
-/// causes OXC parse failure, dropping all bindings.
-/// When OXC fails, bindings fall back to `_ctx.` prefix.
-/// TODO: fix OXC parse for angle bracket assertions in script setup
+/// still resolves the setup computed through $setup. prefix.
 #[test]
 fn ssr_setup_binding_multi_script_ts_angle_bracket() {
     let code = gen_ssr_template(
@@ -2163,11 +2209,9 @@ let c = <string>0;
 </script>
 <template><div>{{ foo }}</div></template>"#,
     );
-    // Currently falls back to _ctx.foo due to OXC parse failure on <string>0
-    // When fixed, this should use _ctx.foo instead
     assert!(
-        code.contains("_ctx.foo") || code.contains("_ctx.foo"),
-        "should render foo with some prefix, got:\n{}",
+        code.contains("$setup.foo"),
+        "should render foo with $setup prefix, got:\n{}",
         code
     );
 }
@@ -2183,18 +2227,13 @@ const name: string = 'John'
 <template><div>{{ count }} {{ name }}</div></template>"#,
     );
     assert!(
-        code.contains("_ctx.count"),
-        "typed const should use _ctx.count, got:\n{}",
+        code.contains("$setup.count"),
+        "typed const should use $setup.count, got:\n{}",
         code
     );
     assert!(
-        code.contains("_ctx.name"),
-        "typed const should use _ctx.name, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$setup"),
-        "must not emit free $setup in non-inline ssrRender, got:\n{}",
+        code.contains("$setup.name"),
+        "typed const should use $setup.name, got:\n{}",
         code
     );
 }
@@ -2316,19 +2355,19 @@ import MyComp from './MyComp.vue'
 </script>"#,
     );
     assert!(
-        code.contains(r#"_ctx.MyComp"#),
+        code.contains(r#"$setup["MyComp"]"#),
         "component ref should use bracket notation, got:\n{}",
         code
     );
-    // Negative: free $setup is invalid in non-inline ssrRender
+    // Negative: should not fall back to _ctx for a setup-declared component
     assert!(
-        !code.contains("$setup"),
-        "must not emit free $setup for component ref in ssrRender, got:\n{}",
+        !code.contains("_ctx.MyComp"),
+        "must not emit _ctx.MyComp for a setup-declared component ref in ssrRender, got:\n{}",
         code
     );
 }
 
-/// @ai-generated — Data bindings from $setup still use dot notation in SSR.
+/// @ai-generated — Data bindings from $setup use dot notation in SSR.
 #[test]
 fn ssr_setup_data_dot_notation() {
     let code = gen_ssr_template(
@@ -2339,14 +2378,14 @@ const msg = ref('hello')
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.msg"),
-        "data binding should use _ctx.msg, got:\n{}",
+        code.contains("$setup.msg"),
+        "data binding should use $setup.msg, got:\n{}",
         code
     );
-    // Negative: free $setup is invalid in non-inline ssrRender
+    // Negative: should not use bracket form for a plain identifier
     assert!(
-        !code.contains("$setup") && !code.contains(r#"_ctx["msg"]"#),
-        "must not emit free $setup or bracket form for plain data, got:\n{}",
+        !code.contains(r#"_ctx["msg"]"#) && !code.contains(r#"$setup["msg"]"#),
+        "must not emit bracket form for a plain identifier, got:\n{}",
         code
     );
 }
@@ -2437,7 +2476,7 @@ const val = ref('')
 
     // Positive: modelValue prop emitted
     assert!(
-        code.contains("modelValue: _ctx.val"),
+        code.contains("modelValue: $setup.val"),
         "should have modelValue prop, got:\n{}",
         code
     );
@@ -2468,7 +2507,7 @@ const title = ref('')
 
     // Positive: title prop (not modelValue)
     assert!(
-        code.contains("title: _ctx.title"),
+        code.contains("title: $setup.title"),
         "should have title prop, got:\n{}",
         code
     );
@@ -2729,10 +2768,10 @@ fn ssr_custom_directive_setup_binding() {
 const vFocus = { mounted(el) { el.focus() } }
 </script>"#,
     );
-    // Positive: should use _ctx.vFocus instead of _resolveDirective
+    // Positive: should use $setup["vFocus"] instead of _resolveDirective
     assert!(
-        code.contains(r#"_ctx.vFocus"#),
-        "setup directive should use _ctx.vFocus, got:\n{}",
+        code.contains(r#"$setup["vFocus"]"#),
+        "setup directive should use $setup[\"vFocus\"], got:\n{}",
         code
     );
     assert!(
@@ -3003,7 +3042,7 @@ import Child from './Child.vue'
     );
     // Positive: else branch should have component VNode
     assert!(
-        code.contains(r#"_createVNode(_ctx.Child)"#),
+        code.contains(r#"_createVNode($setup["Child"])"#),
         "else branch should have component VNode, got:\n{}",
         code
     );
@@ -3391,8 +3430,8 @@ fn ssr_teleport_uses_ssr_helper() {
 // Binding prefix resolution
 // ══════════════════════════════════════════════════════════════════
 
-/// @ai-generated — Options API `data()` properties use `_ctx.` in non-inline SSR
-/// (`ssrRender` has no `$data` parameter).
+/// @ai-generated — Options API `data()` properties use `$data.` in non-inline SSR
+/// (`ssrRender` has an 8-param signature with `$data` when the SFC has a script block).
 #[test]
 fn ssr_data_binding_uses_data_prefix() {
     let code = gen_ssr_template(
@@ -3404,19 +3443,14 @@ export default {
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.count"),
-        "data binding should use _ctx. prefix in non-inline SSR, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$data"),
-        "must not emit free $data in non-inline ssrRender, got:\n{}",
+        code.contains("$data.count"),
+        "data binding should use $data. prefix in non-inline SSR, got:\n{}",
         code
     );
 }
 
-/// @ai-generated — Options API `props` use `_ctx.` in non-inline SSR
-/// (`ssrRender` has no `$props` parameter).
+/// @ai-generated — Options API `props` use `$props.` in non-inline SSR
+/// (`ssrRender` has an 8-param signature with `$props` when the SFC has a script block).
 #[test]
 fn ssr_props_binding_uses_props_prefix() {
     let code = gen_ssr_template(
@@ -3428,13 +3462,8 @@ export default {
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.msg"),
-        "props binding should use _ctx. prefix in SSR, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$props"),
-        "must not emit free $props in non-inline ssrRender, got:\n{}",
+        code.contains("$props.msg"),
+        "props binding should use $props. prefix in SSR, got:\n{}",
         code
     );
 }
@@ -3510,9 +3539,9 @@ const item = ref('x')
         "dynamic option value should use _ssrIncludeBooleanAttr, got:\n{}",
         code
     );
-    // Should reference the dynamic value expr (_ctx.item)
+    // Should reference the dynamic value expr ($setup.item)
     assert!(
-        code.contains("_ctx.item"),
+        code.contains("$setup.item"),
         "should reference dynamic option value, got:\n{}",
         code
     );
@@ -3566,8 +3595,8 @@ const comp = ref('div')
     );
 }
 
-/// @ai-generated — Options API `computed` uses `_ctx.` in non-inline SSR
-/// (`ssrRender` has no `$options` parameter).
+/// @ai-generated — Options API `computed` uses `$options.` in non-inline SSR
+/// (`ssrRender` has an 8-param signature with `$options` when the SFC has a script block).
 #[test]
 fn ssr_computed_binding_uses_options_prefix() {
     let code = gen_ssr_template(
@@ -3579,13 +3608,8 @@ export default {
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.total"),
-        "computed binding should use _ctx. prefix in non-inline SSR, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$options"),
-        "must not emit free $options in non-inline ssrRender, got:\n{}",
+        code.contains("$options.total"),
+        "computed binding should use $options. prefix in non-inline SSR, got:\n{}",
         code
     );
 }
@@ -3604,9 +3628,9 @@ const dynamicPropName = ref('title')
 const dynamicPropValue = ref('hello')
 </script>"#,
     );
-    // Vue: _ssrRenderAttrs({ [_ctx.dynamicPropName || ""]: _ctx.dynamicPropValue })
+    // Non-inline SSR with a script block: [$setup.dynamicPropName || ""]: $setup.dynamicPropValue
     assert!(
-        code.contains(r#"[_ctx.dynamicPropName || ""]"#),
+        code.contains(r#"[$setup.dynamicPropName || ""]"#),
         "should use computed property key with || \"\", got:\n{}",
         code
     );
@@ -3634,9 +3658,9 @@ export default {
 }
 </script>"#,
     );
-    // Vue non-inline SSR: _ssrRenderAttrs({ [(`data-${_ctx.dynamicClassName}`) || ""]: _ctx.isActive })
+    // Non-inline SSR with a script block: _ssrRenderAttrs({ [(`data-${$data.dynamicClassName}`) || ""]: $data.isActive })
     assert!(
-        code.contains(r#"`data-${_ctx.dynamicClassName}`"#),
+        code.contains(r#"`data-${$data.dynamicClassName}`"#),
         "should resolve dynamicClassName in template literal with correct offset, got:\n{}",
         code
     );
@@ -3698,15 +3722,10 @@ fn ssr_same_name_shorthand_id() {
 const id = ref('my-id')
 </script>"#,
     );
-    // Vue: <span${_ssrRenderAttr("id", _ctx.id)}>shorthand</span>
+    // <span${_ssrRenderAttr("id", $setup.id)}>shorthand</span>
     assert!(
-        code.contains("_ctx.id"),
-        "should resolve shorthand :id to _ctx.id, got:\n{}",
-        code
-    );
-    assert!(
-        !code.contains("$setup"),
-        "should use _ctx.id, not free $setup, got:\n{}",
+        code.contains("$setup.id"),
+        "should resolve shorthand :id to $setup.id, got:\n{}",
         code
     );
 }
@@ -3721,10 +3740,10 @@ const dynamicName = ref('foo')
 const val = ref(true)
 </script>"#,
     );
-    // Vue: { [(`data-${_ctx.dynamicName}`) || ""]: _ctx.val }
+    // { [(`data-${$setup.dynamicName}`) || ""]: $setup.val }
     assert!(
-        code.contains(r#"`data-${_ctx.dynamicName}`"#),
-        "should resolve dynamicName to _ctx.dynamicName in template literal, got:\n{}",
+        code.contains(r#"`data-${$setup.dynamicName}`"#),
+        "should resolve dynamicName to $setup.dynamicName in template literal, got:\n{}",
         code
     );
     assert!(
@@ -3746,7 +3765,7 @@ const value = ref('hello')
     );
     // Root elements merge with _attrs, so dynamic attr names use computed keys in the attrs obj
     assert!(
-        code.contains(r#"[_ctx.name || ""]"#),
+        code.contains(r#"[$setup.name || ""]"#),
         "root element should use computed property key, got:\n{}",
         code
     );
@@ -3794,10 +3813,10 @@ fn ssr_slot_same_name_shorthand_props() {
 const items = ref([])
 </script>"#,
     );
-    // Vue: _ssrRenderSlot(_ctx.$slots, "header", {count: ..., items: _ctx.items}, ...)
+    // _ssrRenderSlot(_ctx.$slots, "header", {count: ..., items: $setup.items}, ...)
     assert!(
-        code.contains("items: _ctx.items"),
-        "slot shorthand :items should produce 'items: _ctx.items', got:\n{}",
+        code.contains("items: $setup.items"),
+        "slot shorthand :items should produce 'items: $setup.items', got:\n{}",
         code
     );
     assert!(
@@ -3896,13 +3915,13 @@ const { invert = false, brightness = 0 } = defineProps<{
 <template><Child :invert :brightness /></template>"#,
         runtime,
     );
-    // Official resolves destructured props through _ctx./bindings — pin the
+    // Destructured props resolve through $props./bindings — pin the
     // resolved VALUE expression, not key presence: a regression emitting a
     // bare `invert` (free identifier → ReferenceError in non-inline
     // ssrRender) must fail this test.
     assert!(
-        code.contains("invert: _ctx.invert") && code.contains("brightness: _ctx.brightness"),
-        "destructured prop shorthands must resolve values through _ctx., got:\n{code}"
+        code.contains("invert: $props.invert") && code.contains("brightness: $props.brightness"),
+        "destructured prop shorthands must resolve values through $props., got:\n{code}"
     );
     assert!(
         !code.contains("invert: invert") && !code.contains("brightness: brightness"),
@@ -3959,15 +3978,15 @@ fn ssr_input_range_vmodel_value_attr() {
 const val = ref(50)
 </script>"#,
     );
-    // Vue: { class: "slider", type: "range", value: _ctx.val }
+    // { class: "slider", type: "range", value: $setup.val }
     assert!(
         code.contains("value:") || code.contains("\"value\""),
         "input range v-model should add value property, got:\n{}",
         code
     );
     assert!(
-        code.contains("_ctx.val"),
-        "should resolve v-model value to _ctx.val, got:\n{}",
+        code.contains("$setup.val"),
+        "should resolve v-model value to $setup.val, got:\n{}",
         code
     );
 }
@@ -4113,8 +4132,8 @@ const items = ref([])
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.items"),
-        "v-for iterable should use _ctx. prefix, got:\n{}",
+        code.contains("$setup.items"),
+        "v-for iterable should use $setup. prefix, got:\n{}",
         code
     );
     assert!(
@@ -4134,8 +4153,8 @@ const data = reactive({ items: [] })
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.data.items"),
-        "v-for member expr iterable should prefix root with _ctx., got:\n{}",
+        code.contains("$setup.data.items"),
+        "v-for member expr iterable should prefix root with $setup., got:\n{}",
         code
     );
 }
@@ -4196,7 +4215,7 @@ const text = ref('hello')
     );
     // :key should appear in the dynamic component's props
     assert!(
-        code.contains("key: _ctx.id"),
+        code.contains("key: $setup.id"),
         ":key should be passed as dynamic component prop, got:\n{}",
         code
     );
@@ -4500,7 +4519,7 @@ const handleClick = () => {}
     );
     // VDOM fallback should emit onClick handler
     assert!(
-        code.contains("onClick: _ctx.handleClick"),
+        code.contains("onClick: $setup.handleClick"),
         "should emit onClick event handler in VDOM fallback, got:\n{}",
         code
     );
@@ -4691,8 +4710,8 @@ const teleportTarget = ref('#modal')
     );
     // Should use the resolved binding, not hardcoded "body"
     assert!(
-        code.contains("_ctx.teleportTarget"),
-        "Teleport :to should resolve to _ctx.teleportTarget, got:\n{}",
+        code.contains("$setup.teleportTarget"),
+        "Teleport :to should resolve to $setup.teleportTarget, got:\n{}",
         code
     );
     assert!(
@@ -4715,13 +4734,13 @@ const dynamicProps = ref({})
     );
     // Should pass the spread props to _createVNode
     assert!(
-        code.contains("_ctx.dynamicProps"),
+        code.contains("$setup.dynamicProps"),
         "v-bind spread should be passed as props, got:\n{}",
         code
     );
     // Should NOT have null for props when there's a v-bind spread
     assert!(
-        !code.contains("_resolveDynamicComponent(_ctx.currentComponent), null, null)"),
+        !code.contains("_resolveDynamicComponent($setup.currentComponent), null, null)"),
         "props should not be null with v-bind spread, got:\n{}",
         code
     );
@@ -4740,7 +4759,7 @@ const inputValue = ref('')
     );
     // Should have modelValue prop
     assert!(
-        code.contains("modelValue: _ctx.inputValue"),
+        code.contains("modelValue: $setup.inputValue"),
         "v-model should generate modelValue prop, got:\n{}",
         code
     );
@@ -4764,8 +4783,8 @@ const showModal = ref(false)
     );
     // Should use the resolved binding for disabled
     assert!(
-        code.contains("_ctx.showModal"),
-        "Teleport :disabled should resolve to _ctx.showModal, got:\n{}",
+        code.contains("$setup.showModal"),
+        "Teleport :disabled should resolve to $setup.showModal, got:\n{}",
         code
     );
     // Target should still be "body"
@@ -4866,12 +4885,12 @@ const error = ref(null)
     );
     // Should have if/else-if/else chain
     assert!(
-        code.contains("if (_ctx.loading)"),
+        code.contains("if ($setup.loading)"),
         "should have if condition, got:\n{}",
         code
     );
     assert!(
-        code.contains("} else if (_ctx.error)"),
+        code.contains("} else if ($setup.error)"),
         "should have else-if condition, got:\n{}",
         code
     );
@@ -4907,7 +4926,7 @@ const error = ref(null)
     );
     // Should have proper if/else-if/else chain despite intervening comments
     assert!(
-        code.contains("} else if (_ctx.error)"),
+        code.contains("} else if ($setup.error)"),
         "comment between branches must not break else-if chain, got:\n{}",
         code
     );
@@ -4968,7 +4987,7 @@ const msg = ref('hello')
     );
     // Positive: div with dynamic text should use _toDisplayString with TEXT patch flag
     assert!(
-        code.contains(r#"_createVNode("div", null, _toDisplayString(_ctx.msg), 1 /* TEXT */)"#),
+        code.contains(r#"_createVNode("div", null, _toDisplayString($setup.msg), 1 /* TEXT */)"#),
         "should generate _createVNode with _toDisplayString and TEXT patchflag, got:\n{}",
         code
     );
@@ -4989,7 +5008,7 @@ const val = ref('')
     );
     // Positive: element with dynamic prop should include it in props
     assert!(
-        code.contains(r#"value: _ctx.val"#),
+        code.contains(r#"value: $setup.val"#),
         "should include dynamic prop in VDOM fallback props, got:\n{}",
         code
     );
@@ -5160,7 +5179,7 @@ const msg = ref('hello')
     );
     // The VDOM fallback _createTextVNode should have 1 /* TEXT */ flag
     assert!(
-        code.contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"),
+        code.contains("_createTextVNode(_toDisplayString($setup.msg), 1 /* TEXT */)"),
         "should have TEXT patch flag on _createTextVNode with interpolation, got:\n{}",
         code
     );
@@ -5538,9 +5557,9 @@ import { reactive } from 'vue'
 const state = reactive({ count: 0 })
 </script>"#,
     );
-    // state is setup-reactive-const → _ctx.state.count in both SSR and VDOM paths
+    // state is setup-reactive-const → $setup.state.count in both SSR and VDOM paths
     assert!(
-        code.contains("_ctx.state.count"),
+        code.contains("$setup.state.count"),
         "compound expression should have $setup. prefix, got:\n{}",
         code
     );
@@ -5563,7 +5582,7 @@ const state = reactive({ count: 0 })
 </script>"#,
     );
     assert!(
-        code.contains("_ctx.state.count++"),
+        code.contains("$setup.state.count++"),
         "event handler compound expression should have $setup. prefix, got:\n{}",
         code
     );
@@ -5582,13 +5601,13 @@ const store = reactive({ errors: [] })
     );
     // Both the SSR path (_ssrInterpolate) and VDOM path (_toDisplayString) should use $setup.
     assert!(
-        code.contains("_ctx.store.errors"),
+        code.contains("$setup.store.errors"),
         "interpolation compound expression should have $setup. prefix, got:\n{}",
         code
     );
     // Check that the VDOM fallback path specifically uses $setup. in _toDisplayString
     assert!(
-        code.contains("_toDisplayString(_ctx.store.errors)"),
+        code.contains("_toDisplayString($setup.store.errors)"),
         "VDOM fallback _toDisplayString should have $setup. prefix, got:\n{}",
         code
     );
@@ -5874,12 +5893,10 @@ export default {
 }
 </script>"#,
     );
-    // The slot prop value should use the camelized name (prefix depends on binding type)
+    // The slot prop value should use the camelized name with the $props prefix
+    // (the SFC declares `headingValue` through Options API `props: [...]`)
     assert!(
-        code.contains(r#"headingValue: _ctx["headingValue"]"#)
-            || code.contains("headingValue: _ctx.headingValue")
-            || code.contains("headingValue: _ctx.headingValue")
-            || code.contains(r#"headingValue: _ctx["headingValue"]"#),
+        code.contains("headingValue: $props.headingValue"),
         "slot prop value should use camelized name 'headingValue', got:\n{}",
         code
     );
@@ -5901,13 +5918,10 @@ fn ssr_element_attr_hyphenated_shorthand() {
 const dataCount = ref(0)
 </script>"#,
     );
-    // Should use camelized name for the value expression
+    // Should use camelized name for the value expression, with the $setup prefix
+    // (the SFC declares `dataCount` as a `<script setup>` binding)
     assert!(
-        code.contains("data-count")
-            && (code.contains("_ctx.dataCount")
-                || code.contains(r#"_ctx.dataCount"#)
-                || code.contains("_ctx.dataCount")
-                || code.contains(r#"_ctx["dataCount"]"#)),
+        code.contains("data-count") && code.contains("$setup.dataCount"),
         "should use camelized 'dataCount' for value lookup, got:\n{}",
         code
     );
@@ -6262,10 +6276,10 @@ fn ssr_vdom_fallback_interpolation_no_boundary_whitespace() {
         "<script setup>\nconst msg = ref('hello')\n</script>\n<template><Comp><p>\n  {{ msg }}\n</p></Comp></template>",
     );
     // Vue drops leading/trailing whitespace-only text around interpolation in element children
-    // Should be: _toDisplayString(_ctx.msg), 1 /* TEXT */
-    // NOT: " " + _toDisplayString(_ctx.msg) + " "
+    // Should be: _toDisplayString($setup.msg), 1 /* TEXT */
+    // NOT: " " + _toDisplayString($setup.msg) + " "
     assert!(
-        code.contains(r#"_toDisplayString(_ctx.msg), 1 /* TEXT */"#),
+        code.contains(r#"_toDisplayString($setup.msg), 1 /* TEXT */"#),
         "interpolation-only children should not have surrounding whitespace, got:\n{}",
         code
     );
@@ -6313,7 +6327,7 @@ const active = ref(true)
     );
     // Vue merges static class + :class into array: class: ["static-cls", { active: active }]
     assert!(
-        code.contains(r#"class: ["static-cls", { active: _ctx.active }]"#),
+        code.contains(r#"class: ["static-cls", { active: $setup.active }]"#),
         "should merge static+dynamic class into array, got:\n{}",
         code
     );
@@ -6336,7 +6350,7 @@ const iconColor = ref(true)
     );
     // Class merge should work on component VNodes too
     assert!(
-        code.contains(r#"class: ["htw-w-5", { red: !_ctx.iconColor }]"#),
+        code.contains(r#"class: ["htw-w-5", { red: !$setup.iconColor }]"#),
         "should merge class on component VNode, got:\n{}",
         code
     );
@@ -6354,7 +6368,7 @@ const isActive = ref(true)
     );
     // Root component props should have merged class array
     assert!(
-        code.contains(r#"class: ["base-cls", { active: _ctx.isActive }]"#),
+        code.contains(r#"class: ["base-cls", { active: $setup.isActive }]"#),
         "should merge class into array on root component, got:\n{}",
         code
     );
@@ -6378,7 +6392,7 @@ const isActive = ref(true)
     );
     // Non-root component props should still have merged class array
     assert!(
-        code.contains(r#"class: ["base-cls", { active: _ctx.isActive }]"#),
+        code.contains(r#"class: ["base-cls", { active: $setup.isActive }]"#),
         "should merge class into array on non-root component, got:\n{}",
         code
     );
@@ -6455,7 +6469,7 @@ const show = ref(true)
     );
     // The v-if condition in VDOM fallback should have $setup. prefix
     assert!(
-        code.contains("_ctx.show"),
+        code.contains("$setup.show"),
         "v-if condition should resolve binding with $setup prefix, got:\n{}",
         code
     );
@@ -6508,12 +6522,12 @@ const expandText = ref(false)
     let else_pos = code.find("} else {").expect("should have VDOM else branch");
     let vdom_part = &code[else_pos..];
     assert!(
-        vdom_part.contains("_ctx.group"),
+        vdom_part.contains("$setup.group"),
         "VDOM fallback should resolve 'group' with $setup prefix, got:\n{}",
         vdom_part
     );
     assert!(
-        vdom_part.contains("_ctx.expandText"),
+        vdom_part.contains("$setup.expandText"),
         "VDOM fallback should resolve 'expandText' with $setup prefix, got:\n{}",
         vdom_part
     );
@@ -6530,7 +6544,7 @@ const showModal = ref(false)
     );
     // The disabled expression should have $setup. prefix
     assert!(
-        code.contains("!_ctx.showModal"),
+        code.contains("!$setup.showModal"),
         "Teleport disabled should resolve binding with $setup prefix, got:\n{}",
         code
     );
@@ -6769,7 +6783,7 @@ const items = ref([])
         .expect("should have VDOM else branch");
     let vdom_part2 = &code2[else_pos2..];
     assert!(
-        vdom_part2.contains("(_openBlock(), _createBlock(_ctx.Item"),
+        vdom_part2.contains(r#"(_openBlock(), _createBlock($setup["Item"]"#),
         "keyed v-for component child should also use _createBlock, got:\n{}",
         vdom_part2
     );
@@ -6844,7 +6858,7 @@ const isActive = ref(false)
 <template><Icon class="w-5 h-5" :class="{ active: isActive }" /></template>"#,
     );
     assert!(
-        code.contains(r#"class: ["w-5 h-5", { active: _ctx.isActive }]"#),
+        code.contains(r#"class: ["w-5 h-5", { active: $setup.isActive }]"#),
         "should merge static+dynamic class into array, got:\n{}",
         code
     );
@@ -6869,7 +6883,7 @@ const isActive = ref(false)
 <template><Icon class="w-5 h-5" :class="{ active: isActive }" /></template>"#,
     );
     assert!(
-        code.contains(r#"class: ["w-5 h-5", { active: _ctx.isActive }]"#),
+        code.contains(r#"class: ["w-5 h-5", { active: $setup.isActive }]"#),
         "root component should merge class array too, got:\n{}",
         code
     );
@@ -6890,7 +6904,7 @@ const show = ref(true)
     let else_pos = code.find("} else {").expect("should have VDOM else branch");
     let vdom_part = &code[else_pos..];
     assert!(
-        vdom_part.contains("(_ctx.show)"),
+        vdom_part.contains("($setup.show)"),
         "VDOM ternary should wrap conditions in parens, got:\n{}",
         vdom_part
     );
@@ -6911,7 +6925,7 @@ const b = ref(2)
     let vdom_part = &code[else_pos..];
     // Compound conditions are also wrapped in parens
     assert!(
-        vdom_part.contains("(_ctx.a > _ctx.b)"),
+        vdom_part.contains("($setup.a > $setup.b)"),
         "VDOM ternary should wrap conditions in parens, got:\n{}",
         vdom_part
     );
@@ -6930,7 +6944,7 @@ const pageSize = ref(10)
 <template><Comp v-model:page-size="pageSize" /></template>"#,
     );
     assert!(
-        code.contains(r#""page-size": _ctx.pageSize"#),
+        code.contains(r#""page-size": $setup.pageSize"#),
         "kebab-case v-model prop should be quoted, got:\n{}",
         code
     );
@@ -7003,7 +7017,7 @@ import Foo from './Foo.vue'
 
 #[test]
 fn ssr_custom_directive_on_component_setup_binding() {
-    // Custom directive from setup binding should use _ctx.vFoo
+    // Custom directive from setup binding should use $setup["vFoo"]
     let code = gen_ssr_template(
         r#"<script setup>
 import Comp from './Comp.vue'
@@ -7012,8 +7026,8 @@ const vFoo = { mounted() {} }
 <template><Comp v-foo="expr" /></template>"#,
     );
     assert!(
-        code.contains("_ctx.vFoo"),
-        "Should use _ctx.vFoo for setup-declared directive, got:\n{}",
+        code.contains(r#"$setup["vFoo"]"#),
+        "Should use $setup[\"vFoo\"] for setup-declared directive, got:\n{}",
         code
     );
     assert!(
@@ -7039,7 +7053,7 @@ const msg = ref('hello')
 <template><Comp v-tooltip:top="msg" /></template>"#,
     );
     assert!(
-        code.contains("_ssrGetDirectiveProps(_ctx, _directive_tooltip, _ctx.msg, \"top\")"),
+        code.contains("_ssrGetDirectiveProps(_ctx, _directive_tooltip, $setup.msg, \"top\")"),
         "Should have directive with value and arg, got:\n{}",
         code
     );
@@ -7064,7 +7078,7 @@ const rest = { a: 1, b: 2 }
     );
     // Should include the spread expression
     assert!(
-        code.contains("_ctx.rest"),
+        code.contains("$setup.rest"),
         "Should reference spread expression, got:\n{}",
         code
     );
@@ -7595,16 +7609,10 @@ const foo = computed(() => 1)
 </script>
 <template><div>{{ foo }}</div></template>"#,
     );
-    // Positive: should use _ctx.foo since foo is a setup binding
+    // Positive: should use $setup.foo since foo is a setup binding
     assert!(
-        code.contains("_ctx.foo"),
+        code.contains("$setup.foo"),
         "computed variable should use $setup prefix, got:\n{}",
-        code
-    );
-    // Negative: free $setup is invalid in non-inline ssrRender
-    assert!(
-        !code.contains("$setup"),
-        "computed variable must not use free $setup in ssrRender, got:\n{}",
         code
     );
 }
@@ -7702,16 +7710,10 @@ let b = "";
     );
     eprintln!("MULTISCRIPT TEMPLATE:\n{}", code);
     eprintln!("MULTISCRIPT SCRIPT:\n{}", script);
-    // Positive: should use _ctx.foo
+    // Positive: should use $setup.foo
     assert!(
-        code.contains("_ctx.foo"),
+        code.contains("$setup.foo"),
         "multiscript setup computed should use $setup prefix, got:\n{}",
-        code
-    );
-    // Negative: free $setup is invalid in non-inline ssrRender
-    assert!(
-        !code.contains("$setup"),
-        "multiscript setup computed must not use free $setup in ssrRender, got:\n{}",
         code
     );
 }
@@ -7802,7 +7804,7 @@ const displayedSourceCode = ref('')
     );
     // Root path: value goes into attrs object
     assert!(
-        code.contains("value: _ctx.displayedSourceCode"),
+        code.contains("value: $setup.displayedSourceCode"),
         "root textarea :value should be in attrs obj, got:\n{}",
         code
     );
@@ -7835,7 +7837,7 @@ const text = ref('')
     );
     // Positive: should use _ssrInterpolate for content
     assert!(
-        code.contains("_ssrInterpolate(_ctx.text)"),
+        code.contains("_ssrInterpolate($setup.text)"),
         "textarea v-model should use _ssrInterpolate for content, got:\n{}",
         code
     );
@@ -7879,13 +7881,13 @@ import { elIcon } from 'element-plus'
     );
     // Positive: should use camelCase binding
     assert!(
-        code.contains(r#"_ctx.elIcon"#),
+        code.contains(r#"$setup["elIcon"]"#),
         "should resolve <el-icon> to camelCase $setup[\"elIcon\"], got:\n{}",
         code
     );
     // Negative: should NOT use PascalCase
     assert!(
-        !code.contains(r#"_ctx.ElIcon"#),
+        !code.contains(r#"$setup["ElIcon"]"#),
         "should not use PascalCase ElIcon when camelCase elIcon exists, got:\n{}",
         code
     );
@@ -7904,7 +7906,7 @@ import { ElIcon } from 'element-plus'
     );
     // Positive: should use PascalCase binding
     assert!(
-        code.contains(r#"_ctx.ElIcon"#),
+        code.contains(r#"$setup["ElIcon"]"#),
         "should resolve <el-icon> to PascalCase $setup[\"ElIcon\"], got:\n{}",
         code
     );
@@ -7934,7 +7936,9 @@ function onInput(v) { console.log(v) }
     );
     // Positive: should merge handlers into an array
     assert!(
-        code.contains(r#""onUpdate:modelValue": [$event => ((_ctx.val) = $event), _ctx.onInput]"#),
+        code.contains(
+            r#""onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onInput]"#
+        ),
         "should merge v-model and explicit handler into array, got:\n{}",
         code
     );
@@ -7998,7 +8002,7 @@ const obj = { a: 1 }
     // When v-bind is the only prop source on a non-root element,
     // it should use the spread directly without _mergeProps
     assert!(
-        code.contains(r#"_ssrRenderComponent(_ctx.Comp, _ctx.obj, null"#),
+        code.contains(r#"_ssrRenderComponent($setup["Comp"], $setup.obj, null"#),
         "should use spread directly without _mergeProps, got:\n{}",
         code
     );
@@ -8252,7 +8256,7 @@ const modelValue = defineModel()
     );
     // Should use _ssrInterpolate for content
     assert!(
-        code.contains("_ssrInterpolate(_ctx.modelValue)"),
+        code.contains("_ssrInterpolate($setup.modelValue)"),
         "root textarea should interpolate v-model value as content, got:\n{}",
         code
     );
@@ -8638,10 +8642,13 @@ fn test_ssr_no_scope_id_without_scoped_style() {
     );
 }
 
-/// Drop-in SSR: non-inline `ssrRender(_ctx, _push, _parent, _attrs)` must not
-/// reference free `$setup` / `$props` / `$data` / `$options`. Those names are
-/// parameters of the *client* render signature only. Emitting them in SSR is a
-/// runtime ReferenceError under Vue's server renderer (plugin-vue drop-in proof).
+/// Drop-in SSR: when the SFC has a `<script setup>` block, non-inline
+/// `ssrRender` declares the full 8-param signature `(_ctx, _push, _parent,
+/// _attrs, $props, $setup, $data, $options)` — mirroring the VDOM
+/// `render(_ctx, _cache, $props, $setup, $data, $options)` rule — and setup
+/// bindings route through the declared `$setup` parameter rather than the
+/// generic `_ctx` proxy. `$data`/`$options` stay declared-but-unused here
+/// since this fixture has no Options-API bindings.
 #[test]
 fn ssr_non_inline_emits_no_free_setup_binding() {
     let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
@@ -8671,31 +8678,36 @@ const props = defineProps<{ msg: string }>()
         runtime,
     );
     assert!(
-        code.contains("function ssrRender(_ctx, _push, _parent, _attrs)"),
-        "expected non-inline ssrRender signature, got:\n{}",
+        code.contains(
+            "function ssrRender(_ctx, _push, _parent, _attrs, $props, $setup, $data, $options)"
+        ),
+        "expected the 8-param non-inline ssrRender signature, got:\n{}",
         code
     );
-    // Positive: setup + props reach through the instance proxy
+    // Positive: setup ref + destructured props const resolve via the declared $setup param
     assert!(
-        code.contains("_ctx.n"),
-        "setup ref must resolve via _ctx.n, got:\n{}",
-        code
-    );
-    assert!(
-        code.contains("_ctx.props") || code.contains("_ctx.msg"),
-        "props access must resolve via _ctx, got:\n{}",
+        code.contains("$setup.n"),
+        "setup ref must resolve via $setup.n, got:\n{}",
         code
     );
     assert!(
-        code.contains("_ctx.Child") || code.contains(r#"_ctx["Child"]"#),
-        "imported component must resolve via _ctx, got:\n{}",
+        code.contains("$setup.props.msg"),
+        "props access must resolve via $setup.props.msg, got:\n{}",
         code
     );
-    // Negative: free namespace identifiers that are not in the SSR param list
-    for forbidden in ["$setup", "$props", "$data", "$options"] {
-        assert!(
-            !code.contains(forbidden),
-            "ssrRender must not reference free {forbidden} (not a param), got:\n{code}"
+    assert!(
+        code.contains(r#"$setup["Child"]"#),
+        "imported component must resolve via $setup[\"Child\"], got:\n{}",
+        code
+    );
+    // Negative: $data/$options are declared params but never referenced in the
+    // body — this fixture has no Options-API `data`/method bindings, so those
+    // names must appear exactly once (the signature declaration itself).
+    for unused in ["$data", "$options"] {
+        let count = code.matches(unused).count();
+        assert_eq!(
+            count, 1,
+            "ssrRender must not reference free {unused} beyond the signature declaration, got:\n{code}"
         );
     }
 }
@@ -8717,11 +8729,11 @@ const name = "header"
 </template>"#,
     );
     assert!(
-        code.contains("[_ctx.name]") || code.contains("[name]"),
+        code.contains("[$setup.name]"),
         "dynamic slot name must be a computed key, got:\n{code}"
     );
     assert!(
-        !code.contains("\"[name]\"") && !code.contains("\"[_ctx.name]\""),
+        !code.contains("\"[name]\"") && !code.contains("\"[$setup.name]\""),
         "must not quote the brackets into a literal slot name, got:\n{code}"
     );
     // Positive: still emits the slot body
@@ -8809,7 +8821,7 @@ const tab = { key: 'header' }
 <template><Child><template #[tab.key]>content</template></Child></template>"#,
     );
     assert!(
-        code.contains("[_ctx.tab.key]"),
+        code.contains("[$setup.tab.key]"),
         "compound dynamic slot name must resolve its root binding, got:\n{code}"
     );
     assert!(
@@ -8868,7 +8880,7 @@ const x = { color: 'blue' }
     let merged_start = code.find("_ssrRenderStyle([").expect("merged style");
     let merged = &code[merged_start..];
     let static_pos = merged.find("color").expect("static style part");
-    let dyn_pos = merged.find("_ctx.x").expect("dynamic style part");
+    let dyn_pos = merged.find("$setup.x").expect("dynamic style part");
     assert!(
         static_pos < dyn_pos,
         "authoring order: static style precedes :style, got:\n{code}"
@@ -8888,7 +8900,7 @@ const x = { color: 'blue' }
     assert_eq!(code.matches(" style=").count(), 1);
     let merged_start = code.find("_ssrRenderStyle([").expect("merged style");
     let merged = &code[merged_start..];
-    let dyn_pos = merged.find("_ctx.x").expect("dynamic style part");
+    let dyn_pos = merged.find("$setup.x").expect("dynamic style part");
     let static_pos = merged.find("color").expect("static style part");
     assert!(
         dyn_pos < static_pos,

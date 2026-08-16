@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/components/slots.js",
-      "sha256": "5b333766766280b4f8ac7ecf94ae06c889f1e0d9484e2499441fada816b55cb1",
+      "sha256": "b981f469a7fc886b12d6919222270f79b53216ad3da36cbaa035c920f5fb5764",
       "bytes": 1102
     },
     "map": {

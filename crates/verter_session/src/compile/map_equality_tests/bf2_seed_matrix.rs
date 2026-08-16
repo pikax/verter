@@ -26,11 +26,11 @@
 //!    `map-version`, `mappings-decode`), which describe the artifact's own
 //!    well-formedness rather than where it points, and which composition
 //!    therefore does own.
-//! 5. **Code bytes do not move.** Three independent rails: production's code
+//! 5. **Code bytes do not move.** Two independent rails: production's code
 //!    equals the independent reference's code byte for byte (2 above compares
-//!    both halves of the result); the map-enabled arm's code equals its
+//!    both halves of the result); and the map-enabled arm's code equals its
 //!    map-disabled twin's byte for byte, so enabling composition perturbs no
-//!    output byte; and a committed per-cell digest baseline pins all 36.
+//!    output byte (see [`enabling_source_maps_perturbs_no_assembled_code_byte`]).
 //!
 //! This is a CHILD of the cross-implementation equality harness so it reads that
 //! harness's own bridge — the §3.3 input DTO projection, the artifact decoder,
@@ -59,14 +59,23 @@ use crate::compile::AssembledVueModule;
 /// One `check-candidate.mjs` run's ceiling. The oracle links and executes
 /// pinned framework artifacts, so a few seconds is normal and a hang is not;
 /// this bounds the latter without ever being reached by the former.
-const ORACLE_TIMEOUT: Duration = Duration::from_secs(180);
+pub(super) const ORACLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ══════════════════════════════════════════════════════════════════════════
 // The locked seed manifest
 // ══════════════════════════════════════════════════════════════════════════
 
+// `pub(super)` on this module's manifest-reading/compile/oracle-invocation
+// plumbing (`Backend`, `SeedCell`, `read_seed_matrix`, `compile_cell`,
+// `assemble`, `TempCandidate`, `Finished`, `run_bounded`, `ORACLE_TIMEOUT`) is
+// deliberate reuse surface for the sibling `bf2_full_axis_gate` module (same
+// `map_equality_tests` parent, same crate — no crate-boundary violation): the
+// full-axis gate reads the exact same locked manifest and drives the exact
+// same oracle CLI, and a second hand-written copy of this digest-verification
+// and subprocess-handling logic is exactly the kind of common-mode error a
+// second reader is supposed to catch, not reproduce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Backend {
+pub(super) enum Backend {
     Vdom,
     Vapor,
     Ssr,
@@ -85,16 +94,16 @@ impl Backend {
 
 /// One seed cell, as the LOCKED manifest defines it.
 #[derive(Debug, Clone)]
-struct SeedCell {
+pub(super) struct SeedCell {
     /// The manifest's logical name, e.g. `vue/slots__ssr__map1__prod0`.
-    golden_name: String,
+    pub(super) golden_name: String,
     /// The fixture file name the record names, e.g. `slots.vue`.
-    fixture: String,
-    backend: Backend,
+    pub(super) fixture: String,
+    pub(super) backend: Backend,
     /// THE applicability partition. Read from the record's own `options.sourceMap`
     /// request input — the compile axis BF2 asked the official compiler for.
-    source_map: bool,
-    is_production: bool,
+    pub(super) source_map: bool,
+    pub(super) is_production: bool,
 }
 
 fn harness_root() -> PathBuf {
@@ -150,7 +159,7 @@ fn str_member(value: &Value, path: &[&str], context: &str) -> String {
 /// the digest the manifest lists, and that digest is VERIFIED here — a record
 /// whose bytes do not hash to its manifest name is not the locked record, and
 /// reading its request axis would be reading something else's.
-fn read_seed_matrix() -> Vec<SeedCell> {
+pub(super) fn read_seed_matrix() -> Vec<SeedCell> {
     let goldens = harness_root().join("goldens");
     let manifest = read_json(&goldens.join("manifest.json"));
     let entries = manifest
@@ -227,7 +236,7 @@ fn read_seed_matrix() -> Vec<SeedCell> {
 /// production axis as well, so a candidate at the carrier's own
 /// prod-implies-inline default would be a different topology from the artifact
 /// the oracle is handed alongside it.
-fn compile_cell(cell: &SeedCell) -> RealCompile {
+pub(super) fn compile_cell(cell: &SeedCell) -> RealCompile {
     let mut compiled = compile_fixture(
         &cell.fixture,
         CompileAxes {
@@ -239,10 +248,30 @@ fn compile_cell(cell: &SeedCell) -> RealCompile {
         },
     );
     compiled.id = cell.golden_name.clone();
+    // The golden set is generated statically (never inside a live Vite
+    // dev server), so it carries neither `__file` nor an HMR block for any
+    // cell, dev or prod — official `@vitejs/plugin-vue`'s real
+    // `transformMain` gates both on `devServer` being present, not on
+    // `isProduction` alone. `compile_fixture`'s shared `HmrStrategy::Vite`
+    // default is correct for its OTHER caller (the broader corpus in
+    // `map_equality_tests.rs`, a different comparison this matrix doesn't
+    // own), so it's overridden here rather than changed at the shared
+    // helper.
+    compiled.profile.hmr_strategy = HmrStrategy::None;
+    // Same reasoning, one axis over: the golden's SSR cells are a bare
+    // `@vue/compiler-sfc`-equivalent assembly (compileScript +
+    // compileTemplate stitched together directly), never the full
+    // `@vitejs/plugin-vue` bundler transform — so they carry no
+    // `useSSRContext`/`ssrContext.modules` wrapper either, even though a
+    // REAL bundled SSR build (dev or prod) always would (confirmed
+    // directly against `@vitejs/plugin-vue`'s source — unconditional on
+    // `ssr`, no dev-server gate). See `emit_ssr_module_registration`'s own
+    // doc comment.
+    compiled.profile.emit_ssr_module_registration = false;
     compiled
 }
 
-fn assemble(case: &RealCompile) -> AssembledVueModule {
+pub(super) fn assemble(case: &RealCompile) -> AssembledVueModule {
     assemble_vue_main_module(
         &case.canonical_id,
         &case.compiled,
@@ -510,133 +539,18 @@ fn enabling_source_maps_perturbs_no_assembled_code_byte() {
     }
 }
 
-fn baseline_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/compile/map_equality_tests/bf2_seed_matrix_code_baseline.json")
-}
-
-/// The committed per-cell code digest pin.
-///
-/// SCOPE, stated exactly: this is a GENUINELY HISTORICAL baseline. It was NOT
-/// produced by hashing whatever this candidate's own assembler currently
-/// emits — that would be circular and would prove nothing about byte
-/// neutrality across BV0A's own change. It was produced by running the actual
-/// PRE-BV0A `assemble_vue_main_module` (the bare-`String` signature, before
-/// source-map composition existed) from `program/architecture-lock` @
-/// `6ecfcb7b59c371292f554c06be1d880861e435bc`, fed this exact matrix's current
-/// fixture bytes, 36 manifest axes, canonical IDs, compiled fragment
-/// bundle/metadata, and full production/SSR/HMR/source-map profile — every
-/// input identical to what this test itself builds below, with ONLY the
-/// assembler code historical. The full provenance (producer commit, assembler
-/// blob, fixture/manifest/lockfile/toolchain blobs independently confirmed
-/// identical to this tree, exact runner command) is recorded in the baseline
-/// file's own `provenance` object and in
-/// `docs/arch/refactor/rev11/evidence/BV0A/historical-baseline-provenance.md`.
-///
-/// There is deliberately NO regenerate-from-the-running-tree escape hatch: a
-/// baseline any developer's local candidate could silently repin proves
-/// nothing. A drift here means either the assembler's byte output moved from
-/// what the genuine historical implementation produced (fix the regression,
-/// do not repin) or the matrix's own inputs changed (re-derive the pin from
-/// the named historical anchor commit exactly as this record did, and update
-/// the provenance record in the same change).
-///
-/// This baseline is independent evidence from, not a substitute for,
-/// [`enabling_source_maps_perturbs_no_assembled_code_byte`] (the map-disabled
-/// arm runs the byte-producing writes with composition switched off) and
-/// [`every_seed_matrix_cell_composes_identically_to_the_independent_reference`]
-/// (the bytes are the ones the frozen write grammar specifies, derived
-/// independently) — together the three close AMD-008's "previously successful
-/// results ... remain byte-identical" requirement without any one of them
-/// alone being circular.
-#[test]
-fn assembled_code_bytes_match_the_pinned_baseline() {
-    let cells = read_seed_matrix();
-    let actual: BTreeMap<String, Value> = cells
-        .iter()
-        .map(|cell| {
-            let code = assemble(&compile_cell(cell)).code;
-            (
-                cell.golden_name.clone(),
-                json!({ "codeSha256": sha256_hex(code.as_bytes()), "codeBytes": code.len() }),
-            )
-        })
-        .collect();
-
-    let baseline = read_json(&baseline_path());
-
-    // The provenance object is what makes this pin non-circular; a baseline
-    // silently stripped back down to bare digests would look the same on a
-    // naive diff but would have lost the only thing that distinguishes it
-    // from a value the candidate hashed from itself.
-    let provenance = baseline
-        .get("provenance")
-        .and_then(Value::as_object)
-        .expect("the baseline is missing its `provenance` object — this pin must be bound to a named historical producer, never bare digests");
-    for field in [
-        "producerCommit",
-        "producerBranch",
-        "assemblerFile",
-        "assemblerBlob",
-        "manifestBlob",
-        "fixtureTreeBlob",
-        "cargoLockBlob",
-        "rustToolchainBlob",
-    ] {
-        let value = provenance
-            .get(field)
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("the baseline's provenance is missing `{field}`"));
-        assert!(
-            !value.is_empty(),
-            "the baseline's provenance `{field}` is empty"
-        );
-    }
-
-    let expected = baseline
-        .get("cells")
-        .and_then(Value::as_object)
-        .expect("the baseline carries a `cells` map");
-    assert_eq!(
-        expected.len(),
-        actual.len(),
-        "the baseline pins {} cells, the matrix has {}",
-        expected.len(),
-        actual.len()
-    );
-
-    let mut drift = Vec::new();
-    for (name, value) in &actual {
-        let pinned = expected
-            .get(name)
-            .unwrap_or_else(|| panic!("{name}: the baseline pins no digest for this cell"));
-        if pinned != value {
-            drift.push(format!(
-                "── {name} ──\n  pinned: {pinned}\n  actual: {value}"
-            ));
-        }
-    }
-    assert!(
-        drift.is_empty(),
-        "assembled code bytes moved on {} of {} cells:\n\n{}",
-        drift.len(),
-        actual.len(),
-        drift.join("\n\n")
-    );
-}
-
 // ══════════════════════════════════════════════════════════════════════════
 // Required exit 4 — BF2's authored-source oracle, once per cell
 // ══════════════════════════════════════════════════════════════════════════
 
 /// A candidate file that removes itself, at a path unique to this process and
 /// this call.
-struct TempCandidate {
-    path: PathBuf,
+pub(super) struct TempCandidate {
+    pub(super) path: PathBuf,
 }
 
 impl TempCandidate {
-    fn write(cell: &str, body: &str) -> Self {
+    pub(super) fn write(cell: &str, body: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let slug: String = cell
             .chars()
@@ -660,18 +574,18 @@ impl Drop for TempCandidate {
 }
 
 /// One finished subprocess run, or the fact that it had to be killed.
-struct Finished {
-    code: Option<i32>,
-    timed_out: bool,
-    stdout: String,
-    stderr: String,
+pub(super) struct Finished {
+    pub(super) code: Option<i32>,
+    pub(super) timed_out: bool,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
 }
 
 /// Run a command to completion under an explicit deadline.
 ///
 /// The pipes are drained on their own threads, so a child that fills a pipe
 /// buffer cannot deadlock the deadline loop that is supposed to kill it.
-fn run_bounded(command: &mut Command, timeout: Duration) -> Finished {
+pub(super) fn run_bounded(command: &mut Command, timeout: Duration) -> Finished {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

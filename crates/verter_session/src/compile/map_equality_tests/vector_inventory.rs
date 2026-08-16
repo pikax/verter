@@ -9,8 +9,8 @@
 //! reads the SAME file, builds the SAME [`AssembleInput`] DTO this harness
 //! already bridges to the real production entry point through
 //! [`production_outcome`], and asserts EXACT agreement with each vector's own
-//! frozen `expected`. AMD-008's "both implementations reproduce every vector"
-//! requirement is not met by a hand-transcribed subset (the earlier
+//! frozen `expected`. Both implementations reproducing EVERY vector is not
+//! met by a hand-transcribed subset (the earlier
 //! `map_tests.rs` `vector_v*`/`vector_f*` functions cover only V1–V7/F1–F7,
 //! predating this suite's later completion) — it requires the full inventory,
 //! with the EXECUTED ids asserted against the suite's own id inventory. No
@@ -168,6 +168,7 @@ impl AssembleInput {
             is_production: bool_member(value, "isProduction"),
             ssr: bool_member(value, "ssr"),
             ssr_module_id: opt_str_member(value, "ssrModuleId"),
+            emit_ssr_module_registration: bool_member(value, "emitSsrModuleRegistration"),
             hmr_strategy,
             source_map_requested: bool_member(value, "sourceMapRequested"),
             authored_script: bool_member(authored, "script"),

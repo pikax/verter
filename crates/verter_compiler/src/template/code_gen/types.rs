@@ -6,12 +6,82 @@
 use oxc_allocator::Allocator;
 use smallvec::SmallVec;
 
-use crate::code_transform::CodeTransform;
+use crate::code_transform::{CodeTransform, SegmentAnchor};
+
+use super::vapor::PendingNavQueue;
 
 use super::shared::helpers::{
     BuiltinComponentFlags, SsrHelper, SsrHelperFlags, VaporHelper, VaporHelperFlags, VdomHelper,
     VdomHelperFlags,
 };
+
+// ======================== SegmentedOverwriteAuthority ========================
+
+/// Capability token proving the caller is code inside `template::code_gen`
+/// — the Vue VDOM/Vapor/SSR runtime template emitters (`vdom`, `vapor`,
+/// `ssr`, plus their shared `binding`/`expression`/`shared` plumbing; see
+/// `template::code_gen::mod`'s own submodule list) — the sole authorized
+/// caller of [`CodeTransform::try_overwrite_segmented`]. This is the static
+/// call-site guard the opt-in segmented-overwrite primitive's ruling
+/// requires, held structurally (a type-state capability token, not a
+/// scanner): the constructor is `pub(in crate::template::code_gen)`, an
+/// ancestor-scoped visibility Rust enforces on EVERY build of this crate.
+/// Neither `crate::ide::**` (the separate IDE/TSX codegen path) nor
+/// `crate::svelte::**` (the separate Svelte codegen path) — both SIBLINGS
+/// of `template::code_gen`, not descendants — can obtain a token; any
+/// attempt is a compile error (`E0603`-class), unconditionally, before any
+/// test runs. This is checked on literally every `cargo build -p
+/// verter_compiler` (part of every canonical gate run), which is a
+/// STRONGER guarantee than a separate opt-out-able test would give.
+///
+/// The public entry point every real emitter calls,
+/// [`CodeGenOutput::overwrite_segmented`], REQUIRES a value of this type as
+/// a parameter — so reaching the primitive needs a token, not just calling
+/// `apply_to` (which mints its own token internally only to drain the
+/// ALREADY-QUEUED, already-authorized entries `overwrite_segmented` pushed).
+///
+/// Negative test:
+/// `tests/cases/segmented_overwrite_compile_fail.rs` (trybuild, run with
+/// `--features bench`) proves `Self::new()` is unreachable from a
+/// genuinely external crate. `verter_compiler::template` and `::ide` are
+/// `pub(crate)` in a normal build, so an external probe would otherwise
+/// fail for that unrelated, coarser reason on every path under
+/// `template::` — the `bench` feature makes `template` (and its
+/// descendants) `pub`, isolating the failure to THIS item's own
+/// `pub(in path)` restriction. That test still cannot, by construction,
+/// discriminate `pub(in crate::template::code_gen)` from the coarser
+/// `pub(crate)` (both are equally unreachable from any external vantage
+/// point, including a trybuild fixture) — so it does not independently
+/// re-prove that `crate::ide`/`crate::svelte` specifically are excluded;
+/// that narrower, intra-crate claim is held by Rust's own privacy checker
+/// alone, unconditionally, on every `cargo build`/`cargo check` of this
+/// crate. A source-scanning guard is available in principle but is
+/// excluded by this codebase's own rule against landing new name-keyed
+/// scanners. The positive path (legitimate callers keep working) is
+/// exercised by every VDOM/Vapor/SSR interpolation/attribute test in this
+/// crate, all of which route through [`CodeGenOutput::apply_to`]'s call to
+/// [`Self::new`].
+#[derive(Clone, Copy)]
+pub struct SegmentedOverwriteAuthority(());
+
+impl SegmentedOverwriteAuthority {
+    pub(in crate::template::code_gen) fn new() -> Self {
+        Self(())
+    }
+
+    /// Test-only escape hatch: `code_transform`'s OWN direct primitive
+    /// tests (`code_transform/segmented_tests.rs`) exercise
+    /// `try_overwrite_segmented` in isolation, outside `template::code_gen`
+    /// entirely, and need a token to do it. Cargo test builds compile the
+    /// whole crate under `cfg(test)`, so this is reachable crate-wide in
+    /// tests only — the production call-site restriction this type exists
+    /// to enforce is a property of RELEASE/production builds, where this
+    /// constructor does not exist.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self(())
+    }
+}
 
 // ======================== CodeGenOutput ========================
 
@@ -25,6 +95,24 @@ pub struct CodeGenOutput<'alloc> {
     /// Replace source ranges: (start, end, replacement).
     /// Applied via `ct.batch_overwrite()` in sorted order.
     pub overwrites: Vec<(u32, u32, &'alloc str)>,
+
+    /// Replace source ranges with wholly synthetic content that has no
+    /// character-level correspondence to the replaced span: (start, end,
+    /// replacement). Applied via `ct.overwrite_unmapped()` per entry — see
+    /// [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix) for why
+    /// this is a separate channel from `overwrites` rather than a flag on
+    /// the same one.
+    unmapped_overwrites: Vec<(u32, u32, &'alloc str)>,
+
+    /// Replace source ranges carrying MULTIPLE per-offset authored anchors:
+    /// (start, end, replacement, anchors). Applied via
+    /// `ct.try_overwrite_segmented()` per entry. The additive, opt-in
+    /// segmented-overwrite channel — reserved for the authorized Vue runtime
+    /// template emitters (VDOM/Vapor/SSR) mapping an interpolation
+    /// identifier or a static attribute name embedded inside otherwise
+    /// synthetic generated code. See `code_transform::segmented`'s module
+    /// doc for the full contract.
+    segmented_overwrites: Vec<(u32, u32, &'alloc str, &'alloc [SegmentAnchor])>,
 
     /// Insert content before a position: (position, content).
     /// Applied via `ct.batch_prepend_left_static()` in sorted order.
@@ -67,6 +155,16 @@ pub struct CodeGenOutput<'alloc> {
     /// when no helper-import preamble was emitted.
     helper_preamble: Option<&'alloc str>,
 
+    /// Deferred explicit source-map boundary offsets (original-source byte
+    /// positions), transferred to the `CodeTransform` in
+    /// [`apply_to`](Self::apply_to) via `try_add_sourcemap_location`. An
+    /// `Original`/`Moved` chunk otherwise tokens only its own start and
+    /// newline boundaries (`emit_mapped_content`); a position registered
+    /// here gets its own token even mid-line — e.g. a top-level
+    /// declaration's identifier, which the mapping oracle's `verbatim-carry`
+    /// anchors require a segment to land on exactly.
+    sourcemap_locations: Vec<u32>,
+
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
 
@@ -83,6 +181,8 @@ impl<'alloc> CodeGenOutput<'alloc> {
     pub fn new(alloc: &'alloc Allocator) -> Self {
         Self {
             overwrites: Vec::with_capacity(16),
+            unmapped_overwrites: Vec::new(),
+            segmented_overwrites: Vec::new(),
             prepends: Vec::with_capacity(16),
             mapped_prepends: Vec::new(),
             vdom_imports: VdomHelperFlags::empty(),
@@ -92,6 +192,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             moves: Vec::new(),
             wrapped_moves: Vec::new(),
             helper_preamble: None,
+            sourcemap_locations: Vec::new(),
             alloc,
             scratch: String::new(),
         }
@@ -108,6 +209,50 @@ impl<'alloc> CodeGenOutput<'alloc> {
     #[inline]
     pub fn overwrite_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
         self.overwrites.push((start, end, content));
+    }
+
+    /// Push an unmapped overwrite operation (see `unmapped_overwrites` field
+    /// doc). The content is bump-allocated.
+    #[inline]
+    pub fn overwrite_unmapped(&mut self, start: u32, end: u32, content: &str) {
+        let allocated = self.alloc.alloc_str(content);
+        self.unmapped_overwrites.push((start, end, allocated));
+    }
+
+    /// Push a segmented-overwrite operation: `content` replaces `[start,
+    /// end)`, and each entry in `anchors` is a byte span inside `content`
+    /// that is an AUTHORED lexeme copied verbatim, mapping to its own
+    /// authored source position (see `segmented_overwrites` field doc and
+    /// `code_transform::segmented`'s module doc). `content` and `anchors`
+    /// are bump-allocated.
+    ///
+    /// `_authority` is the ACTUAL call-site guard: this is the entry point
+    /// every real emitter calls (not the lower-level
+    /// `CodeTransform::try_overwrite_segmented`), so the token is required
+    /// HERE, not just on the primitive `apply_to` drains into — `apply_to`
+    /// manufacturing its own token internally would prove nothing about
+    /// THIS method, which any `CodeGenOutput` caller (including a
+    /// hypothetical future IDE user of this shared type) could otherwise
+    /// reach with no token at all. See `SegmentedOverwriteAuthority`'s own
+    /// doc for why `crate::ide::**`/`crate::svelte::**` cannot construct
+    /// one to pass here.
+    #[inline]
+    pub fn overwrite_segmented(
+        &mut self,
+        start: u32,
+        end: u32,
+        content: &str,
+        anchors: &[SegmentAnchor],
+        _authority: SegmentedOverwriteAuthority,
+    ) {
+        let content_ref = self.alloc.alloc_str(content);
+        let anchors_ref: &'alloc [SegmentAnchor] = if anchors.is_empty() {
+            &[]
+        } else {
+            self.alloc.alloc_slice_copy(anchors)
+        };
+        self.segmented_overwrites
+            .push((start, end, content_ref, anchors_ref));
     }
 
     /// Push a prepend-left (insert before position) with `&'static str` content.
@@ -127,22 +272,65 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Root wrapper insertion for a raw template unit whose synthetic root has
     /// a zero-width opening tag. It must precede child operations at the same
     /// byte boundary.
+    ///
+    /// The nonzero-width case (a real tag, e.g. `<script setup>`, being
+    /// replaced by wholly synthetic wrapper code) uses an UNMAPPED overwrite:
+    /// still an `Overwritten` chunk (preserving the exact ordering semantics
+    /// other operations — e.g. the inline-template render splice's
+    /// `move_slice` — depend on relative to this position), but one that
+    /// emits no source-map token. A regular (mapped) `Overwritten` chunk
+    /// claims ONE source position (the replaced span's own start) for the
+    /// entire replacement, which is truthful only for genuine 1:1
+    /// substitutions; synthetic wrapper text has no character-level
+    /// correspondence to the tag it replaces — confirmed directly against
+    /// the pinned rc.3 oracle's own maps, where the official compiler's
+    /// equivalent `prependLeft`-based wrapper insertion never touches the
+    /// tag text at all and so carries no mapping either.
     pub fn overwrite_or_root_prefix(&mut self, start: u32, end: u32, content: &str) {
         if start == end {
             let allocated = self.alloc.alloc_str(content);
             self.prepends.insert(0, (start, allocated));
         } else {
-            self.overwrite(start, end, content);
+            self.overwrite_unmapped(start, end, content);
+        }
+    }
+
+    /// Like [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix),
+    /// but for the opt-in segmented case: `content` embeds one or more
+    /// authored anchors (e.g. a hoisted static-props object's own `class`
+    /// key) that must survive the replacement — see
+    /// `code_transform::segmented`'s module doc. The zero-width root case
+    /// stays a plain unmapped prepend (a synthetic root's own opening tag
+    /// never carries an authored anchor in the shapes reaching this
+    /// primitive today); only the nonzero-width case routes through
+    /// [`overwrite_segmented`](Self::overwrite_segmented).
+    pub fn overwrite_or_root_prefix_segmented(
+        &mut self,
+        start: u32,
+        end: u32,
+        content: &str,
+        anchors: &[SegmentAnchor],
+        authority: SegmentedOverwriteAuthority,
+    ) {
+        if start == end {
+            let allocated = self.alloc.alloc_str(content);
+            self.prepends.insert(0, (start, allocated));
+        } else {
+            self.overwrite_segmented(start, end, content, anchors, authority);
         }
     }
 
     /// Root wrapper close for a raw template unit whose synthetic closing tag
     /// is a zero-width boundary after all authored bytes.
+    ///
+    /// See [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix) for
+    /// why the nonzero-width case uses an unmapped overwrite rather than a
+    /// regular (falsely position-claiming) one.
     pub fn overwrite_or_root_suffix(&mut self, start: u32, end: u32, content: &str) {
         if start == end {
             self.prepend_alloc(start, content);
         } else {
-            self.overwrite(start, end, content);
+            self.overwrite_unmapped(start, end, content);
         }
     }
 
@@ -157,6 +345,16 @@ impl<'alloc> CodeGenOutput<'alloc> {
         let allocated = self.alloc.alloc_str(content);
         self.prepends.push((pos, allocated));
         self.helper_preamble = Some(allocated);
+    }
+
+    /// Register an explicit source-map boundary at an original-source byte
+    /// offset (see `sourcemap_locations` field doc). A no-op for source-map
+    /// purposes when the position ends up outside any surviving `Original`/
+    /// `Moved` chunk or mid-codepoint — `CodeTransform::try_add_sourcemap_location`
+    /// degrades gracefully rather than corrupting the map.
+    #[inline]
+    pub fn add_sourcemap_location(&mut self, offset: u32) {
+        self.sourcemap_locations.push(offset);
     }
 
     /// Push a source-mapped prepend-left with bump-allocated content.
@@ -362,6 +560,18 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.alloc.alloc_str(s)
     }
 
+    /// Allocate a `SegmentAnchor` slice in the bump allocator — the anchor
+    /// carrier for [`VaporTextPart::Dynamic`] and analogous SSR/VDOM
+    /// interpolation-anchor call sites.
+    #[inline]
+    pub fn alloc_segment_anchors(&self, anchors: &[SegmentAnchor]) -> &'alloc [SegmentAnchor] {
+        if anchors.is_empty() {
+            &[]
+        } else {
+            self.alloc.alloc_slice_copy(anchors)
+        }
+    }
+
     /// Record a VDOM runtime helper import.
     #[inline]
     pub fn add_vdom_import(&mut self, h: VdomHelper) {
@@ -456,6 +666,45 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         ct.batch_overwrite(&self.overwrites);
 
+        // Unmapped overwrites (root wrapper open/close tags replaced by
+        // synthetic wrapper code) are rare (at most a handful per file) and
+        // never overlap the general `overwrites` set (both target only
+        // root-level tag spans), so a plain sorted loop is sufficient —
+        // no batch/overlap-filter machinery needed.
+        self.unmapped_overwrites
+            .sort_unstable_by_key(|&(start, ..)| start);
+        for &(start, end, content) in &self.unmapped_overwrites {
+            ct.overwrite_unmapped(start, end, content);
+        }
+
+        // Segmented overwrites (the opt-in multi-anchor primitive). Each
+        // entry targets a disjoint range from every other overwrite-family
+        // channel (VDOM/Vapor/SSR emitters use exactly one overwrite
+        // mechanism per AST node), so ordering relative to the channels
+        // above does not affect correctness. A failure here means this
+        // primitive's own narrow precondition (see `segmented.rs`'s module
+        // doc) was violated by the caller — a composition defect in the
+        // emitter that queued this entry, not a recoverable runtime
+        // condition. This fails closed in EVERY build, debug and release
+        // alike: silently falling back to a plain `ct.overwrite()` would
+        // re-fabricate the exact false whole-block provenance (every byte
+        // of `content` mapping to `start`) this primitive exists to
+        // eliminate, trading a loud compositional bug for a silently wrong
+        // source map — worse-but-passing is not an acceptable outcome here.
+        self.segmented_overwrites
+            .sort_unstable_by_key(|&(start, ..)| start);
+        for &(start, end, content, anchors) in &self.segmented_overwrites {
+            if let Err(err) = ct.try_overwrite_segmented(
+                start,
+                end,
+                content,
+                anchors,
+                SegmentedOverwriteAuthority::new(),
+            ) {
+                panic!("overwrite_segmented precondition violated at [{start},{end}): {err:?}");
+            }
+        }
+
         if self.mapped_prepends.is_empty() {
             // Fast path: no mapped prepends, use the simpler batch method.
             // Must use stable sort to preserve insertion order for same-position
@@ -479,6 +728,15 @@ impl<'alloc> CodeGenOutput<'alloc> {
         // Apply deferred move operations (e.g., slot reordering)
         for &(start, end, target) in &self.moves {
             ct.move_slice(start, end, target);
+        }
+
+        // Register explicit source-map boundaries (see `sourcemap_locations`
+        // field doc). Order relative to the operations above doesn't matter
+        // — these are read only at `generate_map` time, called separately
+        // after `apply_to` returns. Errors (out-of-bounds, mid-codepoint)
+        // degrade to no boundary at that position rather than propagating.
+        for &offset in &self.sourcemap_locations {
+            let _ = ct.try_add_sourcemap_location(offset);
         }
 
         // Return whichever mode's imports are non-empty (only one is ever active)
@@ -700,7 +958,19 @@ pub enum ScopeClose {
     /// Close a v-else branch.
     Else,
     /// Close a v-for renderList.
-    For { is_keyed: bool },
+    ///
+    /// `is_stable` mirrors official `@vue/compiler-core`'s
+    /// `isStableFragment = forNode.source.type === SIMPLE_EXPRESSION &&
+    /// forNode.source.constType > 0` — the v-for's iterable source is a
+    /// bare identifier resolving to a binding whose
+    /// `BindingType::reactivity_level()` is `Static` (a plain
+    /// `<script setup>` const/import, never reassigned or ref-wrapped).
+    /// When true it takes priority over `is_keyed` (official:
+    /// `isStableFragment ? 64 : keyProp ? 128 : 256`) — the fragment
+    /// itself is provably stable-ordered, so neither keyed nor unkeyed
+    /// diffing applies, and per-item elements skip their own block wrap
+    /// (see `is_block_root`'s `v_for` arm in `leave_element`).
+    For { is_keyed: bool, is_stable: bool },
     /// Close a v-for renderList nested INSIDE a v-if/v-else-if/v-else
     /// branch — both structural directives on ONE element. The condition
     /// stays OUTER (official v-if-over-v-for priority) and the branch
@@ -732,12 +1002,19 @@ pub enum ConditionBranchClose {
 ///
 /// Each call to `next_*()` returns the current value and increments.
 /// Variable naming: `n0`, `n1` (nodes), `x0` (text), `p0` (path), `t0` (template).
+///
+/// `n` and `x` declarations SHARE one counter (`n`) — official
+/// (`@vue/compiler-vapor`'s `context.reference()`) has no separate id space
+/// for them: a `const x2 = _txt(n2)` text accessor always names the SAME
+/// numeric id as its owning element's own `const n2 = t0()`, confirmed
+/// directly against the vendored rc.3 compiler and every pinned golden that
+/// emits both. There is no `next_text()` — callers needing a text-accessor
+/// id call `next_node()` (typically via `VaporElementState::ensure_text_ref`,
+/// which reuses `ensure_node_ref`'s shared allocation).
 #[derive(Debug, Default)]
 pub struct VaporCounters {
-    /// Node reference counter (n0, n1, ...).
+    /// Node/text reference counter (n0, n1, ... — also used for x0, x1, ...).
     pub n: u32,
-    /// Text node reference counter (x0, x1, ...).
-    pub x: u32,
     /// Navigation path counter (p0, p1, ...).
     pub p: u32,
     /// Template index counter (t0, t1, ...).
@@ -748,12 +1025,6 @@ impl VaporCounters {
     pub fn next_node(&mut self) -> u32 {
         let v = self.n;
         self.n += 1;
-        v
-    }
-
-    pub fn next_text(&mut self) -> u32 {
-        let v = self.x;
-        self.x += 1;
         v
     }
 
@@ -778,8 +1049,12 @@ impl VaporCounters {
 pub enum VaporTextPart<'a> {
     /// Literal text: `"hello "`.
     Static(&'a str),
-    /// Dynamic expression: `_toDisplayString(_ctx.msg)`.
-    Dynamic(&'a str),
+    /// Dynamic expression: `_toDisplayString(_ctx.msg)`, plus the authored
+    /// anchors embedded in it (interpolation identifiers), relative to THIS
+    /// part's own text start — the opt-in segmented-overwrite primitive's
+    /// anchor shape (see `code_transform::segmented`'s module doc). Empty
+    /// when the expression carries no mappable identifier (e.g. a literal).
+    Dynamic(&'a str, &'a [SegmentAnchor]),
 }
 
 impl VaporTextPart<'_> {
@@ -787,14 +1062,14 @@ impl VaporTextPart<'_> {
     pub fn to_js(&self) -> &str {
         match self {
             VaporTextPart::Static(s) => s,
-            VaporTextPart::Dynamic(s) => s,
+            VaporTextPart::Dynamic(s, _) => s,
         }
     }
 
     /// Returns true if this is a dynamic part.
     #[cfg(test)]
     pub fn is_dynamic(&self) -> bool {
-        matches!(self, VaporTextPart::Dynamic(_))
+        matches!(self, VaporTextPart::Dynamic(..))
     }
 }
 
@@ -846,6 +1121,55 @@ impl VaporEffect<'_> {
                 }
                 buf.push(')');
             }
+            other => other.write_code_into_tail(buf),
+        }
+    }
+
+    /// Byte-identical to [`write_code_into`](Self::write_code_into), but ALSO
+    /// records every embedded interpolation anchor's ABSOLUTE position in
+    /// `buf` into `anchors` — the opt-in path consumed by the render
+    /// function's own segmented overwrite. Only `SetText`'s
+    /// [`VaporTextPart::Dynamic`] parts carry anchors today (interpolation
+    /// identifiers); every other variant delegates to the shared tail
+    /// writer, producing byte-identical output with no anchors added.
+    pub(crate) fn write_code_into_with_anchors(
+        &self,
+        buf: &mut String,
+        anchors: &mut Vec<SegmentAnchor>,
+    ) {
+        use super::shared::helpers::push_u32;
+        match self {
+            VaporEffect::SetText { text_ref, parts } => {
+                buf.push_str("_setText(x");
+                push_u32(buf, *text_ref);
+                buf.push_str(", ");
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(" + ");
+                    }
+                    let base = buf.len() as u32;
+                    buf.push_str(part.to_js());
+                    if let VaporTextPart::Dynamic(_, part_anchors) = part {
+                        anchors.extend(part_anchors.iter().map(|a| SegmentAnchor {
+                            content_offset: base + a.content_offset,
+                            length: a.length,
+                            source_pos: a.source_pos,
+                        }));
+                    }
+                }
+                buf.push(')');
+            }
+            other => other.write_code_into_tail(buf),
+        }
+    }
+
+    /// The variants shared byte-for-byte between [`write_code_into`](Self::write_code_into)
+    /// and [`write_code_into_with_anchors`](Self::write_code_into_with_anchors) —
+    /// none of these carry a `VaporTextPart`, so there is nothing to anchor.
+    fn write_code_into_tail(&self, buf: &mut String) {
+        use super::shared::helpers::push_u32;
+        match self {
+            VaporEffect::SetText { .. } => unreachable!("SetText handled by both callers"),
             VaporEffect::SetClass { node_ref, expr } => {
                 buf.push_str("_setClass(n");
                 push_u32(buf, *node_ref);
@@ -950,8 +1274,11 @@ pub struct VaporElementState<'a> {
     pub child_text_creations: Vec<&'a str>,
     /// Effects from children (bubbled up).
     pub child_effects: Vec<VaporEffect<'a>>,
-    /// Statements (non-effect, like event handlers).
-    pub child_statements: Vec<&'a str>,
+    /// Statements (non-effect, like event handlers), each paired with its
+    /// OWN authored anchors (relative to the statement's own text start) —
+    /// see `VaporRootElement::statements`'s doc for why (a bubbled v-if/v-for
+    /// statement can embed an interpolation identifier).
+    pub child_statements: Vec<(&'a str, &'a [SegmentAnchor])>,
     /// Named slot closure entries built from `<template v-slot>` children.
     /// Each string is a complete slot entry (e.g., `header: () => { ... }`).
     pub named_slots: Vec<String>,
@@ -966,6 +1293,18 @@ pub struct VaporElementState<'a> {
     /// interpolation run, so the next adjacent text/interpolation coalesces
     /// into the same DOM child rather than advancing the cursor.
     pub dom_in_text_run: bool,
+    /// Requests from direct children to establish a nav/operation reference
+    /// into THIS scope, queued rather than resolved immediately — see the
+    /// Vapor-owned `PendingNavRequest`'s doc comment for why this scope's
+    /// own ref cannot be minted until every direct child has been visited.
+    ///
+    /// [`PendingNavQueue`] is OPAQUE here: this field only default-
+    /// constructs and clears it (the two operations `PendingNavQueue`
+    /// exposes outside `vapor/**`). Every operation that can construct,
+    /// push, or drain an individual `PendingNavRequest` is scoped to the
+    /// Vapor backend itself — this shared state type never names
+    /// `PendingNavRequest`, only the opaque queue holding it.
+    pub(in crate::template::code_gen) pending_nav_requests: PendingNavQueue,
 }
 
 impl Default for VaporElementState<'_> {
@@ -974,7 +1313,7 @@ impl Default for VaporElementState<'_> {
     }
 }
 
-impl VaporElementState<'_> {
+impl<'a> VaporElementState<'a> {
     pub fn new() -> Self {
         Self {
             html: String::new(),
@@ -989,6 +1328,7 @@ impl VaporElementState<'_> {
             named_slots: Vec::new(),
             dom_child_cursor: 0,
             dom_in_text_run: false,
+            pending_nav_requests: PendingNavQueue::new(),
         }
     }
 
@@ -1007,6 +1347,7 @@ impl VaporElementState<'_> {
         self.named_slots.clear();
         self.dom_child_cursor = 0;
         self.dom_in_text_run = false;
+        self.pending_nav_requests.clear();
     }
 
     /// Observe an adjacent text or interpolation child while walking this
@@ -1048,11 +1389,22 @@ impl VaporElementState<'_> {
     }
 
     /// Ensure a text node ref is allocated for this element.
+    ///
+    /// Official (`@vue/compiler-vapor`'s `context.reference()`) has NO
+    /// separate id space for `xN` (text-accessor) vs `nN` (element/node)
+    /// declarations — both print the SAME `dynamic.id` under a different
+    /// prefix depending on which declaration is being emitted (confirmed
+    /// directly against the vendored rc.3 compiler and every pinned golden
+    /// that emits both: e.g. basic-interpolation.vue's `const n2 = t0()`
+    /// paired with `const x2 = _txt(n2)`, never a distinct number). This
+    /// reuses `ensure_node_ref`'s shared counter rather than a separate one
+    /// — `text_node_ref` stays its own field purely as the "does this
+    /// element ALSO need an `xN = _txt(nN)` declaration" marker.
     pub fn ensure_text_ref(&mut self, counters: &mut VaporCounters) -> u32 {
         if let Some(r) = self.text_node_ref {
             r
         } else {
-            let r = counters.next_text();
+            let r = self.ensure_node_ref(counters);
             self.text_node_ref = Some(r);
             r
         }
@@ -1072,10 +1424,22 @@ pub struct VaporRootElement<'a> {
     pub nav: Vec<&'a str>,
     /// Text node creations.
     pub text_creations: Vec<&'a str>,
+    /// The root's OWN direct text-node ref (`Some(N)` for `x{N}`), distinct
+    /// from `text_creations` (child-bubbled `_txt(pN)` extractions). Set when
+    /// the root element's ENTIRE dynamic-text content is its own (no other
+    /// static/element content before the interpolation), so its `_txt()`
+    /// extraction targets the root's own node ref directly:
+    /// `const x{own_text_ref} = _txt(n{node_ref})`.
+    pub own_text_ref: Option<u32>,
     /// All effects (own + child).
     pub effects: Vec<VaporEffect<'a>>,
-    /// Non-effect statements.
-    pub statements: Vec<&'a str>,
+    /// Non-effect statements, each paired with its OWN authored anchors
+    /// (relative to the statement's own text start) — a v-if/v-for
+    /// statement can embed an interpolation identifier inside its branch
+    /// closure body, and those anchors must survive into the render
+    /// function's segmented overwrite (see `code_transform::segmented`'s
+    /// module doc). Empty when the statement carries no mappable identifier.
+    pub statements: Vec<(&'a str, &'a [SegmentAnchor])>,
     /// v-once flag: effects are emitted as direct statements (no `_renderEffect` wrapper).
     pub v_once: bool,
     /// v-memo deps expression: effects are wrapped in `_withMemo(deps, ...)`.

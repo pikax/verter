@@ -43,7 +43,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.js",
-      "sha256": "e1700bc78ee34c1f1a64605d5996d7ba4c0fe645743f50b238b1f9586b7193a3",
+      "sha256": "ba088550df6cfe9c20638046df107310e7446c9f586b183090d140d1e61183e8",
       "bytes": 1337
     },
     "map": {

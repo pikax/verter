@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/conditionals/if-else-if-else.js",
-      "sha256": "0ad055db1e178643e417ec930babbe957f28042bb82d9d0ebb22ca518b2b5875",
+      "sha256": "f55e49e0265d60c336346b78bd31c4aacc2187cfc8526aa88385154c88dce828",
       "bytes": 1028
     },
     "map": {

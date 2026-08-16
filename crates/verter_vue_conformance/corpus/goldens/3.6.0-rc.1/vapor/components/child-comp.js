@@ -1,4 +1,3 @@
-import { setInsertionState as _setInsertionState, createSlot as _createSlot, child as _child, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createInvoker as _createInvoker, delegateEvents as _delegateEvents, template as _template } from 'vue';
 
 const _sfc_main = {
   __name: 'child-comp',
@@ -24,6 +23,7 @@ return __returned__
 }
 
 }
+import { setInsertionState as _setInsertionState, createSlot as _createSlot, child as _child, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, createInvoker as _createInvoker, delegateEvents as _delegateEvents, template as _template } from 'vue';
 const t0 = _template("<button class=child-comp> ", 1)
 _delegateEvents("click")
 

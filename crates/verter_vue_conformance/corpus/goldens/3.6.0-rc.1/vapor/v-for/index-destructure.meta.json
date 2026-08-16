@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.js",
-      "sha256": "48b845a749f461a9c1c862e336102bbd0f18d573a41d6f710eaf41311c29a353",
+      "sha256": "3ebee6236357ba764a6de90d68efcfd81b03558cc3b64f0a5ff957822883dc07",
       "bytes": 1156
     },
     "map": {

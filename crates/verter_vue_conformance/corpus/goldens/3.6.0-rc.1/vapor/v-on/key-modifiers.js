@@ -1,4 +1,3 @@
-import { withVaporKeys as _withKeys, delegateEvents as _delegateEvents, template as _template } from 'vue';
 
 const _sfc_main = {
   __name: 'key-modifiers',
@@ -15,6 +14,7 @@ return __returned__
 }
 
 }
+import { withVaporKeys as _withKeys, delegateEvents as _delegateEvents, template as _template } from 'vue';
 const t0 = _template("<input>", 1)
 _delegateEvents("keyup", "keydown")
 

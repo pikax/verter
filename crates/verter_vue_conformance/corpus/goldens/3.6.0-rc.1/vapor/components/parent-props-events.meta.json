@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/components/parent-props-events.js",
-      "sha256": "36398864ffd54975f4ea1a70404e6091867063a1104af3e3c5f95cd85e8b3e94",
+      "sha256": "22de0ca9c826b17b27e068f193abd4df05263ecae37c34e75328954bd01d86eb",
       "bytes": 665
     },
     "map": {

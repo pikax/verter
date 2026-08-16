@@ -92,35 +92,16 @@ fn setup_ref_standalone_prefix_is_setup() {
     assert_eq!(resolver.resolve_prefix("count"), "$setup.");
 }
 
-/// Non-inline SSR `ssrRender(_ctx, _push, _parent, _attrs)` has no `$setup`
-/// parameter — setup bindings must go through the instance proxy as `_ctx.`.
-#[test]
-fn setup_ref_ssr_non_inline_prefix_is_ctx() {
-    let mut resolver = make_resolver(&[("count", BindingType::SetupRef)], false);
-    resolver.set_ssr(true);
-    assert_eq!(resolver.resolve_prefix("count"), "_ctx.");
-    assert_eq!(resolver.resolve_suffix("count"), "");
-    assert_eq!(resolver.resolve_simple_expr("count"), "_ctx.count");
-}
-
-/// SSR props also reach through `_ctx.` (not free `$props`).
-#[test]
-fn props_ssr_non_inline_prefix_is_ctx() {
-    let mut resolver = make_resolver(&[("msg", BindingType::Props)], false);
-    resolver.set_ssr(true);
-    assert_eq!(resolver.resolve_prefix("msg"), "_ctx.");
-    assert_eq!(resolver.resolve_simple_expr("msg"), "_ctx.msg");
-}
-
-/// Inline SSR still closes over setup locals (bare + `.value` for refs).
-#[test]
-fn setup_ref_ssr_inline_keeps_bare_value_access() {
-    let mut resolver = make_resolver(&[("count", BindingType::SetupRef)], true);
-    resolver.set_ssr(true);
-    assert_eq!(resolver.resolve_prefix("count"), "");
-    assert_eq!(resolver.resolve_suffix("count"), ".value");
-    assert_eq!(resolver.resolve_simple_expr("count"), "count.value");
-}
+// `BindingResolver` carries NO SSR-specific mode: non-inline SSR routes
+// through the exact same table as non-inline VDOM (`setup_ref_standalone_*`,
+// `props_standalone_*` below) — official's `processExpression` prefixes
+// identifiers purely from `context.inline`, never from an SSR flag. The
+// `ssrRender` function DECLARES the matching `$props`/`$setup`/`$data`/
+// `$options` parameters instead (see `ssr/mod.rs` and
+// `ssr/tests.rs::ssr_non_inline_setup_binding_routes_through_dollar_setup`
+// for the end-to-end proof). Inline SSR is covered by the plain
+// `setup_ref_inline_prefix_is_empty` case above — inline mode never
+// special-cased SSR either.
 
 #[test]
 fn props_inline_prefix_is_dunder_props() {
@@ -461,9 +442,12 @@ fn vapor_setup_let_prefix_is_ctx() {
 }
 
 #[test]
-fn vapor_props_prefix_is_ctx() {
+fn vapor_props_prefix_is_dollar_props() {
+    // Official `@vue/compiler-vapor`'s non-inline expression transform is
+    // `type === "props" ? "$props" : "_ctx"` — props are the one binding kind
+    // that does NOT route through `_ctx.` in vapor mode.
     let resolver = make_vapor_resolver(&[("msg", BindingType::Props)]);
-    assert_eq!(resolver.resolve_prefix("msg"), "_ctx.");
+    assert_eq!(resolver.resolve_prefix("msg"), "$props.");
 }
 
 #[test]
@@ -485,9 +469,9 @@ fn vapor_resolve_simple_expr_uses_ctx() {
 }
 
 #[test]
-fn vapor_resolve_simple_expr_props_uses_ctx() {
+fn vapor_resolve_simple_expr_props_uses_dollar_props() {
     let resolver = make_vapor_resolver(&[("title", BindingType::Props)]);
-    assert_eq!(resolver.resolve_simple_expr("title"), "_ctx.title");
+    assert_eq!(resolver.resolve_simple_expr("title"), "$props.title");
 }
 
 // ==================== Reserved word bindings ====================
@@ -519,7 +503,7 @@ fn resolve_simple_expr_keyword_for_as_prop() {
 #[test]
 fn vapor_resolve_simple_expr_keyword_prop_uses_bracket_notation() {
     let resolver = make_vapor_resolver(&[("class", BindingType::Props)]);
-    assert_eq!(resolver.resolve_simple_expr("class"), r#"_ctx["class"]"#);
+    assert_eq!(resolver.resolve_simple_expr("class"), r#"$props["class"]"#);
 }
 
 // ==================== TSX mode bindings ====================

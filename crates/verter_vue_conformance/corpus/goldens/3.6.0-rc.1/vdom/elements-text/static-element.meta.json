@@ -36,7 +36,7 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/elements-text/static-element.js",
-      "sha256": "0e8f661b5eebd5bb6c8edf64d34a38cb33ee93ed32f276d8f84022d98f1b85db",
+      "sha256": "6e7dc19370e754a52a3f6a21bd9401230547b77d4df7c9995ed0434339a325be",
       "bytes": 487
     },
     "map": {

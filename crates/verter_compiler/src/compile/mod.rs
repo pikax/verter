@@ -1047,14 +1047,27 @@ fn compile_inner(
             // Emit a synthetic script block so __scopeId / __vapor propagates
             // to consumers (playground, bundler, etc.).
             let mut code = String::with_capacity(128);
-            code.push_str("const __sfc__ = {};\n");
+            // Official `@vue/compiler-sfc` (`compileScript`'s non-TS
+            // `runtimeOptions` string) builds `__vapor: true` as an INLINE
+            // object-literal property, never a separate trailing
+            // `__sfc__.__vapor = true` assignment — confirmed directly
+            // against the vendored rc.3 compiler source and against the
+            // pinned rc.3 golden for `slots.vue`'s template-only vapor
+            // cell (`const _sfc_main = { __vapor: true }`). `__scopeId`
+            // is a DIFFERENT, bundler-level mechanism in real
+            // `@vitejs/plugin-vue` (`attachedProps` + the `_export_sfc`
+            // helper, not `compileScript`'s `runtimeOptions` at all) — its
+            // existing separate-statement emission is left untouched;
+            // neither in-scope seed fixture exercises scoped styles.
+            if use_vapor {
+                code.push_str("const __sfc__ = { __vapor: true };\n");
+            } else {
+                code.push_str("const __sfc__ = {};\n");
+            }
             if has_scoped_style {
                 code.push_str("__sfc__.__scopeId = \"");
                 code.push_str(&scope_id_full);
                 code.push_str("\";\n");
-            }
-            if use_vapor {
-                code.push_str("__sfc__.__vapor = true;\n");
             }
             // Non-inline SSR attaches `ssrRender` on the component after
             // template codegen; do not claim `__ssrInlineRender`.

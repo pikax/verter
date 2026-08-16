@@ -1,4 +1,3 @@
-import { txt as _txt, createInvoker as _createInvoker, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, delegateEvents as _delegateEvents, template as _template } from 'vue';
 
 const _sfc_main = {
   __name: 'props-emits-runtime',
@@ -24,6 +23,7 @@ return __returned__
 }
 
 }
+import { txt as _txt, createInvoker as _createInvoker, toDisplayString as _toDisplayString, setText as _setText, renderEffect as _renderEffect, delegateEvents as _delegateEvents, template as _template } from 'vue';
 const t0 = _template("<button> ", 1)
 _delegateEvents("click")
 

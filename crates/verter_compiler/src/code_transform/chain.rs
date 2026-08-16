@@ -240,6 +240,19 @@ impl<'a> CodeTransform<'a> {
                     return Err(SourceMapChainError::UnsupportedChunk("InsertedMapped"))
                 }
                 Chunk::Moved { .. } => return Err(SourceMapChainError::UnsupportedChunk("Moved")),
+                // Chain composition understands the retained/single-token-
+                // replacement partition only; a segmented overwrite's
+                // multi-anchor shape is a genuinely different chunk kind, so
+                // it is refused exactly like the other unsupported shapes
+                // above rather than approximated as a single `Overwritten`
+                // token (which would silently drop every anchor but the
+                // first). No existing (non-opt-in) caller can ever produce
+                // this chunk kind, so this arm is unreachable for them.
+                Chunk::OverwrittenSegmented { .. } => {
+                    return Err(SourceMapChainError::UnsupportedChunk(
+                        "OverwrittenSegmented",
+                    ))
+                }
             }
         }
 

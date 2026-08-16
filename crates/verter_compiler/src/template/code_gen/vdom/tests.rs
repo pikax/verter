@@ -395,6 +395,144 @@ fn gen_vdom_template(source: &str) -> String {
     tpl.code.clone()
 }
 
+/// Helper: compile a Vue SFC source in PRODUCTION mode and return the
+/// template code (VDOM mode).
+fn gen_vdom_template_prod(source: &str) -> String {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    let alloc = oxc_allocator::Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true,
+        inline: Some(false),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result
+        .template
+        .as_ref()
+        .expect("should have template block");
+    tpl.code.clone()
+}
+
+// ══════════════════════════════════════════════════════════════════
+// `<slot>` outlet fallback content must route through the cache-aware
+// slot-children emitter (grouped `_cache[N]` caching, same as component
+// default slots / `<template v-slot>`), and single-static-text fallback
+// must carry the `-1` (CACHED) patch flag.
+// ══════════════════════════════════════════════════════════════════
+
+#[test]
+fn slot_outlet_fallback_static_text_uses_cache_with_cached_flag() {
+    let code = gen_vdom_template(
+        r#"<template><slot name="header">Untitled</slot></template>
+<script setup>const x = 1</script>"#,
+    );
+    assert!(
+        code.contains("_cache[0] || (_cache[0] = _createTextVNode(\"Untitled\", -1 /* CACHED */))"),
+        "static text fallback must be grouped-cached with the CACHED flag, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_outlet_fallback_static_text_cached_flag_in_production() {
+    // The comment is stripped in production, matching element.rs's own
+    // `has_cached_patchflag` precedent — the emitted `-1` PATCH FLAG VALUE
+    // itself never changes across dev/prod (only the human-readable comment
+    // annotation does).
+    let code = gen_vdom_template_prod(
+        r#"<template><slot name="header">Untitled</slot></template>
+<script setup>const x = 1</script>"#,
+    );
+    assert!(
+        code.contains("_cache[0] || (_cache[0] = _createTextVNode(\"Untitled\", -1))"),
+        "prod static text fallback must keep the -1 CACHED flag, stripped of its comment, got:\n{code}"
+    );
+    assert!(
+        !code.contains("/* CACHED */"),
+        "prod build must not carry the dev-only CACHED comment, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_outlet_no_fallback_content_unaffected() {
+    // Negative control: a slot with NO fallback content must stay the bare
+    // form — no cache machinery, no spurious `-1` flag.
+    let code = gen_vdom_template(
+        r#"<template><slot /></template>
+<script setup>const x = 1</script>"#,
+    );
+    assert!(
+        code.contains("_renderSlot(_ctx.$slots, \"default\")"),
+        "no-fallback slot must stay the bare renderSlot call, got:\n{code}"
+    );
+    assert!(
+        !code.contains("_cache["),
+        "no-fallback slot must not introduce any cache machinery, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_outlet_fallback_static_element_marked_slot_cached() {
+    let code = gen_vdom_template(
+        r#"<template><slot><span>Loading</span></slot></template>
+<script setup>const x = 1</script>"#,
+    );
+    // A single static ELEMENT fallback child takes the individual
+    // `slot_cached` path (element.rs's own -1 CACHED patch-flag argument on
+    // the element's own vnode call), not the grouped array wrapper — this
+    // alone does not prove the slot-context activation (a top-level static
+    // element could ALSO get an unrelated INDIVIDUAL `_cache[N] ||
+    // (_cache[N] = ...)` wrapper outside slot context); the companion test
+    // `slot_outlet_fallback_two_static_elements_grouped_not_double_wrapped`
+    // is what discriminates "in slot context" from "individually cached".
+    assert!(
+        code.contains("_createElementVNode(\"span\", null, \"Loading\", -1 /* CACHED */)"),
+        "static element fallback must carry the CACHED patch flag, got:\n{code}"
+    );
+}
+
+#[test]
+fn slot_outlet_fallback_two_static_elements_grouped_not_double_wrapped() {
+    let code = gen_vdom_template(
+        r#"<template><slot><span>a</span><span>b</span></slot></template>
+<script setup>const x = 1</script>"#,
+    );
+    // Two static elements in one slot context are ONE grouped cache entry
+    // (`...(_cache[N] || (_cache[N] = [a, b]))`), not two independently
+    // `_cache[N]`-wrapped elements — this is what actually discriminates
+    // "slot context activated" from "individual per-element caching",
+    // proving `is_slot_parent` fired for the `<slot>` tag itself.
+    assert!(
+        code.contains("...(_cache[0] || (_cache[0] = ["),
+        "two static fallback elements must be ONE grouped cache array, got:\n{code}"
+    );
+    assert_eq!(
+        code.matches("_cache[0]").count(),
+        2,
+        "exactly one grouped cache slot (referenced twice: `_cache[0] ||` and `_cache[0] =`), \
+         got:\n{code}"
+    );
+    assert!(
+        !code.contains("_cache[1]"),
+        "must not be two independently cached elements, got:\n{code}"
+    );
+}
+
 /// F5 regression guard: a lone `<li v-if v-for>` (no v-else) must still emit
 /// the ternary FALSE edge. Dropping it (grok's `let _ = close`) produces an
 /// unterminated `cond ? (...)` — a syntax error at runtime.
@@ -588,9 +726,16 @@ fn single_v_if_branch_element_gets_key_zero() {
     let code = gen_vdom_template(
         r#"<template><div><p v-if="a">A</p></div></template><script setup>const a = 1;</script>"#,
     );
+    // hoist_static defaults on, so this fully-static branch-key props
+    // object hoists to a `_hoisted_N` constant instead of staying inline
+    // (see `static_hoist_v_if_branch_key_object_hoisted`).
     assert!(
-        code.contains("_createElementBlock(\"p\", { key: 0 }"),
-        "lone v-if <p> branch must carry {{ key: 0 }}.\n{code}"
+        code.contains("const _hoisted_1 = { key: 0 }"),
+        "lone v-if <p> branch's key object must hoist to _hoisted_1.\n{code}"
+    );
+    assert!(
+        code.contains("_createElementBlock(\"p\", _hoisted_1"),
+        "lone v-if <p> branch must reference the hoisted key object.\n{code}"
     );
     assert!(
         code.contains(": _createCommentVNode(\"v-if\", true)"),
@@ -612,6 +757,77 @@ fn template_v_if_injects_fragment_branch_key() {
     assert!(
         code.contains("{ key: 1 }"),
         "the <p v-else> must continue the branch counter to key 1.\n{code}"
+    );
+}
+
+/// Official `@vue/compiler-core`'s `transformFor`: `isStableFragment =
+/// forNode.source.type === SIMPLE_EXPRESSION && forNode.source.constType >
+/// 0`. A `v-for` over a bare identifier resolving to a plain
+/// `<script setup>` const (never reassigned, not ref-wrapped) is
+/// document-order-stable — `_openBlock()` (no re-track `true` arg), fragment
+/// flag `64 /* STABLE_FRAGMENT */` (NOT the keyed/unkeyed 128/256 flags
+/// regardless of an explicit `:key`), and the per-item element is NOT its
+/// own block (`_createElementVNode`, not `_createElementBlock`/`_openBlock`
+/// wrapped) — confirmed against the pinned rc.3 oracle golden for
+/// `basic-interpolation.vue`.
+#[test]
+fn v_for_over_stable_setup_const_uses_stable_fragment() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></template><script setup>const items = ["a", "b", "c"];</script>"#,
+    );
+    assert!(
+        code.contains("64 /* STABLE_FRAGMENT */"),
+        "a v-for over a plain setup const must use the STABLE_FRAGMENT flag, not \
+         KEYED/UNKEYED.\n{code}"
+    );
+    assert!(
+        !code.contains("128") && !code.contains("256"),
+        "no KEYED/UNKEYED fragment flag should appear alongside STABLE_FRAGMENT.\n{code}"
+    );
+    assert!(
+        code.contains("_openBlock(), _createElementBlock(_Fragment, null, _renderList"),
+        "a stable v-for must open its block without the re-track `true` arg.\n{code}"
+    );
+    assert!(
+        code.contains(r#"return _createElementVNode("li", { key: item }"#),
+        "a stable v-for's item must NOT be individually block-wrapped \
+         (_createElementVNode, not _openBlock()/_createElementBlock).\n{code}"
+    );
+}
+
+/// A `v-for` over a `ref()`-wrapped (reactive, reassignable) setup binding
+/// stays on the existing keyed/unkeyed path — `reactivity_level()` is
+/// `Dynamic` for `SetupRef`, so `is_stable_for_source` must NOT misclassify
+/// it as stable. Regression guard for the stable-fragment fix above.
+#[test]
+fn v_for_over_setup_ref_stays_keyed() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></template><script setup>import { ref } from "vue"; const items = ref(["a", "b", "c"]);</script>"#,
+    );
+    assert!(
+        code.contains("128 /* KEYED_FRAGMENT */"),
+        "a v-for over a ref() binding must stay KEYED_FRAGMENT, not STABLE_FRAGMENT.\n{code}"
+    );
+    assert!(
+        code.contains("_openBlock(true)"),
+        "a keyed (non-stable) v-for must still open its block with the re-track \
+         `true` arg.\n{code}"
+    );
+}
+
+/// A `v-for` over a member-expression source (`obj.list`, not a bare
+/// identifier) conservatively stays unstable even when the base object is a
+/// plain setup const — `is_stable_for_source` only recognizes a bare
+/// `Expression::Identifier`, matching official's own analysis being unable
+/// to prove complex expressions constant in general.
+#[test]
+fn v_for_over_member_expression_source_stays_unstable() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-for="item in obj.list" :key="item">{{ item }}</li></ul></template><script setup>const obj = { list: ["a"] };</script>"#,
+    );
+    assert!(
+        !code.contains("STABLE_FRAGMENT"),
+        "a v-for over a member-expression source must not be classified stable.\n{code}"
     );
 }
 
@@ -960,18 +1176,50 @@ fn block_tree_vif_component_uses_block() {
     );
 }
 
+/// `const items = []` is a plain (never-reassigned, unwrapped) setup const —
+/// a document-order-STABLE v-for source. Official's `transformFor`
+/// downgrades the per-item child to non-block whenever the fragment is
+/// stable and the child isn't independently `isBlockRequired` (custom
+/// directives with children, `vue:beforeUpdate` hook) — a plain component
+/// with just a static `:key` does NOT set `isBlockRequired`, so it stays
+/// `_createVNode(...)`, NOT `(_openBlock(), _createBlock(...))`. Confirmed
+/// directly against the real vendored `@vue/compiler-dom@3.6.0-rc.3`.
 #[test]
-fn block_tree_vfor_component_uses_block() {
+fn block_tree_vfor_component_over_stable_source_stays_vnode() {
     let code = gen_vdom_template(
         "<template><div><MyComp v-for=\"item in items\" :key=\"item.id\"/></div></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst items = []\n</script>",
     );
     assert!(
+        code.contains("_createVNode("),
+        "v-for component over a stable source should use plain _createVNode, got:\n{code}"
+    );
+    assert!(
+        !code.contains("(_openBlock(), _createBlock("),
+        "v-for component over a stable source should NOT be block-wrapped, got:\n{code}"
+    );
+    assert!(
+        code.contains("64 /* STABLE_FRAGMENT */"),
+        "the outer fragment must be STABLE_FRAGMENT, got:\n{code}"
+    );
+}
+
+/// The SAME component v-for, but over a `ref()`-wrapped (non-stable)
+/// source: the fragment is keyed (128), and the per-item component DOES
+/// need its own block — `(_openBlock(), _createBlock(...))` — matching
+/// Verter's pre-existing (and still correct) behavior for a non-stable
+/// v-for source. Regression guard for `block_tree_vfor_component_over_stable_source_stays_vnode`.
+#[test]
+fn block_tree_vfor_component_over_ref_source_uses_block() {
+    let code = gen_vdom_template(
+        "<template><div><MyComp v-for=\"item in items\" :key=\"item.id\"/></div></template>\n<script setup>\nimport { ref } from 'vue'\nimport MyComp from './MyComp.vue'\nconst items = ref([])\n</script>",
+    );
+    assert!(
         code.contains("(_openBlock(), _createBlock("),
-        "v-for component should use (_openBlock(), _createBlock(...)), got:\n{code}"
+        "v-for component over a ref() source should use (_openBlock(), _createBlock(...)), got:\n{code}"
     );
     assert!(
         !code.contains("_createVNode("),
-        "v-for component should NOT use _createVNode, got:\n{code}"
+        "v-for component over a ref() source should NOT use plain _createVNode, got:\n{code}"
     );
 }
 
@@ -1762,6 +2010,44 @@ const items = [{ name: 'a' }]
     );
 }
 
+/// Event-handler keys (`onClick`, `onUpdate:modelValue`, ...) must never
+/// appear in the dynamicProps array. Official Vue relies on stable invoker
+/// caching for listeners — a handler binding never needs PATCH_PROPS
+/// re-patching, so `genEventHandler`/`buildProps` never add the `on*` key to
+/// `dynamicPropNames`. Listing it anyway forces a spurious 8 /* PROPS */
+/// patch flag + hoisted array on every element with an event listener.
+#[test]
+fn event_handler_key_not_in_dynamic_props_array() {
+    let code =
+        gen_vdom_template("<template><button :disabled=\"d\" @click=\"onClick\">x</button></template>\n<script setup>\nconst d = false\nfunction onClick() {}\n</script>");
+    assert!(
+        code.contains(r#"const _hoisted_1 = ["disabled"]"#),
+        "dynamicProps must contain only the genuinely dynamic prop \"disabled\", got:\n{code}"
+    );
+    assert!(
+        !code.contains(r#""onClick""#),
+        "dynamicProps must not include \"onClick\", got:\n{code}"
+    );
+}
+
+/// v-model's own `onUpdate:X` handler key is likewise a listener, not a
+/// patchable prop — only the model VALUE prop name (`modelValue`) belongs in
+/// dynamicProps.
+#[test]
+fn vmodel_update_handler_key_not_in_dynamic_props_array() {
+    let code = gen_vdom_template(
+        "<template><MyComp v-model=\"val\"/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst val = 1\n</script>",
+    );
+    assert!(
+        code.contains(r#"const _hoisted_1 = ["modelValue"]"#),
+        "dynamicProps must contain only \"modelValue\", got:\n{code}"
+    );
+    assert!(
+        !code.contains(r#"["modelValue", "onUpdate:modelValue"]"#),
+        "dynamicProps must not include \"onUpdate:modelValue\", got:\n{code}"
+    );
+}
+
 /// Vnode `key` must never appear in the dynamicProps array. Official Vue only
 /// puts it on the VNode; listing `"key"` in dynamicProps breaks keyed fragment
 /// reuse (reka-ui Calendar cells remount → keyboard focus lost).
@@ -2161,11 +2447,12 @@ fn static_style_duplicate_keys_last_wins() {
 fn duplicate_event_handlers_array_merge_byte_identical() {
     let code =
         gen_vdom_template("<template><button @click=\"a\" @click=\"b\">x</button></template>");
+    // Event-handler keys never enter dynamicProps (stable invoker caching —
+    // verified against the real compiler: no hoisted array, no PATCH_PROPS
+    // flag for a props object containing only handlers).
     let expected = [
-        r#"const _hoisted_1 = ["onClick"]"#,
-        r#""#,
         r#"function render(_ctx, _cache) {"#,
-        r#"return (_openBlock(), _createElementBlock("button", { onClick: [_ctx.a, _ctx.b] }, "x", 8 /* PROPS */, _hoisted_1))"#,
+        r#"return (_openBlock(), _createElementBlock("button", { onClick: [_ctx.a, _ctx.b] }, "x"))"#,
         r#"}"#,
     ]
     .join("\n");
@@ -2192,8 +2479,11 @@ fn vmodel_with_explicit_update_handler_byte_identical() {
     let code = gen_vdom_template(
         "<template><MyComp v-model=\"val\" @update:modelValue=\"onUp\"/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst val = 1\nconst onUp = () => {}\n</script>",
     );
+    // Only the model VALUE prop ("modelValue") goes in dynamicProps —
+    // `onUpdate:modelValue` is a listener key, verified against the real
+    // compiler's `["modelValue"]`-only dynamicProps output.
     let expected = [
-        r#"const _hoisted_1 = ["modelValue", "onUpdate:modelValue"]"#,
+        r#"const _hoisted_1 = ["modelValue"]"#,
         r#""#,
         r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
         r#"return (_openBlock(), _createBlock($setup.MyComp, { modelValue: $setup.val, "onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp] }, null, 8 /* PROPS */, _hoisted_1))"#,
@@ -2206,11 +2496,12 @@ fn vmodel_with_explicit_update_handler_byte_identical() {
         code.contains(r#""onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp]"#),
         "v-model + explicit @update:* must array-merge, got:\n{code}"
     );
-    // Negative: the explicit handler must not also appear as its own key.
+    // Negative: onUpdate:modelValue is a listener key — it must appear only
+    // once (as the props-object key), never in the hoisted dynamicProps array.
     assert_eq!(
         code.matches("onUpdate:modelValue").count(),
-        2,
-        "onUpdate:modelValue should appear once as a key and once in the hoisted array, got:\n{code}"
+        1,
+        "onUpdate:modelValue should appear only once (as the props key), got:\n{code}"
     );
 }
 
@@ -2246,10 +2537,8 @@ fn class_style_static_dynamic_merge_byte_identical() {
 fn single_event_handler_no_merge_byte_identical() {
     let code = gen_vdom_template("<template><button @click=\"a\">x</button></template>");
     let expected = [
-        r#"const _hoisted_1 = ["onClick"]"#,
-        r#""#,
         r#"function render(_ctx, _cache) {"#,
-        r#"return (_openBlock(), _createElementBlock("button", { onClick: _ctx.a }, "x", 8 /* PROPS */, _hoisted_1))"#,
+        r#"return (_openBlock(), _createElementBlock("button", { onClick: _ctx.a }, "x"))"#,
         r#"}"#,
     ]
     .join("\n");

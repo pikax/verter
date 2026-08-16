@@ -792,7 +792,13 @@ fn test_hoist_mixed_props_not_hoisted() {
     );
 }
 
-/// @ai-generated — Event handler dynamic props array gets hoisted
+/// An event handler embeds a `_ctx`/`$setup` reference in the props object,
+/// so — despite the props object having zero *dynamicProps* entries (handler
+/// keys never enter dynamicProps; stable invoker caching) — the object must
+/// NOT be hoisted to module scope: `const _hoisted_1 = { onClick: _ctx.go }`
+/// would throw a ReferenceError at load (`_ctx` only exists inside
+/// `render()`). Confirmed against the real compiler: no hoisting, no
+/// dynamicProps array, no PATCH_PROPS flag — the props object is inlined.
 #[test]
 fn test_hoist_event_prevents_hoisting() {
     let allocator = Allocator::new();
@@ -810,13 +816,15 @@ fn test_hoist_event_prevents_hoisting() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains("const _hoisted_1 = [\"onClick\"]"),
-        "Event handler dynamic props array SHOULD be hoisted, got:\n{}",
+        !template.code.contains("_hoisted_1"),
+        "an event-handler-bearing props object must not be hoisted to module scope, got:\n{}",
         template.code
     );
     assert!(
-        template.code.contains("_hoisted_1)"),
-        "Should reference hoisted constant in element call, got:\n{}",
+        template
+            .code
+            .contains(r#"{ class: "btn", onClick: _ctx.go }"#),
+        "props object should be inlined directly, got:\n{}",
         template.code
     );
 }
@@ -1185,7 +1193,9 @@ fn test_vmodel_hyphenated_component() {
 // =========================================================================
 // ported from syntax/plugins/code_gen/template/tests.rs
 
-/// @ai-generated — @click becomes onClick prop
+/// @click becomes onClick prop. Confirmed against the real compiler: event
+/// handlers never trigger PATCH_PROPS or enter dynamicProps (stable invoker
+/// caching means a listener binding never needs re-patching).
 #[test]
 fn test_event_click() {
     let allocator = Allocator::new();
@@ -1208,18 +1218,19 @@ fn test_event_click() {
         template.code
     );
     assert!(
-        template.code.contains("8 /* PROPS */"),
-        "Event should produce PROPS (8) patch flag, got:\n{}",
+        !template.code.contains("8 /* PROPS */"),
+        "an @click-only element must not produce a PROPS patch flag, got:\n{}",
         template.code
     );
     assert!(
-        template.code.contains(r#"["onClick"]"#),
-        "Event name should be in dynamic props list, got:\n{}",
+        !template.code.contains(r#"["onClick"]"#),
+        "onClick must not appear in dynamicProps, got:\n{}",
         template.code
     );
 }
 
-/// @ai-generated — Multiple events
+/// Multiple events. Confirmed against the real compiler: neither listener
+/// key ever enters dynamicProps or triggers PATCH_PROPS.
 #[test]
 fn test_event_multiple() {
     let allocator = Allocator::new();
@@ -1247,18 +1258,20 @@ fn test_event_multiple() {
         template.code
     );
     assert!(
-        template.code.contains("8 /* PROPS */"),
-        "Events should produce PROPS (8) patch flag, got:\n{}",
+        !template.code.contains("8 /* PROPS */"),
+        "event-only elements must not produce a PROPS patch flag, got:\n{}",
         template.code
     );
     assert!(
-        template.code.contains(r#"["onClick", "onMouseover"]"#),
-        "Event names should be in dynamic props list, got:\n{}",
+        !template.code.contains(r#"["onClick", "onMouseover"]"#),
+        "event names must not be in the dynamic props list, got:\n{}",
         template.code
     );
 }
 
-/// @ai-generated — Vue treats events as PROPS patch flag with event name in dynamic props
+/// Vue never treats a bare event listener as a PATCH_PROPS-worthy binding —
+/// stable invoker caching means the handler is never re-patched. Confirmed
+/// against the real compiler: no PROPS flag, no dynamicProps entry.
 #[test]
 fn test_event_props_patch_flag() {
     let allocator = Allocator::new();
@@ -1276,13 +1289,13 @@ fn test_event_props_patch_flag() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains("8 /* PROPS */"),
-        "Event should produce PROPS (8) patch flag, got:\n{}",
+        !template.code.contains("8 /* PROPS */"),
+        "an @click-only element must not produce a PROPS patch flag, got:\n{}",
         template.code
     );
     assert!(
-        template.code.contains(r#"["onClick"]"#),
-        "Event name should be in dynamic props list, got:\n{}",
+        !template.code.contains(r#"["onClick"]"#),
+        "onClick must not be in the dynamic props list, got:\n{}",
         template.code
     );
 }
@@ -2090,12 +2103,20 @@ fn test_v_if_key_injection() {
         "v-if should produce ternary, got:\n{}",
         template.code
     );
-    // Official Vue injects the branch key on the v-if root.
+    // Official Vue injects the branch key on the v-if root. With
+    // hoist_static enabled (the default), the branch's own fully-static
+    // `{ key: 0 }` props object hoists to a `_hoisted_N` constant exactly
+    // like a static class/attrs object, rather than staying inline.
+    assert!(
+        template.code.contains("const _hoisted_1 = { key: 0 }"),
+        "v-if branch key object must hoist to _hoisted_1, got:\n{}",
+        template.code
+    );
     assert!(
         template
             .code
-            .contains(r#"_createElementBlock("div", { key: 0 }, "yes")"#),
-        "v-if branch must inject {{ key: 0 }} on the branch root, got:\n{}",
+            .contains(r#"_createElementBlock("div", _hoisted_1, "yes")"#),
+        "v-if branch must reference the hoisted key object on the branch root, got:\n{}",
         template.code
     );
 }
