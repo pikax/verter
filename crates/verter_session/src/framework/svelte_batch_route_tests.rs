@@ -37,6 +37,33 @@ use crate::{
     CompileProfile, HostConfig, HostError, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
+/// The full path of THIS module's own witness test, as the census names it.
+///
+/// Not merely the module path: the census requires a test with exactly this
+/// path to be present in the binary's own listing, and derives the module it
+/// counts from it. Pointing the constant at another module — even a sibling of
+/// the right shape — therefore names a witness that module does not have. The
+/// census READS this constant rather than repeating the string, so deleting
+/// this module breaks the census's compile.
+pub(crate) const CENSUS_WITNESS_PATH: &str =
+    concat!(module_path!(), "::this_suite_is_registered_with_the_census");
+
+/// The other half of that dependency.
+///
+/// The census lives OUTSIDE this module deliberately — a check placed inside a
+/// suite is deleted by the same edit that empties it. That leaves the reverse
+/// hole: deleting the census too. This test consumes an item the census owns,
+/// so removing EITHER `mod` declaration is a COMPILE error rather than a filter
+/// that silently matches nothing and still exits 0.
+#[test]
+fn this_suite_is_registered_with_the_census() {
+    assert!(
+        super::suite_census::covers(CENSUS_WITNESS_PATH),
+        "{CENSUS_WITNESS_PATH}: the census carries no test for this suite, so this suite's \
+         documented invocation could match nothing and still report success"
+    );
+}
+
 /// A supported Svelte client component: through the single-file route it
 /// publishes a runtime module.
 const SUPPORTED: &str =

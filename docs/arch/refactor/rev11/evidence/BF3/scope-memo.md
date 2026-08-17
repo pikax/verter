@@ -1,5 +1,14 @@
 # BF3 scope memo — recorded deviation from the charter's production mechanism
 
+> **Status update (2026-08-16), added after this memo was written.**
+> [`AMD-009`](../../amendments/AMD-009-bf3-audit-and-immediate-correction-blocks.md) is
+> now **RATIFIED on its full §7 scope** by the designated maintainer — see
+> [`maintainer-ruling-section7-ratification.md`](maintainer-ruling-section7-ratification.md)
+> and [`amd009-ratification-packet.md`](amd009-ratification-packet.md). The body below is
+> preserved unedited as the record of what was known when the deviation was recorded; its
+> "UNRATIFIED" status line describes that moment, not the present state. Ratification does
+> not accept BF3 and does not unlock B2 or B3.
+
 **Status:** recorded deviation; the required
 [`AMD-009`](../../amendments/AMD-009-bf3-audit-and-immediate-correction-blocks.md)
 package is drafted but **UNRATIFIED** until the designated maintainer accepts it.

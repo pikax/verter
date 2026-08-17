@@ -1,7 +1,10 @@
 # BF3 — Conformance exhaustion and correction dispatch audit
 
-**Status:** PROPOSED amendment / **RATIFIED (AMD-009)**. This audit charter is not
-accepted.
+**Status:** PROPOSED amendment / **RATIFIED (AMD-009 §7)**. The §7 DIRECTION is ratified by a
+direct maintainer act; these exact bytes are recorded and independently reviewed, not
+maintainer-inspected — see
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md). This audit
+charter is not accepted.
 **Class:** Foundational (audit). **Predecessor:** BF2.
 
 ## Objective

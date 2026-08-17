@@ -8,7 +8,20 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { SVELTE_DOMAIN } from "../src/domain-pin.mjs";
+
 const HARNESS_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * The child's own `spawnSync` deadline. The parent `it(...)` budget below is
+ * deliberately LARGER: whichever killer fires first decides what the failure
+ * says, and only the child's deadline can report why the child stalled. A
+ * parent budget at or below this value kills a cold run mid-flight and reports
+ * nothing but "test timed out".
+ */
+const CHILD_DEADLINE_MS = 30_000;
+/** Strictly above {@link CHILD_DEADLINE_MS} — see above. */
+const PARENT_BUDGET_MS = 60_000;
 
 const NAVIGATOR_ABSENT_SCRIPT = `
   const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -112,44 +125,57 @@ const INITIALIZATION_RETRY_SCRIPT = `
 `;
 
 describe("Svelte client executor DOM initialization", () => {
-  it("installs navigator before the shared runtime initializes and survives a failed mount", () => {
-    const child = spawnSync(
-      process.execPath,
-      ["--input-type=module", "--eval", NAVIGATOR_ABSENT_SCRIPT],
-      { cwd: HARNESS_ROOT, encoding: "utf8", timeout: 30_000 },
-    );
+  it(
+    "installs navigator before the shared runtime initializes and survives a failed mount",
+    () => {
+      const child = spawnSync(
+        process.execPath,
+        ["--input-type=module", "--eval", NAVIGATOR_ABSENT_SCRIPT],
+        { cwd: HARNESS_ROOT, encoding: "utf8", timeout: CHILD_DEADLINE_MS },
+      );
 
-    expect(child.error).toBeUndefined();
-    expect(child.status, child.stderr).toBe(0);
-    const result = JSON.parse(child.stdout);
-    expect(result.navigatorWasAbsent).toBe(true);
-    expect(result.navigatorWasRestored).toBe(true);
-    expect(result.failed.ok).toBe(false);
-    expect(result.failed.error).toContain("intentional mount failure");
-    expect(result.failed.error).not.toContain("undefined (reading 'call')");
-    expect(result.control.ok, result.control.error).toBe(true);
-    expect(result.control.html).toContain("<p>ready</p>");
-  });
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+      const result = JSON.parse(child.stdout);
+      expect(result.navigatorWasAbsent).toBe(true);
+      expect(result.navigatorWasRestored).toBe(true);
+      expect(result.failed.ok).toBe(false);
+      expect(result.failed.error).toContain("intentional mount failure");
+      expect(result.failed.error).not.toContain("undefined (reading 'call')");
+      expect(result.control.ok, result.control.error).toBe(true);
+      expect(result.control.html).toContain("<p>ready</p>");
+      // The mount is only evidence about the pinned domain if it bound the
+      // pinned runtime. Read the version from the harness's own pin authority,
+      // never a literal, so a domain amendment cannot leave this stale.
+      expect(result.control.runtime?.version).toBe(SVELTE_DOMAIN.packageVersion);
+    },
+    PARENT_BUDGET_MS,
+  );
 
   // @ai-generated - Proves a rejected shared-runtime initialization is retryable.
-  it("does not memoize a rejected shared runtime initialization", () => {
-    const child = spawnSync(
-      process.execPath,
-      ["--input-type=module", "--eval", INITIALIZATION_RETRY_SCRIPT],
-      { cwd: HARNESS_ROOT, encoding: "utf8", timeout: 30_000 },
-    );
+  it(
+    "does not memoize a rejected shared runtime initialization",
+    () => {
+      const child = spawnSync(
+        process.execPath,
+        ["--input-type=module", "--eval", INITIALIZATION_RETRY_SCRIPT],
+        { cwd: HARNESS_ROOT, encoding: "utf8", timeout: CHILD_DEADLINE_MS },
+      );
 
-    expect(child.error).toBeUndefined();
-    expect(child.status, child.stderr).toBe(0);
-    const result = JSON.parse(child.stdout);
-    expect(result.failedInitialization.ok).toBe(false);
-    expect(result.failedInitialization.error).toContain(
-      "the shared client runtime could not initialize",
-    );
-    expect(result.readsAfterFailure).toBe(1);
-    expect(result.windowReads).toBe(2);
-    expect(result.retry.ok, result.retry.error).toBe(true);
-    expect(result.retry.html).toContain("<p>retry-ready</p>");
-    expect(result.navigatorRestoredExactly).toBe(true);
-  });
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+      const result = JSON.parse(child.stdout);
+      expect(result.failedInitialization.ok).toBe(false);
+      expect(result.failedInitialization.error).toContain(
+        "the shared client runtime could not initialize",
+      );
+      expect(result.readsAfterFailure).toBe(1);
+      expect(result.windowReads).toBe(2);
+      expect(result.retry.ok, result.retry.error).toBe(true);
+      expect(result.retry.html).toContain("<p>retry-ready</p>");
+      expect(result.navigatorRestoredExactly).toBe(true);
+      expect(result.retry.runtime?.version).toBe(SVELTE_DOMAIN.packageVersion);
+    },
+    PARENT_BUDGET_MS,
+  );
 });

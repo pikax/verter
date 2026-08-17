@@ -1,8 +1,11 @@
 # BA0 — Immediate request and result atomicity
 
-**Status:** PROPOSED / **RATIFIED (AMD-009)**; not accepted. **Class:** Foundational atomic.
-**Predecessor:** BF3. **Downstream:** acceptance is a mandatory predecessor of B2
-and B3.
+**Status:** PROPOSED / **RATIFIED (AMD-009 §7)**; not accepted. The §7 DIRECTION is
+ratified by a direct maintainer act; these exact bytes are recorded and independently
+reviewed, not maintainer-inspected — see
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md).
+**Class:** Foundational atomic. **Predecessor:** BF3. **Downstream:** acceptance is a
+mandatory predecessor of B2 and B3.
 
 ## Objective
 

@@ -1,8 +1,11 @@
 # BCSS0 — Standalone CSS source-map product correction
 
-**Status:** PROPOSED / **RATIFIED (AMD-009)**; not accepted. **Class:** Framework subsystem.
-**Predecessor:** BF3. **Downstream:** acceptance is a mandatory predecessor of B2
-and B3.
+**Status:** PROPOSED / **RATIFIED (AMD-009 §7)**; not accepted. The §7 DIRECTION is
+ratified by a direct maintainer act; these exact bytes are recorded and independently
+reviewed, not maintainer-inspected — see
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md).
+**Class:** Framework subsystem. **Predecessor:** BF3. **Downstream:** acceptance is a
+mandatory predecessor of B2 and B3.
 
 ## Objective
 
@@ -18,17 +21,18 @@ to BS0, BS1, or a host-route owner.
 
 | finding | acceptance ID | correct-behavior target and characterization |
 |---|---|---|
-| CSS-1 | `BF3-CSS-1-STANDALONE-SOURCEMAP` → `FC-OPTIONS-001` | A separately named correct-behavior target must be added by BCSS0 implementation and is currently absent. `the_standalone_css_spelling_publishes_css_and_ignores_its_source_map_axis` remains the green inert-axis characterization until the axis is live; it is not the acceptance target. |
+| CSS-1 | `BF3-CSS-1-STANDALONE-SOURCEMAP` → `FC-OPTIONS-001` | `the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css` (`#[ignore]`d correct-behavior target added by the audit and owned here). `the_standalone_css_spelling_publishes_css_and_ignores_its_source_map_axis` remains the green inert-axis characterization until the axis is live; it is not the acceptance target. |
 
 ## Required procedure
 
-First add a separately named public-boundary correct-behavior target that requires a
-valid requested map on both processing branches and prove that new target RED. Do
-not invert or use the green inert-axis characterization as the RED or acceptance
-target; keep it unchanged until the axis is live. Implement the minimum shared
-CSS-owner correction, carry the product through NAPI, and rerun map validity,
-authored-source anchoring, option-off absence, passthrough/transformed, and
-unrequested-product controls. No retraction or typed refusal may replace the product.
+The separately named public-boundary correct-behavior target already requires a
+valid requested map on both processing branches and is RED because the passthrough
+branch publishes none. Do not invert or use the green inert-axis characterization
+as the RED or acceptance target; keep it unchanged until the axis is live. Implement
+the minimum shared CSS-owner correction, carry the product through NAPI, and rerun
+map validity, authored-source anchoring, option-off absence,
+passthrough/transformed, and unrequested-product controls. No retraction or typed
+refusal may replace the product.
 
 ## Required exits
 
