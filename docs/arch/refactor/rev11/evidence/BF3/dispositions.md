@@ -110,6 +110,22 @@ both are pinned green so a change in either direction is visible.
   at a `.svelte` canonical with `fileKind: "vue"` still took the Svelte lane.
   Recorded because it is the reason a naive plant on that axis does not
   discriminate.
+- **The published Svelte virtual-script map is structurally valid and
+  semantically empty.** Measured on the built bundler entry: the Vue public
+  virtual-script product carries an 84-character `mappings` — 16 segments across
+  18 generated lines, 12 of them naming an authored position — while BOTH public
+  Svelte routes, the Vite virtual-script load and the Rollup one, carry the
+  single segment `"A"`: one generated column, no authored position, nothing a
+  consumer can navigate to. The green acceptance target asks only for a v3 map
+  with a non-empty `mappings` string, so it passes on both. Pinned by
+  `the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output`,
+  which fixes the Svelte structure exactly and the Vue structure as a floor, so
+  a correction to the Svelte map builder flips it — that flip is the signal to
+  re-measure, not a regression. This is NOT a new finding row: Svelte client
+  map provenance is already owned as SV-3 by BS0, whose correct-behavior target
+  is `the_client_source_map_covers_every_required_authored_anchor`. Recorded
+  here only because the measurement was taken at the bundler boundary, where
+  the acceptance target cannot see the difference.
 
 ## What this block did not do
 

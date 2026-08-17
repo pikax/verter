@@ -1,8 +1,11 @@
 # BRT0 — Immediate route and transport parity
 
-**Status:** PROPOSED / **RATIFIED (AMD-009)**; not accepted. **Class:** Framework subsystem.
-**Predecessor:** BF3. **Downstream:** acceptance is a mandatory predecessor of B2
-and B3.
+**Status:** PROPOSED / **RATIFIED (AMD-009 §7)**; not accepted. The §7 DIRECTION is
+ratified by a direct maintainer act; these exact bytes are recorded and independently
+reviewed, not maintainer-inspected — see
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md).
+**Class:** Framework subsystem. **Predecessor:** BF3. **Downstream:** acceptance is a
+mandatory predecessor of B2 and B3.
 
 ## Objective
 
@@ -25,7 +28,10 @@ outside correction scope; see `../evidence/BF3/dispositions.md`.
 
 ## Required procedure
 
-For each ratified item, first enable or add the correct public-boundary parity
+For each owned item above — RT-1 and TR-1 from the ratified table, and the
+Rollup/non-Vite half of BND-2 from the re-measured rows that post-date it, both
+carried by [`../evidence/BF3/dispositions.md`](../evidence/BF3/dispositions.md) —
+first enable or add the correct public-boundary parity
 assertion and prove it RED, then make the minimum route/transport-owner correction
 and rerun the target, all named characterizations, representative success and
 genuine-refusal cases, ordering, neighbour isolation, and option-conversion
@@ -43,6 +49,13 @@ green.
 acceptance satisfies this block's B2/B3 predecessor edge.
 
 ## Re-measured exclusions and split
+
+These two rows were `AWAITING CONFIRMATION` when this charter was first written. The
+audit then executed both public pinned Vite entries and both public Rollup entries and
+recorded the settled result in
+[`../evidence/BF3/dispositions.md`](../evidence/BF3/dispositions.md), which is the
+authority for every classification below; this charter follows that table and
+re-classes nothing itself.
 
 BND-1 is not an include-identity defect: `VerterVue.vite({})` is Vue-pinned and
 `VerterSvelte.vite({})` is Svelte-pinned, and each public entry accepts its own

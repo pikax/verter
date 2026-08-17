@@ -59,6 +59,33 @@ use crate::{
     VirtualNodeKind, VirtualQuery,
 };
 
+/// The full path of THIS module's own witness test, as the census names it.
+///
+/// Not merely the module path: the census requires a test with exactly this
+/// path to be present in the binary's own listing, and derives the module it
+/// counts from it. Pointing the constant at another module — even a sibling of
+/// the right shape — therefore names a witness that module does not have. The
+/// census READS this constant rather than repeating the string, so deleting
+/// this module breaks the census's compile.
+pub(crate) const CENSUS_WITNESS_PATH: &str =
+    concat!(module_path!(), "::this_suite_is_registered_with_the_census");
+
+/// The other half of that dependency.
+///
+/// The census lives OUTSIDE this module deliberately — a check placed inside a
+/// suite is deleted by the same edit that empties it. That leaves the reverse
+/// hole: deleting the census too. This test consumes an item the census owns,
+/// so removing EITHER `mod` declaration is a COMPILE error rather than a filter
+/// that silently matches nothing and still exits 0.
+#[test]
+fn this_suite_is_registered_with_the_census() {
+    assert!(
+        super::suite_census::covers(CENSUS_WITNESS_PATH),
+        "{CENSUS_WITNESS_PATH}: the census carries no test for this suite, so this suite's \
+         documented invocation could match nothing and still report success"
+    );
+}
+
 /// One probe run's ceiling. A transport probe loads a large native module or
 /// instantiates a wasm binary, so a few seconds is normal and a hang is not.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -71,6 +98,16 @@ fn repo_root() -> PathBuf {
 /// in-process comparison is asking the identical question.
 const SUPPORTED_SVELTE: &str = "<script>\n  let count = $state(0);\n</script>\n\n<div class=\"root\">{count}</div>\n\n<style>\n  .root { color: red; }\n</style>\n";
 const VUE_SFC: &str = "<script setup>\nconst props = defineProps({ label: { type: String, required: true } });\n</script>\n\n<template>\n  <button>{{ label }}</button>\n</template>\n";
+/// The carrier ids this suite asks the bundler about.
+///
+/// Expectations are stated against THESE, never against an id read back out of
+/// the probe record: an assertion whose subject comes from the record can be
+/// satisfied by forging both the subject and the answer, which is exactly what
+/// a retargeted map plus a relabelled `id` did. Where a case reports an id, it
+/// is ASSERTED equal to one of these before anything about that case is read.
+const PROBE_VUE_ID: &str = "/probe/Plug.vue";
+const PROBE_SVELTE_ID: &str = "/probe/Plug.svelte";
+
 /// A second supported Svelte component, distinct from [`SUPPORTED_SVELTE`].
 const SUPPORTED_TWO: &str =
     "<script>\n  let total = $state(7);\n</script>\n\n<span class=\"total\">{total}</span>\n";
@@ -221,13 +258,33 @@ fn probe_profile(ssr: bool, source_map: bool) -> CompileProfile {
 enum HostOutcome {
     Published {
         code: String,
-        has_map: bool,
+        /// The host's published map, VERBATIM (a JSON string), not a presence
+        /// flag: a route that claims to preserve the host's map can only be
+        /// tested against the artifact the host actually published.
+        source_map: Option<String>,
         lang: Option<String>,
     },
     Refused {
         diagnostic_code: String,
     },
     Missing,
+}
+
+impl HostOutcome {
+    /// The published map, or a panic naming what the host did instead.
+    #[track_caller]
+    fn published_map(&self, label: &str) -> String {
+        match self {
+            HostOutcome::Published {
+                source_map: Some(map),
+                ..
+            } => map.clone(),
+            other => panic!(
+                "{label}: the host published no source map for the requested profile, so there is \
+                 nothing to compare a bundler product against: {other:?}"
+            ),
+        }
+    }
 }
 
 fn host_node(
@@ -244,7 +301,7 @@ fn host_node(
     }) {
         Ok(response) => HostOutcome::Published {
             code: response.code.to_string(),
-            has_map: response.source_map.is_some(),
+            source_map: response.source_map.as_ref().map(|map| map.to_string()),
             lang: response.lang.clone(),
         },
         Err(HostError::RuntimeSurfaceRefused {
@@ -262,7 +319,7 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
     match expected {
         HostOutcome::Published {
             code,
-            has_map,
+            source_map,
             lang,
         } => {
             assert_eq!(
@@ -275,7 +332,8 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
                 "{transport}/{label}: the transport's bytes differ from the host route's"
             );
             assert_eq!(
-                case["hasMap"], *has_map,
+                case["hasMap"],
+                source_map.is_some(),
                 "{transport}/{label}: map presence differs from the host route's"
             );
             assert_eq!(
@@ -1237,6 +1295,244 @@ fn the_transports_serialize_a_missing_node_differently() {
 const BUNDLER_BUILD: &str =
     "pnpm --filter @verter/unplugin build (the plugin's fingerprinted dist/index.mjs)";
 
+/// A published map, in parsed form.
+///
+/// The bundler hooks return a map as either an object or a JSON string, so both
+/// shapes are accepted and the string is parsed. Absence fails here: every
+/// caller is asking a question about a map that was supposed to be published.
+#[track_caller]
+fn parse_source_map_artifact(label: &str, map: &Value) -> Value {
+    assert!(
+        !map.is_null(),
+        "{label}: no source-map artifact was published (the map itself is null)"
+    );
+    match map {
+        Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or_else(|error| {
+            panic!(
+                "{label}: the published source map is a string that is not JSON ({error}): {text}"
+            )
+        }),
+        other => other.clone(),
+    }
+}
+
+/// Assert a published source-map ARTIFACT, never a probe-derived boolean.
+///
+/// A `hasMap` flag is the probe's OPINION of the artifact: hard-coding it to
+/// `true` while the real `map` stays `null` satisfies an assertion written
+/// against it, so such an assertion cannot tell a published map from a claimed
+/// one. This reads the map itself — present, parsed when it crossed as a JSON
+/// string (the bundler hooks return both shapes), and carrying the three fields
+/// that make it a usable v3 map rather than an empty envelope.
+#[track_caller]
+fn assert_source_map_artifact(label: &str, map: &Value) {
+    let object = &parse_source_map_artifact(label, map);
+    assert_eq!(
+        object["version"],
+        Value::from(3),
+        "{label}: the published source map is not a v3 map: {object}"
+    );
+    let mappings = object["mappings"].as_str().unwrap_or_else(|| {
+        panic!("{label}: the published source map has no `mappings` string: {object}")
+    });
+    assert!(
+        !mappings.is_empty(),
+        "{label}: the published source map's `mappings` is empty, so it maps nothing: {object}"
+    );
+    let sources = object["sources"].as_array().unwrap_or_else(|| {
+        panic!("{label}: the published source map has no `sources` array: {object}")
+    });
+    assert!(
+        !sources.is_empty(),
+        "{label}: the published source map names no sources: {object}"
+    );
+}
+
+/// The measured structure of a v3 `mappings` string.
+#[derive(Debug, PartialEq, Eq)]
+struct MappingsShape {
+    /// Generated lines, i.e. `;`-separated groups.
+    lines: usize,
+    /// Non-empty `,`-separated segments across all lines.
+    segments: usize,
+    /// Segments that name an authored position — four or five VLQ fields.
+    /// A ONE-FIELD segment names only a generated column and maps to nothing a
+    /// consumer can navigate to, so it is counted separately here.
+    mapped_segments: usize,
+}
+
+/// The base64 alphabet source maps encode VLQ digits in.
+const VLQ_BASE64: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// How many VLQ fields one segment carries.
+///
+/// Each field is a run of digits ended by the first digit without the
+/// continuation bit (0x20), so the fields are counted without decoding the
+/// values themselves.
+#[track_caller]
+fn vlq_field_count(label: &str, segment: &str) -> usize {
+    segment
+        .chars()
+        .filter(|character| {
+            let digit = VLQ_BASE64.find(*character).unwrap_or_else(|| {
+                panic!("{label}: `{segment}` is not a base64 VLQ segment ({character:?})")
+            });
+            digit & 0x20 == 0
+        })
+        .count()
+}
+
+/// Read a published map's `mappings` structure.
+#[track_caller]
+fn mappings_shape(label: &str, map: &Value) -> MappingsShape {
+    let object = parse_source_map_artifact(label, map);
+    let mappings = object["mappings"].as_str().unwrap_or_else(|| {
+        panic!("{label}: the published source map has no `mappings` string: {object}")
+    });
+    let lines: Vec<&str> = mappings.split(';').collect();
+    let segments: Vec<&str> = lines
+        .iter()
+        .flat_map(|line| line.split(','))
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    MappingsShape {
+        lines: lines.len(),
+        mapped_segments: segments
+            .iter()
+            .filter(|segment| vlq_field_count(label, segment) >= 4)
+            .count(),
+        segments: segments.len(),
+    }
+}
+
+/// A published map, normalized for WHOLE-ARTIFACT comparison.
+///
+/// The envelope check ([`assert_source_map_artifact`]) proves a map is usable;
+/// it cannot prove a route PRESERVED the map it was given. Neither can a
+/// comparison over a chosen subset of fields: comparing `sources` plus the mere
+/// PRESENCE of `sourcesContent` accepts forged `sourcesContent` bytes, which is
+/// exactly the content a debugger displays to the user as the authored source.
+/// So the comparison is over the entire artifact — `version`, `file`,
+/// `sourceRoot`, `sources`, every `sourcesContent` VALUE, `names`, `mappings`,
+/// and any other member the producer emitted.
+///
+/// Exactly two things are normalized away, and only because neither carries
+/// meaning:
+///
+/// * KEY ORDER — a JSON object is unordered by definition, and `serde_json`
+///   compares object members by key, so parsing alone normalizes it.
+/// * ABSENT vs explicit `null` for an optional member — `{"file": null}` and a
+///   map with no `file` member both say "no file", so `null` members are
+///   dropped. Nothing else is dropped: an EMPTY value (`""`, `[]`) is a
+///   statement about the map, not an absence, and is compared as itself.
+#[track_caller]
+fn normalized_source_map(label: &str, map: &Value) -> Value {
+    let mut parsed = parse_source_map_artifact(label, map);
+    if let Some(object) = parsed.as_object_mut() {
+        object.retain(|_, value| !value.is_null());
+    }
+    parsed
+}
+
+/// The host's published map, normalized the same way.
+#[track_caller]
+fn host_normalized_source_map(label: &str, outcome: &HostOutcome) -> Value {
+    normalized_source_map(label, &Value::String(outcome.published_map(label)))
+}
+
+/// Assert a published map that actually MAPS something.
+///
+/// [`assert_source_map_artifact`] validates the envelope, and an envelope is
+/// satisfied by the single segment `"A"` — one generated column naming no
+/// authored position. Where the envelope check is the ACCEPTANCE rather than a
+/// precondition to a parity comparison, that is not enough: the product is
+/// claimed to carry a requested map, and a map that maps nothing does not.
+///
+/// This is deliberately NOT applied to the public Svelte virtual-script
+/// product, whose map is exactly that empty single segment today — a recorded
+/// observation with an owner and its own green characterization.
+#[track_caller]
+fn assert_mapped_source_map_artifact(label: &str, map: &Value) {
+    assert_source_map_artifact(label, map);
+    let shape = mappings_shape(label, map);
+    assert!(
+        shape.mapped_segments > 0,
+        "{label}: the published source map is a valid envelope that maps NOTHING — {} segment(s), \
+         none naming an authored position ({shape:?})",
+        shape.segments
+    );
+}
+
+/// Assert a case describes the carriers this test means.
+///
+/// A probe case reports the id it drove and the opposite id it offered. Every
+/// assertion about that case — its include decisions, its published map —
+/// silently inherits those ids, so they are pinned to the test's own constants
+/// before anything else about the case is read.
+#[track_caller]
+fn assert_bundler_case_carriers(case: &Value, expected_id: &str, expected_opposite: &str) {
+    assert_eq!(
+        case["id"].as_str(),
+        Some(expected_id),
+        "the case this test reads as `{expected_id}` reports a different requested carrier, so \
+         every assertion below would be about something else: {case}"
+    );
+    // REQUIRED, never conditional: the opposite-carrier include decision is the
+    // whole content of the REJECTION half of each pinned entry's contract, so a
+    // missing `oppositeId` leaves that assertion describing nothing at all.
+    assert_eq!(
+        case["oppositeId"].as_str(),
+        Some(expected_opposite),
+        "the case's opposite-carrier decision was taken against a carrier this test did not ask \
+         about (expected `{expected_opposite}`): {case}"
+    );
+}
+
+/// Assert a published map describes the carrier it was REQUESTED for.
+///
+/// A structural oracle says a map is well-formed and covers something; it says
+/// nothing about WHAT. Where no host counterpart exists to compare against,
+/// that gap lets a map retargeted at an unrelated file satisfy every check
+/// while describing a different compilation. Every `sources` entry must
+/// therefore name the requested carrier.
+#[track_caller]
+fn assert_source_map_names_only(label: &str, map: &Value, requested_id: &str) {
+    let object = parse_source_map_artifact(label, map);
+    let sources = object["sources"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("{label}: the published source map has no `sources` array: {object}")
+        })
+        .iter()
+        .map(|source| source.as_str().unwrap_or("<non-string>").to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !sources.is_empty(),
+        "{label}: the published source map names no sources, so it describes no request"
+    );
+    let foreign: Vec<&String> = sources
+        .iter()
+        .filter(|source| source.as_str() != requested_id)
+        .collect();
+    assert!(
+        foreign.is_empty(),
+        "{label}: the map published for `{requested_id}` names {} source(s) that are not that \
+         carrier ({foreign:?}), so it describes a different compilation: sources={sources:?}",
+        foreign.len()
+    );
+}
+
+/// The counterpart of [`assert_source_map_artifact`]: the ABSENCE of a map is
+/// asserted on the artifact too, not on the derived flag.
+#[track_caller]
+fn assert_no_source_map_artifact(label: &str, map: &Value) {
+    assert_eq!(
+        *map,
+        Value::Null,
+        "{label}: a source-map artifact was published where none was expected"
+    );
+}
+
 /// The BUNDLER route, executed: the shipped unplugin's public Vue- and
 /// Svelte-pinned Vite and Rollup entries, loaded from the fingerprinted BUILT
 /// entry and driven through `transform` and any virtual-script `load` it
@@ -1338,6 +1634,12 @@ fn the_bundler_public_entries_apply_their_documented_include_contract() {
     let vue = &record["cases"]["vuePublicEntry"];
     let svelte = &record["cases"]["sveltePublicEntry"];
 
+    // Which carrier each case is ABOUT is fixed by this test, not read from the
+    // record: without this the include booleans below describe whichever ids
+    // the probe chose.
+    assert_bundler_case_carriers(vue, PROBE_VUE_ID, PROBE_SVELTE_ID);
+    assert_bundler_case_carriers(svelte, PROBE_SVELTE_ID, PROBE_VUE_ID);
+
     assert_eq!(
         vue["transformInclude"], true,
         "VerterVue.vite rejected its documented `.vue` carrier: {vue}"
@@ -1356,6 +1658,595 @@ fn the_bundler_public_entries_apply_their_documented_include_contract() {
     );
 }
 
+/// A SECOND reading of the built bundler entry, owned by this test.
+///
+/// Everything the guards below judge otherwise arrives in one JSON document
+/// written by one program. Cross-checking two fields of that document catches a
+/// case copied from a sibling — the copy carries the sibling's drive result —
+/// but both fields are still that program's word. This observation is not: its
+/// text lives here, it is executed by this test, and it imports the same built
+/// entry the probe imported.
+///
+/// It reads SHAPE ONLY and drives nothing, so it stays a few lines rather than
+/// a second copy of the probe. It re-uses the probe's freshness fingerprint
+/// rather than adding a second one: the probe proves that entry fresh, and this
+/// reads the same path.
+///
+/// ## What it closes, and what remains open
+///
+/// It closes any forgery that MISSTATES the artifact — an export the probe
+/// omitted or invented, or a value whose reported `typeof` or adapter
+/// callability is not what the module actually holds. Those now have to
+/// disagree with a reading the probe did not produce.
+///
+/// What remains open is narrower than "these spellings are indistinguishable",
+/// which would be false: `VerterVue` and `unpluginFactory` separate cleanly out
+/// of process, and this suite already relies on it — object vs function, a
+/// callable `.vite` vs none, and the flattened `configResolved` /
+/// `handleHotUpdate` that only the `createUnplugin` wrapper carries.
+///
+/// The open residue is INVOCATION ATTRIBUTION: nothing here requires a driven
+/// export to have actually been APPLIED. A probe can print an export's TRUE
+/// readings — evidence, plugin keys, carriers — while having sourced the drive
+/// results from its sibling, and every check above is satisfied because each
+/// individual statement is true of the real value. Invocation is observable
+/// from outside this process too: wrapping the built entry's bindings at import
+/// (a module hook / `--import` wrapper installing an apply-counting `Proxy`)
+/// attributes an apply to a spelling without any in-process driving. Requiring
+/// a non-zero apply count per driven export is the named closure; it is not
+/// built here, and it is recorded in the evidence index rather than implied.
+const BUNDLER_OBSERVER_SCRIPT: &str = r#"
+const { pathToFileURL } = await import("node:url");
+const entry = process.env.VERTER_OBSERVED_ENTRY;
+if (!entry) throw new Error("no observed entry was supplied");
+const observed = await import(pathToFileURL(entry).href);
+const names = Object.keys(observed).sort();
+const observations = {};
+for (const name of names) {
+  const value = observed[name];
+  observations[name] = {
+    valueType: typeof value,
+    viteIsCallable: typeof value?.vite === "function",
+    rollupIsCallable: typeof value?.rollup === "function",
+  };
+}
+process.stdout.write(JSON.stringify({ exports: names, observations }));
+"#;
+
+/// Run [`BUNDLER_OBSERVER_SCRIPT`] against the built entry.
+///
+/// A missing or failing `node` FAILS here. Skipping would turn the independent
+/// half of the check into an optional one, which is the same
+/// no-evidence-reads-as-pass shape these guards exist to reject.
+fn observe_bundler_entry() -> Value {
+    let entry = repo_root().join("packages/unplugin/dist/index.mjs");
+    let output = Command::new("node")
+        .args(["--input-type=module", "--eval", BUNDLER_OBSERVER_SCRIPT])
+        .env("VERTER_OBSERVED_ENTRY", &entry)
+        .current_dir(repo_root())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "the test-owned observation of {} could not run: node failed ({error}). This \
+                 check is required, never optional.",
+                entry.display()
+            )
+        });
+    assert!(
+        output.status.success(),
+        "the test-owned observation of {} exited {:?}:\n{}",
+        entry.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap_or_else(|error| {
+        panic!(
+            "the test-owned observation emitted no JSON ({error}):\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+/// Whether the probe's recorded evidence says this export exposes a callable
+/// `vite` — derived here, so it is comparable with the observation.
+fn probe_says_vite_callable(case: &Value) -> bool {
+    let evidence = &case["evidence"];
+    if evidence["valueType"].as_str() != Some("object") {
+        return false;
+    }
+    let (Some(keys), Some(types)) = (
+        evidence["ownKeys"].as_array(),
+        evidence["ownKeyTypes"].as_array(),
+    ) else {
+        return false;
+    };
+    keys.iter()
+        .zip(types)
+        .any(|(key, kind)| key == "vite" && kind == "function")
+}
+
+/// The probe's record and the test-owned observation must describe the same
+/// module.
+#[track_caller]
+fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
+    // The observation reads the entry the probe proved fresh; no second
+    // fingerprint is introduced.
+    assert_eq!(
+        record["fresh"], true,
+        "bundler: the probe did not prove the built entry fresh, so the independent observation \
+         below would be reading an unverified artifact: {record}"
+    );
+    let observed = observe_bundler_entry();
+
+    // ENUMERATION, independently: a probe that hid or invented an export is
+    // caught here, where the export list was previously its word alone.
+    assert_eq!(
+        record["exports"], observed["exports"],
+        "bundler: the probe's export enumeration disagrees with this test's own reading of the \
+         same built entry"
+    );
+
+    for name in record["exports"]
+        .as_array()
+        .expect("the export list is an array")
+        .iter()
+        .filter_map(Value::as_str)
+    {
+        let case = &record["exportCases"][name];
+        let seen = &observed["observations"][name];
+        assert_eq!(
+            case["evidence"]["valueType"], seen["valueType"],
+            "bundler/{name}: the probe reports a {} where this test reads a {} in the same built \
+             entry",
+            case["evidence"]["valueType"], seen["valueType"]
+        );
+        assert_eq!(
+            Value::Bool(probe_says_vite_callable(case)),
+            seen["viteIsCallable"],
+            "bundler/{name}: the probe's evidence and this test's own reading disagree on whether \
+             the value exposes a callable vite adapter: {case}"
+        );
+    }
+}
+
+/// What an export IS, derived HERE from the evidence the probe read off the
+/// value — never a classification the probe assigned.
+///
+/// The probe records `typeof`, an object's sorted own-key list with each key's
+/// `typeof`, a callable's arity and name, and any measured alias identity. It
+/// records no `kind`: a `kind` string is an opinion, and an opinion copied from
+/// a sibling case arrives already agreeing with itself.
+///
+/// ## What this proves, and what it cannot
+///
+/// It proves the recorded evidence is VALUE-DERIVED and internally consistent
+/// with the driving results and with each spelling's documented contract, so a
+/// case copied from a sibling contradicts the row it is filed under. It does
+/// NOT prove the probe READ HONESTLY: a probe can print any `typeof` it likes.
+/// That is the trust floor of every out-of-process probe — the artifact is
+/// examined by a program, and a program that lies about what it saw cannot be
+/// caught by reading what it printed. Closing it needs the observation moved
+/// in-process, not a further assertion here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DerivedKind {
+    /// A `createUnplugin` result: an object exposing a callable `.vite`.
+    UnpluginObject,
+    /// A bare unplugin factory a consumer calls with its own bundler meta.
+    RawFactory,
+    /// The same object as an earlier export, by measured identity.
+    Alias(String),
+    /// Neither, with the evidence-stated reason.
+    NotDrivable(String),
+}
+
+impl DerivedKind {
+    fn is_executed(&self) -> bool {
+        matches!(self, DerivedKind::UnpluginObject | DerivedKind::RawFactory)
+    }
+}
+
+/// Derive one export's kind from its recorded evidence alone.
+#[track_caller]
+fn derived_kind(export: &str, case: &Value) -> DerivedKind {
+    if let Some(alias_of) = case["aliasOf"].as_str() {
+        return DerivedKind::Alias(alias_of.to_string());
+    }
+    let evidence = &case["evidence"];
+    let value_type = evidence["valueType"].as_str().unwrap_or_else(|| {
+        panic!("bundler/{export}: the case records no `evidence.valueType`: {case}")
+    });
+    match value_type {
+        "function" => DerivedKind::RawFactory,
+        "object" => {
+            let keys = evidence["ownKeys"].as_array().unwrap_or_else(|| {
+                panic!("bundler/{export}: an object case records no `evidence.ownKeys`: {case}")
+            });
+            let types = evidence["ownKeyTypes"].as_array().unwrap_or_else(|| {
+                panic!("bundler/{export}: an object case records no `evidence.ownKeyTypes`: {case}")
+            });
+            assert_eq!(
+                keys.len(),
+                types.len(),
+                "bundler/{export}: the recorded own-key list and its type list disagree in \
+                 length, so the evidence is not internally consistent: {evidence}"
+            );
+            let exposes_vite = keys
+                .iter()
+                .zip(types)
+                .any(|(key, kind)| key == "vite" && kind == "function");
+            if exposes_vite {
+                DerivedKind::UnpluginObject
+            } else {
+                DerivedKind::NotDrivable(format!(
+                    "an object exposing no callable `vite` (own keys {keys:?})"
+                ))
+            }
+        }
+        other => DerivedKind::NotDrivable(format!("a value of type `{other}`")),
+    }
+}
+
+/// The recorded evidence must agree with what DRIVING the value produced.
+///
+/// Two independent observations of the same export are recorded: what the value
+/// looked like (`typeof`, own keys), and what the invocation returned (the
+/// plugin object's own keys). `createUnplugin` is precisely what flattens an
+/// adapter's Vite-only hooks onto the plugin it returns, so a wrapped entry's
+/// plugin carries `configResolved` at the top level while a raw factory's keeps
+/// it nested under `.vite`. A case copied from a wrapped entry therefore
+/// contradicts any reading that claims a bare factory — the copied drive result
+/// and the claimed shape cannot both be true.
+#[track_caller]
+fn assert_evidence_matches_the_driven_plugin(export: &str, case: &Value, kind: &DerivedKind) {
+    let keys: Vec<&str> = case["pluginKeys"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("bundler/{export}: a driven export records no `pluginKeys`: {case}")
+        })
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        !keys.is_empty(),
+        "bundler/{export}: the driven plugin exposed no hooks at all: {case}"
+    );
+    let flattened = keys.contains(&"configResolved");
+    match kind {
+        DerivedKind::UnpluginObject => assert!(
+            flattened,
+            "bundler/{export}: read as an unplugin object, but the plugin it returned does NOT \
+             carry a flattened `configResolved` — the two observations disagree, so at least one \
+             is not this value's: pluginKeys={keys:?}"
+        ),
+        DerivedKind::RawFactory => assert!(
+            !flattened,
+            "bundler/{export}: read as a raw factory, but the plugin it returned carries a \
+             FLATTENED `configResolved`, which only `createUnplugin` produces — the two \
+             observations disagree, so at least one is not this value's: pluginKeys={keys:?}"
+        ),
+        other => panic!("bundler/{export}: {other:?} is not a driven kind"),
+    }
+}
+
+/// What each drivable public spelling must be, and must accept.
+///
+/// These rows are the DISCRIMINATOR between the spellings, and both components
+/// come from measurements rather than labels: `kind` is [`derived_kind`]'s
+/// answer over the recorded evidence, and `accepts_*` are that value's OWN
+/// `transformInclude` answers, one per carrier. `createUnplugin` wraps a raw
+/// factory into an unplugin object, so the two really are different shapes at
+/// the export surface — which is what separates `VerterVue` from
+/// `unpluginFactory`, since those two agree on both carriers.
+///
+/// The four rows are pairwise DISTINCT on that triple —
+/// [`the_bundler_public_spellings_are_distinguished_by_what_they_accept`]
+/// asserts that first, so the discrimination claim is itself checked rather
+/// than assumed.
+struct BundlerSpelling {
+    export: &'static str,
+    kind: DerivedKind,
+    accepts_vue: bool,
+    accepts_svelte: bool,
+}
+
+fn bundler_spelling_contracts() -> Vec<BundlerSpelling> {
+    vec![
+        BundlerSpelling {
+            export: "Verter",
+            kind: DerivedKind::UnpluginObject,
+            accepts_vue: true,
+            accepts_svelte: true,
+        },
+        BundlerSpelling {
+            export: "VerterSvelte",
+            kind: DerivedKind::UnpluginObject,
+            accepts_vue: false,
+            accepts_svelte: true,
+        },
+        BundlerSpelling {
+            export: "VerterVue",
+            kind: DerivedKind::UnpluginObject,
+            accepts_vue: true,
+            accepts_svelte: false,
+        },
+        BundlerSpelling {
+            export: "unpluginFactory",
+            kind: DerivedKind::RawFactory,
+            accepts_vue: true,
+            accepts_svelte: false,
+        },
+    ]
+}
+
+/// Every spelling the BUILT bundler artifact exports is either executed by the
+/// probe or classified out of scope with a reason.
+///
+/// Both classes are DERIVED from the probe's per-export records, never from a
+/// list kept here: the probe's case map is keyed by the export enumeration
+/// itself and each record carries the name it was read by, so a case cannot be
+/// contributed for a spelling that was never looked up. A list on this side
+/// could only ever assert that a name was written down.
+#[test]
+fn every_exported_bundler_spelling_is_executed_or_classified_out_of_scope() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let exported: Vec<String> = record["exports"]
+        .as_array()
+        .expect("the built plugin entry enumerates its exports")
+        .iter()
+        .map(|name| {
+            name.as_str()
+                .expect("an export name is a string")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        !exported.is_empty(),
+        "the enumeration found no bundler exports, so it proves nothing"
+    );
+    assert_probe_agrees_with_the_test_owned_observation(&record);
+
+    // The case set IS the export set — in both directions.
+    let cases = record["exportCases"]
+        .as_object()
+        .expect("the probe records one case per enumerated export");
+    assert_eq!(
+        cases.len(),
+        exported.len(),
+        "bundler: the probe recorded {} case(s) for {} exported spelling(s), so the case set is \
+         no longer the export set: cases={:?} exports={exported:?}",
+        cases.len(),
+        exported.len(),
+        cases.keys().collect::<Vec<_>>()
+    );
+    for name in &exported {
+        let case = &record["exportCases"][name];
+        assert!(
+            !case.is_null(),
+            "bundler/{name}: the enumeration names this export but the probe recorded no case"
+        );
+        // The record must carry the name it was READ BY. A case produced for a
+        // different spelling therefore cannot be filed under this one.
+        assert_eq!(
+            case["exportName"].as_str(),
+            Some(name.as_str()),
+            "bundler/{name}: the case filed under this export was produced by reading `{}` \
+             instead, so the observation is not this spelling's",
+            case["exportName"]
+        );
+    }
+
+    // The two classes, derived HERE from each case's evidence. Nothing on this
+    // path reads a classification the probe wrote down.
+    let kinds: Vec<DerivedKind> = exported
+        .iter()
+        .map(|name| derived_kind(name, &record["exportCases"][name]))
+        .collect();
+    let mut executed: Vec<&str> = Vec::new();
+    let mut classified: Vec<(String, String)> = Vec::new();
+    for (name, kind) in exported.iter().zip(&kinds) {
+        let case = &record["exportCases"][name];
+        if kind.is_executed() {
+            assert_ne!(
+                case["outcome"], "error",
+                "bundler/{name}: the probe drove this export and it errored: {case}"
+            );
+            // The two independent observations of this value must agree.
+            assert_evidence_matches_the_driven_plugin(name, case, kind);
+            // Driving an export means it answered for both carriers.
+            for carrier in ["vue", "svelte"] {
+                assert!(
+                    case["carriers"][carrier]["transformInclude"].is_boolean(),
+                    "bundler/{name}: its evidence says it is drivable, but no {carrier} include \
+                     decision was recorded, so it was not driven: {case}"
+                );
+            }
+            executed.push(name.as_str());
+            continue;
+        }
+        let reason = match kind {
+            DerivedKind::Alias(target) => {
+                format!("the same object as the executed `{target}` spelling, by measured identity")
+            }
+            DerivedKind::NotDrivable(reason) => reason.clone(),
+            _ => unreachable!("executed kinds are handled above"),
+        };
+        classified.push((name.clone(), reason));
+    }
+    let classified_refs: Vec<(&str, &str)> = classified
+        .iter()
+        .map(|(name, reason)| (name.as_str(), reason.as_str()))
+        .collect();
+    assert_partition("bundler", &exported, &executed, &classified_refs, &[]);
+
+    // An ALIAS is only a classification if what it aliases actually ran, AND if
+    // the two spellings' evidence agrees — a necessary consequence of the two
+    // being the same object, and checkable without trusting the identity claim.
+    for (name, kind) in exported.iter().zip(&kinds) {
+        let DerivedKind::Alias(target) = kind else {
+            continue;
+        };
+        assert!(
+            executed.contains(&target.as_str()),
+            "bundler/{name}: classified as an alias of `{target}`, which is not itself executed, \
+             so neither spelling was driven"
+        );
+        assert_eq!(
+            record["exportCases"][name]["evidence"], record["exportCases"][target]["evidence"],
+            "bundler/{name}: claimed to be the same object as `{target}`, but the two spellings' \
+             evidence differs, so they cannot be one value"
+        );
+    }
+
+    // The historically documented alias, still measured rather than claimed.
+    assert_eq!(
+        record["defaultIsVerterVue"], true,
+        "bundler: the `default` export is no longer the `VerterVue` object: {record}"
+    );
+    assert_eq!(
+        record["exportCases"]["default"]["aliasOf"], "VerterVue",
+        "bundler: the `default` export no longer aliases `VerterVue`: {}",
+        record["exportCases"]["default"]
+    );
+}
+
+/// Every executed spelling, on the contract that tells it apart from its
+/// siblings — and on what its own hooks produced.
+#[test]
+fn the_bundler_public_spellings_are_distinguished_by_what_they_accept() {
+    let contracts = bundler_spelling_contracts();
+
+    // The discrimination claim, checked before it is relied on: two spellings
+    // sharing a triple could each satisfy the other's row.
+    for (index, left) in contracts.iter().enumerate() {
+        for right in contracts.iter().skip(index + 1) {
+            assert!(
+                (&left.kind, left.accepts_vue, left.accepts_svelte)
+                    != (&right.kind, right.accepts_vue, right.accepts_svelte),
+                "`{}` and `{}` are indistinguishable on (kind, accepts_vue, accepts_svelte), so \
+                 neither row can tie an observation to its spelling",
+                left.export,
+                right.export
+            );
+        }
+    }
+
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+
+    // Every executed export has a row, and every row names an exported
+    // spelling: the contract table and the driven set stay in step. The driven
+    // set is derived from the evidence here, not read off a probe label.
+    let exported: Vec<String> = record["exports"]
+        .as_array()
+        .expect("the built plugin entry enumerates its exports")
+        .iter()
+        .map(|name| name.as_str().unwrap_or_default().to_string())
+        .collect();
+    let executed: Vec<&str> = exported
+        .iter()
+        .filter(|name| derived_kind(name, &record["exportCases"][name.as_str()]).is_executed())
+        .map(String::as_str)
+        .collect();
+    assert_probe_agrees_with_the_test_owned_observation(&record);
+    let contracted: Vec<&str> = contracts.iter().map(|row| row.export).collect();
+    assert_eq!(
+        executed, contracted,
+        "the executed spellings and the contract rows have diverged"
+    );
+
+    for row in &contracts {
+        let case = &record["exportCases"][row.export];
+        let observed = derived_kind(row.export, case);
+        assert_eq!(
+            observed, row.kind,
+            "bundler/{}: its recorded evidence describes a {observed:?} where this spelling is a \
+             {:?} — the case belongs to a different export shape: {case}",
+            row.export, row.kind
+        );
+        assert_evidence_matches_the_driven_plugin(row.export, case, &observed);
+        assert_eq!(
+            case["carriers"]["vue"]["transformInclude"], row.accepts_vue,
+            "bundler/{}: its own `transformInclude` disagrees with this spelling's documented \
+             `.vue` contract: {case}",
+            row.export
+        );
+        assert_eq!(
+            case["carriers"]["svelte"]["transformInclude"], row.accepts_svelte,
+            "bundler/{}: its own `transformInclude` disagrees with this spelling's documented \
+             `.svelte` contract: {case}",
+            row.export
+        );
+        // An accepted carrier must have produced a product, so "accepts" is not
+        // satisfied by an include decision alone.
+        for (carrier, accepts) in [("vue", row.accepts_vue), ("svelte", row.accepts_svelte)] {
+            if !accepts {
+                continue;
+            }
+            assert_eq!(
+                case["carriers"][carrier]["loadedScriptOutcome"], "published",
+                "bundler/{}: it accepted the {carrier} carrier but published no virtual-script \
+                 product: {case}",
+                row.export
+            );
+        }
+    }
+
+    // `VerterVue` is `createUnplugin(unpluginFactory)`, so the wrapped entry's
+    // product IS the raw factory's product.
+    let raw_vue = &record["exportCases"]["unpluginFactory"]["carriers"]["vue"]["loadedScriptCode"];
+    assert!(
+        raw_vue.as_str().is_some_and(|code| !code.is_empty()),
+        "unpluginFactory: the raw factory published empty code, so the comparison below is vacuous"
+    );
+    assert_eq!(
+        raw_vue, &record["exportCases"]["VerterVue"]["carriers"]["vue"]["loadedScriptCode"],
+        "unpluginFactory: the raw factory's product differs from the public Vue entry's, so the \
+         public entry is no longer wrapping this factory"
+    );
+
+    // The auto entry routed each carrier to ITS OWN product, and its Svelte
+    // product is the in-process host route's `Main`.
+    let auto = &record["exportCases"]["Verter"]["carriers"];
+    assert_ne!(
+        auto["vue"]["loadedScriptCode"], auto["svelte"]["loadedScriptCode"],
+        "Verter: both carriers produced identical bytes, so this cannot detect a mis-routed carrier"
+    );
+    let svelte_host = host_with(
+        "/probe/Plug.svelte",
+        SUPPORTED_SVELTE,
+        verter_language::FileLanguage::svelte(),
+    );
+    let expected = host_node(
+        &svelte_host,
+        "/probe/Plug.svelte",
+        VirtualNodeKind::Main,
+        &CompileProfile {
+            source_map: true,
+            hmr_strategy: crate::types::HmrStrategy::None,
+            ..CompileProfile::default()
+        },
+    );
+    let HostOutcome::Published {
+        code: host_code, ..
+    } = &expected
+    else {
+        panic!("Verter: the host route no longer publishes this module: {expected:?}");
+    };
+    assert_eq!(
+        auto["svelte"]["loadedScriptCode"].as_str(),
+        Some(host_code.as_str()),
+        "Verter: the auto entry's loaded Svelte bytes differ from the host route's `Main`"
+    );
+}
+
 /// BND-2 previously inspected the synthetic wrapper's `map: null`. Public Vite
 /// consumers resolve and load the wrapper's script request; that virtual-script
 /// product must carry the map requested from and published by the host.
@@ -1368,22 +2259,51 @@ fn the_bundler_virtual_script_loads_publish_requested_source_maps() {
     );
     let vue = &record["cases"]["vuePublicEntry"];
     let svelte = &record["cases"]["sveltePublicEntry"];
+    assert_bundler_case_carriers(vue, PROBE_VUE_ID, PROBE_SVELTE_ID);
+    assert_bundler_case_carriers(svelte, PROBE_SVELTE_ID, PROBE_VUE_ID);
 
     for (factory, case) in [("VerterVue.vite", vue), ("VerterSvelte.vite", svelte)] {
-        assert_eq!(
-            case["wrapperHasMap"], false,
-            "{factory}: the routing wrapper unexpectedly became the mapped product: {case}"
+        assert_no_source_map_artifact(
+            &format!("{factory}: the routing wrapper unexpectedly became the mapped product"),
+            &case["wrapperMap"],
         );
         assert_eq!(
             case["loadedScriptOutcome"], "published",
             "{factory}: the public virtual-script load did not publish a product: {case}"
         );
-        assert_eq!(
-            case["loadedScriptHasMap"], true,
-            "{factory}: the mapped virtual-script product dropped its requested map: {case}"
-        );
     }
 
+    // The VUE product's map is checked by the ENVELOPE ORACLE ALONE — there is
+    // no host counterpart to compare it against (see the note at the end of
+    // this test) — so the oracle has to carry the whole acceptance. Two things
+    // are therefore required of it: that it maps SOMETHING, and that what it
+    // maps is THIS request. Without the second, a map retargeted at an
+    // unrelated file satisfies every structural check while describing a
+    // different compilation entirely.
+    assert_mapped_source_map_artifact(
+        "VerterVue.vite: the mapped virtual-script product",
+        &vue["loadedScriptMap"],
+    );
+    assert_source_map_names_only(
+        "VerterVue.vite: the mapped virtual-script product",
+        &vue["loadedScriptMap"],
+        PROBE_VUE_ID,
+    );
+    // The SVELTE product is held to the envelope only, and deliberately: its
+    // map is a single unmapped segment today. That is a recorded observation
+    // with an owner, pinned green by
+    // `the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output`,
+    // so the stricter oracle is not applied here — the acceptance for this
+    // product is the host PARITY comparison below, which is stronger than
+    // either oracle and does not depend on the map being non-empty.
+    assert_source_map_artifact(
+        "VerterSvelte.vite: the mapped virtual-script product",
+        &svelte["loadedScriptMap"],
+    );
+
+    // ── the ACCEPTANCE: the Svelte product carries the HOST's map ───────────
+    // This case already compares its loaded bytes against the host's `Main`
+    // product, so its map is comparable the same way.
     let host = host_with(
         "/probe/Plug.svelte",
         SUPPORTED_SVELTE,
@@ -1399,10 +2319,93 @@ fn the_bundler_virtual_script_loads_publish_requested_source_maps() {
             ..CompileProfile::default()
         },
     );
+    assert_eq!(
+        normalized_source_map(
+            "VerterSvelte.vite: the virtual-script product's map",
+            &svelte["loadedScriptMap"],
+        ),
+        host_normalized_source_map("the host's Svelte `Main` product's map", &expected),
+        "VerterSvelte.vite: the published virtual-script map is not the map the host published \
+         for the same requested profile"
+    );
+
+    // The VUE case has no established host counterpart: its `?vue&type=script`
+    // sub-request is a Vite-only split of the SFC whose rendered content is
+    // owned elsewhere, and the suite's route comparison likewise asserts only
+    // that it published non-empty code. So it keeps the envelope precondition
+    // above and no parity assertion — stated rather than silently omitted.
+    let _ = vue;
+}
+
+/// CHARACTERIZATION — the published Svelte virtual-script map is structurally
+/// valid and semantically empty, where the Vue one maps most of its output.
+///
+/// The green acceptance target above
+/// ([`the_bundler_virtual_script_loads_publish_requested_source_maps`]) asks
+/// whether a v3 map with a non-empty `mappings` string was published. Both
+/// carriers answer yes — but the Svelte answer is the single segment `"A"`: one
+/// generated column, no authored position, nothing a consumer can navigate to.
+/// The Vue answer is 16 segments across 18 generated lines, 12 of them naming
+/// an authored position.
+///
+/// So this pins the DIVERGENCE the acceptance target cannot see, at the
+/// structure level rather than through a presence flag:
+///
+/// * Svelte is pinned EXACTLY (one segment, none of them mapped). A correction
+///   to the Svelte map builder is EXPECTED to flip this test, and that flip is
+///   the signal to re-measure and update it — not a regression to revert. The
+///   Svelte map-provenance class already has an owner and an acceptance target
+///   elsewhere; this test only records what is true today.
+/// * Vue is pinned as a FLOOR at its measured values, so an improvement to the
+///   Vue map keeps it green while a loss of coverage fails it.
+///
+/// The Vue ROLLUP entry publishes no map at all; that is the separately owned
+/// ignored acceptance target below, not part of this measurement.
+#[test]
+fn the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+
+    let vue = mappings_shape(
+        "VerterVue.vite: the virtual-script map",
+        &record["cases"]["vuePublicEntry"]["loadedScriptMap"],
+    );
     assert!(
-        matches!(expected, HostOutcome::Published { has_map: true, .. }),
-        "the host did not publish the requested Svelte map, so bundler parity cannot be tested: \
-         {expected:?}"
+        vue.lines >= 18 && vue.segments >= 16 && vue.mapped_segments >= 12,
+        "VerterVue.vite: the virtual-script map covers less than the recorded measurement \
+         (18 generated lines, 16 segments, 12 of them naming an authored position): {vue:?}"
+    );
+
+    // Both public Svelte routes — the Vite virtual-script load and the Rollup
+    // one — carry the SAME empty map, so this is the Svelte map builder's
+    // output rather than one bundler adapter's handling of it.
+    for label in ["sveltePublicEntry", "svelteRollupEntry"] {
+        let svelte = mappings_shape(
+            &format!("bundler/{label}: the virtual-script map"),
+            &record["cases"][label]["loadedScriptMap"],
+        );
+        assert_eq!(
+            svelte,
+            MappingsShape {
+                lines: 1,
+                segments: 1,
+                mapped_segments: 0,
+            },
+            "bundler/{label}: the Svelte virtual-script map's structure moved. If the Svelte map \
+             builder was corrected this is the expected signal — re-measure and update this \
+             characterization rather than reverting."
+        );
+    }
+
+    // The divergence itself, stated as the comparison: the acceptance target
+    // treats these two products identically, and they are not.
+    assert!(
+        vue.mapped_segments > 0,
+        "VerterVue.vite: the Vue product now maps nothing either, so this test no longer \
+         characterizes a divergence: {vue:?}"
     );
 }
 
@@ -1461,9 +2464,41 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
         svelte["loadedScriptOutcome"], "published",
         "VerterSvelte.rollup did not publish its virtual-script product: {svelte}"
     );
+    // Envelope only, for the same recorded reason as the Vite route above: this
+    // product's map is a single unmapped segment today, and its acceptance is
+    // the host parity comparison that follows.
+    assert_source_map_artifact(
+        "VerterSvelte.rollup: the virtual-script product",
+        &svelte["loadedScriptMap"],
+    );
+    // Same treatment as the Vite route: the Svelte Rollup virtual-script load
+    // serves the host's `Main` product, so its map is PARITY-tested against the
+    // host's, not merely envelope-checked.
+    let svelte_host = host_with(
+        "/probe/Plug.svelte",
+        SUPPORTED_SVELTE,
+        verter_language::FileLanguage::svelte(),
+    );
     assert_eq!(
-        svelte["loadedScriptHasMap"], true,
-        "VerterSvelte.rollup dropped the map from its virtual-script product: {svelte}"
+        normalized_source_map(
+            "VerterSvelte.rollup: the virtual-script product's map",
+            &svelte["loadedScriptMap"],
+        ),
+        host_normalized_source_map(
+            "the host's Svelte `Main` product's map",
+            &host_node(
+                &svelte_host,
+                "/probe/Plug.svelte",
+                VirtualNodeKind::Main,
+                &CompileProfile {
+                    source_map: true,
+                    hmr_strategy: crate::types::HmrStrategy::None,
+                    ..CompileProfile::default()
+                },
+            ),
+        ),
+        "VerterSvelte.rollup: the published virtual-script map is not the map the host published \
+         for the same requested profile"
     );
 
     let host = host_with(
@@ -1484,18 +2519,39 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
         VirtualNodeKind::Main,
         &requested_profile,
     );
-    let host_has_map = matches!(host_product, HostOutcome::Published { has_map: true, .. });
+    let host_has_map = matches!(
+        host_product,
+        HostOutcome::Published {
+            source_map: Some(_),
+            ..
+        }
+    );
     assert!(
         host_has_map,
         "the matching source-map-requesting host profile did not publish a map, so Rollup parity \
          cannot be tested: {host_product:?}"
     );
 
+    // PRECONDITION: a usable map that maps something. This is deliberately NOT
+    // the whole acceptance — a `version: 3` envelope for an unrelated file also
+    // satisfies it, so on its own it cannot tell a PRESERVED map from a
+    // substituted one — but the Vue product this route inlines is one whose map
+    // covers its output, so an empty-mapping map is already a failure here.
+    let inline_label = format!(
+        "VerterVue.rollup: the public non-Vite inline product's requested map \
+         (hostHasMap={host_has_map}, publicTransformIsInline={}, publicTransformHasMap={})",
+        vue["publicTransformIsInline"], vue["publicTransformHasMap"]
+    );
+    assert_mapped_source_map_artifact(&inline_label, &vue["publicTransformMap"]);
+
+    // The ACCEPTANCE: "preserves" means the inline product carries the SAME
+    // map the host published for the profile this route requested — the
+    // sources it names, whether their contents ride along, and the mapping
+    // payload itself.
     assert_eq!(
-        vue["publicTransformHasMap"], true,
-        "VerterVue.rollup dropped the requested map from the public non-Vite inline product: \
-         hostHasMap={host_has_map}, publicTransformIsInline={}, publicTransformMap={}, \
-         publicTransformHasMap={}; case={vue}",
-        vue["publicTransformIsInline"], vue["publicTransformMap"], vue["publicTransformHasMap"]
+        normalized_source_map(&inline_label, &vue["publicTransformMap"]),
+        host_normalized_source_map("the host's Vue `Main` product's map", &host_product),
+        "VerterVue.rollup: the public non-Vite inline product does not carry the map the host \
+         published for the same requested profile"
     );
 }

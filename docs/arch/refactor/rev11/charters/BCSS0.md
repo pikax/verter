@@ -1,8 +1,11 @@
 # BCSS0 — Standalone CSS source-map product correction
 
-**Status:** PROPOSED / **RATIFIED (AMD-009)**; not accepted. **Class:** Framework subsystem.
-**Predecessor:** BF3. **Downstream:** acceptance is a mandatory predecessor of B2
-and B3.
+**Status:** PROPOSED / **RATIFIED (AMD-009 §7)**; not accepted. The §7 DIRECTION is
+ratified by a direct maintainer act; these exact bytes are recorded and independently
+reviewed, not maintainer-inspected — see
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md).
+**Class:** Framework subsystem. **Predecessor:** BF3. **Downstream:** acceptance is a
+mandatory predecessor of B2 and B3.
 
 ## Objective
 

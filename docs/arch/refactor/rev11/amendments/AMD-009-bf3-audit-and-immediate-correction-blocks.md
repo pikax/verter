@@ -1,8 +1,11 @@
 # AMD-009 — BF3 audit and immediate correction blocks
 
-**Status:** **RATIFIED** by the designated maintainer's 2026-08-16
-[`product ruling`](../evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md),
-as recorded in §8. This ratification does not accept BF3 or unlock B2/B3.
+**Status:** **RATIFIED on the full §7 scope** by the designated maintainer's 2026-08-16
+[`§7 ratification ruling`](../evidence/BF3/maintainer-ruling-section7-ratification.md),
+as recorded in §8. The earlier 2026-08-16
+[`product ruling`](../evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md)
+ratified only the §1/§2 no-retraction direction and is not the authority for §7 — see §8.
+This ratification does not accept BF3 or unlock B2/B3.
 **Prepared against:** program checkout
 `75bf4f722d2a0f1c99efae8d15d2eb811f16b168`, tree
 `54817b786bb326de5b9a823d6c5536480d1cd916`; BF3 worktree tip
@@ -197,8 +200,14 @@ On ratification, the four new charters are ratified verbatim:
   requests without taking B3/B4's final authority.
 - [`BCSS0.md`](../charters/BCSS0.md) owns CSS-1 at
   `verter_compiler::css` and the standalone NAPI product boundary.
-- [`BRT0.md`](../charters/BRT0.md) owns RT-1 and TR-1 and provisionally carries
-  BND-1/BND-2 as `AWAITING CONFIRMATION`, exactly as dispositioned.
+- [`BRT0.md`](../charters/BRT0.md) owns RT-1, the distinct TR-1, and the
+  Rollup/non-Vite inline portion of BND-2, exactly as dispositioned. The two BND rows
+  were `AWAITING CONFIRMATION` when this section was first drafted; the audit then
+  executed both public pinned bundler entries and both public Rollup entries, and
+  [`dispositions.md`](../evidence/BF3/dispositions.md) records the settled result —
+  BND-1 REJECTED as a defect (each public entry applies its own documented include
+  contract) and BND-2 split, with the Vite virtual-script products green and outside
+  correction scope. This section follows that table rather than re-classing anything.
 
 Each block's acceptance is a mandatory predecessor of B2 and B3. None may add a
 production retraction path, fixture-specific branch, generated-output string scan,
@@ -245,17 +254,46 @@ explicit acceptance.
 
 ## 8. Recorded ratification
 
-On 2026-08-16, the designated maintainer, Carlos Rodrigues / pikax, issued the
-binding [`product ruling`](../evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md).
-The maintainer accepted AMD-009 through that ruling, not by quoting the packet's
-accept line in chat. The ruling ratifies AMD-009's product boundary and retraction
-supersession on the exact scope of the reviewed package. For traceability, the
-packet's accept line is recorded verbatim below and bound to reviewed package
-commit `9e457ca781d3684e562d6eaea24c401e2d9849a7`, the last AMD-009 content
-commit before the packet:
+Two distinct maintainer acts exist, and this section separates them because an
+earlier version of it did not.
 
-> Ratify AMD-009 for worktree commit `9e457ca781d3684e562d6eaea24c401e2d9849a7` on exactly the scope and terms of AMD-009 §7: supersede BF3's safety-retraction title, objective, procedures, exits, abort logic, ledger note, and `BF3-RET-*` production-record scheme; supersede AMD-005 §5 and §12 and the conflicting AMD-005 §15.1 recorded-ratification wording, and AMD-006 §4 and §8.1, only as §7 states; ratify BF3 as a conformance-exhaustion and correction-dispatch audit; create BA0, BS0, BCSS0, and BRT0 after BF3 and require all four, together with BV0 and BF3, as mandatory predecessors of B2 and B3; authorize no production defect-recognition refusal or retraction path; keep B2 and B3 locked until every predecessor is accepted; and leave the separate `svelte@5.56.3` pin migration unauthorized.
+**8.1 The product ruling — the §1/§2 direction only.** On 2026-08-16 the designated
+maintainer, Carlos Rodrigues / pikax, issued a binding
+[`product ruling`](../evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md).
+Its own "Ratification effect" section states that it "ratifies the AMD-009 §1 and §2
+no-retraction direction" and that "the live program ledger is unchanged by this
+evidence record." That is exactly what it ratified, and it remains valid for exactly
+that. It is **not** authority for §7's structural effect — the charter rewrites, the
+four new blocks, the DAG amendment, or any ledger transition.
 
-No program-branch landing SHA is recorded because it is not yet known. This
-ratifies AMD-009 only: it does **not** accept BF3 or any correction block, does
+**8.2 The correction of the record.** This section, and the packet at
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md),
+previously recorded the product ruling as ratifying the full §7 scope. That was an
+overstatement, found by a bounded closing re-attestation and confirmed by an
+independent governance consult. It is recorded here rather than quietly removed.
+
+**8.3 The §7 ratification.** On 2026-08-16 the same maintainer issued a further
+binding ruling — [`maintainer-ruling-section7-ratification.md`](../evidence/BF3/maintainer-ruling-section7-ratification.md)
+— confirming that the intended ratification was the **full AMD-009 §7**, that the
+structural reshape stands as intended, and that the defect to cure was one of
+recording rather than substance. That ruling directed the cure order: fix the verified
+in-delta test defects, re-review the charters that changed after the earlier bound
+identity, rebind the package, and record the §7 ratification against the rebound
+identity. Its Ruling 1 is the authority under which §7 takes effect.
+
+The maintainer's ratification act, verbatim:
+
+> Ratify AMD-009 §7 in full: BF3 is a conformance-exhaustion and correction-dispatch audit; create BA0, BS0, BCSS0, and BRT0 as mandatory B2/B3 predecessors together with BV0 and BF3; supersede the retraction procedure and the conflicting AMD-005/AMD-006 text as AMD-009 §7 states; authorize no production error-on-bad-output path; do not accept BF3 or unlock B2/B3.
+
+**Ratifier:** Carlos Rodrigues &lt;carlos@hypermob.co.uk&gt; (GitHub: `pikax`), designated
+maintainer, 2026-08-16.
+
+The act ratifies §7's TEXT and names no commit. The rebound package content identity in
+[`amd009-ratification-packet.md`](../evidence/BF3/amd009-ratification-packet.md) records
+the exact bytes §7 is applied to at landing; the act is not backdated onto the superseded
+reviewed package commit `9e457ca781d3684e562d6eaea24c401e2d9849a7`. The act explicitly
+withholds BF3 acceptance, B2/B3 unlock, acceptance of any of the four correction blocks,
+and any production error-on-bad-output path.
+
+This ratifies AMD-009 only: it does **not** accept BF3 or any correction block, does
 **not** unlock B2/B3, and does not itself mutate the live program ledger.

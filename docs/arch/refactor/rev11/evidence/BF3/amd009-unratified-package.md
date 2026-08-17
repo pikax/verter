@@ -1,11 +1,20 @@
-# AMD-009 ratified package record
+# AMD-009 package record (historical)
 
-**Status:** **RATIFIED PACKAGE RECORD.** The designated maintainer, Carlos
-Rodrigues / pikax, ratified this package through the 2026-08-16
-[`product ruling`](maintainer-product-ruling-no-error-on-bad-output.md), bound to
-reviewed package commit `9e457ca781d3684e562d6eaea24c401e2d9849a7`. The
-filename is retained so historical links remain valid. This record is historical
-evidence; ratification does not accept BF3 or unlock B2/B3.
+**Status: HISTORICAL RECORD — superseded as a ratification record.** This file
+describes the package as it stood when it was bound to reviewed package commit
+`9e457ca781d3684e562d6eaea24c401e2d9849a7`, and it is retained under its original
+filename so historical links keep resolving.
+
+It is **not** the ratification record and must not be read as one. An earlier
+revision of this file recorded the 2026-08-16
+[`product ruling`](maintainer-product-ruling-no-error-on-bad-output.md) as having
+ratified this package; that ruling in fact ratified only the AMD-009 §1/§2
+no-retraction direction, by its own text. Full §7 ratification is the separate
+2026-08-16 ruling at
+[`maintainer-ruling-section7-ratification.md`](maintainer-ruling-section7-ratification.md),
+bound to the rebound package content identity recorded in
+[`amd009-ratification-packet.md`](amd009-ratification-packet.md) — which is the
+authoritative ratification record. Ratification does not accept BF3 or unlock B2/B3.
 
 ## Package contents
 
@@ -71,14 +80,19 @@ prohibited an implementer from building the disputed mechanism. The ratified
 amendment now supplies the no-retraction authority; the DAG continues to prohibit
 downstream dispatch until every required predecessor is accepted.
 
-## Proposed ledger transition for the returning orchestrator
+## Proposed ledger transition for the returning orchestrator (APPLIED — historical)
+
+**This snippet has already been applied by the program orchestrator** and is kept only
+as the record of what was proposed. The four correction-block rows exist in the live
+ledger today, and the current BF3 row's status and notes have since moved on. Read the
+live ledger for present state, and [`landing-record.md`](landing-record.md) for the
+transition proposed after the cure.
 
 The program orchestrator owns
 `docs/arch/architecture-lock/ledger/program-state.toml`. This package did not write
-that file. Maintainer ratification has occurred; only the returning orchestrator may
-apply the following transition. BF3 remains `READY`, B2/B3 remain `LOCKED`, and
-`current_block` remains unchanged; the snippet intentionally contains no acceptance
-or unlock transition.
+that file. BF3 remained `READY` at the time this snippet was proposed, B2/B3 remain
+`LOCKED`, and `current_block` remained unchanged; the snippet intentionally contains no
+acceptance or unlock transition.
 
 ```toml
 # Preserve the current top-level field exactly. Live value is BF3, not BV0A.

@@ -248,7 +248,11 @@ after committing it, the three guards a new tracked document can affect —
 `every_critical_rule_in_docs_has_registered_guard` — were re-run directly against the final tree
 and pass.
 
-## Re-attestation, and why this block is NOT acceptance-recommended
+## The first closing re-attestation, and why it did not close the block
+
+> **Everything in this section is history.** It records the state at the first attempt to
+> close the block. All five in-delta defects below, and the governance blocker, were
+> subsequently cured — see [The cure](#the-cure) at the end of this record.
 
 The block used its three review rounds. Per this program's round cap, closing verdicts came from a
 bounded per-mandate re-attestation against the final candidate, scoped to the delta
@@ -291,7 +295,7 @@ one internally consistent exact package, have it reviewed, obtain an explicit ma
 The audit's own technical work is not what fails here. What fails is the authority the reshaped
 charter, the four correction-owner blocks, and the DAG edges rest on.
 
-### Findings inside the delta, verified and not fixed
+### Findings inside the delta, verified and not fixed AT THAT TIME
 
 Recorded rather than actioned: the block needs a fresh package, a fresh maintainer act and a fresh
 re-attestation regardless, so closing these against the current candidate would be work landed
@@ -362,16 +366,225 @@ and adversarial seats both verified this independently and recorded it as PASS.
   packet itself states the later fixes did not receive a full clean 3/3 re-review — which is
   exactly why the re-attestation delta above starts at `a1ef593d1` rather than later.
 
-## Status at the close of this landing
 
-This record lands so the block has a durable evidence file; it is **not** an acceptance
-recommendation. The candidate's mechanical verification is fully green and its technical evidence
-is the strongest this program has produced for a Svelte/product-route surface — the shipped-path
-Svelte oracle exists and discriminates, every committed cell is driven and recorded, the
-TypeScript-observable family is observed under real pinned declaration closures with a fail-closed
-resolution gate, and every genuine defect carries a named owner, an acceptance identifier and a
-target that fails today for its stated reason.
+## The cure
 
-What is not established is the authority the reshaped charter, the four correction-owner blocks and
-the amended DAG rest on, plus five verified in-delta test defects. Both must be settled before this
-block can be recommended for acceptance, and the first of them is maintainer-reserved.
+The block was recorded BLOCKED on two things: an authority defect no track-level actor could
+settle, and five verified in-delta test defects. Both are now closed.
+
+### The authority defect
+
+The designated maintainer ruled on it directly, then issued the ratification act itself. Both are
+reproduced verbatim at
+[`maintainer-ruling-section7-ratification.md`](maintainer-ruling-section7-ratification.md). The
+ruling's substance is that the intended ratification WAS the full AMD-009 §7, that the structural
+reshape stands as intended, and that what failed was the RECORDING of it, not the work; it set the
+cure order — fix the test defects first, re-review the post-binding charter drift, rebind the
+package, record an explicit §7 ratification, and only then re-attest. The act is the maintainer's
+own text:
+
+> Ratify AMD-009 §7 in full: BF3 is a conformance-exhaustion and correction-dispatch audit; create
+> BA0, BS0, BCSS0, and BRT0 as mandatory B2/B3 predecessors together with BV0 and BF3; supersede
+> the retraction procedure and the conflicting AMD-005/AMD-006 text as AMD-009 §7 states;
+> authorize no production error-on-bad-output path; do not accept BF3 or unlock B2/B3.
+
+It ratifies §7's TEXT and names no commit, so the content identity below records the bytes §7 is
+applied to at landing rather than a tree the maintainer inspected. It settles AUTHORITY and
+nothing else: BF3 is not accepted, B2/B3 are not unlocked, the four correction blocks are created
+but not accepted, and no production error-on-bad-output path is authorized anywhere. It is not
+license to green any outstanding verification.
+
+- The product ruling is **not** rewritten or weakened. It remains a genuine maintainer artifact
+  and remains valid for exactly what its own text says: the AMD-009 §1/§2 no-production-error
+  direction. What is superseded is the *reading* of it as full-§7 ratification.
+- The over-claim is recorded, not erased —
+  [`amd009-ratification-packet.md`](amd009-ratification-packet.md) states plainly what the earlier
+  record claimed and why it was wrong, AMD-009 §8 separates the two maintainer acts, and
+  [`amd009-unratified-package.md`](amd009-unratified-package.md) is demoted to a historical record
+  under its original filename so links keep resolving.
+- The two live documents that still read UNRATIFIED — [`scope-memo.md`](scope-memo.md) and
+  [`../framework-conformance/bf3-safety-retraction-scope.md`](../framework-conformance/bf3-safety-retraction-scope.md)
+  — carry dated status notices; the memo's historical body is preserved unedited.
+- The package is **rebound by content**, not by commit: seven files, their git blob OIDs, and a
+  combined SHA-256, all fixed before the commit that lands them and reproducible from any
+  checkout. The identity is in the packet.
+- The **template ledger** now carries `BA0`, `BS0`, `BCSS0` and `BRT0`, which it was missing.
+  `--mode template` had been FAILING on that gap; both modes now validate clean.
+
+### The post-binding charter drift
+
+Five charters changed `+51/−36` after the earlier bound identity `9e457ca78` and had never been
+accepted. Two independent external seats reviewed exactly that drift; both returned `BLOCKING`,
+and both located the fault in AUTHORITY rather than content — every finding row still matched
+`dispositions.md`, and every test the drifted text names exists with the stated ignore status and
+assertions. The full record, both verbatim reports, and the per-finding disposition are at
+[`charter-drift-review.md`](charter-drift-review.md). Three drift findings produced text changes
+here: AMD-009 §5's BRT0 bullet and `BRT0.md`'s procedure now follow the re-measured BND rows and
+name `dispositions.md` as their authority instead of describing a superseded provisional state,
+and each charter's status line cites the rebound content identity so the ratified bytes are
+unambiguous.
+
+### The five test defects
+
+Each was closed test-first, with the discriminating assertion proven RED against the pre-fix tree
+before the fix, and every mutation plant proven present, unique and new before its run was
+trusted.
+
+- **`BS0.md`'s SV-4 row contradicted the tree.** It said there is no ignored correct-behaviour
+  target "because the projector defines the correct surface", and its exits said "the three
+  ignored" targets. The tree has four: SV-4's
+  `an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript`
+  (`public_api_typescript_observation.rs:505`, `#[ignore]`d) runs and fails for its stated reason.
+  The row, the exit count and the procedure now say what the tree proves. Both drift seats
+  verified the corrected text against the test independently.
+- **Bundler public-spelling coverage.** The built artifact exports `Verter`, `VerterVue`,
+  `VerterSvelte`, `unpluginFactory` and `default`; the probe drove two. It now executes the raw
+  Vue-pinned `unpluginFactory` and the auto-carrier `Verter` over both carriers, and measures
+  `default === VerterVue` rather than asserting the alias. A partition test requires every exported
+  spelling to be either executed — with its named probe case present and proven to have run — or
+  classified out of scope with a reason, and makes membership in both classes a failure. Proven RED
+  twice: dropping the `unpluginFactory` row reports it in NEITHER class, and renaming its probe
+  case reports that the claimed execution did not run. No behavioural divergence was found in the
+  newly executed routes.
+- **The Rollup acceptance target greened against a lying boolean.** It asserted the probe's derived
+  `publicTransformHasMap`. Acceptance now validates the map ARTIFACT — non-null, `version: 3`,
+  non-empty `mappings`, non-empty `sources` — across the Rollup target and both Vite targets, and
+  absence is asserted as a null artifact rather than a false boolean. Proven RED in both
+  directions: hard-coding the boolean true with `map` still null leaves the ignored target failing
+  at the artifact, and planting a structurally valid but empty map turns the green Vite test RED
+  while the old boolean oracle still reported `true`.
+- **The documented invocations could go vacuously green.** Commenting out the three `mod`
+  declarations left all three reporting `running 0 tests` / `ok` / exit 0. A census module now
+  lives OUTSIDE all three suites, so deleting them cannot delete the check. Its three tests are
+  named so each documented substring filter matches the census even when its suite is gone, and
+  each performs independent discovery — re-executing the test binary with `--list --format=terse`,
+  requiring the child to exit 0, witnessing its own path in the listing so an empty listing can
+  never read as a pass, and asserting a floor on the tests the suite itself contributes. Proven RED
+  per suite: with a `mod` line commented out, the invocation goes from `running 0 tests`/ok/exit 0
+  to `running 1 test` → FAILED, naming the suite and its observed zero.
+- **The JS executor spec pinned no runtime version and was cold-fragile.** Both `it(...)` blocks
+  now assert the mounted module's bound `runtime.version` against the harness's own pin authority
+  (`SVELTE_DOMAIN.packageVersion`), never a literal — planting `9.9.9` in `resolveBoundRuntime`
+  fails both. The timeout defect was an INVERTED DEADLINE NESTING, not slowness: the child's
+  `spawnSync` deadline was 30 s while the parent `it(...)` used vitest's 5 s default, so a cold run
+  was killed before the child's own timeout could report why. The parent budget is now explicitly
+  above the child deadline, with the ordering stated in a comment.
+
+### One further defect the cure surfaced and closed
+
+Fixing the map-artifact assertions exposed that the public Svelte virtual-script product publishes
+a structurally valid but semantically EMPTY map — `mappings: "A"`, one unmapped segment — while the
+Vue product carries 16 segments of which 12 are mapped. Tightening the acceptance target would have
+flipped a green target RED with no owner, so it is recorded instead as a green characterization
+(`the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output`)
+that pins the exact current shape on both public Svelte routes and a floor on Vue's, and as an
+observation in [`dispositions.md`](dispositions.md). It is not a new finding row: Svelte client map
+provenance is already owned as SV-3 by BS0, with its own correct-behaviour target.
+
+### Verification after the cure (run directly by the track orchestrator)
+
+Run in a dedicated worktree after `pnpm install --frozen-lockfile` and `pnpm build:ts` (both rc=0),
+on the toolchain the repository pins — `clippy 0.1.97 (8bab26f4f6)`. Every figure was observed
+directly, not taken from a worker's report.
+
+- `node scripts/gate.mjs --build-jobs 4 --test-threads 4 --memory-limit 12GiB` — **VERDICT: PASS
+  (all three surfaces green)**, exit 0.
+  - Surface 1 (nextest, process isolation): **24387 run, 24387 passed**, 0 failed, 0 timed out,
+    0 tolerated, 584 skipped.
+  - Surface 2 (in-process `verter_session` libtests from the same archive): 3 suites clean,
+    0 tolerated failures.
+  - Surface 3 (shipped `no-debug-assertions` cfg, `verter_session` + `verter_scheduler`):
+    **8621 run, 8621 passed**, 566 skipped.
+  - Build-prerequisite preflight `SATISFIED`; freshness-tooling preflight
+    `already-present — tolerance DISABLED`, so the proto/TS byte-pin ran genuinely and a freshness
+    failure would have been a hard failure.
+- `cargo fmt --all --check` — clean. `cargo clippy --workspace --all-targets -- -D warnings` —
+  clean. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — clean.
+  `cargo check --workspace --release` — clean.
+- Every suite in [`test-invocations.md`](test-invocations.md) at its recorded invocation matched
+  its recorded expectation exactly: Svelte official-conformance `running 19` → 16/3;
+  PublicApi-TSC-declaration `running 8` → 7/1; IDE-TSX `running 3` → 3/0; product-route inventory
+  `running 24` → 22/2; batch route `running 9` → 8/1; transport equivalence `running 16` → 15/1;
+  the `the_bundler` filter `running 5` → 4/1. The three inventory/batch/transport counts each
+  include that suite's census test.
+- All **eight** `#[ignore]`d conformance targets were run individually with `--ignored`; each
+  reported `running 1 test` and **FAILED at its own named assertion**, not at setup, a missing file
+  or a compile error. They are, by name rather than by line so the record cannot go stale:
+  `each_flags_for_a_keyed_runes_each_match_the_official_compiler`,
+  `a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module` and
+  `the_client_source_map_covers_every_required_authored_anchor` in
+  `svelte_official_conformance_gate.rs`;
+  `an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript` in
+  `public_api_typescript_observation.rs`;
+  `the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css`
+  and `a_refused_combined_request_publishes_no_product_at_all` in
+  `framework_product_surface_tests.rs`;
+  `a_svelte_batch_matches_the_single_file_route_item_for_item` in `svelte_batch_route_tests.rs`;
+  and `the_bundler_rollup_inline_transform_preserves_requested_source_maps` in
+  `transport_route_equivalence_tests.rs` — the last now failing on PARITY against the host's own
+  published map artifact, not on a derived boolean and not on envelope shape.
+- `packages/framework-conformance-harness` full `npx vitest --run`: **640/640 across 30 files.**
+- `node scripts/validate-program-state.mjs --dag docs/arch/refactor/rev11/program-dag.toml --state
+  docs/arch/architecture-lock/ledger/program-state.toml --mode live` — OK, 62 blocks; and
+  `node scripts/validate-program-state.mjs --dag docs/arch/refactor/rev11/program-dag.toml --state
+  docs/arch/refactor/rev11/templates/program-state.template.toml --mode template` — OK, 62 blocks.
+  (All three flags are mandatory; the bare command prints usage and exits 2.) Template mode had
+  been FAILING before this cure.
+
+The gate above ran on the tree without this record's final section. After committing it, the three
+guards a tracked document can affect — `tracked_files_contain_no_machine_specific_path_markers`,
+`tracked_paths_are_portable`, and `every_critical_rule_in_docs_has_registered_guard` — were re-run
+directly against the final tree.
+
+## Re-attestation, and why this block is still NOT acceptance-recommended
+
+A bounded per-mandate re-attestation ran against the cure delta — external CLI seats only, scoped to
+two questions about that delta, with an exit-criteria enumeration required per seat. Four rounds ran,
+each scoped to the delta the previous round produced. The full record, all ten verbatim reports and
+the per-finding disposition are at [`reattestation.md`](reattestation.md).
+
+**Every round found real defects in the checks this cure introduced** — a map oracle that validated
+envelope shape rather than preservation, an export partition satisfied by a spelling that never ran,
+a census that trusted a path string the suite itself owned, and a recorded residue that was simply
+FALSE. All were fixed or, where genuinely open, restated accurately. Three residues remain recorded
+and are named in that file: invocation attribution on the bundler probe, the witness decoy, and the
+all-four-`mod` removal that no in-binary check can decide.
+
+**The block is not acceptance-recommended, and the reason is not the cure.** The cure's own scope —
+the authority defect and the five verified test defects — is closed. What blocks acceptance is
+pre-existing and was recorded before this cure began: the seats' exit-criteria enumeration returned
+`NOT-EVIDENCED` for BF3's procedure item 3 (no committed plant drives a wrong-render candidate
+through the candidate-vs-golden runtime comparison), item 4 (several bundler lanes in the route
+inventory remain read-verified citations rather than driven results), and item 6 (AT-2's gating test
+measures a different failure class than the row it gates), and for the matching "Required exits"
+sentences. The charter's own words settle it: *"`UNPROVEN` records an open proof gap and cannot
+count as exhaustion."* Those gaps were outside this cure's scope, are unchanged by it, and must be
+closed before this block can be recommended.
+
+## Proposed ledger transition
+
+The program orchestrator owns `docs/arch/architecture-lock/ledger/program-state.toml`; this record
+does not write it. The proposed BF3 field set is:
+
+| field | value |
+|---|---|
+| `status` | `BLOCKED` |
+| `base_sha` | the cure commit's parent on the program branch |
+| `candidate_sha` / `candidate_tree` | the squashed cure commit and its tree |
+| `accepted_sha` / `accepted_tree` | empty — the block is NOT accepted |
+| `charter_digest` | `sha256` of `charters/BF3.md` |
+| `context_packet_digest` | unchanged |
+| `evidence_digest` | `sha256` of this file |
+| `conformance_review` / `architecture_review` / `adversarial_review` | `BLOCKING` — no seat issued a PASS on the block, and the exit-criteria gaps above are unresolved |
+| `maintainer_decision` | `PENDING` — the ratification act settles §7's authority and explicitly withholds block acceptance |
+
+## Status
+
+The authority defect is closed by a direct maintainer act on §7, and every defect this record
+previously listed as verified-and-unfixed is closed with a discriminating test that was proven to
+fail before it was fixed. What the act explicitly does NOT do is accept this block:
+`maintainer_decision` stays `PENDING`, B2 and B3 stay locked, the four correction blocks are created
+but not accepted, and no production error-on-bad-output path is authorized anywhere.
+
+Three charter exit criteria remain `NOT-EVIDENCED`. Until they are closed, this block is not
+acceptance-recommendable, and this record does not recommend it.

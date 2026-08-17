@@ -37,6 +37,12 @@ mod svelte_batch_route_tests;
 #[cfg(all(test, feature = "transport-authoritative"))]
 mod transport_route_equivalence_tests;
 
+/// Proves each of those suites' documented invocations selects a non-vacuous
+/// suite. It sits OUTSIDE them deliberately: a check living inside a suite is
+/// deleted by the same edit that empties it.
+#[cfg(test)]
+mod suite_census;
+
 pub use api_projector::{ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx};
 pub use ctx::FrameworkAdapterCtx;
 pub use descriptor::{
