@@ -19,6 +19,7 @@ item 4 with citations, and stated that `NOT-EVIDENCED` is a legitimate answer.
 |---|---|---|---|
 | Codex (round 2) | PASS | **BLOCKING on authority**, substance resolved | EVIDENCED |
 | Grok | PASS | PASS | EVIDENCED |
+| Codex (confirm round, after the naming act) | — | PASS, Finding 2 DISCHARGED | item 6 EVIDENCED |
 
 **Both seats agree** the recompile WRITE is attributed (each proved it with its own plants
 separating the CALL from the WRITE), that item 4 is EVIDENCED, and that AT-2's ORIGINAL
@@ -28,16 +29,19 @@ claim is not a demonstrated defect.
 is a general standing ruling that does not name `AT-2`; applying it to that row is the
 program orchestrator's reading. Grok reads that as sufficient; Codex does not, and asks for
 an explicit maintainer act naming `AT-2` or a revert of the `AT-2` row and the matching
-`BA0` obligation lines — under which item 6 returns to `NOT-EVIDENCED`. That objection is
-unresolved, recorded here and in [`dispositions.md`](dispositions.md),
-[`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)
-and the landing record, and it is a governance decision above track level.
+`BA0` obligation lines — under which item 6 returns to `NOT-EVIDENCED`. That objection was
+a governance decision above track level, it was **correct**, and it is now **RESOLVED** by
+the first of the two remedies it named: the maintainer issued an act that names `AT-2`. See
+[Resolution of the authority objection](#resolution-of-the-authority-objection) at the end
+of this file. The reports below are unedited; the resolution is recorded beneath them, not
+folded into them.
 
 Round 1 found four defects, all real: the AT-2 artifact was mislabelled and did not
 discriminate what its name claimed; the "`buildStart` reaches `getVirtualFile` at exactly
 ONE place" claim was false (the Svelte branch's compiled-style read is a second in-hook
-site); and the record contradicted its own evidence index on item 6. Three are resolved at
-HEAD; the fourth is the authority objection above.
+site); and the record contradicted its own evidence index on item 6. Three were resolved at
+HEAD; the fourth is the authority objection above, resolved afterwards by the maintainer
+act recorded at the end of this file.
 
 All reports are reproduced verbatim below.
 
@@ -180,3 +184,112 @@ PLANTS YOU AUTHORED
 
 All markers are zero, both files are byte-identical to HEAD, and the worktree is clean. Targeted batch suite: 10 passed, 2 ignored; restored ignored target: 1 passed.
 ```
+
+---
+
+## Resolution of the authority objection
+
+**The seat was right, and it was answered rather than argued down.** Codex's Finding 2, held
+across both rounds and terminal in round 2 —
+
+> FINDING 2: UNRESOLVED — STILL BLOCKING. Recording the objection is not authority. The
+> maintainer act does not name AT-2 (`maintainer-standing-ruling-bugs-and-types.md:40-60`),
+> while the controlling consult permits only a maintainer amendment
+> (`at2-disposition-ruling.md:80-92`). Neither requested remedy occurred.
+
+— named two acceptable remedies: an explicit maintainer act naming `AT-2`, or a revert of the
+`AT-2` row and the matching `BA0` obligation lines. **The first remedy was taken.** The
+maintainer was asked directly and issued an act that names the row:
+
+> Reject AT-2's claim that a reachable batch entry publishes a product beside a genuine typed
+> refusal; reclassify AT-2 as a latent HostBacked construction hazard with reachability unproven;
+> retain the DEFER to BA0; carry it as an `#[ignore]`d characterization test; and drop the
+> required-RED Svelte-refusal atomicity target.
+
+The act's own text records why the objection was correct: *"A review seat blocked that inference:
+the general ruling never NAMES AT-2, and a general act does not authorize a change to a specific
+ratified findings row. The seat was correct — acting on an unnamed authority is the same governance
+defect that blocked this block once already."* The act is reproduced in full, with its scope,
+evidence and stated effect, at
+[`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md).
+
+Three properties of the remedy matter for reading this file:
+
+1. **It names the row.** The precise defect the seat identified — a general act applied to a
+   specific ratified row by a track-level actor — is cured, not restated.
+2. **It authorizes exactly the bytes already present.** The act bounds itself to the `AT-2` row in
+   [`dispositions.md`](dispositions.md) and `charters/BA0.md` lines 28 and 37, and both are
+   byte-unchanged by the commit that records the act. No further edit was taken under it.
+3. **It does not accept anything.** BF3 is not accepted, `BA0` is not accepted, B2/B3 stay locked,
+   and no production guard, refusal, withhold path, retraction or removal ID is authorized.
+
+Consequence for the closing round's verdicts: Codex's `PROCEDURE ITEM 6: NOT-EVIDENCED` was
+conditioned in its own words on *"without an authorized AT-2 amendment, the ratified row remains
+governing"*. The amendment is now authorized by a maintainer act naming the row, so that condition
+no longer holds. Every other verdict in both reports stands exactly as issued — including Codex's
+round-1 PASS on claim 1 and EVIDENCED on item 4, and Grok's F2 category note on the `#[ignore]`d
+characterization, which the act independently settles by directing that the hazard be carried as an
+`#[ignore]`d characterization rather than a required-RED target.
+
+**What this section does NOT claim.** It does not convert either seat's verdict into an
+architecture-mandate PASS. Both seats reviewed the exhaustion-closure DELTA, not the block. The
+full architecture mandate over the block as a whole is recorded separately at
+[`architecture-mandate-review.md`](architecture-mandate-review.md).
+
+---
+
+## Confirm round — the conformance mandate, re-issued on the discharged objection
+
+The remedy above changes the premise of the blocking seat's finding, so the finding was put BACK to
+an external seat rather than declared discharged by the actor who took the remedy. Recording an
+objection is not authority, and neither is satisfying one — this block's whole history is that
+distinction, and applying it to ourselves is the only consistent reading.
+
+A fresh `codex exec` process (`gpt-5.6-sol`, effort `high`) was given a NARROW confirm: is the
+blocking finding discharged as the finding itself stated it, is charter procedure item 6 evidenced on
+the tree as it now stands, and does the delta since that round weaken any conformance claim. The
+prompt quoted the blocking finding verbatim, required the seat to enumerate the genuine-defect rows
+ITSELF from [`dispositions.md`](dispositions.md) and answer per row with the test item it checked,
+stated that `BLOCKING` and `NOT-EVIDENCED` are legitimate verdicts, and told it that the separate
+architecture mandate returned `BLOCKING` while explicitly NOT binding its own verdict in either
+direction.
+
+**`CONFORMANCE VERDICT: PASS`. Finding 2 DISCHARGED. Procedure item 6 EVIDENCED. No findings.**
+
+The seat did not take item 6 on the record's word. It ran each of the nine genuine rows' targets
+alone with `--ignored`, confirmed each selected exactly one test, and reported the assertion line and
+the observed failure for every one — SV-1 at emitted flag 21 versus official 20, SV-2 at the typed
+advanced-rune refusal, SV-3 at the enumerated missing authored anchors, SV-4 at TypeScript observing
+`[]` instead of `disabled,label`, RT-1 at Vue bytes with an absent refusal, AT-1 at the refused
+combined request publishing IDE output, CSS-1 at requested passthrough CSS with no map, TR-1 at the
+new parity assertion, BND-2 at a null public map. It separately confirmed the three rejected rows
+create no item-6 obligation.
+
+On the new TR-1 target it went past the test to the production conversions, citing NAPI mapping
+`MissingVirtualNode` to `None` and WASM mapping the same host error through `host_err` — the two
+sides of the divergence the target now gates — and confirmed the adjacent characterization still
+pins today's shapes and reran green beside it.
+
+On the one point where the remedy is incomplete it was precise rather than accommodating: it noted
+that the act's `BA0` locator enumerates lines 28 and 37 and not the same operative consequence
+restated at `BA0.md` lines 59-62, and held that this narrower architecture-governance issue does not
+undo the as-stated remedy, because Finding 2's first alternative required a maintainer act naming the
+amended row and did not require an exhaustive locator. That is a conformance reading of a conformance
+finding; the governance question it points at remains open and is recorded in
+[`architecture-mandate-review.md`](architecture-mandate-review.md) and the landing record.
+
+### Verbatim report
+
+````
+CONFORMANCE VERDICT: PASS
+
+Q1 FINDING 2 — DISCHARGED — The first expressly permitted remedy occurred in `c864febd1`: the maintainer's verbatim act names `AT-2` and orders rejection of the old reachable-defect claim, reclassification as a latent/unproven hazard, retention of DEFER to BA0, an `#[ignore]`d characterization, and removal of the required-RED Svelte-refusal target (`docs/arch/refactor/rev11/evidence/BF3/maintainer-act-at2-amendment.md:25-50`); it states the authority objection is discharged (`docs/arch/refactor/rev11/evidence/BF3/maintainer-act-at2-amendment.md:65-70`) and the current row contains exactly that amendment (`docs/arch/refactor/rev11/evidence/BF3/dispositions.md:29`). No revert occurred. This satisfies Finding 2 as stated: its first alternative required an explicit maintainer act naming the amended row. The act record separately notes that its BA0 locator enumerates lines 28 and 37 but not the same operative consequence restated at BA0 lines 59-62 (`docs/arch/refactor/rev11/evidence/BF3/maintainer-act-at2-amendment.md:98-118`); that narrower architecture-governance issue does not undo the as-stated remedy, whose first alternative did not require a revert or an exhaustive BA0 locator once the maintainer named and amended AT-2.
+
+Q2 PROCEDURE ITEM 6 — EVIDENCED — The criterion is non-vacuous: nine rows are genuine defects. Each cited target has a substantive body and was run alone with `--ignored`, selected exactly one test, and failed at the named defect: SV-1 `each_flags_for_a_keyed_runes_each_match_the_official_compiler` (`crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:852-869`) failed at `crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:857` on emitted flag 21 versus official 20; SV-2 `a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module` (`crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:888-909`) failed at `crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:903` on the typed advanced-rune refusal; SV-3 `the_client_source_map_covers_every_required_authored_anchor` (`crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:929-969`) failed at `crates/verter_session/src/compile/map_equality_tests/svelte_official_conformance_gate.rs:965` on the enumerated missing authored anchors; SV-4 `an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript` (`crates/verter_session/src/compile/map_equality_tests/public_api_typescript_observation.rs:503-537`) failed at `crates/verter_session/src/compile/map_equality_tests/public_api_typescript_observation.rs:523` because TypeScript observed `[]`, not `disabled,label`; RT-1 `a_svelte_batch_matches_the_single_file_route_item_for_item` (`crates/verter_session/src/framework/svelte_batch_route_tests.rs:596-660`) failed at `crates/verter_session/src/framework/svelte_batch_route_tests.rs:656` with Vue bytes, absent refusal, and a partial product; AT-1 `a_refused_combined_request_publishes_no_product_at_all` (`crates/verter_session/src/framework/framework_product_surface_tests.rs:1445-1493`) failed at `crates/verter_session/src/framework/framework_product_surface_tests.rs:1482` because the refused combined request published IDE output; CSS-1 `the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css` (`crates/verter_session/src/framework/framework_product_surface_tests.rs:1255-1301`) failed at `crates/verter_session/src/framework/framework_product_surface_tests.rs:1285` because requested passthrough CSS had no map; TR-1 `the_transports_report_a_missing_node_the_same_way` (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1327-1395`) failed at `crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1378` on NAPI `missing` versus WASM `error`; BND-2 `the_bundler_rollup_inline_transform_preserves_requested_source_maps` (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:2670-2808`) failed at `crates/verter_session/src/framework/transport_route_equivalence_tests.rs:2796` with `hostHasMap=true`, inline product true, and public map null. These are precisely the genuine rows in `docs/arch/refactor/rev11/evidence/BF3/dispositions.md:23-31` and `docs/arch/refactor/rev11/evidence/BF3/dispositions.md:256-259`; AT-2 is latent/unproven (`docs/arch/refactor/rev11/evidence/BF3/dispositions.md:29`), RA-1/RA-2 are rejected (`docs/arch/refactor/rev11/evidence/BF3/dispositions.md:32-33`), and BND-1 is rejected (`docs/arch/refactor/rev11/evidence/BF3/dispositions.md:258`), so none creates another item-6 obligation.
+
+Q3 DELTA — PASS — `9104e0be7..HEAD` changes no production implementation: it adds the ignored TR-1 test plus evidence documents. The new test is not a stub: it drives both built transports, proves the in-process subject is `HostOutcome::Missing` (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1341-1358`), rejects a published/code-bearing answer on either transport (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1360-1375`), then asserts parity (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1377-1381`) and preserves typed-error classification if that design wins (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1383-1394`). Its isolated run failed today exactly at parity with NAPI `{"outcome":"missing"}` and WASM `{"outcome":"error","message":"HostError::MissingVirtualNode: /probe/Server.svelte"}`; the code confirms NAPI maps `MissingVirtualNode` to `None` (`crates/verter_napi/src/lib.rs:1683-1710`) while WASM maps the same host error through `host_err` (`crates/verter_wasm/src/lib.rs:382-398`). It neither weakens nor duplicates the adjacent characterization: the existing test still pins today's two exact shapes and no-product result (`crates/verter_session/src/framework/transport_route_equivalence_tests.rs:1253-1309`) and independently reran green, whereas the new target demands the corrected, shape-neutral equality and is ignored until correction. Evidence-only edits record the new authority/test; they do not retract any previously upheld conformance evidence.
+
+FINDINGS — none
+PLANTS YOU AUTHORED — none
+git status --porcelain: <empty>
+````

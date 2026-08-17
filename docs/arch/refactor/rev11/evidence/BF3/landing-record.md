@@ -812,10 +812,13 @@ document can affect — `tracked_files_contain_no_machine_specific_path_markers`
 `tracked_paths_are_portable`, and `every_critical_rule_in_docs_has_registered_guard` — were re-run
 directly against the final tree.
 
-## Proposed ledger transition
+## Proposed ledger transition — the §7 cure round (superseded)
+
+Kept as the record of what that round proposed. The CURRENT proposal is at the end of this file,
+under "Proposed ledger transition — the acceptance round".
 
 The program orchestrator owns `docs/arch/architecture-lock/ledger/program-state.toml`; this record
-does not write it. The proposed BF3 field set is:
+does not write it. The proposed BF3 field set was:
 
 | field | value |
 |---|---|
@@ -844,31 +847,86 @@ current position, criterion by criterion:
 |---|---|
 | procedure 3, and its matching "Required exits" sentence | **SATISFIED.** The runtime axis has its own committed plant driving a wrong-render candidate through the same `compare_mounted_render` helper the live gate uses; the plant is proven applied, the planted module still MOUNTS, and the comparison was proven to go red when the helper is forced to report no divergence. |
 | procedure 4, and its matching "Required exits" sentence | **EVIDENCED.** All five cited bundler aliases are DRIVEN with route-identity comparisons and negative controls. The last residue — the recompile WRITE — is attributed against the SHIPPED native artifact rather than the `session_metrics` build the earlier record named: the `getVirtualFile` call the recompile block makes is observed at the native module boundary while `buildStart` runs, a `crossFileOptimize`-off control observes none on the same fixture while still publishing both host products, and a marked substitution for that one return is what the route publishes for the child and only the child. Three plants in the plugin source prove the three readings discriminate, including one that keeps the call and drops the write. |
-| procedure 6, and its matching "Required exits" sentence | **EVIDENCED UNDER THE AMENDED ROW — and one review seat says the amendment is not authorized, so read the dependency.** The atomicity regression is a driven table over every failing-entry class the public API can reach, with class-entry proofs and sixteen proven-applied mutations. The row that GATES the criterion, `AT-2`, was escalated as not an evidenced defect and is now AMENDED under the maintainer's standing ruling of 2026-08-17: rejected as a demonstrated defect, reclassified as a latent construction hazard with reachability unproven, DEFER to `BA0` retained, and carried by an `#[ignore]`d characterization instead of a required-RED target. Item 6 binds "every genuine defect"; under the amended row AT-2 is not one, so it raises no defect-specific regression obligation, and every row that IS a genuine defect has its precise discriminating regression. **The dependency:** the maintainer's act is general and does not name `AT-2`; applying it to that row is the program orchestrator's reading. Both seats agree the ORIGINAL claim is not demonstrated; they split on the authority — Grok LAND, Codex BLOCKING, asking for an explicit maintainer act naming `AT-2` or a revert of the row and the matching `BA0` lines. If that objection is upheld, item 6 returns to `NOT-EVIDENCED`. |
+| procedure 6, and its matching "Required exits" sentence | **EVIDENCED. The amendment is authorized by a maintainer act that names the row** ([`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md)), issued after a review seat correctly refused the earlier general-ruling chain. The atomicity regression is a driven table over every failing-entry class the public API can reach, with class-entry proofs and sixteen proven-applied mutations. The row that GATES the criterion, `AT-2`, was escalated as not an evidenced defect and is now AMENDED: rejected as a demonstrated defect, reclassified as a latent construction hazard with reachability unproven, DEFER to `BA0` retained, and carried by an `#[ignore]`d characterization instead of a required-RED target. Item 6 binds "every genuine defect"; under the amended row AT-2 is not one, so it raises no defect-specific regression obligation, and every row that IS a genuine defect has its precise discriminating regression. **The authority, in order:** the amendment was first taken under the maintainer's GENERAL standing ruling of 2026-08-17, which does not name `AT-2`; both closing seats agreed the ORIGINAL claim is not demonstrated but split on that chain — Grok LAND, Codex BLOCKING, asking for an explicit act naming `AT-2` or a revert. Codex was right, and the first remedy it named was taken: the maintainer issued an act naming `AT-2`, authorizing exactly the bytes already present and changing none of them. |
 
 The three recorded residues were worked to three different ends, stated as such: invocation
 attribution is CLOSED; the witness decoy is NARROWED, with the surviving hole measured and named;
 and the all-four-`mod` removal is RAISED TO A BUILD ERROR, with the general execution-attestation
 remainder dispositioned as ledger row **GI-21** rather than claimed closed.
 
-No charter exit criterion is now recorded `NOT-EVIDENCED`. All three that the re-attestation
-returned are closed: procedure 3 by its committed runtime plant, procedure 4 by attributing the last
-bundler residue against the shipped artifact, and procedure 6 by the maintainer act that amends the
-row it gates.
+All three exit criteria the re-attestation returned `NOT-EVIDENCED` are closed: procedure 3 by its
+committed runtime plant, procedure 4 by attributing the last bundler residue against the shipped
+artifact, and procedure 6 by the maintainer act that amends the row it gates.
+
+**One open proof gap survives, and it is not counted as exhaustion.** The `AT-2` reachability
+residual — `peek_last_good` skipping its validator on an empty fact rail, which a self-contained SFC
+produces — was probed and NOT reproduced, and it is recorded as `UNKNOWN` in
+[`dispositions.md`](dispositions.md) rather than as a closure. The charter is explicit that an
+`UNPROVEN` result records an open proof gap and cannot count as exhaustion, so this record does not
+count it as one. What bounds it is stated exactly:
+
+- It is **not an inventory row.** Every retained product/route row in
+  `framework_product_surface_inventory.json` carries an actual driven result; the residual is a
+  reachability question about ONE construction shape, not an undriven surface.
+- Its status is **what the maintainer act authorizes**: the act reclassifies `AT-2` as a latent
+  HostBacked construction hazard *with reachability unproven*, retains the DEFER to `BA0`, and
+  directs that it be carried as an `#[ignore]`d characterization. "Reachability unproven" is the
+  recorded state of that row, not a gap the record claims to have closed.
+- It is **dispatched**, not dropped: `BA0` owns removing the hazard, and the act says that if the
+  hazard is later demonstrated reachable, that reproduction is a NEW finding with its own RED
+  target.
+
+Anyone reading this record should read that residual as open. The claim made here is narrower than
+"everything is closed": it is that every criterion the re-attestation returned is closed, that every
+retained inventory row has an actual result, and that the one surviving unknown is recorded as
+unknown and owned by a named block.
 
 Both closures were reviewed by two external CLI seats, run sequentially, each authoring its own
 plants; the verbatim reports and the split verdict are at
 [`exhaustion-closure-reviews.md`](exhaustion-closure-reviews.md).
 
-**Procedure 6's closure carries a stated dependency, and a live objection.** It holds only if the
-`AT-2` amendment is validly authorized. The maintainer's act is a GENERAL standing ruling that does
-not name `AT-2`; the application to that row is the program orchestrator's. One review seat holds
-that chain insufficient and asks for an explicit maintainer act naming `AT-2` or a revert of the row
-and the matching `BA0` lines. If that objection is upheld, `AT-2` and those lines revert and item 6
-returns to `NOT-EVIDENCED`. The objection is recorded in
-[`dispositions.md`](dispositions.md) and
-[`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)
-rather than resolved here.
+**Procedure 6's closure carried a stated dependency and a live objection; both are now closed.** The
+closure holds only if the `AT-2` amendment is validly authorized. It was first taken under a GENERAL
+maintainer standing ruling that does not name `AT-2`, with the application to that row recorded as
+the program orchestrator's. One review seat held that chain insufficient and asked for an explicit
+maintainer act naming `AT-2` or a revert of the row and the matching `BA0` lines. **The seat was
+right, and the first remedy was taken.** The maintainer issued an act that names `AT-2` and
+authorizes, clause for clause, the four points the deviation memo had asked for; it is recorded
+verbatim at [`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md), its effect on the
+seat's report at [`exhaustion-closure-reviews.md`](exhaustion-closure-reviews.md), and its discharge
+of the memo at [`at2-deviation-memo.md`](at2-deviation-memo.md).
+
+**The discharge was confirmed by a seat, not declared by the actor who took the remedy.** Satisfying
+an objection is no more self-certifying than recording one, so the finding was put back to a fresh
+external conformance seat on this tree. It ruled Finding 2 DISCHARGED and procedure item 6
+EVIDENCED — having run all nine genuine rows' correction targets individually and reported each
+one's assertion line and observed failure — with no findings and a `PASS` verdict. Its verbatim
+report is in [`exhaustion-closure-reviews.md`](exhaustion-closure-reviews.md).
+
+The act authorizes bytes that were already in the tree — the `AT-2` row in
+[`dispositions.md`](dispositions.md) and `charters/BA0.md` lines 28 and 37 — and **neither file is
+touched by the commit that records it**, so no post-act drift can hide behind the act. `git diff`
+over those two paths against the pre-act tip is empty.
+
+**One discrepancy in that scope is recorded rather than resolved here, and it needs the
+maintainer.** The act's scope bullet enumerates two locations in `BA0.md`, lines 28 and 37. The
+block's actual `BA0.md` edit has THREE hunks: the row at line 28, the AT-2 procedure paragraph at
+line 37, and a third at the Required-exits paragraph (`git diff --unified=0
+b75fcebc33e3a100bbfff7af62fe2edceb4fcaf0..HEAD -- docs/arch/refactor/rev11/charters/BA0.md` shows
+`@@ -54,5 +59,5 @@`). The third hunk carries the SAME instruction the act's operative clause drops —
+that AT-2 prove the Svelte-refusal batch class with a RED target once RT-1 is corrected — so it is
+within the act's operative sentence while sitting outside its locator enumeration. The enumeration
+was inherited from [`at2-deviation-memo.md`](at2-deviation-memo.md), which named the same two
+locations and missed the third.
+
+This record does NOT claim the act covers that hunk. Track-level actors may not widen a maintainer
+act any more than they may amend a ratified row, and the whole point of the naming act was to stop
+exactly that kind of inference. The disposition is: the bytes stand as landed and byte-unchanged,
+the discrepancy is stated here and in
+[`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md), and the maintainer is asked to
+either confirm the act reaches the third hunk or direct that it be reverted to its ratified text —
+under which `BA0` would again instruct a Svelte-refusal RED target that the act's own reasoning
+rejects. **Acceptance should not be granted before that confirmation.**
 
 **That is not the same as acceptance, and this record does not claim it.** The §7 ratification act
 explicitly withheld block acceptance, `maintainer_decision` stays `PENDING`, B2 and B3 stay locked,
@@ -876,3 +934,117 @@ and the four correction blocks exist but are not accepted. What changed is the g
 record previously withheld a recommendation: the two open exit criteria that stood in the way are no
 longer open. Whether the block is accepted remains the maintainer's decision, on the evidence
 recorded here.
+
+## The architecture mandate
+
+The closing round commissioned two seats. This block is foundational class and acceptance needs
+three, so a full architecture mandate was owed. That was an orchestrator scoping error, not a seat
+finding, and it is now discharged: the mandate ran over the block as a whole — every numbered
+procedure item and every "Required exits" sentence enumerated independently, each verdict required to
+cite evidence the seat had personally verified, with an item carried on this record's say-so counting
+as `NOT-EVIDENCED` by default. Two rounds, both external CLI seats, verbatim reports and per-finding
+dispositions at [`architecture-mandate-review.md`](architecture-mandate-review.md).
+
+**Round 1: `NOT-EVIDENCED`, seven findings.** Three were real and new. One was fixed as code, one as
+a record correction, one escalated:
+
+- A genuine defect row, `TR-1`, had no correction-oriented regression. Its only test asserts BOTH
+  current transport shapes, so it goes RED if either is corrected — a test that fails on the fix
+  cannot be the gate for the fix. Every other genuine row carries an `#[ignore]`d correct-behaviour
+  target beside its characterization; `TR-1` was the only one that did not, and procedure item 6
+  requires one for every genuine defect. **Fixed:**
+  `the_transports_report_a_missing_node_the_same_way` is added, `#[ignore]`d, and proven RED at its
+  parity assertion with the staleness guard and both no-product assertions passing before it. It is
+  deliberately shape-neutral — it asserts the two transports AGREE without asserting which spelling
+  wins — so it passes under either correction and does not pre-empt `BRT0`'s design decision. No
+  ratified row and no charter is edited to accommodate it.
+- This record claimed no exit criterion remained `NOT-EVIDENCED` while `dispositions.md` recorded the
+  `AT-2` reachability residual as an open proof gap. **Fixed as a record correction:** the universal
+  claim is withdrawn above, and the residual is stated with its exact bounds.
+- The maintainer act's `BA0.md` locator names lines 28 and 37 while the landed edit has three hunks.
+  **Escalated**, not resolved — see the discrepancy recorded above.
+
+Two round-1 findings were REJECTED with evidence, and one was declared outside this track's
+ownership. All three rejections were put back to the seat in round 2 and upheld.
+
+**Round 2: `BLOCKING`, no new findings, all four dispositions ruled CORRECT.** Procedure items 4 and
+6, Required-exits sentences 2, 3 and 5, and Stub Prevention all moved to `EVIDENCED`. On Stub
+Prevention the seat reversed its own round-1 finding by experiment: it planted an injected error into
+the HostBacked success arm, proved the marker absent-before and once-after with a changed file SHA,
+drove the `AT-2` characterization RED, restored the file byte-identically and re-ran green —
+concluding that the `Vec::new()` counterexample attacks a property that test expressly disclaims.
+
+**Two items remain open, and neither is closable at track level.**
+
+1. **The `BA0.md` byte-scope discrepancy.** The seat ruled the escalation CORRECT and restated it:
+   only the maintainer can confirm the act reaches the third hunk or direct that it be reverted. It
+   independently confirmed there is no drift — `dispositions.md` and `BA0.md` have identical blob IDs
+   on both sides of the delta. This is the acceptance blocker.
+2. **Required-exits sentence 1 and the "exhaust the retained inventory" objective.** The `AT-2`
+   reachability residual is recorded UNKNOWN, and the controlling independent consult says a residue
+   must be demonstrated or conclusively closed before exhaustion is claimed. The seat's reading is
+   precise: the naming act changes `AT-2`'s classification and its item-6 consequence, but its stated
+   effect names item 6 only — it does not amend this exit. Closing it needs either a conclusive
+   structural proof of unreachability, which is investigation rather than a record edit, or a
+   maintainer act ruling that a recorded, bounded, dispatched open proof gap satisfies the exit.
+
+A third row, **Verification Must Prove Execution**, is also `NOT-EVIDENCED`, and it is not a finding
+against this block: the repository already carries that class as an open gate-integrity row (`GI-21`)
+with its owner and resolution gate outstanding, and `CLAUDE.md` says of that rule in its own words
+that it currently fails its own test. No block closes it by running more targeted filters.
+
+## Verification for this delta
+
+The delta is one test file plus evidence documents. Per the standing gate-scope ruling of 2026-08-17
+— the full gate runs once at landing readiness, and a test-only change warrants targeted tests rather
+than a gate run — no canonical gate was run for it, and the reasoning is recorded here rather than
+assumed. The claim that it reaches nothing in production is VERIFIED, not asserted:
+`git diff --name-status` over the delta lists one test module
+(`crates/verter_session/src/framework/transport_route_equivalence_tests.rs`, a `#[cfg(test)]` module
+behind the `transport-authoritative` feature) and evidence documents under
+`docs/arch/refactor/rev11/evidence/BF3/`. No production implementation file is touched, so no
+consumer of production code can observe it. The independent architecture seat re-checked the same
+boundary and reported it identically.
+
+What was run:
+
+- `cargo fmt --all --check` — exit 0.
+- `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1`
+  — `running 23 tests` → 21 passed, 2 ignored.
+- `cargo test -p verter_session --lib --features transport-authoritative the_transports_report_a_missing_node_the_same_way -- --ignored --test-threads=1`
+  — `running 1 test` → FAILED at the parity assertion, which is the required RED.
+- Both ledger validator modes.
+- The architecture seat additionally ran, on this tree, the official-conformance (20), PublicApi/TSC
+  (8), IDE (3), product/route (24), batch (12) and transport (23) suites, plus its own plant.
+- The conformance confirm seat additionally ran, on this tree, all nine genuine rows' correction
+  targets individually with `--ignored`, confirming each selected exactly one test and reporting the
+  assertion line and observed failure for every one.
+
+The gate figures recorded earlier in this file still stand for the production/test content they
+measured: that content is unchanged since the gate-passed commit apart from this one added
+`#[ignore]`d test, which the targeted runs above cover directly.
+
+## Proposed ledger transition — the acceptance round
+
+The program orchestrator owns `docs/arch/architecture-lock/ledger/program-state.toml`; this record
+does not write it, and this track did not touch it. The proposed BF3 field set:
+
+| field | value |
+|---|---|
+| `status` | `BLOCKED` |
+| `base_sha` | `9104e0be7edb07fe5bbd477a903c457c9d825b5b` |
+| `candidate_sha` / `candidate_tree` | this round's squashed commit and its tree |
+| `accepted_sha` / `accepted_tree` | empty — the block is NOT accepted |
+| `charter_digest` | unchanged — `charters/BF3.md` is not edited |
+| `context_packet_digest` | unchanged |
+| `evidence_digest` | `sha256` over the raw bytes of this file |
+| `conformance_review` | `PASS` — re-issued by a fresh external seat on this tree, not inferred from the discharge: Finding 2 DISCHARGED, procedure item 6 EVIDENCED with all nine genuine rows' targets run individually and RED at their named assertions, no findings |
+| `architecture_review` | `BLOCKING` — the mandate ran and returned `BLOCKING` on the `BA0.md` byte-scope escalation and the exhaustion exit; both need the maintainer |
+| `adversarial_review` | unchanged from the closing round |
+| `maintainer_decision` | `PENDING` |
+
+**This record does not recommend acceptance.** Two items need a maintainer act first: confirmation
+that the `AT-2` act reaches `BA0.md`'s third hunk (or a direction to revert it), and a decision on
+whether the recorded `AT-2` reachability residual leaves the exhaustion exit open. Everything the
+track could close is closed and independently verified; what remains is authority, and inferring it
+is the exact defect this block has now been blocked for twice.

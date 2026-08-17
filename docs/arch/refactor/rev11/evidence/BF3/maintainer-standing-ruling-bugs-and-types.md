@@ -66,3 +66,16 @@ ratified findings table was touched.
 
 **If the maintainer intended something narrower for AT-2 specifically, this file and those two
 edits are what to correct.**
+
+## The AT-2 authority question is closed elsewhere, by a separate act
+
+The review seat's objection recorded above was **correct and was upheld**. The remedy it asked for
+was taken: on 2026-08-17 the maintainer issued a separate act that NAMES `AT-2`, recorded verbatim
+at [`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md). That act — not this general
+ruling — is the authority for the `AT-2` row and the matching `BA0` obligation lines. It authorizes
+exactly the bytes already present and leaves them byte-unchanged.
+
+This file's own status is unaffected: the standing ruling stands for exactly what its verbatim text
+says, as a GENERAL rule binding every remaining block. What is withdrawn is its use as the authority
+for one specific ratified findings row. The provenance note above is preserved because it is the
+honest record of an inference that a seat correctly refused.

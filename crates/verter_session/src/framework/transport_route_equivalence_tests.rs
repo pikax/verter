@@ -1308,6 +1308,92 @@ fn the_transports_serialize_a_missing_node_differently() {
     }
 }
 
+/// The correct-behaviour target for the missing-node transport divergence: the
+/// two transports report a missing node the SAME way.
+///
+/// [`the_transports_serialize_a_missing_node_differently`] above characterizes
+/// the divergence, and by construction it fails if EITHER shape moves — so it
+/// cannot also be the acceptance gate for the correction, which must move
+/// exactly one of them. This target states the corrected behaviour instead. It
+/// FAILS today, at the parity assertion, because one transport answers with an
+/// absent response and the other throws.
+///
+/// It is deliberately SHAPE-NEUTRAL. Which spelling survives — a null/absent
+/// response or a typed throw — is the correction owner's design decision;
+/// asserting one of them here would pre-empt it. What the portable public
+/// contract owes is that ONE answer exists for both transports, that it is
+/// distinguishable from a published product, and that neither transport leaks
+/// a product while giving it.
+#[ignore = "missing-node transport parity: NAPI answers with an absent response where WASM throws"]
+#[test]
+fn the_transports_report_a_missing_node_the_same_way() {
+    let napi = probe(
+        "napi",
+        "packages/native/scripts/probe-transport-surface.mjs",
+        NAPI_BUILD,
+    );
+    let wasm = probe(
+        "wasm",
+        "packages/wasm/scripts/probe-transport-surface.mjs",
+        WASM_BUILD,
+    );
+
+    // Staleness guard: the in-process host must still answer MISSING for this
+    // request, or the transports are converting something else and the
+    // comparison below decides nothing.
+    let server = host_with(
+        "/probe/Server.svelte",
+        SUPPORTED_SVELTE,
+        verter_language::FileLanguage::svelte(),
+    );
+    assert_eq!(
+        host_node(
+            &server,
+            "/probe/Server.svelte",
+            VirtualNodeKind::Style { index: 0 },
+            &probe_profile(true, true),
+        ),
+        HostOutcome::Missing,
+        "the host route no longer reports a missing node here, so this target is stale"
+    );
+
+    let napi_case = &napi["cases"]["svelteServerStyle"];
+    let wasm_case = &wasm["cases"]["svelteServerStyle"];
+
+    // True today, and it must survive the correction: a node that does not
+    // exist is never published as a product on either transport.
+    for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
+        assert_ne!(
+            case["outcome"], "published",
+            "{transport}: a missing node was published as a product: {case}"
+        );
+        assert_eq!(
+            case["code"],
+            Value::Null,
+            "{transport}: a product crossed the boundary for a missing node: {case}"
+        );
+    }
+
+    // The parity assertion — the half that is RED today.
+    assert_eq!(
+        napi_case["outcome"], wasm_case["outcome"],
+        "the transports still spell a missing node differently: napi {napi_case}, wasm {wasm_case}"
+    );
+
+    // Whichever spelling they agree on, it stays a TYPED answer a caller can
+    // classify rather than an anonymous failure.
+    if napi_case["outcome"] == "error" {
+        for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
+            assert!(
+                case["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("MissingVirtualNode")),
+                "{transport}: the agreed missing-node error is not the typed one: {case}"
+            );
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // The bundler route
 // ══════════════════════════════════════════════════════════════════════════

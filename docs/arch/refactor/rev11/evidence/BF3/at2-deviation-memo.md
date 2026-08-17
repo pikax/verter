@@ -1,16 +1,26 @@
 # Deviation memo — AT-2's ratified claim is not supported by any reachable instance
 
 **Raised by:** the track orchestrator closing this block's evidence gaps.
-**Status:** **DISCHARGED.** The act this memo asked for now exists. The maintainer issued a standing
-ruling on bug handling and the type waiver on 2026-08-17
-([`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)),
-whose rule 4 and anti-stub consequence decide every point this memo raised; the program orchestrator
-applied it to AT-2 and directed the amendment. The two byte locations this memo named — the `AT-2`
+**Status:** **DISCHARGED — by an act that names `AT-2`.** The act this memo asked for now EXISTS in
+its own right: [`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md), issued by the
+maintainer on 2026-08-17, names `AT-2`, and authorizes clause for clause the four points this memo
+asked for — reject the ratified claim, reclassify as a latent HostBacked construction hazard with
+reachability unproven, retain the DEFER to `BA0`, and drop the required-RED Svelte-refusal
+atomicity target. It bounds itself to exactly the two byte locations this memo named — the `AT-2`
 row in [`dispositions.md`](dispositions.md) and the AT-2 obligation lines in
-[`../../charters/BA0.md`](../../charters/BA0.md) — are amended accordingly, and nothing else in the
-ratified findings table was touched. Read the standing ruling's own provenance note: the verbatim
-act does not name AT-2, and its application to this row is the program orchestrator's reading of a
-general rule.
+[`../../charters/BA0.md`](../../charters/BA0.md) — and nothing else in the ratified findings table
+was touched.
+
+**How the discharge was reached, in order, because the first attempt was insufficient.** The memo
+was first marked discharged against the maintainer's GENERAL standing ruling on bug handling and the
+type waiver
+([`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)),
+whose rule 4 and anti-stub consequence decide every point raised here — but whose verbatim act does
+not name `AT-2`, so applying it to this row was the program orchestrator's reading of a general
+rule, recorded as such. A review seat blocked on exactly that, and was RIGHT to: this memo's own
+ruling section says a track-level actor may not amend a ratified row, and an unnamed authority does
+not become a named one by being recorded honestly. The maintainer was then asked directly. The
+naming act is what discharges this memo; the general ruling stands for what its own text says.
 **Effect on this block:** owned-scope item 6 is no longer blocked on this escalation. Under the
 amended row AT-2 is not a genuine defect, so item 6's "every genuine defect" clause raises no
 defect-specific regression obligation for it; the hazard is carried by an `#[ignore]`d
@@ -130,3 +140,12 @@ without an act is the precise governance defect that blocked this block once alr
 
 Until that act exists, item 6 is `NOT-EVIDENCED` for AT-2 and this block is not
 acceptance-recommendable.
+
+---
+
+**The act exists.** It was issued on 2026-08-17 and is recorded verbatim at
+[`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md). It names `AT-2`, carries the
+four clauses requested immediately above, bounds itself to the same two byte locations, and states
+that both remain byte-unchanged by it — the act ratifies bytes already in the tree rather than
+licensing a further edit. Item 6 is no longer blocked on `AT-2`. This memo is closed; the paragraph
+above is left standing because it is the condition the act satisfied.
