@@ -15,6 +15,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -524,61 +525,153 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
 // shared mutable resource: two probes running at once — the ordinary case when
 // the consuming suite is not forced onto one thread — would delete each other's
 // files mid-build and record an `ENOENT` recompile lane.
+//
+// ATTRIBUTING THE RECOMPILE WRITE. The pre-compiled and the recompiled module
+// are byte-identical (the runtime compile path passes no constness overrides),
+// so the published products cannot tell the two apart, and the products alone
+// say nothing about the cross-file block. What DOES separate them: an
+// observation of `host.getVirtualFile` taken WHILE `buildStart` runs. The hook
+// reaches that call at two places — the cross-file recompile block, and the
+// compiled-style read the SVELTE pre-compile branch performs — and this lane's
+// fixture is Vue-only, so only the recompile block can fire. The two are
+// distinguishable regardless: the style read asks for a
+// `?verter&type=style&index=…` request, the recompile asks for a BARE
+// canonical, and both are recorded so the consumer can tell them apart.
+//
+// The observation is taken at the NATIVE MODULE BOUNDARY, on the very
+// `@verter/native` the plugin's own `createRequire(dist/index.mjs)` resolves;
+// the wrapper delegates and hands back the real value, so the lane under
+// observation is the shipped code path, unmodified. The wrapper is installed
+// only around this lane group and removed immediately after, so no other lane
+// in this probe runs against a patched prototype.
+//
+// One run SUBSTITUTES a marked value for what that one call returns. Whether
+// the published module carries the marker is the write itself: the recompiled
+// value either reached the cache the load hook serves from, or it did not.
+const RECOMPILE_RETURN_MARKER = "\n/* verter-probe: recompile-return */\n";
+const nativeRequire = createRequire(entry);
+results.nativeEntry = nativeRequire.resolve("@verter/native").split(path.sep).join("/");
 {
-  const label = "vueRecompileLane";
-  const errors = [];
-  const context = bundlerContext(errors);
-  let fixtureRoot = null;
-  let parentId = null;
-  let childId = null;
-  let plugin;
-  try {
-    await mkdir(FIXTURE_PARENT, { recursive: true });
-    fixtureRoot = await mkdtemp(path.join(FIXTURE_PARENT, "recompile-"));
-    parentId = path.join(fixtureRoot, "Parent.vue").split(path.sep).join("/");
-    childId = path.join(fixtureRoot, "Child.vue").split(path.sep).join("/");
-    await writeFile(path.join(fixtureRoot, "Child.vue"), RECOMPILE_CHILD_VUE);
-    await writeFile(path.join(fixtureRoot, "Parent.vue"), RECOMPILE_PARENT_VUE);
+  const native = nativeRequire("@verter/native");
+  const publishedVirtualFile = native.VerterHost.prototype.getVirtualFile;
+  if (typeof publishedVirtualFile !== "function") {
+    throw new TypeError("the native host exposes no getVirtualFile to observe");
+  }
 
-    plugin = module_.VerterVue.vite({ preCompile: true, crossFileOptimize: true });
-    await plugin.configResolved({
-      root: fixtureRoot,
-      command: "build",
-      build: { ssr: false },
+  // "off" while nothing is being observed, so a stray read outside a
+  // `buildStart` cannot be recorded as one.
+  let phase = "off";
+  let reads = [];
+  native.VerterHost.prototype.getVirtualFile = function observedGetVirtualFile(...args) {
+    const published = publishedVirtualFile.apply(this, args);
+    if (phase === "off") return published;
+    reads.push({
+      rawId: args[0]?.rawId ?? null,
+      codeLength: typeof published?.code === "string" ? published.code.length : null,
     });
-    await hook(plugin, "buildStart").call(context);
+    if (phase === "substitute") {
+      return { ...published, code: `${published.code}${RECOMPILE_RETURN_MARKER}` };
+    }
+    return published;
+  };
 
-    // What `buildStart` POPULATED, read back through the plugin's own load
-    // hook: a script sub-request is served from the cache the pre-compile loop
-    // filled, so a `buildStart` that did nothing publishes nothing here.
-    const parentScript = await loadRequest(plugin, `${parentId}?vue&type=script&lang.js`, context);
-    const childScript = await loadRequest(plugin, `${childId}?vue&type=script&lang.js`, context);
+  /**
+   * Drive `buildStart` once over a fresh two-file fixture, recording what the
+   * hook published and every `getVirtualFile` it reached while it ran.
+   */
+  async function driveRecompileLane(label, { crossFileOptimize, substitute }) {
+    const errors = [];
+    const context = bundlerContext(errors);
+    let fixtureRoot = null;
+    let plugin;
+    try {
+      await mkdir(FIXTURE_PARENT, { recursive: true });
+      fixtureRoot = await mkdtemp(path.join(FIXTURE_PARENT, "recompile-"));
+      const parentId = path.join(fixtureRoot, "Parent.vue").split(path.sep).join("/");
+      const childId = path.join(fixtureRoot, "Child.vue").split(path.sep).join("/");
+      await writeFile(path.join(fixtureRoot, "Child.vue"), RECOMPILE_CHILD_VUE);
+      await writeFile(path.join(fixtureRoot, "Parent.vue"), RECOMPILE_PARENT_VUE);
 
-    results.cases[label] = {
-      outcome: "buildStarted",
-      publicFactory: "VerterVue.vite",
-      fixtureRoot: fixtureRoot.split(path.sep).join("/"),
-      parentId,
-      childId,
-      parentSource: RECOMPILE_PARENT_VUE,
-      childSource: RECOMPILE_CHILD_VUE,
-      parentScript,
-      childScript,
-      errors,
-    };
-  } catch (error) {
-    results.cases[label] = {
-      outcome: "error",
-      publicFactory: "VerterVue.vite",
-      message: String(error?.message ?? error),
-      stack: String(error?.stack ?? ""),
-      errors,
-    };
+      plugin = module_.VerterVue.vite({ preCompile: true, crossFileOptimize });
+      await plugin.configResolved({
+        root: fixtureRoot,
+        command: "build",
+        build: { ssr: false },
+      });
+
+      reads = [];
+      phase = substitute ? "substitute" : "observe";
+      try {
+        await hook(plugin, "buildStart").call(context);
+      } finally {
+        phase = "off";
+      }
+      const buildStartVirtualFileCalls = reads;
+
+      // What `buildStart` POPULATED, read back through the plugin's own load
+      // hook: a script sub-request is served from the cache the pre-compile
+      // loop filled, so a `buildStart` that did nothing publishes nothing here.
+      // The observation is disarmed by now, so a cache MISS here would be
+      // served with the host's true bytes and could not forge the marker.
+      const parentScript = await loadRequest(
+        plugin,
+        `${parentId}?vue&type=script&lang.js`,
+        context,
+      );
+      const childScript = await loadRequest(plugin, `${childId}?vue&type=script&lang.js`, context);
+
+      results.cases[label] = {
+        outcome: "buildStarted",
+        publicFactory: "VerterVue.vite",
+        crossFileOptimize,
+        fixtureRoot: fixtureRoot.split(path.sep).join("/"),
+        parentId,
+        childId,
+        parentSource: RECOMPILE_PARENT_VUE,
+        childSource: RECOMPILE_CHILD_VUE,
+        parentScript,
+        childScript,
+        buildStartVirtualFileCalls,
+        recompileReturnMarker: substitute ? RECOMPILE_RETURN_MARKER : null,
+        errors,
+      };
+    } catch (error) {
+      results.cases[label] = {
+        outcome: "error",
+        publicFactory: "VerterVue.vite",
+        crossFileOptimize,
+        message: String(error?.message ?? error),
+        stack: String(error?.stack ?? ""),
+        errors,
+      };
+    } finally {
+      if (typeof plugin?.closeBundle === "function") await plugin.closeBundle.call(context);
+      // ONLY this invocation's directory. The parent is left in place: it is a
+      // stable, ignored location, not this run's property.
+      if (fixtureRoot !== null) await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }
+
+  try {
+    // The lane itself.
+    await driveRecompileLane("vueRecompileLane", {
+      crossFileOptimize: true,
+      substitute: false,
+    });
+    // The NEGATIVE CONTROL: the same drive with the cross-file pass off. It
+    // still publishes both modules, so an empty observation is an absent
+    // recompile rather than an absent lane.
+    await driveRecompileLane("vueRecompileLaneWithoutCrossFile", {
+      crossFileOptimize: false,
+      substitute: false,
+    });
+    // The WRITE: the one read `buildStart` takes comes back marked.
+    await driveRecompileLane("vueRecompileWriteAttribution", {
+      crossFileOptimize: true,
+      substitute: true,
+    });
   } finally {
-    if (typeof plugin?.closeBundle === "function") await plugin.closeBundle.call(context);
-    // ONLY this invocation's directory. The parent is left in place: it is a
-    // stable, ignored location, not this run's property.
-    if (fixtureRoot !== null) await rm(fixtureRoot, { recursive: true, force: true });
+    native.VerterHost.prototype.getVirtualFile = publishedVirtualFile;
   }
 }
 

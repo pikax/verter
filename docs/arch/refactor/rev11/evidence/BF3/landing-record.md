@@ -536,7 +536,7 @@ guards a tracked document can affect — `tracked_files_contain_no_machine_speci
 `tracked_paths_are_portable`, and `every_critical_rule_in_docs_has_registered_guard` — were re-run
 directly against the final tree.
 
-## Re-attestation, and why this block is still NOT acceptance-recommended
+## Re-attestation, and the gaps it surfaced (all since closed — see Status)
 
 A bounded per-mandate re-attestation ran against the cure delta — external CLI seats only, scoped to
 two questions about that delta, with an exit-criteria enumeration required per seat. Four rounds ran,
@@ -563,9 +563,10 @@ closed before this block can be recommended.
 
 > **Superseded in part.** Items 3 and 4, and all three residues, were subsequently worked — see
 > [Closing the exhaustion gaps](#closing-the-exhaustion-gaps) below. WORKED is not CLOSED for all of
-> them: item 3 is satisfied, item 4 is narrowed to a single residue (the recompile write) and stays
-> `NOT-EVIDENCED`, and item 6 is ESCALATED, not closed — the row it gates cannot be amended at track
-> level.
+> them: items 3 and 4 are satisfied — item 4's last residue, the recompile write, was closed
+> afterwards by attributing it against the shipped artifact — and item 6 was ESCALATED, then closed
+> by a maintainer act amending the ratified row it gates. See the Status section for the current
+> position on each.
 
 ## Closing the exhaustion gaps
 
@@ -617,17 +618,41 @@ negative control:
 | load | `index.ts:668` | DRIVEN — a `?vue&type=template` request falls through to the host route; compared against the host's `Template` node; an unregistered carrier must answer `missing` |
 | runtime-render batch | `index.ts:101` | DRIVEN — the Vue rollup INLINE product is captured and compared against `compile_many(RuntimeRender)` |
 | non-Vite CSS scoping + its native wrapper | `index.ts:863`, `core/compiler.ts:64` | DRIVEN — a rollup-shaped two-call sequence ending in a `&scoped&lang.scss` style request, compared against the shared style processor, asserting both the `[data-v-…]` attribute and a `v-bind()` rewrite that proves WHICH cached profile's component id was used |
-| recompile | `index.ts:803` | PARTIAL — `buildStart` is driven over a real two-file fixture and both published modules match the in-process host's products, but the recompile WRITE is unattributable and no claim is made about the cross-file block |
+| recompile | `index.ts:803` | DRIVEN — `buildStart` is driven over a real two-file fixture and both published modules match the in-process host's products; the recompile WRITE itself is attributed separately, see below |
 
-The recompile lane's residue is stated exactly rather than papered over: a recompiled module is
-byte-identical to the pre-compiled one because the pipeline passes `prop_constness_overrides: None`
-(`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2843`); the plugin runs OUT OF
-PROCESS, so nothing this test observes in-process is evidence about the plugin's own host; and the
-metrics channel that would count the call is `session_metrics`, a non-default build feature absent
-from the shipped native artifact. The NAMED CLOSURE CONDITION is therefore known: attributing the
-recompile call needs the host metrics channel, hence a `session_metrics`-enabled native build — not
-the shipped artifact, and not produced here. The inventory's blanket sentence is replaced by a
-per-alias status list.
+The recompile lane's write was, at that point, the one residue, and it is now closed — against the
+SHIPPED native artifact, not a feature-enabled build. The earlier record named a
+`session_metrics`-enabled native build as the closure condition, on the reading that the host metrics
+channel was the only thing that could count the call. That reading was wrong, and the correction is
+recorded rather than quietly swapped: the metrics channel is one way to count the call, not the only
+one. An observation of `host.getVirtualFile` taken WHILE `buildStart` runs names the recompile call,
+and the observation is taken at the native module boundary on the same `@verter/native` the plugin
+resolves, by a wrapper that delegates and returns the real value. The hook reaches that call at TWO
+places, not one — the recompile block and the SVELTE branch's compiled-style read — a precision a
+review seat was right to insist on; the lane's fixture is two `.vue` files so the Svelte branch
+cannot fire, the two reads are distinguishable by request shape (a bare canonical versus a
+`?verter&type=style&index=…` request) and the test asserts equality against the bare child canonical,
+and reading 2 below ties the observation to the cross-file block by turning its flag off on the same
+fixture.
+
+Three readings, in `the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call`: the
+lane observes exactly one read and its `rawId` is the CHILD; the same drive with `crossFileOptimize`
+off observes NONE while still publishing both host products, so zero is an absent recompile and not
+an absent lane; and a third drive in which the boundary substitutes a marked value for that one
+return publishes, for the child and only the child, the host's own product followed by exactly those
+bytes — asserted as an EQUALITY, never as a search for the marker inside generated output. What the
+recompile call returned is therefore what the route cached and served, which is the write.
+
+Each reading was proven discriminating by a plant in the PLUGIN SOURCE — dropping the call, dropping
+the cache write while keeping the call, and entering the block regardless of the flag — each proven
+present, unique and new before its run and restored to a byte-identical build. The middle plant is
+the one that matters: it leaves the call intact and makes only the write assertion go red, which is
+what separates "the write happened" from "the call happened". The full plant table is in
+[`test-invocations.md`](test-invocations.md). It remains true, and unchanged, that a recompiled
+module is byte-identical to the pre-compiled one (`prop_constness_overrides: None` in
+`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`) — which is exactly why the
+published products alone cannot attribute the write and an observation of the call was needed. The
+inventory's blanket sentence is replaced by a per-alias status list.
 
 The lane's claim was also CORRECTED rather than defended. It previously called
 `compute_cross_file_optimizations()` on a fresh in-process host and read the non-empty result as
@@ -654,17 +679,42 @@ that would fail for the wrong reason. Sixteen mutations of the code
 under test — every product-publishing site, every class-proof rendering, and four shape mutations —
 were each proven applied and each went RED.
 
-The row that gates this criterion, `AT-2`, is a different matter, and it is ESCALATED rather than
-closed. Its ratified text asserts that a batch entry publishes a product together with a genuine typed
+The row that gates this criterion, `AT-2`, was ESCALATED and is now AMENDED under a maintainer act.
+Its ratified text asserted that a batch entry publishes a product together with a genuine typed
 refusal. An enumeration of all nine `CompileBatchEntry` construction sites shows eight are atomic by
 hardcoded literal, the typed refusal itself lands on an atomic arm, and the single non-atomic
 construction has no demonstrated reachable input; one path remains UNKNOWN and unreproduced. An
-independent, unprimed disposition ruling holds that the row as written is not an evidenced defect,
-that no track-level actor may amend a ratified row, and that under the current ratified bytes this
-criterion stays `NOT-EVIDENCED`. The full evidence, the verbatim ruling and the exact act being asked
-for are at [`at2-deviation-memo.md`](at2-deviation-memo.md) and
-[`at2-disposition-ruling.md`](at2-disposition-ruling.md). Nothing in the ratified findings table was
-changed.
+independent, unprimed disposition ruling held that the row as written is not an evidenced defect and
+recommended a specific amending act, which no track-level actor could issue.
+
+That act now exists. The maintainer's standing ruling of 2026-08-17 on bug handling and the type
+waiver ([`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md),
+verbatim) establishes that a bug found during the program is captured as an `#[ignore]`d test with
+the fix deferred, and that a finding which is not a demonstrated, reproduced defect must not carry a
+required-RED target. Applied to `AT-2` — the application is the program orchestrator's reading of a
+general rule, and the ruling file says so — that rejects the original claim, reclassifies the row as
+a latent construction hazard with reachability unproven, retains the DEFER to `BA0`, and drops the
+requirement that a Svelte-refusal atomicity target be RED (that target would fail only because the
+separate ratified row `RT-1` prevents Svelte classification at all — a stub by the ruling's own
+terms).
+
+Two byte locations changed under that authority, and only those two: the `AT-2` row in
+[`dispositions.md`](dispositions.md) and the AT-2 obligation lines in
+[`../../charters/BA0.md`](../../charters/BA0.md). Every other row of the ratified findings table is
+untouched. The hazard's PRECONDITION is now carried by an `#[ignore]`d characterization,
+`the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error`, which asserts
+through the public batch API that the host-backed SUCCESS construction is fed by a response carrying
+no error-severity diagnostic, and that a genuine FAILURE answers `Err` and never reaches that
+construction. It passes today by design and turns RED if a successful host-backed response ever
+carries an error. It deliberately does NOT claim the construction READS its error list rather than
+hardcoding it — a review seat proved that a hardcoded-empty plant leaves it green, and the test says
+so rather than implying otherwise. Two plants settle the surrounding mechanism: flipping the
+producing diagnostic to error severity routes the whole response to `Err` and an atomic arm
+(`code_len=0`), which is WHY the construction is never fed one; and merging an error diagnostic into
+the success response downstream of that gate makes the entry carry a 480-byte product beside the
+error — the hazard is real as a construction property, and only its reachability is unproven. The full evidence and the verbatim
+independent ruling remain at [`at2-deviation-memo.md`](at2-deviation-memo.md) (now marked
+discharged) and [`at2-disposition-ruling.md`](at2-disposition-ruling.md).
 
 ### The three recorded residues
 
@@ -793,13 +843,36 @@ current position, criterion by criterion:
 | charter item | position now |
 |---|---|
 | procedure 3, and its matching "Required exits" sentence | **SATISFIED.** The runtime axis has its own committed plant driving a wrong-render candidate through the same `compare_mounted_render` helper the live gate uses; the plant is proven applied, the planted module still MOUNTS, and the comparison was proven to go red when the helper is forced to report no divergence. |
-| procedure 4, and its matching "Required exits" sentence | **STILL `NOT-EVIDENCED`, narrowed to one residue.** Four of the five cited bundler aliases are now DRIVEN with route-identity comparisons and negative controls. The fifth, the recompile lane, is PARTIAL: `buildStart` is driven over a real two-file project and both published modules match the in-process host's products, but the recompile WRITE is not attributable — the plugin runs out of process, a recompiled module is byte-identical to the pre-compiled one, and the metrics channel that would count the call needs a `session_metrics`-enabled native build that is not the shipped artifact. That is the named closure condition, and it is not met here. |
-| procedure 6, and its matching "Required exits" sentence | **ESCALATED, and `NOT-EVIDENCED`.** The atomicity regression is now a driven table over every failing-entry class the public API can reach, with class-entry proofs and sixteen proven-applied mutations. The row that GATES the criterion, `AT-2`, is not an evidenced defect on the enumerated evidence, and no track-level actor may amend a ratified row. Under the current ratified bytes the criterion stays open. |
+| procedure 4, and its matching "Required exits" sentence | **EVIDENCED.** All five cited bundler aliases are DRIVEN with route-identity comparisons and negative controls. The last residue — the recompile WRITE — is attributed against the SHIPPED native artifact rather than the `session_metrics` build the earlier record named: the `getVirtualFile` call the recompile block makes is observed at the native module boundary while `buildStart` runs, a `crossFileOptimize`-off control observes none on the same fixture while still publishing both host products, and a marked substitution for that one return is what the route publishes for the child and only the child. Three plants in the plugin source prove the three readings discriminate, including one that keeps the call and drops the write. |
+| procedure 6, and its matching "Required exits" sentence | **EVIDENCED UNDER THE AMENDED ROW — and one review seat says the amendment is not authorized, so read the dependency.** The atomicity regression is a driven table over every failing-entry class the public API can reach, with class-entry proofs and sixteen proven-applied mutations. The row that GATES the criterion, `AT-2`, was escalated as not an evidenced defect and is now AMENDED under the maintainer's standing ruling of 2026-08-17: rejected as a demonstrated defect, reclassified as a latent construction hazard with reachability unproven, DEFER to `BA0` retained, and carried by an `#[ignore]`d characterization instead of a required-RED target. Item 6 binds "every genuine defect"; under the amended row AT-2 is not one, so it raises no defect-specific regression obligation, and every row that IS a genuine defect has its precise discriminating regression. **The dependency:** the maintainer's act is general and does not name `AT-2`; applying it to that row is the program orchestrator's reading. Both seats agree the ORIGINAL claim is not demonstrated; they split on the authority — Grok LAND, Codex BLOCKING, asking for an explicit maintainer act naming `AT-2` or a revert of the row and the matching `BA0` lines. If that objection is upheld, item 6 returns to `NOT-EVIDENCED`. |
 
 The three recorded residues were worked to three different ends, stated as such: invocation
 attribution is CLOSED; the witness decoy is NARROWED, with the surviving hole measured and named;
 and the all-four-`mod` removal is RAISED TO A BUILD ERROR, with the general execution-attestation
 remainder dispositioned as ledger row **GI-21** rather than claimed closed.
 
-Two charter exit criteria therefore remain `NOT-EVIDENCED`. This block is **NOT
-acceptance-recommended**, and this record does not recommend it.
+No charter exit criterion is now recorded `NOT-EVIDENCED`. All three that the re-attestation
+returned are closed: procedure 3 by its committed runtime plant, procedure 4 by attributing the last
+bundler residue against the shipped artifact, and procedure 6 by the maintainer act that amends the
+row it gates.
+
+Both closures were reviewed by two external CLI seats, run sequentially, each authoring its own
+plants; the verbatim reports and the split verdict are at
+[`exhaustion-closure-reviews.md`](exhaustion-closure-reviews.md).
+
+**Procedure 6's closure carries a stated dependency, and a live objection.** It holds only if the
+`AT-2` amendment is validly authorized. The maintainer's act is a GENERAL standing ruling that does
+not name `AT-2`; the application to that row is the program orchestrator's. One review seat holds
+that chain insufficient and asks for an explicit maintainer act naming `AT-2` or a revert of the row
+and the matching `BA0` lines. If that objection is upheld, `AT-2` and those lines revert and item 6
+returns to `NOT-EVIDENCED`. The objection is recorded in
+[`dispositions.md`](dispositions.md) and
+[`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)
+rather than resolved here.
+
+**That is not the same as acceptance, and this record does not claim it.** The §7 ratification act
+explicitly withheld block acceptance, `maintainer_decision` stays `PENDING`, B2 and B3 stay locked,
+and the four correction blocks exist but are not accepted. What changed is the ground on which this
+record previously withheld a recommendation: the two open exit criteria that stood in the way are no
+longer open. Whether the block is accepted remains the maintainer's decision, on the evidence
+recorded here.

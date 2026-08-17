@@ -2888,6 +2888,14 @@ const PROBE_VUE_SCOPED_STYLE_REQUEST: &str =
     "/probe/Plug.vue?vue&type=style&index=0&scoped&lang.scss";
 /// The same bytes the probe hands that lane.
 const NON_VITE_STYLE_SOURCE: &str = ".box { color: v-bind(primary); }\n";
+/// The bytes the probe substitutes for the value the cross-file recompile block
+/// reads back, in its substitution run and nowhere else.
+///
+/// Pinned on both sides: the probe appends exactly this to the value that one
+/// call returns, and the assertion below is an EQUALITY against the host's own
+/// product followed by exactly this — never a search for the marker inside
+/// published output.
+const RECOMPILE_RETURN_MARKER: &str = "\n/* verter-probe: recompile-return */\n";
 /// The pre-compile fixture's sources, byte for byte.
 const RECOMPILE_CHILD_VUE: &str =
     "<script setup>\ndefineProps({ msg: String })\n</script>\n\n<template><div>{{ msg }}</div></template>\n";
@@ -3280,21 +3288,14 @@ fn the_non_vite_style_lane_scopes_through_the_shared_css_processor() {
 /// project on disk, and both modules it published are byte-identical to the
 /// in-process host's products for the same profile.
 ///
-/// It does NOT attribute the RECOMPILE write inside the cross-file block, and
-/// makes no claim about that block at all — not that it was entered, and not
-/// that it iterated. Three reasons, all structural rather than incidental: the
-/// cross-file result never reaches codegen (the runtime compile path passes no
-/// constness overrides), so a recompiled module is byte-identical to the
-/// pre-compiled one; the plugin ran OUT OF PROCESS, so nothing this test can
-/// observe in-process is evidence about the plugin's own host; and the metrics
-/// channel that would count the call is `session_metrics`, a non-default build
-/// feature absent from the shipped native artifact the probe loads.
+/// It makes NO claim about the cross-file recompile block — not that it was
+/// entered, and not that it iterated. A recompiled module is byte-identical to
+/// the pre-compiled one (the runtime compile path passes no constness
+/// overrides), so these products cannot tell the two apart, and this test does
+/// not pretend otherwise.
 ///
-/// The CLOSURE CONDITION is therefore named rather than open-ended: attributing
-/// the recompile call needs the host metrics channel, which needs a
-/// `session_metrics`-enabled native build. That build is not the shipped
-/// artifact and is not produced here, so the attribution stays out of reach for
-/// this test as it stands.
+/// That block is attributed separately, and against the SHIPPED artifact, by
+/// [`the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call`].
 #[test]
 fn the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project() {
     let record = probe(
@@ -3308,34 +3309,58 @@ fn the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project(
         "the pre-compile lane did not complete: {case}"
     );
 
-    // The fixture is pinned to this test's own expectation: without it the
-    // products below are about whatever project the probe happened to build.
-    //
-    // The LEAF is allocated per invocation, so that suffix cannot be pinned —
-    // concurrent probes would otherwise share one directory and delete each
-    // other's files. What IS pinned is everything that makes the fixture this
-    // test's: the stable parent inside this repository, the leaf's prefix, and
-    // that it is a single directory level (so the reported root cannot wander
-    // off into some other project below it). The sources are pinned outright
-    // below, which is what ties the products to this test's expectation.
+    let (parent_id, child_id) = recompile_fixture_ids("the pre-compile lane", case);
+
+    // ROUTE IDENTITY, per file: what `buildStart` published is the host's own
+    // `Main` node for the production profile this lane builds. A `buildStart`
+    // that returned early publishes nothing here at all.
+    let host = recompile_host(&parent_id, &child_id);
+    for (label, key, id) in [
+        ("Parent", "parentScript", &parent_id),
+        ("Child", "childScript", &child_id),
+    ] {
+        assert_published_product_matches_host(
+            &format!("VerterVue.vite buildStart: the pre-compiled {label} module"),
+            &case[key],
+            &recompile_host_product(&host, id),
+        );
+    }
+}
+
+/// The pinned fixture identity of ONE recompile-lane case: its parent and child
+/// canonical ids.
+///
+/// The fixture is pinned to this suite's own expectation — without it the
+/// products compared against it are about whatever project the probe happened
+/// to build.
+///
+/// The LEAF is allocated per invocation, so that suffix cannot be pinned:
+/// concurrent probes would otherwise share one directory and delete each
+/// other's files. What IS pinned is everything that makes the fixture this
+/// suite's: the stable parent inside this repository, the leaf's prefix, and
+/// that it is a single directory level (so the reported root cannot wander off
+/// into some other project below it). The two sources are pinned outright,
+/// which is what ties the products to the stated expectation.
+#[track_caller]
+fn recompile_fixture_ids(label: &str, case: &Value) -> (String, String) {
     let fixture_parent = repo_root_lexical().join(".verter-probe-fixtures");
     let fixture_parent = fixture_parent.to_string_lossy().replace('\\', "/");
     let fixture_root = case["fixtureRoot"]
         .as_str()
-        .unwrap_or_else(|| panic!("the pre-compile lane reported no fixture root: {case}"))
+        .unwrap_or_else(|| panic!("{label} reported no fixture root: {case}"))
         .to_string();
     let leaf = fixture_root
         .strip_prefix(&format!("{fixture_parent}/"))
         .unwrap_or_else(|| {
             panic!(
-                "the pre-compile lane was driven outside this test's fixture parent \
+                "{label} was driven outside this suite's fixture parent \
                  (`{fixture_parent}`): {case}"
             )
         });
     assert!(
         leaf.starts_with("recompile-") && !leaf.contains('/'),
-        "the pre-compile lane's fixture root is not one per-invocation directory under this \
-         test's fixture parent: {case}"
+        "{label}'s fixture root is not one per-invocation directory under this suite's fixture \
+         parent: {case}"
     );
     let parent_id = format!("{fixture_root}/Parent.vue");
     let child_id = format!("{fixture_root}/Child.vue");
@@ -3344,69 +3369,232 @@ fn the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project(
     assert_eq!(
         case["parentSource"].as_str(),
         Some(RECOMPILE_PARENT_VUE),
-        "the fixture's parent is not the source this test states its expectation against: {case}"
+        "{label}'s parent is not the source this suite states its expectation against: {case}"
     );
     assert_eq!(
         case["childSource"].as_str(),
         Some(RECOMPILE_CHILD_VUE),
-        "the fixture's child is not the source this test states its expectation against: {case}"
+        "{label}'s child is not the source this suite states its expectation against: {case}"
     );
+    (parent_id, child_id)
+}
 
-    // ROUTE IDENTITY, per file: what `buildStart` published is the host's own
-    // `Main` node for the production profile this lane builds. A `buildStart`
-    // that returned early publishes nothing here at all.
+/// An in-process host carrying one recompile-lane fixture's two files.
+fn recompile_host(parent_id: &str, child_id: &str) -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     for (id, source) in [
-        (&child_id, RECOMPILE_CHILD_VUE),
-        (&parent_id, RECOMPILE_PARENT_VUE),
+        (child_id, RECOMPILE_CHILD_VUE),
+        (parent_id, RECOMPILE_PARENT_VUE),
     ] {
         let _ = host
             .upsert(UpsertRequest {
-                canonical_id: Some(id.clone()),
-                input_id: id.clone(),
+                canonical_id: Some(id.to_string()),
+                input_id: id.to_string(),
                 source: Arc::from(source),
                 file_language: verter_language::FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .unwrap_or_else(|error| panic!("upsert {id}: {error:?}"));
     }
-    for (label, key, id, source, relative) in [
-        (
-            "Parent",
-            "parentScript",
-            &parent_id,
-            RECOMPILE_PARENT_VUE,
-            "Parent.vue",
-        ),
-        (
-            "Child",
-            "childScript",
-            &child_id,
-            RECOMPILE_CHILD_VUE,
-            "Child.vue",
-        ),
+    host
+}
+
+/// The host's own `Main` product for one recompile-lane file, under the
+/// production profile that lane builds.
+#[track_caller]
+fn recompile_host_product(host: &VerterHost, id: &str) -> HostOutcome {
+    let (relative, source) = if id.ends_with("/Parent.vue") {
+        ("Parent.vue", RECOMPILE_PARENT_VUE)
+    } else {
+        ("Child.vue", RECOMPILE_CHILD_VUE)
+    };
+    // A production profile hashes the ROOT-RELATIVE path plus the source.
+    let profile = CompileProfile {
+        filename: Some(id.to_string()),
+        is_production: true,
+        custom_element: false,
+        ssr: false,
+        hmr_strategy: crate::types::HmrStrategy::None,
+        component_id: Some(bundler_component_id(&format!("{relative}{source}"))),
+        source_map: true,
+        force_js: false,
+        ..CompileProfile::default()
+    };
+    host_node(host, id, VirtualNodeKind::Main, &profile)
+}
+
+/// The published bytes of a host product, for a comparison that is not a plain
+/// equality against the whole outcome.
+#[track_caller]
+fn recompile_host_code(label: &str, outcome: &HostOutcome) -> String {
+    match outcome {
+        HostOutcome::Published { code, .. } => code.clone(),
+        other => panic!("{label}: the host route published no product here: {other:?}"),
+    }
+}
+
+/// The `rawId`s the probe observed `getVirtualFile` reached with, during
+/// `buildStart` and nowhere else.
+#[track_caller]
+fn build_start_virtual_file_reads(label: &str, case: &Value) -> Vec<String> {
+    case["buildStartVirtualFileCalls"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("{label}: the probe recorded no `buildStart` read observations at all: {case}")
+        })
+        .iter()
+        .map(|call| {
+            call["rawId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{label}: an observation carries no `rawId`: {case}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The cross-file RECOMPILE write inside `buildStart`, attributed.
+///
+/// `buildStart` reaches `getVirtualFile` at TWO places in the shipped plugin:
+/// the cross-file recompile block, and the compiled-style read the SVELTE
+/// pre-compile branch performs. This lane's fixture is Vue-only, so the Svelte
+/// branch cannot fire — and the two are distinguishable anyway, because the
+/// style read asks for a `?verter&type=style&index=…` request while the
+/// recompile asks for a BARE canonical. The assertions below are an equality
+/// against the bare child canonical, so a style read would fail them rather
+/// than be mistaken for the recompile call, and reading 2 pins the observation
+/// to the cross-file block specifically by turning the flag off on the same
+/// fixture.
+///
+/// The observation is taken at the NATIVE MODULE BOUNDARY, on the same
+/// `@verter/native` the plugin's own `createRequire` resolves, by a wrapper
+/// that delegates and returns the real value; the shipped plugin is not
+/// modified, and the wrapper is installed only around this lane group.
+///
+/// Three readings, and each needs the other two:
+///
+/// 1. THE CALL — the ordinary lane observes exactly one read, and it is the
+///    CHILD, the file whose constness hints the cross-file pass changed.
+/// 2. THE NEGATIVE CONTROL — the same drive with `crossFileOptimize` off
+///    observes NONE, while still publishing both host products. Zero is
+///    therefore an absent recompile, not an absent lane, and the observation
+///    channel is not a constant.
+/// 3. THE WRITE — a run in which the boundary substitutes a marked value for
+///    what that one call returns publishes, for the child and only the child,
+///    the host's product followed by exactly that marker. The value the
+///    recompile call returned is therefore what the route cached and served,
+///    which is the write itself.
+///
+/// This supersedes the earlier `session_metrics` closure condition: the metrics
+/// channel is one way to count the call, but it is not the only one, and this
+/// runs against the SHIPPED native artifact rather than a feature-enabled build.
+#[test]
+fn the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+
+    // The wrapper has to sit on the module the PLUGIN loads. The empirical half
+    // of that is reading 3 below — a marker cannot reach a published product
+    // through a copy the plugin never used — and this is the structural half.
+    let expected_native = repo_root_lexical().join("packages/native/index.js");
+    let expected_native = expected_native.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        record["nativeEntry"].as_str(),
+        Some(expected_native.as_str()),
+        "the probe observed a different `@verter/native` than this repository's: {}",
+        record["nativeEntry"]
+    );
+
+    // 1. THE CALL.
+    let driven = &record["cases"]["vueRecompileLane"];
+    assert_eq!(
+        driven["outcome"], "buildStarted",
+        "the pre-compile lane did not complete: {driven}"
+    );
+    let (_parent_id, child_id) = recompile_fixture_ids("the pre-compile lane", driven);
+    assert_eq!(
+        build_start_virtual_file_reads("the pre-compile lane", driven),
+        vec![child_id.clone()],
+        "`buildStart` did not reach the cross-file recompile block for the child exactly once: \
+         {driven}"
+    );
+
+    // 2. THE NEGATIVE CONTROL.
+    let without = &record["cases"]["vueRecompileLaneWithoutCrossFile"];
+    assert_eq!(
+        without["outcome"], "buildStarted",
+        "the cross-file-off control did not complete: {without}"
+    );
+    let (control_parent_id, control_child_id) =
+        recompile_fixture_ids("the cross-file-off control", without);
+    assert_eq!(
+        build_start_virtual_file_reads("the cross-file-off control", without),
+        Vec::<String>::new(),
+        "the recompile block ran with `crossFileOptimize` off: {without}"
+    );
+    let control_host = recompile_host(&control_parent_id, &control_child_id);
+    for (label, key, id) in [
+        ("Parent", "parentScript", &control_parent_id),
+        ("Child", "childScript", &control_child_id),
     ] {
-        // A production profile hashes the ROOT-RELATIVE path plus the source.
-        let profile = CompileProfile {
-            filename: Some(id.clone()),
-            is_production: true,
-            custom_element: false,
-            ssr: false,
-            hmr_strategy: crate::types::HmrStrategy::None,
-            component_id: Some(bundler_component_id(&format!("{relative}{source}"))),
-            source_map: true,
-            force_js: false,
-            ..CompileProfile::default()
-        };
         assert_published_product_matches_host(
-            &format!("VerterVue.vite buildStart: the pre-compiled {label} module"),
-            &case[key],
-            &host_node(&host, id, VirtualNodeKind::Main, &profile),
+            &format!(
+                "VerterVue.vite buildStart without cross-file optimization: the pre-compiled \
+                 {label} module"
+            ),
+            &without[key],
+            &recompile_host_product(&control_host, id),
         );
     }
 
-    // Deliberately NOT asserted here: anything about the cross-file recompile
-    // block. This host is this test's, not the plugin's — the plugin ran in
-    // another process — so no reading taken from it says what the plugin's own
-    // host did. See the closure condition on this test's doc comment.
+    // 3. THE WRITE.
+    let substituted = &record["cases"]["vueRecompileWriteAttribution"];
+    assert_eq!(
+        substituted["outcome"], "buildStarted",
+        "the substitution run did not complete: {substituted}"
+    );
+    assert_eq!(
+        substituted["recompileReturnMarker"].as_str(),
+        Some(RECOMPILE_RETURN_MARKER),
+        "the substitution run did not substitute the bytes this test states its expectation \
+         against: {substituted}"
+    );
+    let (marked_parent_id, marked_child_id) =
+        recompile_fixture_ids("the substitution run", substituted);
+    assert_eq!(
+        build_start_virtual_file_reads("the substitution run", substituted),
+        vec![marked_child_id.clone()],
+        "the substitution run did not reach the recompile block for the child exactly once: \
+         {substituted}"
+    );
+    let marked_host = recompile_host(&marked_parent_id, &marked_child_id);
+
+    let child_label = "VerterVue.vite buildStart with a substituted recompile return: the child";
+    let child_outcome = recompile_host_product(&marked_host, &marked_child_id);
+    let child_code = recompile_host_code(child_label, &child_outcome);
+    assert_eq!(
+        substituted["childScript"]["outcome"], "published",
+        "{child_label}: nothing was published: {substituted}"
+    );
+    assert_eq!(
+        substituted["childScript"]["code"].as_str(),
+        Some(format!("{child_code}{RECOMPILE_RETURN_MARKER}").as_str()),
+        "{child_label}: what the route served is not the value the recompile call returned"
+    );
+    assert_eq!(
+        normalized_source_map(child_label, &substituted["childScript"]["map"]),
+        host_normalized_source_map(child_label, &child_outcome),
+        "{child_label}: the substituted return carried a different map than the host's"
+    );
+
+    // The PARENT is the other half of the same reading: the recompile block
+    // reached one file, so the other file's published bytes are still the
+    // host's own, marker-free.
+    assert_published_product_matches_host(
+        "VerterVue.vite buildStart with a substituted recompile return: the parent",
+        &substituted["parentScript"],
+        &recompile_host_product(&marked_host, &marked_parent_id),
+    );
 }

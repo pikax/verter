@@ -25,7 +25,7 @@ canonical request model and atomic publication architecture.
 | finding | acceptance ID | target and characterization obligation |
 |---|---|---|
 | AT-1 | `BF3-AT-1-COMBINED-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | `a_refused_combined_request_publishes_no_product_at_all` (`#[ignore]`d target); characterization `a_refused_runtime_surface_still_publishes_the_ide_and_public_api_products` |
-| AT-2 | `BF3-AT-2-BATCH-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | `a_genuinely_failing_batch_entry_publishes_no_partial_product` is the green characterization of the currently reachable genuine-conflict class, not a RED target. After RT-1 is corrected, BA0 must prove the newly reachable Svelte-refusal batch class and, when the green test already covers the reachable genuine-failure class as recorded, add a new separately named `#[ignore]`d correct-behavior target (currently absent). |
+| AT-2 | `BF3-AT-2-BATCH-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | AT-2 is an AMENDED row: a latent construction hazard with reachability unproven, not a demonstrated per-entry atomicity violation (see the maintainer standing ruling of 2026-08-17 and the amended row in `dispositions.md`). Its artifact is the `#[ignore]`d characterization `the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error`, which is NOT a required-RED target. `a_genuinely_failing_batch_entry_publishes_no_partial_product` remains the green regression over the reachable failure classes, and `searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_finds_none` the green search control. |
 
 ## Required procedure
 
@@ -34,15 +34,20 @@ request token, requested-product set, typed terminal result, and every publicati
 under that token, and prove its RED result discriminates partial publication. Keep
 that target as the live `FC-ATOMIC-001` target.
 
-For AT-2, do not require a RED cycle against
-`a_genuinely_failing_batch_entry_publishes_no_partial_product`; it is already green
-for the reachable genuine-conflict failure described in `dispositions.md`. Once
-RT-1 is corrected, prove the Svelte-refusal batch class. If the current green test
-already covers the reachable genuine-failure class, add a new separately named
-ignored correct-behavior target for the Svelte-refusal class and prove that new
-target RED. Then make the minimum common-layer correction, with no retraction
-mechanism, and rerun the live targets, characterizations, batch-neighbour control,
-and independent-product success controls.
+For AT-2, require no RED cycle at all. Its ratified claim is rejected as not
+demonstrated and the row is amended to a latent construction hazard with
+reachability unproven, so there is no reproduced defect for a RED target to
+assert. In particular, do NOT require a Svelte-refusal atomicity target to be
+RED: such a target would fail only because the separate ratified row RT-1
+prevents Svelte classification on the batch route at all, which the standing
+ruling calls a stub rather than evidence. Make the minimum common-layer
+correction that removes the hazard — the host-backed successful-response
+construction reading a product and an error list independently — with no
+retraction mechanism, and rerun the live targets, the `#[ignore]`d
+characterization named above, the batch-neighbour control, and the
+independent-product success controls. If the hazard is demonstrated reachable
+before or during BA0, that reproduction is a new finding with its own RED target;
+it is not assumed here.
 
 ## Required exits
 
@@ -51,11 +56,11 @@ products requested by that identity, refusal publishes none, and a failing batch
 entry cannot publish a partial product or contaminate a neighbour. Separate IDE-only
 or PublicApi-only requests may succeed under separate identities; a combined request
 cannot publish those products beside its runtime refusal. AT-1's existing ignored
-test is the live acceptance target. AT-2 proves the Svelte-refusal batch class after
-RT-1 is corrected, using a new ignored correct-behavior target when the current green
-test already covers the reachable genuine-failure class; the current green test
-remains a characterization/control, not a RED target. All affected public routes
-observe the same transaction boundary.
+test is the live acceptance target. AT-2 is satisfied by removing the latent
+construction hazard and by its `#[ignore]`d characterization turning from
+"passes, hazard unreachable" into a statement the corrected construction makes
+structurally true; it carries no RED target and no Svelte-refusal obligation. All
+affected public routes observe the same transaction boundary.
 
 Only BA0 acceptance satisfies this block's B2/B3 predecessor edge.
 

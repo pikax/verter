@@ -149,8 +149,8 @@ bare workspace `cargo build` / `test` / `nextest`.
 | PublicApi / TSC / declaration under the TypeScript oracle | `cargo test -p verter_session --lib --features bf2-authoritative public_api_typescript_observation -- --test-threads=1` | `running 8 tests` → 7 passed, 1 ignored |
 | IDE/TSX under the TypeScript oracle | `cargo test -p verter_session --lib --features bf2-authoritative ide_surface_typescript_observation -- --test-threads=1` | `running 3 tests` → 3 passed |
 | Product/route inventory | `cargo test -p verter_session --lib framework_product_surface -- --test-threads=1` | `running 24 tests` → 22 passed, 2 ignored (23 suite tests plus the census test) |
-| Batch route | `cargo test -p verter_session --lib svelte_batch_route -- --test-threads=1` | `running 11 tests` → 10 passed, 1 ignored (10 suite tests plus the census test) |
-| Transport equivalence (NAPI / WASM / bundler) | `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1` | `running 21 tests` → 20 passed, 1 ignored (the BND-2 Rollup acceptance target); 20 suite tests plus the census test |
+| Batch route | `cargo test -p verter_session --lib svelte_batch_route -- --test-threads=1` | `running 12 tests` → 10 passed, 2 ignored (11 suite tests plus the census test) |
+| Transport equivalence (NAPI / WASM / bundler) | `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1` | `running 22 tests` → 21 passed, 1 ignored (the BND-2 Rollup acceptance target); 21 suite tests plus the census test |
 | TypeScript observation domain (harness) | `npx vitest --run --root packages/framework-conformance-harness test/typescript-observation-domain.spec.mjs` | 22 passed (22) |
 
 The corrected public bundler measurements are green and run individually:
@@ -461,8 +461,9 @@ changes both the emitted module and the id it is scoped by.
   why the scoping assertion is separate); echoing the scoped product as the
   negative control fails with *transformed CSS for a carrier it never
   transformed*.
-- **Recompile lane** (`:803`) — PARTIALLY driven, by
-  `the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project`.
+- **Recompile lane** (`:803`) — DRIVEN, by
+  `the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project`
+  and `the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call`.
   The probe writes a two-file project INSIDE the repository (a parent passing a
   literal prop to a child, the shape the cross-file pass records constness for)
   into a directory it allocates PER INVOCATION with `mkdtemp` under the stable,
@@ -481,8 +482,8 @@ changes both the emitted module and the id it is scoped by.
   substituting `export default {}` for the child's published module fails the
   parity comparison.
 
-  **What this lane claims, exactly.** Two things: `buildStart` completed over a
-  real two-file project on disk, and both modules it published are
+  **What the first test claims, exactly.** Two things: `buildStart` completed
+  over a real two-file project on disk, and both modules it published are
   byte-identical to the in-process host's products for the same profile. It
   asserts NOTHING about the cross-file recompile block — not that it was
   entered, and not that it iterated. An earlier version of this test called
@@ -491,21 +492,79 @@ changes both the emitted module and the id it is scoped by.
   does not hold: it is a different host in a different process. The claim was
   dropped rather than weakened, and the measurement it rested on with it.
 
-  **What this lane does NOT prove, and why.** The RECOMPILE write itself is not
-  attributable. Three structural reasons: the cross-file result never reaches
-  codegen — `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`
-  passes `prop_constness_overrides: None` — so a recompiled module is
-  byte-identical to the pre-compiled one; the plugin runs OUT OF PROCESS, so no
-  reading this test can take in-process is evidence about the plugin's own host;
-  and the metrics channel that would count the call is `session_metrics`, a
-  non-default build feature absent from the shipped native artifact the probe
-  loads.
+  Its products cannot separate the two writes, and it does not pretend to: the
+  cross-file result never reaches codegen —
+  `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs` passes
+  `prop_constness_overrides: None` — so a recompiled module is byte-identical to
+  the pre-compiled one.
 
-  **Named closure condition.** Attributing the recompile call needs the host
-  metrics channel, which requires a `session_metrics`-enabled native build. That
-  is not the shipped artifact, and it is not built here. Until such a build is
-  produced and the probe loads it, this lane stays PARTIAL — the condition is
-  known and stated, not open-ended.
+  **How the write IS attributed, against the shipped artifact.** An earlier
+  record named a `session_metrics`-enabled native build as the closure
+  condition, on the reading that the host metrics channel was the only thing
+  that could count the call. That is false: the metrics channel is *one* way to
+  count it, not the only one. An observation of `host.getVirtualFile` taken
+  WHILE `buildStart` runs is what names the recompile call — with one precision
+  a review seat was right to insist on. The hook reaches that call at TWO
+  places, not one: the recompile block itself (`:803`), and the compiled-style
+  read the SVELTE pre-compile branch performs (`readCompiledStyleArtifacts`,
+  called at `:785`, calling `getVirtualFile` at `:68`). The plugin's other two
+  call sites — the load lane at `:668` and the transform at `:1041` — are not
+  reachable from `buildStart`.
+
+  Three things keep that from weakening the attribution, and none of them is
+  prose. This lane's fixture is TWO `.vue` files, so the Svelte branch cannot
+  fire at all. The two reads are distinguishable in the record regardless: the
+  style read asks for a `?verter&type=style&index=…` request while the recompile
+  asks for a BARE canonical, and the test asserts EQUALITY against the bare child
+  canonical, so a style read fails that assertion rather than passing as a
+  recompile. And reading 2 below turns the cross-file flag off on the same
+  fixture and observes ZERO — which ties the observation to the cross-file block
+  specifically, not merely to "something in `buildStart`".
+
+  `the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call`
+  takes that observation at the NATIVE MODULE BOUNDARY: the probe resolves the
+  same `@verter/native` the plugin's own `createRequire(dist/index.mjs)`
+  resolves (recorded as `nativeEntry` and pinned by the test to this
+  repository's `packages/native/index.js`) and wraps
+  `VerterHost.prototype.getVirtualFile` so the call delegates and hands back the
+  real value. The plugin is not modified, the lane under observation is the
+  shipped code path, the wrapper is installed only around this lane group and
+  removed afterwards, and the observation is armed only for the duration of
+  `buildStart` — so a read taken by the later `load` calls cannot be recorded as
+  a recompile.
+
+  Three readings, each needing the other two:
+
+  1. **The call.** The ordinary lane observes exactly one read during
+     `buildStart`, and its `rawId` is the CHILD — the file whose constness hints
+     the cross-file pass changed.
+  2. **The negative control** (`vueRecompileLaneWithoutCrossFile`). The same
+     drive with `crossFileOptimize` off observes NONE, while still publishing
+     both modules and matching the host's products for both. Zero is therefore
+     an absent recompile rather than an absent lane, and the observation channel
+     is not a constant.
+  3. **The write** (`vueRecompileWriteAttribution`). In a third drive the
+     boundary substitutes, for that one call's return only, the real value with
+     `\n/* verter-probe: recompile-return */\n` appended. The published child
+     module is then asserted EQUAL to the host's own product followed by exactly
+     those bytes — an equality, never a search for the marker inside generated
+     output — with its map still equal to the host's, while the PARENT publishes
+     the host's product unchanged. The value the recompile call returned is
+     therefore what the route cached and served, which is the write.
+
+  **Discrimination.** Each reading was proven discriminating by a plant in the
+  PLUGIN SOURCE — the code under test, never the test — each proven present and
+  unique in the working tree and absent from `HEAD` before its run, rebuilt
+  through `pnpm --filter @verter/unplugin build` with the committed freshness
+  record regenerated, then restored and rebuilt back to a freshness record
+  byte-identical to the committed one (the build is deterministic; the restored
+  digests reproduce the committed pair exactly).
+
+  | plant | mutation | result |
+  |---|---|---|
+  | `PLANT_P1_NO_RECOMPILE_CALL` | replace the `getVirtualFile` call with a literal | reading 1 RED — `buildStartVirtualFileCalls` is `[]`; the built `dist` drops from 5 `getVirtualFile` occurrences to 4, and the child publishes `""` |
+  | `PLANT_P2_DROP_RECOMPILE_WRITE` | keep the call, drop the `scriptCache.set` | reading 3 RED — the published child is the host product WITHOUT the marker, while reading 1 still passes; this is what separates "the write happened" from "the call happened" |
+  | `PLANT_P3_IGNORE_CROSSFILE_FLAG` | enter the block regardless of `opts.crossFileOptimize` | reading 2 RED — the control observes one read with `crossFileOptimize: false` |
 
 ## The batch route's per-entry atomicity table, driven
 
@@ -514,7 +573,17 @@ changes both the emitted module and the id it is scoped by.
 table-driven regression over every failing-entry class the public `compile_many`
 API can genuinely reach, on both lanes where the class exists on that lane. It is
 reached by the batch-route invocation above; the whole suite now executes
-`running 11 tests` → 10 passed, 1 ignored.
+`running 12 tests` → 10 passed, 2 ignored.
+
+The second ignored target is the amended AT-2 row's own artifact,
+`the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error`
+(`cargo test -p verter_session --lib the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error -- --ignored --test-threads=1` → `running 1 test` → PASSES).
+It is `#[ignore]`d under the maintainer standing ruling of 2026-08-17 and is
+deliberately not a required-RED target: it characterizes a latent construction
+hazard whose reachability is unproven, and it turns RED the day a successful
+host-backed response carries an error-severity diagnostic. See
+[`dispositions.md`](dispositions.md) and
+[`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md).
 
 For each row the entry is FIRST proven to have entered the class the row names —
 never merely that `errors` is non-empty, which would let a row pass on a failure
@@ -601,13 +670,17 @@ proven otherwise; every plant below went RED.
 | the render lane withholds a successful product | the ordinary-success control: *reported no failure but published no code either* |
 
 **What this evidence does NOT establish.** It establishes that the table
-discriminates, not that AT-2 as ratified is evidenced. The only construction that
-can express a product beside a fatal-looking error list — the successful-response
-arm — is reached in these runs only by a PLANT; no public input was found that
-reaches it with error diagnostics. That is exactly why the residual stays UNKNOWN
-and item 6 stays `NOT-EVIDENCED` for that row. See
-[`dispositions.md`](dispositions.md) and
-[`at2-deviation-memo.md`](at2-deviation-memo.md).
+discriminates, not that AT-2 AS ORIGINALLY RATIFIED is evidenced. The only
+construction that can express a product beside a fatal-looking error list — the
+successful-response arm — is reached with error diagnostics in these runs only by
+a PLANT; no public input was found that reaches it that way, and the residual
+stays UNKNOWN. That measurement is precisely what the AT-2 amendment rests on:
+the row is now a latent construction hazard with reachability unproven, carried
+by an `#[ignore]`d characterization rather than a required-RED target, so item 6
+no longer turns on it. See [`dispositions.md`](dispositions.md),
+[`at2-deviation-memo.md`](at2-deviation-memo.md) (discharged) and
+[`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md),
+including the review seat that disputes the amendment's authority.
 
 ## The same hazard in the other direction
 

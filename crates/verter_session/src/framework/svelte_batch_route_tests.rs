@@ -1195,6 +1195,140 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
     }
 }
 
+/// The latent host-backed construction hazard's PRECONDITION, characterized.
+///
+/// This is the artifact for a finding that is NOT a demonstrated defect. Of
+/// the nine `CompileBatchEntry` constructions on the batch route, eight write
+/// a hardcoded empty product beside their errors; the host-backed
+/// SUCCESSFUL-RESPONSE construction is the only one that reads the product and
+/// the error list from the same response. That shape could express a product
+/// beside a fatal-looking error list — but only if it is ever HANDED a
+/// successful response carrying an error-severity diagnostic. That precondition
+/// is what this test measures, and it is the half a public-API test can decide.
+///
+/// Two readings, on the host-backed lane:
+///
+/// 1. A compile that SUCCEEDS while carrying a diagnostic is served by that
+///    construction from a response that carries NO error-severity diagnostic.
+///    The response's diagnostics list is non-empty (it carries a warning), so
+///    "no error" is a real reading and not a vacuous one over an empty list.
+/// 2. A compile that genuinely FAILS never reaches that construction at all:
+///    the same request answers `Err`, so its entry is built by one of the
+///    hardcoded-empty arms, and it publishes nothing.
+///
+/// **What this deliberately does NOT prove.** It does not prove the
+/// construction READS its error list from the response rather than writing a
+/// hardcoded empty one — replacing that filter with an empty literal leaves
+/// this test green, and it is written not to claim otherwise. Deciding that
+/// half needs a synthetic response carrying a product and an error together,
+/// which needs a seam in production code that this suite does not own. It is
+/// recorded as an open residue for the correction owner, not smuggled in as a
+/// claim here.
+///
+/// It is `#[ignore]`d deliberately, and it is NOT a RED target: it passes
+/// today, by design. It is the re-examination artifact its correction owner
+/// re-runs — the day a successful host-backed response carries an
+/// error-severity diagnostic, reading 1 turns RED, the precondition holds, and
+/// the hazard has become reachable. Making it a required-RED gate today would
+/// mean asserting a defect nobody has reproduced.
+///
+/// That combination — `#[ignore]`d AND passing — is a deliberate category
+/// mismatch with every other ignored target in this suite, which states a
+/// correct behaviour the product does not yet have and therefore FAILS. This
+/// one is the named artifact for a finding that is not a defect, so it has no
+/// failing correct-behaviour to state. Nothing is lost by ignoring it: the same
+/// precondition is asserted LIVE, on the same lane, by the non-ignored
+/// [`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`],
+/// whose host-backed half already requires the response to carry no
+/// error-severity diagnostic. This test exists so that requirement has a name
+/// the amended finding can point at.
+#[ignore]
+#[test]
+fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error() {
+    let row = "latent-hazard/HostBacked";
+    let warning_id = "/atomic/LatentHazardWarns.vue".to_string();
+    let failing_id = "/atomic/LatentHazardFails.vue".to_string();
+    let batch_host = host();
+    let entries = batch_host.compile_many(
+        vec![
+            batch_input(&warning_id, WARNS_WITHOUT_FAILING),
+            batch_input(&failing_id, TEMPLATE_THAT_FAILS_TO_PARSE),
+        ],
+        CompileBatchOptions::default(),
+        Lane::HostBacked.target(),
+    );
+    assert_eq!(entries.len(), 2, "{row}: one entry per input");
+
+    // 1. The SUCCESS half — served by the response-reading construction. The
+    //    PRECONDITION is read first, so a failure names it rather than naming
+    //    the pairing it causes one line later.
+    let response = batch_host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(warning_id.clone()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: crate::host_compile::compile_profile_for_bundler(),
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "{row}: the diagnostic-carrying input must SUCCEED here, or this test is \
+                    measuring a failure arm instead of the response-reading construction: \
+                    {error:?}"
+            )
+        });
+    assert!(
+        !response.code.is_empty(),
+        "{row}: the successful response published no product, so the construction under \
+         characterization had nothing to pair"
+    );
+    assert!(
+        response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::HostSeverity::Warning),
+        "{row}: the response carries no diagnostic at all, so \"it carries no ERROR\" would be a \
+         vacuous reading over an empty list rather than a measurement"
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::HostSeverity::Error),
+        "{row}: a SUCCESSFUL host-backed response now carries an error-severity diagnostic — the \
+         latent construction hazard is reachable, and this entry pairs that error list with the \
+         response's product: {:?}",
+        response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (
+                diagnostic.code.as_str(),
+                &diagnostic.severity,
+                diagnostic.message.as_str()
+            ))
+            .collect::<Vec<_>>()
+    );
+    // The precondition holds, so the entry this construction built is clean:
+    // a product, and no errors beside it.
+    assert_publishes_cleanly(row, &entries[0]);
+
+    // 2. The FAILURE half — never reaches that construction.
+    assert_publishes_no_product(row, &entries[1]);
+    let failure = batch_host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(failing_id.clone()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: crate::host_compile::compile_profile_for_bundler(),
+    });
+    assert!(
+        failure.is_err(),
+        "{row}: the failing input answered Ok, so its entry WAS built by the response-reading \
+         construction and the hazard is reachable through an ordinary compile failure"
+    );
+}
+
 /// A SEARCH for one specific shape, not a proof that it cannot exist.
 ///
 /// The host-backed lane's successful-response construction is the ONLY one
