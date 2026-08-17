@@ -561,6 +561,207 @@ sentences. The charter's own words settle it: *"`UNPROVEN` records an open proof
 count as exhaustion."* Those gaps were outside this cure's scope, are unchanged by it, and must be
 closed before this block can be recommended.
 
+> **Superseded in part.** Items 3 and 4, and all three residues, were subsequently worked — see
+> [Closing the exhaustion gaps](#closing-the-exhaustion-gaps) below. WORKED is not CLOSED for all of
+> them: item 3 is satisfied, item 4 is narrowed to a single residue (the recompile write) and stays
+> `NOT-EVIDENCED`, and item 6 is ESCALATED, not closed — the row it gates cannot be amended at track
+> level.
+
+## Closing the exhaustion gaps
+
+The three exit criteria the re-attestation returned `NOT-EVIDENCED`, plus the three residues that
+record named as open, were worked directly. Every change below is test-, probe- or evidence-only:
+`git diff` against this section's base touches no production Rust outside `#[cfg(test)]` modules and
+no `packages/*/src` file at all.
+
+### Procedure 3 — the runtime axis now has its own planted defect
+
+The gate claimed six discrimination axis families — parse, real-package link, structural,
+diagnostics, mapping, runtime — and `the_gate_detects_a_planted_defect_on_every_applicable_axis_family`
+planted a defect for five of them (mapping twice: content integrity and anchor coverage). The RUNTIME
+comparison, which mounts the candidate and the golden against the pinned official client runtime and
+compares rendered markup, had none: nothing proved it would notice a candidate that renders the
+WRONG markup.
+
+That comparison was extracted into ONE helper (`compare_mounted_render`) which the live gate
+(`every_emitting_client_request_mounts_and_renders_what_the_golden_renders`) now drives, so the plant
+exercises the same code rather than a copy of it. `the_runtime_comparison_detects_a_planted_wrong_render`
+then retemplates the `basic-runes` golden's `<p>zero</p>` — the markup the `alternate` branch actually
+renders, since `count` starts at 0 — into a marker, proves the plant applied through the existing
+`assert_plant_applied` (absent before, present exactly once after, bytes changed), and requires the
+comparison to report a divergence **while the planted module still MOUNTS**. That last assertion is
+the point: it makes the plant a wrong RENDER rather than a crash, so the test cannot pass by proving
+only that a broken module is noticed. It also asserts the planted markup breaks the recorded render
+pin, so the two independent catches are both shown.
+
+The unplanted control for this axis is the live gate itself, which mounts the real shipped-route
+candidate against the golden and is green; the plant test additionally brackets itself with a
+pristine-against-pristine run before and after, which pins the bound runtime version and the recorded
+markup and proves no plant leaked into shared harness state.
+
+Discrimination was proven, not assumed: with `compare_mounted_render` temporarily forced to report no
+divergence, the new test FAILS naming both rendered strings; restored byte-identically (hash
+re-verified), it passes.
+
+### Procedure 4 — the bundler route aliases are DRIVEN, not cited
+
+The route inventory admitted the bundler style, load, recompile and CSS-scoping lanes and the
+runtime-render batch lane as "read-verified citations, not driven". A source investigation found that
+two of them were in fact already REACHED by the existing probe and simply never observed. All five are
+now driven, each with a route-identity comparison against the in-process host product and each with a
+negative control:
+
+| lane | site | now |
+|---|---|---|
+| style + `listVirtualFiles` | `packages/unplugin/src/index.ts:68`, `:63` | DRIVEN — the Svelte wrapper's style requests are loaded and compared against the host's `Style{0}` product, whole-map included; a carrier with no `<style>` publishes zero style requests |
+| load | `index.ts:668` | DRIVEN — a `?vue&type=template` request falls through to the host route; compared against the host's `Template` node; an unregistered carrier must answer `missing` |
+| runtime-render batch | `index.ts:101` | DRIVEN — the Vue rollup INLINE product is captured and compared against `compile_many(RuntimeRender)` |
+| non-Vite CSS scoping + its native wrapper | `index.ts:863`, `core/compiler.ts:64` | DRIVEN — a rollup-shaped two-call sequence ending in a `&scoped&lang.scss` style request, compared against the shared style processor, asserting both the `[data-v-…]` attribute and a `v-bind()` rewrite that proves WHICH cached profile's component id was used |
+| recompile | `index.ts:803` | PARTIAL — `buildStart` is driven over a real two-file fixture and both published modules match the in-process host's products, but the recompile WRITE is unattributable and no claim is made about the cross-file block |
+
+The recompile lane's residue is stated exactly rather than papered over: a recompiled module is
+byte-identical to the pre-compiled one because the pipeline passes `prop_constness_overrides: None`
+(`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2843`); the plugin runs OUT OF
+PROCESS, so nothing this test observes in-process is evidence about the plugin's own host; and the
+metrics channel that would count the call is `session_metrics`, a non-default build feature absent
+from the shipped native artifact. The NAMED CLOSURE CONDITION is therefore known: attributing the
+recompile call needs the host metrics channel, hence a `session_metrics`-enabled native build — not
+the shipped artifact, and not produced here. The inventory's blanket sentence is replaced by a
+per-alias status list.
+
+The lane's claim was also CORRECTED rather than defended. It previously called
+`compute_cross_file_optimizations()` on a fresh in-process host and read the non-empty result as
+evidence that the plugin's guarded block iterated. A different host in a different process cannot
+witness that, and an adversarial seat proved it by disabling the plugin's cross-file block and finding
+the test still green. The claim and the measurement behind it are both gone; the test now states only
+what it measures.
+
+One honesty note carried into the assertion text, the inventory and the evidence index: the
+runtime-render lane is documented to publish the same `Main` bytes as the host-backed lane, so the
+identity comparison proves the bundler publishes the host's render product but cannot discriminate
+WHICH host lane produced it.
+
+### Procedure 6 — the atomicity regression, and an escalation
+
+`FC-ATOMIC-001`'s batch half was carried by a single test driving ONE failure class. It is now a
+table over every failing-entry class reachable through the public `compile_many` API, on both lanes,
+each row proving CLASS ENTRY with a class-specific assertion before asserting the entry publishes no
+code, no source map and no output language, and each row asserting a cleanly-publishing neighbour.
+Two controls keep a diagnostic from being read as a refusal: an ordinary success, and a warning-only
+compile that still publishes. Two whole classes are recorded NOT REACHABLE with their source reasons, plus
+the one lane of a driven class that has no reachable input, rather than given an `#[ignore]`d target
+that would fail for the wrong reason. Sixteen mutations of the code
+under test — every product-publishing site, every class-proof rendering, and four shape mutations —
+were each proven applied and each went RED.
+
+The row that gates this criterion, `AT-2`, is a different matter, and it is ESCALATED rather than
+closed. Its ratified text asserts that a batch entry publishes a product together with a genuine typed
+refusal. An enumeration of all nine `CompileBatchEntry` construction sites shows eight are atomic by
+hardcoded literal, the typed refusal itself lands on an atomic arm, and the single non-atomic
+construction has no demonstrated reachable input; one path remains UNKNOWN and unreproduced. An
+independent, unprimed disposition ruling holds that the row as written is not an evidenced defect,
+that no track-level actor may amend a ratified row, and that under the current ratified bytes this
+criterion stays `NOT-EVIDENCED`. The full evidence, the verbatim ruling and the exact act being asked
+for are at [`at2-deviation-memo.md`](at2-deviation-memo.md) and
+[`at2-disposition-ruling.md`](at2-disposition-ruling.md). Nothing in the ratified findings table was
+changed.
+
+### The three recorded residues
+
+- **Invocation attribution — CLOSED.** The recorded hole was that nothing required a driven export to
+  have been APPLIED, so a probe could print an export's true readings while sourcing its drive results
+  from a sibling. The test-owned observer — a node script that lives in the Rust source, which the
+  probe cannot forge — now DRIVES each export itself through an apply-counting `Proxy` and records the
+  apply count, the plugin keys ITS OWN invocation returned, and both carrier include decisions. Every
+  export the test classifies as executed must carry a non-zero apply count from the test's own
+  invocation and must agree with it. The exact recorded full-forgery plant, reconstructed faithfully
+  (true evidence, plausible plugin keys, drive skipped), PASSES the pre-change tree and FAILS the
+  post-change tree — that two-sided measurement is the discrimination proof. The `rollupIsCallable`
+  reading the observer gathered and discarded, and the default-alias identity that was the probe's
+  word alone, are now compared too. Residue, stated: the observer drives the factory and the include
+  decision, never a carrier transform, so per-carrier product BYTES remain the probe's word — judged
+  where it matters by host parity.
+- **The witness decoy — NARROWED, and said so.** A census row was bound to "a test of this path exists",
+  a free `&str` each suite handed over, so a module defining a same-named witness could be borrowed to
+  clear another suite's floor. A row is now a reference to the witness function ITEM, with the path
+  coming back from the compiler (`std::any::type_name` on the zero-sized function-item type, verified
+  in-crate to equal the `module_path!()` spelling and verified to degrade to `fn()` under pointer
+  coercion, hence the `&F` signature). The per-suite constants are deleted. The recorded decoy plant is
+  now `error[E0425]`. What remains, stated plainly rather than claimed closed: anyone editing the
+  census file itself can still name any resolvable item, and that was measured to pass.
+- **All four `mod` declarations removed at once — raised to a build error, residue dispositioned.**
+  The census and its three suites protected each other pairwise, but one edit removing all four
+  removed every party to the argument. An unrelated long-lived sibling module now makes a real,
+  discriminating assertion through the census (that no census row counts ITS tests, which would
+  otherwise let a suite clear its floor on them), which anchors the registration from outside the set.
+  Two mutations were measured, both under `--features transport-authoritative`, and they are different
+  facts:
+
+  | mutation | diagnostics |
+  |---|---|
+  | remove `mod suite_census;` ALONE | seven `error[E0433]`, one per consuming site, across four modules — `framework_product_surface_tests.rs:66,69`, `svelte_batch_route_tests.rs:67,70`, `transport_route_equivalence_tests.rs:79,82`, and the outside anchor `script_facts_tests.rs:32` |
+  | remove ALL FOUR `mod` declarations | ONE `error[E0433]` — `script_facts_tests.rs:32:28`, `could not find suite_census in framework`. The six in-set sites vanish with the modules that held them; the outside anchor is the one party the edit does not remove, and it is what makes this a build error at all |
+
+  The general
+  execution-attestation problem is NOT closed by that and is not claimed to be — a source-tree scanner
+  is forbidden as a landed guard here — so it is dispositioned as ledger row **GI-21** in
+  [`../../../gate-integrity-ledger.md`](../../../gate-integrity-ledger.md), owned by the gate-integrity
+  block with a named acceptance test.
+
+### Verification after closing the exhaustion gaps (run directly by the track orchestrator)
+
+Run in a dedicated worktree after `pnpm install --frozen-lockfile` and `pnpm build:ts` (both rc=0).
+Every figure below was observed directly, not taken from a worker's report.
+
+- `node scripts/gate.mjs --build-jobs 4 --test-threads 4 --memory-limit 12GiB` — **VERDICT: PASS
+  (all three surfaces green)**, exit 0, terminal summary present.
+  - Surface 1 (nextest, process isolation): **24390 run, 24390 passed**, 0 failed, 0 timed out,
+    0 tolerated, 584 skipped.
+  - Surface 2 (in-process `verter_session` libtests from the same archive): 3 suites clean,
+    0 tolerated failures.
+  - Surface 3 (shipped `no-debug-assertions` cfg, `verter_session` + `verter_scheduler`):
+    **8624 run, 8624 passed**, 566 skipped.
+  - Build-prerequisite preflight `SATISFIED`; freshness-tooling preflight
+    `already-present — tolerance DISABLED`, so the proto/TS byte-pin ran genuinely and a freshness
+    failure would have been a hard failure.
+  - An EARLIER run of this same gate FAILED, and the failure is recorded rather than smoothed over:
+    `phase_archaeology_test_files_count_zero` flagged an assertion message this work had added which
+    read `style block 0` — numbered-block vocabulary the repository forbids in source. It was
+    reworded and the gate re-run in full. A partial or aborted gate is not a verdict; both runs are
+    stated.
+- `cargo fmt --all --check` — clean. `cargo clippy --workspace --all-targets -- -D warnings` —
+  clean. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — clean.
+  `cargo check --workspace --release` — clean.
+- Every suite in [`test-invocations.md`](test-invocations.md), at its recorded invocation, matched
+  its recorded expectation exactly: Svelte official-conformance `running 20` → 17 passed/3 ignored;
+  PublicApi-TSC-declaration `running 8` → 7/1; IDE-TSX `running 3` → 3/0; product-route inventory
+  `running 24` → 22/2; batch route `running 11` → 10/1; transport equivalence `running 21` → 20/1;
+  the `the_bundler` filter `running 9` → 8/1.
+- All **eight** `#[ignore]`d conformance targets were run individually with `--ignored`; each
+  reported `running 1 test` and **FAILED at its own named assertion inside its own file**, not at
+  setup, a missing file or a compile error:
+  `each_flags_for_a_keyed_runes_each_match_the_official_compiler`,
+  `a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module` and
+  `the_client_source_map_covers_every_required_authored_anchor` in
+  `svelte_official_conformance_gate.rs`;
+  `an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript` in
+  `public_api_typescript_observation.rs`;
+  `the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css` and
+  `a_refused_combined_request_publishes_no_product_at_all` in `framework_product_surface_tests.rs`;
+  `a_svelte_batch_matches_the_single_file_route_item_for_item` in `svelte_batch_route_tests.rs`;
+  and `the_bundler_rollup_inline_transform_preserves_requested_source_maps` in
+  `transport_route_equivalence_tests.rs`.
+- `packages/framework-conformance-harness` full `npx vitest --run`: **640/640 across 30 files.**
+- The out-of-process bundler probe, before and after the work:
+  `node packages/unplugin/scripts/probe-bundler-route.mjs` — exit 0, `loaded: true`, `fresh: true`,
+  `erroredCases: []`.
+- Both ledger validator modes — OK, 62 blocks each.
+
+The gate above ran on the tree without this section. After committing it, the three guards a tracked
+document can affect — `tracked_files_contain_no_machine_specific_path_markers`,
+`tracked_paths_are_portable`, and `every_critical_rule_in_docs_has_registered_guard` — were re-run
+directly against the final tree.
+
 ## Proposed ledger transition
 
 The program orchestrator owns `docs/arch/architecture-lock/ledger/program-state.toml`; this record
@@ -586,5 +787,19 @@ fail before it was fixed. What the act explicitly does NOT do is accept this blo
 `maintainer_decision` stays `PENDING`, B2 and B3 stay locked, the four correction blocks are created
 but not accepted, and no production error-on-bad-output path is authorized anywhere.
 
-Three charter exit criteria remain `NOT-EVIDENCED`. Until they are closed, this block is not
-acceptance-recommendable, and this record does not recommend it.
+The three exit criteria the re-attestation returned `NOT-EVIDENCED` no longer stand alike. Their
+current position, criterion by criterion:
+
+| charter item | position now |
+|---|---|
+| procedure 3, and its matching "Required exits" sentence | **SATISFIED.** The runtime axis has its own committed plant driving a wrong-render candidate through the same `compare_mounted_render` helper the live gate uses; the plant is proven applied, the planted module still MOUNTS, and the comparison was proven to go red when the helper is forced to report no divergence. |
+| procedure 4, and its matching "Required exits" sentence | **STILL `NOT-EVIDENCED`, narrowed to one residue.** Four of the five cited bundler aliases are now DRIVEN with route-identity comparisons and negative controls. The fifth, the recompile lane, is PARTIAL: `buildStart` is driven over a real two-file project and both published modules match the in-process host's products, but the recompile WRITE is not attributable — the plugin runs out of process, a recompiled module is byte-identical to the pre-compiled one, and the metrics channel that would count the call needs a `session_metrics`-enabled native build that is not the shipped artifact. That is the named closure condition, and it is not met here. |
+| procedure 6, and its matching "Required exits" sentence | **ESCALATED, and `NOT-EVIDENCED`.** The atomicity regression is now a driven table over every failing-entry class the public API can reach, with class-entry proofs and sixteen proven-applied mutations. The row that GATES the criterion, `AT-2`, is not an evidenced defect on the enumerated evidence, and no track-level actor may amend a ratified row. Under the current ratified bytes the criterion stays open. |
+
+The three recorded residues were worked to three different ends, stated as such: invocation
+attribution is CLOSED; the witness decoy is NARROWED, with the surviving hole measured and named;
+and the all-four-`mod` removal is RAISED TO A BUILD ERROR, with the general execution-attestation
+remainder dispositioned as ledger row **GI-21** rather than claimed closed.
+
+Two charter exit criteria therefore remain `NOT-EVIDENCED`. This block is **NOT
+acceptance-recommended**, and this record does not recommend it.

@@ -59,30 +59,27 @@ use crate::{
     VirtualNodeKind, VirtualQuery,
 };
 
-/// The full path of THIS module's own witness test, as the census names it.
-///
-/// Not merely the module path: the census requires a test with exactly this
-/// path to be present in the binary's own listing, and derives the module it
-/// counts from it. Pointing the constant at another module — even a sibling of
-/// the right shape — therefore names a witness that module does not have. The
-/// census READS this constant rather than repeating the string, so deleting
-/// this module breaks the census's compile.
-pub(crate) const CENSUS_WITNESS_PATH: &str =
-    concat!(module_path!(), "::this_suite_is_registered_with_the_census");
-
-/// The other half of that dependency.
+/// This module's half of a MUTUAL, compile-enforced registration.
 ///
 /// The census lives OUTSIDE this module deliberately — a check placed inside a
 /// suite is deleted by the same edit that empties it. That leaves the reverse
 /// hole: deleting the census too. This test consumes an item the census owns,
-/// so removing EITHER `mod` declaration is a COMPILE error rather than a filter
-/// that silently matches nothing and still exits 0.
+/// and the census in turn NAMES this test as an item, so removing EITHER `mod`
+/// declaration is a COMPILE error rather than a filter that silently matches
+/// nothing and still exits 0.
+///
+/// The identity the census counts by is this function ITEM, not a path this
+/// module writes down: it is passed by reference and the compiler answers with
+/// the definition's own path. A suite therefore cannot nominate a module it does
+/// not live in, and the census requires a test with exactly that path to be
+/// present in the binary's own listing before counting anything under it.
 #[test]
-fn this_suite_is_registered_with_the_census() {
+pub(crate) fn this_suite_is_registered_with_the_census() {
     assert!(
-        super::suite_census::covers(CENSUS_WITNESS_PATH),
-        "{CENSUS_WITNESS_PATH}: the census carries no test for this suite, so this suite's \
-         documented invocation could match nothing and still report success"
+        super::suite_census::covers(&this_suite_is_registered_with_the_census),
+        "{}: the census carries no test for this suite, so this suite's documented invocation \
+         could match nothing and still report success",
+        super::suite_census::witness_identity(&this_suite_is_registered_with_the_census)
     );
 }
 
@@ -162,6 +159,13 @@ fn run_probe(script: &Path) -> (Option<i32>, String, String) {
     let mut child = Command::new("node")
         .arg(script)
         .current_dir(repo_root())
+        // The bundler's non-Vite lanes read `NODE_ENV` to decide production
+        // codegen, and a production profile changes both the emitted module and
+        // the component id it is scoped by. Pinning it here makes the probe's
+        // inputs the test's own rather than the ambient shell's; a run under a
+        // different value would fail the product comparisons rather than pass
+        // quietly, but it would fail for the wrong reason.
+        .env("NODE_ENV", "development")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -206,6 +210,13 @@ fn run_probe(script: &Path) -> (Option<i32>, String, String) {
 /// A transport that could not be loaded FAILS here with the producing build
 /// command, so a missing artifact is an execution prerequisite reported as
 /// such — never a silent skip and never a pass.
+///
+/// A probe that publishes `erroredCases` is declaring which of the lanes it is
+/// REQUIRED to drive failed to reach their subject. That is a failed run, not a
+/// datum, and it fails here for every consumer at once — so no single test can
+/// read a lane that errored as an observation of the thing it names. (Probes
+/// with legitimately-failing cases, like the transports' typed-refusal rows, do
+/// not publish the field.)
 fn probe(transport: &str, script: &str, build_command: &str) -> Value {
     let (code, stdout, stderr) = run_probe(&repo_root().join(script));
     let record: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
@@ -217,6 +228,15 @@ fn probe(transport: &str, script: &str, build_command: &str) -> Value {
          {build_command}",
         record["error"]
     );
+    if let Some(errored) = record["erroredCases"].as_array() {
+        assert!(
+            errored.is_empty(),
+            "{transport}: the probe drove {} required lane(s) into an error, so this record is \
+             not an observation of them: {}\nstderr:\n{stderr}",
+            errored.len(),
+            record["cases"]
+        );
+    }
     assert_eq!(
         code,
         Some(0),
@@ -1667,50 +1687,125 @@ fn the_bundler_public_entries_apply_their_documented_include_contract() {
 /// text lives here, it is executed by this test, and it imports the same built
 /// entry the probe imported.
 ///
-/// It reads SHAPE ONLY and drives nothing, so it stays a few lines rather than
-/// a second copy of the probe. It re-uses the probe's freshness fingerprint
-/// rather than adding a second one: the probe proves that entry fresh, and this
-/// reads the same path.
+/// It re-uses the probe's freshness fingerprint rather than adding a second
+/// one: the probe proves that entry fresh, and this reads the same path.
 ///
 /// ## What it closes, and what remains open
 ///
 /// It closes any forgery that MISSTATES the artifact — an export the probe
-/// omitted or invented, or a value whose reported `typeof` or adapter
-/// callability is not what the module actually holds. Those now have to
-/// disagree with a reading the probe did not produce.
+/// omitted or invented, or a value whose reported `typeof`, adapter
+/// callability, or alias identity is not what the module actually holds. Those
+/// have to disagree with a reading the probe did not produce.
 ///
-/// What remains open is narrower than "these spellings are indistinguishable",
-/// which would be false: `VerterVue` and `unpluginFactory` separate cleanly out
-/// of process, and this suite already relies on it — object vs function, a
-/// callable `.vite` vs none, and the flattened `configResolved` /
-/// `handleHotUpdate` that only the `createUnplugin` wrapper carries.
+/// It also closes INVOCATION ATTRIBUTION, which used to be the named residue.
+/// The problem was that nothing required a driven export to have been APPLIED:
+/// a probe could print an export's TRUE readings — evidence, plugin keys,
+/// carriers — while sourcing the drive results from its sibling, and every
+/// check was satisfied because each individual statement was true of the real
+/// value. So this observation no longer reads shape only. Per enumerated
+/// export it wraps the callable it is about to invoke — an unplugin object's
+/// `.vite`, or a raw factory itself — in an apply-counting `Proxy`, invokes it
+/// exactly as the probe does, and records both the apply count and the plugin
+/// object THAT drive returned. A spelling this test classifies as executed must
+/// then carry a non-zero apply count HERE, and the probe's `pluginKeys` must
+/// equal the ones this test's own drive produced. The executed class is
+/// therefore witnessed by an apply this test performed, and the probe's drive
+/// result is compared against a drive result it did not produce.
 ///
-/// The open residue is INVOCATION ATTRIBUTION: nothing here requires a driven
-/// export to have actually been APPLIED. A probe can print an export's TRUE
-/// readings — evidence, plugin keys, carriers — while having sourced the drive
-/// results from its sibling, and every check above is satisfied because each
-/// individual statement is true of the real value. Invocation is observable
-/// from outside this process too: wrapping the built entry's bindings at import
-/// (a module hook / `--import` wrapper installing an apply-counting `Proxy`)
-/// attributes an apply to a spelling without any in-process driving. Requiring
-/// a non-zero apply count per driven export is the named closure; it is not
-/// built here, and it is recorded in the evidence index rather than implied.
+/// The other half of the spelling discriminator — which carriers a value
+/// ACCEPTS — is taken over the same way: the observation asks each driven
+/// plugin's own `transformInclude` about both carriers (a decision that needs
+/// no host) and the probe's answers must match. So every component of the
+/// `(kind, accepts_vue, accepts_svelte)` triple the contract rows are matched
+/// on is now something this test measured.
+///
+/// What remains is narrower than "these spellings are indistinguishable", which
+/// would be false: `VerterVue` and `unpluginFactory` separate cleanly out of
+/// process — object vs function, a callable `.vite` vs none, and the flattened
+/// `configResolved` / `handleHotUpdate` that only the `createUnplugin` wrapper
+/// carries. The residue is that this observation drives the FACTORY and the
+/// include decision only, never a carrier transform, so the per-carrier
+/// PRODUCT bytes in the probe's record remain the probe's word — judged, where
+/// it matters, by the host parity comparisons and the wrapped-factory product
+/// equality this suite asserts separately.
 const BUNDLER_OBSERVER_SCRIPT: &str = r#"
 const { pathToFileURL } = await import("node:url");
 const entry = process.env.VERTER_OBSERVED_ENTRY;
 if (!entry) throw new Error("no observed entry was supplied");
 const observed = await import(pathToFileURL(entry).href);
 const names = Object.keys(observed).sort();
+const viteConfig = { root: process.cwd(), command: "serve", build: { ssr: false } };
 const observations = {};
 for (const name of names) {
   const value = observed[name];
-  observations[name] = {
+  const record = {
     valueType: typeof value,
     viteIsCallable: typeof value?.vite === "function",
     rollupIsCallable: typeof value?.rollup === "function",
+    aliasOf:
+      names
+        .slice(0, names.indexOf(name))
+        .find((earlier) => observed[earlier] === value) ?? null,
+    applyCount: 0,
+    pluginKeys: null,
+    carrierIncludes: null,
+    driveError: null,
   };
+  observations[name] = record;
+  // An alias is the same object as a spelling already driven; driving it twice
+  // would attribute a second apply to a value that was invoked once.
+  if (record.aliasOf !== null) continue;
+
+  // WHICH callable is applied follows from the value, exactly as it does in
+  // the probe: an unplugin object exposes a `.vite` factory, a raw unplugin
+  // factory is itself the callable and takes the consumer's bundler meta.
+  let target = null;
+  let self;
+  let args;
+  if (value !== null && typeof value === "object" && typeof value.vite === "function") {
+    target = value.vite;
+    self = value;
+    args = [{}];
+  } else if (typeof value === "function") {
+    target = value;
+    self = undefined;
+    args = [{}, { framework: "vite" }];
+  }
+  if (target === null) continue;
+
+  const counted = new Proxy(target, {
+    apply(fn, thisArg, applied) {
+      record.applyCount += 1;
+      return Reflect.apply(fn, thisArg, applied);
+    },
+  });
+  try {
+    const plugin = Reflect.apply(counted, self, args);
+    if (typeof plugin?.configResolved === "function") {
+      await plugin.configResolved(viteConfig);
+    } else if (typeof plugin?.vite?.configResolved === "function") {
+      await plugin.vite.configResolved.call({}, viteConfig);
+    }
+    record.pluginKeys = Object.keys(plugin).sort();
+    // The include decision needs no host, so asking it here costs nothing and
+    // takes the other half of the spelling discriminator off the probe's word.
+    record.carrierIncludes = {
+      vue: plugin.transformInclude.call({}, "/probe/Plug.vue"),
+      svelte: plugin.transformInclude.call({}, "/probe/Plug.svelte"),
+    };
+    if (typeof plugin?.closeBundle === "function") await plugin.closeBundle.call({});
+  } catch (error) {
+    record.driveError = String(error?.message ?? error);
+  }
 }
-process.stdout.write(JSON.stringify({ exports: names, observations }));
+process.stdout.write(
+  JSON.stringify({
+    exports: names,
+    // The `default` alias, evaluated HERE rather than taken from the probe.
+    defaultIsVerterVue: observed.default === observed.VerterVue,
+    observations,
+  }),
+);
 "#;
 
 /// Run [`BUNDLER_OBSERVER_SCRIPT`] against the built entry.
@@ -1749,8 +1844,9 @@ fn observe_bundler_entry() -> Value {
 }
 
 /// Whether the probe's recorded evidence says this export exposes a callable
-/// `vite` — derived here, so it is comparable with the observation.
-fn probe_says_vite_callable(case: &Value) -> bool {
+/// adapter under `key` — derived here, so it is comparable with the
+/// observation's own reading of the same value.
+fn probe_says_adapter_callable(case: &Value, key: &str) -> bool {
     let evidence = &case["evidence"];
     if evidence["valueType"].as_str() != Some("object") {
         return false;
@@ -1763,7 +1859,7 @@ fn probe_says_vite_callable(case: &Value) -> bool {
     };
     keys.iter()
         .zip(types)
-        .any(|(key, kind)| key == "vite" && kind == "function")
+        .any(|(name, kind)| name == key && kind == "function")
 }
 
 /// The probe's record and the test-owned observation must describe the same
@@ -1787,6 +1883,13 @@ fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
          same built entry"
     );
 
+    // The `default` alias, read by this test rather than taken from the record.
+    assert_eq!(
+        record["defaultIsVerterVue"], observed["defaultIsVerterVue"],
+        "bundler: the probe and this test's own reading disagree on whether `default` and \
+         `VerterVue` are the same object"
+    );
+
     for name in record["exports"]
         .as_array()
         .expect("the export list is an array")
@@ -1801,12 +1904,71 @@ fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
              entry",
             case["evidence"]["valueType"], seen["valueType"]
         );
+        for adapter in ["vite", "rollup"] {
+            assert_eq!(
+                Value::Bool(probe_says_adapter_callable(case, adapter)),
+                seen[format!("{adapter}IsCallable")],
+                "bundler/{name}: the probe's evidence and this test's own reading disagree on \
+                 whether the value exposes a callable {adapter} adapter: {case}"
+            );
+        }
         assert_eq!(
-            Value::Bool(probe_says_vite_callable(case)),
-            seen["viteIsCallable"],
-            "bundler/{name}: the probe's evidence and this test's own reading disagree on whether \
-             the value exposes a callable vite adapter: {case}"
+            case["aliasOf"], seen["aliasOf"],
+            "bundler/{name}: the probe's measured alias identity disagrees with this test's own \
+             reading of the same module: {case}"
         );
+
+        // ── INVOCATION ATTRIBUTION ──────────────────────────────────────────
+        //
+        // Everything above is a statement ABOUT the value, and a probe can
+        // print an export's true readings while sourcing its DRIVE results
+        // from a sibling: each individual statement stays true of the real
+        // value. So the executed class is witnessed by an apply THIS TEST
+        // performed, through the same observation script, and the probe's
+        // drive result is compared against one it did not produce.
+        if !derived_kind(name, case).is_executed() {
+            continue;
+        }
+        assert_eq!(
+            seen["driveError"],
+            Value::Null,
+            "bundler/{name}: this test classifies the spelling as executed, but this test's own \
+             invocation of it failed ({}), so the probe's claim that it drove this export cannot \
+             be corroborated",
+            seen["driveError"]
+        );
+        let applied = seen["applyCount"].as_u64().unwrap_or_else(|| {
+            panic!(
+                "bundler/{name}: this test's own observation recorded no apply count for a \
+                 spelling it classifies as executed: {seen}"
+            )
+        });
+        assert!(
+            applied >= 1,
+            "bundler/{name}: this test classifies the spelling as executed, but this test's own \
+             apply-counting invocation of it ran {applied} time(s) — the `executed` class would \
+             then rest on the probe's claim alone: {seen}"
+        );
+        assert_eq!(
+            case["pluginKeys"], seen["pluginKeys"],
+            "bundler/{name}: the plugin the PROBE reports driving is not the plugin this test's \
+             own invocation of the same spelling returned, so the probe's drive result was not \
+             produced by applying this export: probe={} observed={}",
+            case["pluginKeys"], seen["pluginKeys"]
+        );
+        for carrier in ["vue", "svelte"] {
+            assert!(
+                seen["carrierIncludes"][carrier].is_boolean(),
+                "bundler/{name}: this test's own drive recorded no {carrier} include decision, so \
+                 the contract row's `accepts_{carrier}` column would rest on the probe alone: \
+                 {seen}"
+            );
+            assert_eq!(
+                case["carriers"][carrier]["transformInclude"], seen["carrierIncludes"][carrier],
+                "bundler/{name}: the {carrier} include decision the probe reports differs from \
+                 the one this test's own invocation of the same spelling produced: {case}"
+            );
+        }
     }
 }
 
@@ -1822,12 +1984,12 @@ fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
 ///
 /// It proves the recorded evidence is VALUE-DERIVED and internally consistent
 /// with the driving results and with each spelling's documented contract, so a
-/// case copied from a sibling contradicts the row it is filed under. It does
-/// NOT prove the probe READ HONESTLY: a probe can print any `typeof` it likes.
-/// That is the trust floor of every out-of-process probe — the artifact is
-/// examined by a program, and a program that lies about what it saw cannot be
-/// caught by reading what it printed. Closing it needs the observation moved
-/// in-process, not a further assertion here.
+/// case copied from a sibling contradicts the row it is filed under. On its own
+/// it does NOT prove the probe READ HONESTLY: a probe can print any `typeof` it
+/// likes. What answers that is not a further assertion over the record but a
+/// SECOND reading — [`assert_probe_agrees_with_the_test_owned_observation`],
+/// whose script lives in this file, is executed by this test, and both READS
+/// and APPLIES each export itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DerivedKind {
     /// A `createUnplugin` result: an object exposing a callable `.vite`.
@@ -2102,7 +2264,10 @@ fn every_exported_bundler_spelling_is_executed_or_classified_out_of_scope() {
         );
     }
 
-    // The historically documented alias, still measured rather than claimed.
+    // The historically documented alias, still measured rather than claimed —
+    // and the measurement is now cross-checked against this test's own reading
+    // of the same module by
+    // [`assert_probe_agrees_with_the_test_owned_observation`] above.
     assert_eq!(
         record["defaultIsVerterVue"], true,
         "bundler: the `default` export is no longer the `VerterVue` object: {record}"
@@ -2417,7 +2582,7 @@ fn the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_mo
 /// shape: it publishes a `?verter&type=script` wrapper whose loaded script
 /// already carries the host map, like the green Vite route above.
 #[test]
-#[ignore = "BF3-BND-2-SOURCEMAP-PARITY: Rollup inline transform currently drops the host map"]
+#[ignore = "Rollup inline source-map parity: Rollup inline transform currently drops the host map"]
 fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
     let record = probe(
         "bundler",
@@ -2554,4 +2719,694 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
         "VerterVue.rollup: the public non-Vite inline product does not carry the map the host \
          published for the same requested profile"
     );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// The bundler route's remaining product lanes
+//
+// The lanes below are reached through the SAME built entry the tests above
+// drive, but through hooks the wrapper/virtual-script pair never touches: the
+// style artifacts a wrapper points at, a virtual request no transform cached,
+// the render-only batch lane the carrier transform publishes from, the non-Vite
+// CSS scoping pass, and the pre-compile pass `buildStart` owns.
+//
+// Each is an ALIAS of a host route already proven live in the product/route
+// inventory, so what is asked of it is route identity plus publication — the
+// bundler's product must BE the in-process host's product for the same typed
+// request — not a new semantic case.
+// ══════════════════════════════════════════════════════════════════════════
+
+/// The lexical repository root, matching how the probe derives its own.
+///
+/// [`repo_root`] keeps `..` segments (it is only ever joined onto), which
+/// cannot be string-compared against the probe's already-normalized answer.
+fn repo_root_lexical() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("this crate sits two directories below the repository root")
+        .to_path_buf()
+}
+
+/// The eight-hex-digit component id the bundler derives, restated here.
+///
+/// `generateComponentId` (`packages/unplugin/src/core/compiler.ts`) hashes the
+/// root-relative carrier path — plus the source, in a production profile — and
+/// keeps the first eight hex digits of the SHA-256. It is restated rather than
+/// read back out of the probe record on purpose: a component id taken from the
+/// record makes every assertion resting on it an assertion about whatever id
+/// the record chose.
+fn bundler_component_id(hashed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(hashed.as_bytes())
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The profile `VerterVue.vite({})` builds under the probe's resolved config.
+///
+/// `command: "serve"` with no SSR makes it a DEV profile, which is what selects
+/// the Vite HMR strategy and the path-only component id; a resolved Vite config
+/// whose framework is Vite is also what leaves TS stripping to `vite:esbuild`
+/// rather than to the host.
+fn bundler_vue_vite_profile(carrier_id: &str) -> CompileProfile {
+    CompileProfile {
+        filename: Some(carrier_id.to_string()),
+        is_production: false,
+        custom_element: false,
+        ssr: false,
+        hmr_strategy: crate::types::HmrStrategy::Vite,
+        component_id: Some(bundler_component_id(carrier_id)),
+        source_map: true,
+        force_js: false,
+        ..CompileProfile::default()
+    }
+}
+
+/// The profile `VerterSvelte.vite({})` builds under the same resolved config.
+///
+/// The Svelte lane pins HMR off (native Svelte HMR codegen is fail-closed) and
+/// forces JS regardless of the bundler, so this is NOT the Vue profile with a
+/// different carrier.
+fn bundler_svelte_vite_profile(carrier_id: &str) -> CompileProfile {
+    CompileProfile {
+        filename: Some(carrier_id.to_string()),
+        is_production: false,
+        custom_element: false,
+        ssr: false,
+        hmr_strategy: crate::types::HmrStrategy::None,
+        component_id: Some(bundler_component_id(carrier_id)),
+        source_map: true,
+        force_js: true,
+        ..CompileProfile::default()
+    }
+}
+
+/// The profile `VerterVue.rollup({})` builds: no resolved Vite config, so no
+/// HMR strategy, no root to relativize against, and TS stripping owned by the
+/// host because a non-Vite consumer has no `vite:esbuild` to hand it to.
+fn bundler_vue_rollup_profile(carrier_id: &str) -> CompileProfile {
+    CompileProfile {
+        filename: Some(carrier_id.to_string()),
+        is_production: false,
+        custom_element: false,
+        ssr: false,
+        hmr_strategy: crate::types::HmrStrategy::None,
+        component_id: Some(bundler_component_id(carrier_id)),
+        source_map: true,
+        force_js: true,
+        ..CompileProfile::default()
+    }
+}
+
+/// The same profile as [`bundler_vue_rollup_profile`], in the shape the
+/// render-only batch lane requires — field for field, so both routes are asked
+/// the identical typed question.
+fn bundler_vue_rollup_render_profile(
+    carrier_id: &str,
+) -> crate::host_compile::CompileBatchRenderProfile {
+    crate::host_compile::CompileBatchRenderProfile {
+        filename: Some(carrier_id.to_string()),
+        is_production: false,
+        custom_element: false,
+        ssr: false,
+        force_js: true,
+        force_vapor: false,
+        source_map: true,
+        comments: None,
+        hmr_strategy: crate::types::HmrStrategy::None,
+        runtime_module_name: None,
+        types_module_name: None,
+        delimiters: None,
+        custom_elements: None,
+        ssr_module_id: None,
+    }
+}
+
+/// Assert a bundler-published product IS the host route's product.
+///
+/// Both halves are required. The bytes alone leave the map unchecked, and a
+/// map PRESENCE flag is satisfied by any map at all — including one published
+/// for a different compilation — so the map is compared as a whole artifact,
+/// the same way the virtual-script parity comparisons above do it.
+#[track_caller]
+fn assert_published_product_matches_host(label: &str, case: &Value, expected: &HostOutcome) {
+    let HostOutcome::Published {
+        code, source_map, ..
+    } = expected
+    else {
+        panic!("{label}: the host route publishes no product here, so there is nothing for the bundler route to match: {expected:?}");
+    };
+    assert_eq!(
+        case["outcome"], "published",
+        "{label}: the host route published a product but the bundler route returned {case}"
+    );
+    assert_eq!(
+        case["code"].as_str(),
+        Some(code.as_str()),
+        "{label}: the bundler route's published bytes differ from the host route's"
+    );
+    match source_map {
+        Some(_) => assert_eq!(
+            normalized_source_map(label, &case["map"]),
+            host_normalized_source_map(label, expected),
+            "{label}: the bundler route published a different map than the host published for the \
+             same requested profile"
+        ),
+        None => assert_no_source_map_artifact(label, &case["map"]),
+    }
+}
+
+/// The virtual request this suite asks the load lane about, and the carrier it
+/// asks the same question about without ever having transformed it.
+const PROBE_VUE_TEMPLATE_REQUEST: &str = "/probe/Plug.vue?vue&type=template";
+const PROBE_UNREGISTERED_TEMPLATE_REQUEST: &str = "/probe/NotRegistered.vue?vue&type=template";
+/// The scoped, preprocessed style request the non-Vite lane is asked about.
+const PROBE_VUE_SCOPED_STYLE_REQUEST: &str =
+    "/probe/Plug.vue?vue&type=style&index=0&scoped&lang.scss";
+/// The same bytes the probe hands that lane.
+const NON_VITE_STYLE_SOURCE: &str = ".box { color: v-bind(primary); }\n";
+/// The pre-compile fixture's sources, byte for byte.
+const RECOMPILE_CHILD_VUE: &str =
+    "<script setup>\ndefineProps({ msg: String })\n</script>\n\n<template><div>{{ msg }}</div></template>\n";
+const RECOMPILE_PARENT_VUE: &str =
+    "<script setup>\nimport Child from \"./Child.vue\"\n</script>\n\n<template><Child msg=\"hello\" /></template>\n";
+
+/// The STYLE lane: the wrapper's style sub-requests, loaded, against the host's
+/// own style nodes — and NONE published for a carrier with no `<style>`.
+///
+/// The two halves are one measurement. The count rests on the negative control:
+/// the Vue carrier this suite drives carries no `<style>` block, so its wrapper
+/// must publish zero style requests. Without that, "exactly one style request"
+/// is satisfied by a plugin that emits one unconditionally, and the index and
+/// language below would describe a request nobody asked for.
+///
+/// The count and index are also the only externally visible consequence of the
+/// inventory listing the lane performs before it reads anything: the artifacts
+/// are keyed by the style node indices the host reported, sorted.
+#[test]
+fn the_bundler_style_lane_publishes_the_hosts_style_products_and_none_without_a_style_block() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let vue = &record["cases"]["vuePublicEntry"];
+    let svelte = &record["cases"]["sveltePublicEntry"];
+    assert_bundler_case_carriers(vue, PROBE_VUE_ID, PROBE_SVELTE_ID);
+    assert_bundler_case_carriers(svelte, PROBE_SVELTE_ID, PROBE_VUE_ID);
+
+    // NEGATIVE CONTROL, stated first because the positive count rests on it.
+    let vue_styles = vue["loadedStyles"].as_array().unwrap_or_else(|| {
+        panic!("bundler/vue: the case records no loaded style list at all: {vue}")
+    });
+    assert!(
+        vue_styles.is_empty(),
+        "bundler/vue: the Vue carrier this suite drives has no `<style>` block, but its wrapper \
+         published {} style request(s) — so a style-request count proves nothing about a carrier \
+         that does have one: {:?}",
+        vue_styles.len(),
+        vue["styleRequests"]
+    );
+
+    let styles = svelte["loadedStyles"].as_array().unwrap_or_else(|| {
+        panic!("bundler/svelte: the case records no loaded style list at all: {svelte}")
+    });
+    assert_eq!(
+        styles.len(),
+        1,
+        "bundler/svelte: the Svelte carrier carries exactly one `<style>` block, so its wrapper \
+         must publish exactly one style request: {:?}",
+        svelte["styleRequests"]
+    );
+    let style = &styles[0];
+    assert_eq!(
+        style["index"],
+        Value::from(0),
+        "bundler/svelte: the published style request does not name the first authored style \
+         element: {style}"
+    );
+    assert_eq!(
+        style["lang"].as_str(),
+        Some("css"),
+        "bundler/svelte: the published style request names a different output language: {style}"
+    );
+
+    // ROUTE IDENTITY: the loaded artifact is the host's own `Style{0}` node for
+    // the profile this entry builds.
+    let host = host_with(
+        PROBE_SVELTE_ID,
+        SUPPORTED_SVELTE,
+        verter_language::FileLanguage::svelte(),
+    );
+    let expected = host_node(
+        &host,
+        PROBE_SVELTE_ID,
+        VirtualNodeKind::Style { index: 0 },
+        &bundler_svelte_vite_profile(PROBE_SVELTE_ID),
+    );
+    assert_case_matches_host("bundler", "svelteStyleLane", style, &expected);
+    assert_published_product_matches_host(
+        "VerterSvelte.vite: the loaded style product",
+        style,
+        &expected,
+    );
+
+    // PUBLICATION: the product is a COMPILED style, not the authored bytes. The
+    // parity comparison above would also hold if the host had started echoing
+    // its input, so the scoped form is asserted directly.
+    let published = style["code"].as_str().unwrap_or_default();
+    assert!(
+        published.contains(".root.svelte-"),
+        "bundler/svelte: the loaded style product carries no scoped class, so it is not the \
+         compiled style surface: {published:?}"
+    );
+    assert!(
+        !published.contains(".root {"),
+        "bundler/svelte: the loaded style product still carries the AUTHORED selector, so the \
+         scoping pass did not reach it: {published:?}"
+    );
+}
+
+/// The LOAD lane: a virtual request no transform cached, served from the host.
+///
+/// Every request the wrapper points at is answered out of a cache the carrier
+/// transform filled. This one is not: a `?vue&type=template` request is never
+/// cached, so answering it at all means the lane fell through to the host. The
+/// negative control is the same request for a carrier this plugin never
+/// transformed, which must publish nothing.
+#[test]
+fn the_bundler_load_lane_serves_the_hosts_node_and_nothing_for_an_unregistered_carrier() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let vue = &record["cases"]["vuePublicEntry"];
+    assert_bundler_case_carriers(vue, PROBE_VUE_ID, PROBE_SVELTE_ID);
+
+    let loaded = &vue["loadedTemplate"];
+    // WHICH request this test is about is fixed here, never read off the record.
+    assert_eq!(
+        loaded["request"].as_str(),
+        Some(PROBE_VUE_TEMPLATE_REQUEST),
+        "the case this test reads as the template request drove something else: {loaded}"
+    );
+
+    // NEGATIVE CONTROL: same lane, same shape of request, carrier never
+    // registered. A lane that answered this one would be answering from
+    // somewhere other than the host's inventory.
+    let unregistered = &vue["unregisteredTemplate"];
+    assert_eq!(
+        unregistered["request"].as_str(),
+        Some(PROBE_UNREGISTERED_TEMPLATE_REQUEST),
+        "the negative control drove something other than the unregistered carrier: {unregistered}"
+    );
+    assert_eq!(
+        unregistered["outcome"], "missing",
+        "the load lane published a product for a carrier it never transformed: {unregistered}"
+    );
+    assert_eq!(
+        unregistered["code"],
+        Value::Null,
+        "the load lane published code for a carrier it never transformed: {unregistered}"
+    );
+
+    // ROUTE IDENTITY: the published product is the host's own `Template` node.
+    let host = host_with(PROBE_VUE_ID, VUE_SFC, verter_language::FileLanguage::vue());
+    let expected = host_node(
+        &host,
+        PROBE_VUE_ID,
+        VirtualNodeKind::Template,
+        &bundler_vue_vite_profile(PROBE_VUE_ID),
+    );
+    assert_published_product_matches_host(
+        "VerterVue.vite: the loaded template product",
+        loaded,
+        &expected,
+    );
+    assert!(
+        loaded["code"]
+            .as_str()
+            .is_some_and(|code| code.contains("function render(")),
+        "VerterVue.vite: the loaded template product is not a render function: {loaded}"
+    );
+}
+
+/// The RUNTIME-RENDER BATCH lane: the non-Vite inline product, against the
+/// host's own render-only batch answer.
+///
+/// A non-Vite consumer has no script sub-request to point at, so the carrier
+/// transform returns the rendered module INLINE. That module comes from
+/// `compile_many` on the render-only lane, and this compares it against exactly
+/// that call for the same canonical and an equivalent profile.
+///
+/// ## What the identity proves, and what it does not
+///
+/// The render-only lane is documented to produce the SAME `Main` bytes as the
+/// host-backed lane through the same shared substrate, and this test MEASURES
+/// that rather than assuming it. The consequence, stated plainly: byte identity
+/// with the render lane does not by itself discriminate WHICH of the two host
+/// lanes produced the bundler's bytes, because on this input both publish the
+/// same bytes. What it does prove is that the bundler publishes the host's
+/// runtime-render product rather than something of its own — and if the two
+/// host lanes ever diverge, the measurement below fails and this test becomes
+/// able to tell them apart.
+#[test]
+fn the_bundler_inline_transform_publishes_the_hosts_runtime_render_batch_product() {
+    use crate::host_compile::{CompileBatchOptions, CompileManyTarget};
+
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let vue = &record["cases"]["vueRollupEntry"];
+    assert_eq!(
+        vue["publicFactory"], "VerterVue.rollup",
+        "the probe did not execute the public Vue Rollup entry: {vue}"
+    );
+    assert_eq!(
+        vue["id"].as_str(),
+        Some(PROBE_VUE_ID),
+        "the case this test reads as the Vue carrier drove something else: {vue}"
+    );
+    assert_eq!(
+        vue["transformInclude"], true,
+        "VerterVue.rollup rejected its documented `.vue` carrier: {vue}"
+    );
+    assert_eq!(
+        vue["publicTransformIsInline"], true,
+        "VerterVue.rollup no longer returned the non-Vite inline product: {vue}"
+    );
+    let published = vue["publicTransformCode"].as_str().unwrap_or_else(|| {
+        panic!("VerterVue.rollup: the case records no published inline product: {vue}")
+    });
+    assert!(
+        !published.is_empty(),
+        "VerterVue.rollup: the published inline product is empty, so the comparison below is \
+         vacuous: {vue}"
+    );
+
+    let host = host_with(PROBE_VUE_ID, VUE_SFC, verter_language::FileLanguage::vue());
+    let entries = host.compile_many(
+        vec![crate::host_compile::CompileBatchInput {
+            canonical_id: PROBE_VUE_ID.to_string(),
+            source: Arc::from(VUE_SFC),
+            requested_mode: None,
+            component_id: Some(bundler_component_id(PROBE_VUE_ID)),
+        }],
+        CompileBatchOptions::default(),
+        CompileManyTarget::RuntimeRender {
+            profile: bundler_vue_rollup_render_profile(PROBE_VUE_ID),
+        },
+    );
+    assert_eq!(
+        entries.len(),
+        1,
+        "the render-only batch lane returned {} entries for one input",
+        entries.len()
+    );
+    let entry = &entries[0];
+    assert!(
+        entry.errors.is_empty(),
+        "the render-only batch lane failed for this input: {:?}",
+        entry.errors
+    );
+    assert_eq!(
+        published,
+        entry.code.as_ref(),
+        "VerterVue.rollup: the published inline product is not the host's render-only batch \
+         product for the same canonical and profile"
+    );
+
+    // The measurement the paragraph above rests on, made rather than assumed.
+    let host_backed = host_node(
+        &host,
+        PROBE_VUE_ID,
+        VirtualNodeKind::Main,
+        &bundler_vue_rollup_profile(PROBE_VUE_ID),
+    );
+    let HostOutcome::Published {
+        code: main_code, ..
+    } = &host_backed
+    else {
+        panic!("the host-backed `Main` route no longer publishes this module: {host_backed:?}");
+    };
+    assert_eq!(
+        main_code.as_str(),
+        entry.code.as_ref(),
+        "the render-only batch lane and the host-backed `Main` route no longer publish the same \
+         bytes for this profile. That identity is exactly what stops the comparison above from \
+         telling the two host lanes apart — if they have diverged, re-measure this test, which can \
+         now discriminate between them."
+    );
+}
+
+/// The NON-VITE CSS SCOPING lane, and the shared CSS processor beneath it.
+///
+/// Two things make this attributable rather than merely non-crashing. The
+/// request carries `&scoped`, because an unscoped request is returned
+/// byte-for-byte and would be indistinguishable from a lane that never ran; and
+/// the CSS carries a `v-bind()` payload, whose rewrite names the component id
+/// of the cached profile the lane read — so the product identifies WHICH
+/// carrier's profile produced it, not merely that scoping happened.
+///
+/// The negative control is the same request for a carrier this plugin never
+/// transformed: with no cached profile the lane returns its input untouched.
+#[test]
+fn the_non_vite_style_lane_scopes_through_the_shared_css_processor() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let case = &record["cases"]["vueRollupStyleScoping"];
+    assert_eq!(
+        case["outcome"], "transformed",
+        "the non-Vite style lane did not run: {case}"
+    );
+    assert_eq!(
+        case["publicFactory"], "VerterVue.rollup",
+        "the probe did not drive the public Vue Rollup entry: {case}"
+    );
+    assert_eq!(
+        case["id"].as_str(),
+        Some(PROBE_VUE_ID),
+        "the carrier whose profile this lane read is not the one this test asked about: {case}"
+    );
+    assert_eq!(
+        case["styleId"].as_str(),
+        Some(PROBE_VUE_SCOPED_STYLE_REQUEST),
+        "the style request this lane answered is not the one this test asked about: {case}"
+    );
+    assert_eq!(
+        case["styleSource"].as_str(),
+        Some(NON_VITE_STYLE_SOURCE),
+        "the bytes handed to this lane are not the bytes this test states its expectation against: \
+         {case}"
+    );
+    // The include contract for this lane: a NON-`css` lang is what selects it
+    // on a plugin with no resolved Vite config.
+    assert_eq!(
+        case["styleTransformInclude"], true,
+        "the non-Vite entry refused the preprocessed scoped style request it owns: {case}"
+    );
+
+    let component_id = bundler_component_id(PROBE_VUE_ID);
+    let scoped = case["scopedCode"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the non-Vite style lane published no CSS at all: {case}"));
+    assert!(
+        scoped.contains(&format!("[data-v-{component_id}]")),
+        "the non-Vite style lane published CSS with no `[data-v-{component_id}]` scoping \
+         attribute, so it did not scope to the carrier whose profile it read: {scoped:?}"
+    );
+    assert!(
+        scoped.contains(&format!("var(--{component_id}-primary)")),
+        "the non-Vite style lane did not rewrite the `v-bind()` payload against \
+         `{component_id}`, so the product cannot be attributed to this carrier's cached profile: \
+         {scoped:?}"
+    );
+    assert_eq!(
+        case["scopedMap"],
+        Value::Null,
+        "the non-Vite style lane published a source map where it publishes none: {case}"
+    );
+
+    // NEGATIVE CONTROL: no cached profile, no transform.
+    assert_eq!(
+        case["unregisteredCode"].as_str(),
+        Some(NON_VITE_STYLE_SOURCE),
+        "the non-Vite style lane transformed CSS for a carrier it never transformed, so a scoped \
+         product proves nothing about which profile the lane consulted: {case}"
+    );
+
+    // ROUTE IDENTITY: the same shared CSS processor the free-function transport
+    // spelling calls, on the same input and scope id.
+    let processed = verter_compiler::css::process_style(
+        NON_VITE_STYLE_SOURCE,
+        &verter_compiler::css::ProcessStyleOptions {
+            scope_id: &component_id,
+            scoped: true,
+            is_module: false,
+            module_name: None,
+            filename: None,
+            sourcemap: false,
+        },
+    )
+    .expect("the shared CSS processor accepts this input");
+    assert_eq!(
+        scoped,
+        processed.code.as_ref(),
+        "the non-Vite style lane's product is not the shared CSS processor's product for the same \
+         bytes and scope id"
+    );
+}
+
+/// The PRE-COMPILE lane, driven over a real project on disk.
+///
+/// `buildStart` is its only entry, and it needs files: the probe writes a
+/// parent passing a LITERAL prop to a child — the shape the cross-file pass
+/// records constness for — configures a production build, and runs the hook.
+/// What it published is read back through the plugin's own load hook and
+/// compared against the host's `Main` node for the same profile.
+///
+/// ## What this proves, and what it cannot
+///
+/// It proves exactly two things: `buildStart` completed over a real two-file
+/// project on disk, and both modules it published are byte-identical to the
+/// in-process host's products for the same profile.
+///
+/// It does NOT attribute the RECOMPILE write inside the cross-file block, and
+/// makes no claim about that block at all — not that it was entered, and not
+/// that it iterated. Three reasons, all structural rather than incidental: the
+/// cross-file result never reaches codegen (the runtime compile path passes no
+/// constness overrides), so a recompiled module is byte-identical to the
+/// pre-compiled one; the plugin ran OUT OF PROCESS, so nothing this test can
+/// observe in-process is evidence about the plugin's own host; and the metrics
+/// channel that would count the call is `session_metrics`, a non-default build
+/// feature absent from the shipped native artifact the probe loads.
+///
+/// The CLOSURE CONDITION is therefore named rather than open-ended: attributing
+/// the recompile call needs the host metrics channel, which needs a
+/// `session_metrics`-enabled native build. That build is not the shipped
+/// artifact and is not produced here, so the attribution stays out of reach for
+/// this test as it stands.
+#[test]
+fn the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project() {
+    let record = probe(
+        "bundler",
+        "packages/unplugin/scripts/probe-bundler-route.mjs",
+        BUNDLER_BUILD,
+    );
+    let case = &record["cases"]["vueRecompileLane"];
+    assert_eq!(
+        case["outcome"], "buildStarted",
+        "the pre-compile lane did not complete: {case}"
+    );
+
+    // The fixture is pinned to this test's own expectation: without it the
+    // products below are about whatever project the probe happened to build.
+    //
+    // The LEAF is allocated per invocation, so that suffix cannot be pinned —
+    // concurrent probes would otherwise share one directory and delete each
+    // other's files. What IS pinned is everything that makes the fixture this
+    // test's: the stable parent inside this repository, the leaf's prefix, and
+    // that it is a single directory level (so the reported root cannot wander
+    // off into some other project below it). The sources are pinned outright
+    // below, which is what ties the products to this test's expectation.
+    let fixture_parent = repo_root_lexical().join(".verter-probe-fixtures");
+    let fixture_parent = fixture_parent.to_string_lossy().replace('\\', "/");
+    let fixture_root = case["fixtureRoot"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the pre-compile lane reported no fixture root: {case}"))
+        .to_string();
+    let leaf = fixture_root
+        .strip_prefix(&format!("{fixture_parent}/"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the pre-compile lane was driven outside this test's fixture parent \
+                 (`{fixture_parent}`): {case}"
+            )
+        });
+    assert!(
+        leaf.starts_with("recompile-") && !leaf.contains('/'),
+        "the pre-compile lane's fixture root is not one per-invocation directory under this \
+         test's fixture parent: {case}"
+    );
+    let parent_id = format!("{fixture_root}/Parent.vue");
+    let child_id = format!("{fixture_root}/Child.vue");
+    assert_eq!(case["parentId"].as_str(), Some(parent_id.as_str()));
+    assert_eq!(case["childId"].as_str(), Some(child_id.as_str()));
+    assert_eq!(
+        case["parentSource"].as_str(),
+        Some(RECOMPILE_PARENT_VUE),
+        "the fixture's parent is not the source this test states its expectation against: {case}"
+    );
+    assert_eq!(
+        case["childSource"].as_str(),
+        Some(RECOMPILE_CHILD_VUE),
+        "the fixture's child is not the source this test states its expectation against: {case}"
+    );
+
+    // ROUTE IDENTITY, per file: what `buildStart` published is the host's own
+    // `Main` node for the production profile this lane builds. A `buildStart`
+    // that returned early publishes nothing here at all.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    for (id, source) in [
+        (&child_id, RECOMPILE_CHILD_VUE),
+        (&parent_id, RECOMPILE_PARENT_VUE),
+    ] {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(id.clone()),
+                input_id: id.clone(),
+                source: Arc::from(source),
+                file_language: verter_language::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|error| panic!("upsert {id}: {error:?}"));
+    }
+    for (label, key, id, source, relative) in [
+        (
+            "Parent",
+            "parentScript",
+            &parent_id,
+            RECOMPILE_PARENT_VUE,
+            "Parent.vue",
+        ),
+        (
+            "Child",
+            "childScript",
+            &child_id,
+            RECOMPILE_CHILD_VUE,
+            "Child.vue",
+        ),
+    ] {
+        // A production profile hashes the ROOT-RELATIVE path plus the source.
+        let profile = CompileProfile {
+            filename: Some(id.clone()),
+            is_production: true,
+            custom_element: false,
+            ssr: false,
+            hmr_strategy: crate::types::HmrStrategy::None,
+            component_id: Some(bundler_component_id(&format!("{relative}{source}"))),
+            source_map: true,
+            force_js: false,
+            ..CompileProfile::default()
+        };
+        assert_published_product_matches_host(
+            &format!("VerterVue.vite buildStart: the pre-compiled {label} module"),
+            &case[key],
+            &host_node(&host, id, VirtualNodeKind::Main, &profile),
+        );
+    }
+
+    // Deliberately NOT asserted here: anything about the cross-file recompile
+    // block. This host is this test's, not the plugin's — the plugin ran in
+    // another process — so no reading taken from it says what the plugin's own
+    // host did. See the closure condition on this test's doc comment.
 }

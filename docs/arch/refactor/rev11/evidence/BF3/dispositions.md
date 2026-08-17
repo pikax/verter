@@ -34,21 +34,123 @@ against the live suite by
 
 ### Observation note on AT-2
 
-AT-2 is recorded exactly as ratified. The driven evidence for the genuine-failure
-class this block could reach does **not** reproduce it: with two batch inputs
-naming the same canonical under different sources — the batch's own typed
-conflict failure, `crates/verter_session/src/host_compile.rs:479-485` — every
-failing entry publishes no code, no source map and no output language, and its
-neighbour is unaffected. That is what `a_genuinely_failing_batch_entry_publishes_no_partial_product`
-asserts, green.
+AT-2 is recorded exactly as ratified. **This block changed nothing in the
+ratified table above** — not the finding text, not the class, not the
+disposition, not the owner, not the acceptance id, not the gating test. What
+follows is measurement, recorded under the row rather than applied to it.
 
-The failure class that would exercise a genuine *Svelte* refusal inside a batch
-is not reachable while RT-1 stands: the batch selects the Vue carrier for every
-input, so no Svelte refusal fires there. Malformed Vue script is not a substitute
-— the Vue carrier's error recovery still publishes a module for it. So the
-earlier "product beside a refusal" reading came from a Vue-shaped SUCCESS, not
-from a refusal. This note records the measurement; the row's class and owner are
-unchanged.
+**Item 6 is `NOT-EVIDENCED` for AT-2**, and stays so pending the maintainer act
+recommended in [`at2-deviation-memo.md`](at2-deviation-memo.md) (which reproduces
+the independent ruling verbatim, and the ruling itself is at
+[`at2-disposition-ruling.md`](at2-disposition-ruling.md)). No track-level actor
+may amend a ratified row, so the row is left exactly as it stands and the gap is
+named here.
+
+#### The construction-site enumeration
+
+Every construction of `CompileBatchEntry` in
+`crates/verter_session/src/host_compile.rs`, with what each writes into the
+product fields:
+
+| # | origin | `errors` | `code` / `lang` / `source_map` | atomic? |
+|---|---|---|---|---|
+| 1 | Stage-D `group_errors` fan-out (duplicate-canonical conflict, upsert failure) | one string | hardcoded empty | YES |
+| 2 | `compile_one_in_batch` precomputed-error short circuit | one string | hardcoded empty | YES |
+| 3 | HostBacked `get_virtual_file` → `Ok(response)` | error-severity diagnostics of the response | `response.code` / `source_map` / `lang` | **NO** |
+| 4 | HostBacked `Err(CompileError)` | non-empty by construction | hardcoded empty | YES |
+| 5 | HostBacked `Err(other)` — including `RuntimeSurfaceRefused` | one formatted string | hardcoded empty | YES |
+| 6 | RuntimeRender `Ok(render)` | hardcoded `Vec::new()` | product | YES |
+| 7 | RuntimeRender `Err(CompileError)` | non-empty | hardcoded empty | YES |
+| 8 | RuntimeRender `Err(other)` | one string | hardcoded empty | YES |
+| 9 | `compile_panic_entry` | one string | hardcoded empty | YES |
+
+Eight of the nine are atomic by hardcoded literal. Site 3 is the only
+construction that reads a product and an error list independently, so it is the
+only shape that can express a product beside a fatal-looking `errors` list.
+
+#### The reachability argument
+
+The typed refusal does **not** reach site 3. `HostError::RuntimeSurfaceRefused`
+is returned as `Err` by `get_virtual_file`
+(`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1087-1108`) and
+lands on site 5, which publishes no product. The actual typed-refusal path is
+therefore atomic.
+
+A genuine *Svelte* refusal cannot reach the batch at all while RT-1 stands:
+`crates/verter_session/src/host_compile.rs:469-478` hardcodes
+`file_language: FileLanguage::vue()` for every batch input, and the
+`RuntimeRender` lane never reads the runtime-surface-refused flag. Malformed Vue
+script is not a substitute — the Vue carrier's error recovery still publishes a
+module for it, with no error at all. So the earlier "product beside a refusal"
+reading came from a Vue-shaped SUCCESS, not from a refusal.
+
+The only known upstream producer of an `Ok` carrying error-severity diagnostics
+is the `DevServeLastKnownGood` stale serve (`virtual_file_pipeline.rs:1755-1766`),
+which pairs the PREVIOUS compile's outputs with the NEW compile's error
+diagnostics — and whose own source says it is not a fresh refusal. Every
+invalidation route that could make an unchanged-profile compile newly fail also
+clears the last-good slot (`host_upsert.rs:754-761`, `block_content.rs:1613-1618`,
+`host_lifecycle.rs:530`/`:916`, `host_manage/analysis_io.rs:2044`/`:2092`), and a
+cross-file edit dies with the warm hit because `peek_last_good` validates the same
+fact signature as `lookup` (`cache_runtime/compile_output_node.rs:665` vs `:549`).
+
+#### The residual, stated as UNKNOWN
+
+One residual is **UNKNOWN, not closed**: `lookup` acquires a store view
+unconditionally while `peek_last_good` skips its validator when the fact rail is
+empty (`cache_runtime/compile_output_node.rs:665` vs `:549`), and a self-contained
+SFC records zero facts. Reaching the stale serve through that crack would
+additionally require a cold recompile of unchanged bytes to fail, which only the
+transient macro-semantic outcomes could do. It was probed and not reproduced. It
+is recorded as an open proof gap, not as a closure.
+
+#### What was driven
+
+`a_genuinely_failing_batch_entry_publishes_no_partial_product` is now a
+table-driven regression over every failing-entry class the public `compile_many`
+API can genuinely reach, on both lanes where the class exists on that lane. Each
+row proves the entry entered its intended class before asking whether it
+published anything, and each row carries an entry that must publish cleanly:
+
+| class | lanes driven | what proves the entry entered it |
+|---|---|---|
+| duplicate-canonical conflict | RuntimeRender, HostBacked | the entry's single error is exactly the batch's per-canonical conflict message, at BOTH original input positions |
+| compile failure (`Err(CompileError)`) | RuntimeRender, HostBacked | every message is prefixed with the canonical id — the discriminator against site 3, whose diagnostics ride verbatim beside a published product — and at least one is the template-parse diagnostic |
+| other typed host error (`Err(other)`) | RuntimeRender | the single error is the typed grammar-mismatch host error, and the same inputs under the lane's ordinary profile publish |
+| caught panic | RuntimeRender, HostBacked | the single error carries the coordinator's panic rendering and the injected panic body |
+| upsert failure | NOT REACHABLE | it folds into the same per-canonical map as the conflict, but the upsert engine only errors from a scheduler `Failed` / `Superseded` / `Shutdown` completion state or a post-commit generation-fence mismatch (`host_upsert.rs` `map_states` / `finish_upsert_post_commit`); `compile_many` exposes no input that produces any of them, and the only in-tree driver is a test-only completion-state seam that bypasses the batch. Both constructions it would reach (sites 1 and 2) hardcode an empty product |
+| typed Svelte runtime refusal | NOT REACHABLE | the batch hardcodes the Vue carrier (RT-1) |
+| other host error on HostBacked | NOT REACHABLE | that lane's profile is the fixed bundler preset, which `compile_many` never lets a caller vary, so the grammar axis — the one caller-settable route to `Err(other)` — exists only on the render lane |
+
+Three rows above are NOT REACHABLE, and they are not the same kind of fact: upsert
+failure and the typed Svelte runtime refusal are whole classes with no reachable
+input on either lane, while `Err(other)` is a class the table DOES drive — on the
+render lane — that has no reachable input on the host-backed one. None of the three
+is represented by an `#[ignore]`d target: such a target would fail for a reason
+other than the property it names, which the ruling calls a stub. The suite states
+the same three facts in the same terms
+(`a_genuinely_failing_batch_entry_publishes_no_partial_product`).
+
+Two controls run beside the table
+(`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`), so
+a diagnostic is never equated with a refusal and "no product beside a failure" is
+never satisfied by a route that withholds every product: an ordinary SUCCESS, and
+a compile that succeeds while carrying a non-error diagnostic (an unresolvable
+member-position macro type, which degrades that member to `null` and warns). Both
+publish their product and report no error, on both lanes.
+
+The residual above additionally has a committed probe control,
+`searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_finds_none`.
+It drives, through the public API only, the sequences most likely to reach the
+stale serve — a zero-fact self-contained component compiled to populate the
+last-good slot, then store-view-advancing operations that do not edit that file's
+bytes, then a re-request; the same file recompiled into a genuine failure, with
+and without unrelated generations in between; and a fail-then-recover cycle — and
+asserts every resulting entry is atomic. Its own doc comment states plainly that
+it SEARCHES for the shape and does not prove it unreachable.
+
+None of this evidences the ratified AT-2 claim, and it is not offered as the
+ratified gate. It is the charter's separate atomicity exit, driven green.
 
 ## Re-measured rows post-dating the ratified table
 
