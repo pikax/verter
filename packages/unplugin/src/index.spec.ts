@@ -2367,3 +2367,201 @@ describe("barrel file export signatures", () => {
     expect(version.reexportSource).toBeUndefined();
   });
 });
+
+describe("non-Vite inline transform source maps", () => {
+  const SFC = `<script setup>
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+`;
+
+  /** Parse a bundler-published map, which may arrive as an object or a JSON string. */
+  function parseMap(map: unknown): any {
+    expect(map).toBeTruthy();
+    return typeof map === "string" ? JSON.parse(map) : map;
+  }
+
+  /** How many VLQ segments name an authored position (4 or 5 fields), not just a column. */
+  function mappedSegments(mappings: string): number {
+    let count = 0;
+    for (const line of mappings.split(";")) {
+      for (const segment of line.split(",")) {
+        if (segment.length === 0) continue;
+        // A segment with an authored position decodes to 4 or 5 fields. The
+        // VLQ alphabet packs one field per continuation run, so a single-field
+        // segment is at most one non-continuation character.
+        let fields = 0;
+        for (const character of segment) {
+          const value = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".indexOf(
+            character,
+          );
+          if (value >= 0 && (value & 32) === 0) fields++;
+        }
+        if (fields >= 4) count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Generated positions the map names that do not exist in the code it was
+   * published with. Decoding only the generated half of each segment is enough
+   * to catch a map describing a DIFFERENT text than the one it travels with: a
+   * segment naming a column past the end of its own line points at nothing.
+   */
+  function overshootingPositions(code: string, mappings: string): string[] {
+    const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const lines = code.split("\n");
+    const overshooting: string[] = [];
+    mappings.split(";").forEach((line, lineIndex) => {
+      let column = 0;
+      for (const segment of line.split(",")) {
+        if (segment.length === 0) continue;
+        // The first VLQ field of a segment is the generated column delta.
+        let value = 0;
+        let shift = 0;
+        for (const character of segment) {
+          const digit = CHARS.indexOf(character);
+          value += (digit & 31) << shift;
+          shift += 5;
+          if ((digit & 32) === 0) break;
+        }
+        column += value & 1 ? -(value >> 1) : value >> 1;
+        const generated = lines[lineIndex];
+        if (generated === undefined || column > generated.length) {
+          overshooting.push(
+            `line ${lineIndex + 1} column ${column} (line length ${generated?.length ?? "absent"})`,
+          );
+        }
+      }
+    });
+    return overshooting;
+  }
+
+  beforeEach(() => {
+    resetHost();
+  });
+
+  afterEach(() => {
+    resetHost();
+  });
+
+  it("publishes the host's requested map on the non-Vite inline product", async () => {
+    const plugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+
+    const id = "/test/InlineMap.vue";
+    const result = await plugin.transform(SFC, id);
+    expect(result).toBeDefined();
+
+    // Precondition: this really is the inline product, not a wrapper pointing
+    // at a script sub-request — the wrapper carries no map by design, so
+    // asserting a map on one would be asserting the wrong contract.
+    expect(result.code).not.toContain("?vue&type=script");
+    expect(result.code.length).toBeGreaterThan(0);
+
+    const map = parseMap(result.map);
+    expect(map.version).toBe(3);
+    expect(map.sources.some((source: string) => source.endsWith("InlineMap.vue"))).toBe(true);
+    // Not merely a valid envelope: the map has to navigate somewhere. A
+    // single-field `mappings` string is structurally valid and useless.
+    expect(mappedSegments(map.mappings)).toBeGreaterThan(0);
+    // And it must describe THIS code — a map for a different text names
+    // generated positions that do not exist here.
+    expect(overshootingPositions(result.code, map.mappings)).toEqual([]);
+
+    await plugin.closeBundle();
+  });
+
+  // The negative control for the assertion above: only the INLINE product
+  // carries the map. In Vite mode the transform returns a synthetic routing
+  // wrapper that imports the compiled module from a script sub-request; that
+  // wrapper is not derived from the authored SFC, so a map on it would be a
+  // mis-mapping, and the map travels on the sub-request's load instead. A
+  // change that attached the host map to every transform return would pass the
+  // test above and fail this one.
+  it("leaves the Vite routing wrapper unmapped and maps the script sub-request instead", async () => {
+    const tempDir = join(
+      tmpdir(),
+      `verter-inline-map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    const plugin = unpluginFactory(undefined, {
+      framework: "vite",
+      versions: { unplugin: "0.0.0", vite: "7.0.0" },
+    } as any) as any;
+    const viteConfig = await resolveConfig(defineConfig({ root: tempDir }), "build", "production");
+    plugin.vite.configResolved(viteConfig);
+
+    try {
+      const id = join(tempDir, "WrapperMap.vue").replace(/\\/g, "/");
+      const wrapper = await plugin.transform(SFC, id);
+      expect(wrapper).toBeDefined();
+      expect(wrapper.code).toContain("?vue&type=script");
+      expect(wrapper.map).toBeNull();
+
+      const script = await plugin.load(`${id}?vue&type=script&lang.js`);
+      expect(script).toBeDefined();
+      const map = parseMap(script.map);
+      expect(map.version).toBe(3);
+      expect(mappedSegments(map.mappings)).toBeGreaterThan(0);
+    } finally {
+      await plugin.closeBundle();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // CHARACTERIZED, NOT FIXED — a defect in a different owner.
+  //
+  // `replaceImportMetaSsr` / `stripComponents` (`src/core/ssr-transforms.ts`,
+  // applied in the carrier transform of `src/index.ts`) rewrite the compiled
+  // module with plain string replacement AFTER the host produced it. The
+  // replacements change byte offsets — `import.meta.server` → `false` is 13
+  // bytes shorter — while the map the host published for that module is
+  // handed on unchanged, so the published pair describes two different texts.
+  //
+  // Measured on the fixture below: the host places `later` at generated line 7
+  // column 39 and the map names that position; `import.meta.server` → `false`
+  // shortens the line from 48 bytes to 35 and moves `later` to column 26, so
+  // the published map points past the end of the line it describes.
+  //
+  // This is NOT introduced by publishing the map on the inline product: the
+  // Vite branch has always cached the SAME rewritten code beside the SAME host
+  // map for the script sub-request. The fix belongs to the SSR
+  // dead-code-elimination pass, which must apply its rewrites through a
+  // map-aware mechanism instead of `String.replaceAll`, and is out of scope
+  // here.
+  it.skip("maps a token that the SSR rewrite moved to its new generated column", async () => {
+    // `later` sits AFTER the rewritten expression on the same line, so the
+    // rewrite moves it left. Every mapping at or beyond that point is then off
+    // by the length the replacement removed.
+    const SSR_SFC = `<script setup>
+const flag = import.meta.server; const later = 1
+</script>
+<template><div>{{ flag }} {{ later }}</div></template>
+`;
+    const rollup = (options: unknown) =>
+      unpluginFactory(
+        options as any,
+        {
+          framework: "rollup",
+          versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+        } as any,
+      ) as any;
+
+    const rewriting = rollup(undefined);
+    const rewritten = await rewriting.transform(SSR_SFC, "/test/SsrRewrite.vue");
+    await rewriting.closeBundle();
+
+    // The pass really did rewrite this module — otherwise nothing below proves
+    // anything.
+    expect(rewritten.code).not.toContain("import.meta.server");
+
+    // The same oracle the live test above applies. It reports `[]` for a
+    // module the pass did not rewrite, so what it reports here is the shift.
+    const map = parseMap(rewritten.map);
+    expect(overshootingPositions(rewritten.code, map.mappings)).toEqual([]);
+  });
+});

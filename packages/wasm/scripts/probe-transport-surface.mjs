@@ -126,6 +126,38 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   );
 }
 
+// ── STRUCTURAL ABSENCE: a node the carrier simply does not have ────────────
+//
+// The refusal case above reaches a missing node THROUGH a refused compilation.
+// This one never involves a refusal at all: the carrier compiles normally and
+// the requested node does not exist, because the SFC has no `<style>` block.
+// The two are distinct classes of "no product" and a transport can serialize
+// them differently, so both are probed.
+{
+  const host = new module_.VerterHost({});
+  host.upsert({
+    canonicalId: "/probe/NoStyle.vue",
+    inputId: "/probe/NoStyle.vue",
+    source: VUE_SFC,
+    fileKind: "vue",
+  });
+  results.cases.vueMissingStyle = virtualFile(
+    host,
+    "/probe/NoStyle.vue",
+    "style",
+    { isProduction: true, sourceMap: true, hmrStrategy: "none" },
+    0,
+  );
+  // The SUCCESSFUL control on the same carrier: the node that DOES exist is
+  // published, so an absent answer above cannot be a host that failed to load
+  // the file at all.
+  results.cases.vueMissingStyleControl = virtualFile(host, "/probe/NoStyle.vue", "main", {
+    isProduction: true,
+    sourceMap: true,
+    hmrStrategy: "none",
+  });
+}
+
 // ── IDE/TSX: ensure + read, on the profile the LSP uses ────────────────────
 {
   const host = new module_.VerterHost({});

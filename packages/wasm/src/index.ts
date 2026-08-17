@@ -149,7 +149,7 @@ type WasmInitFn = () => Promise<unknown>;
 type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
 type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
 type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => HostUpdateResult;
-type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
+type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse | null;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
 type WasmHostGetIdeFn = (
@@ -333,7 +333,16 @@ export class Host {
     return this.inner.ensureIdeCompiled(canonicalId, profile);
   }
 
-  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {
+  /**
+   * Retrieve a single compiled virtual file (script, template, or style).
+   *
+   * Returns `null` when the node does not exist — a `.vue` with no `<style>`
+   * block, for instance. That is an ordinary negative answer about the
+   * carrier's structure, not a failure, and it is the same answer the native
+   * binding gives. A genuine failure (an invalid query, an unknown file, a
+   * refused compilation) still throws.
+   */
+  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse | null {
     return this.inner.getVirtualFile(query);
   }
 

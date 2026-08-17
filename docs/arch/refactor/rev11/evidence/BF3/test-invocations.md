@@ -150,7 +150,7 @@ bare workspace `cargo build` / `test` / `nextest`.
 | IDE/TSX under the TypeScript oracle | `cargo test -p verter_session --lib --features bf2-authoritative ide_surface_typescript_observation -- --test-threads=1` | `running 3 tests` → 3 passed |
 | Product/route inventory | `cargo test -p verter_session --lib framework_product_surface -- --test-threads=1` | `running 24 tests` → 22 passed, 2 ignored (23 suite tests plus the census test) |
 | Batch route | `cargo test -p verter_session --lib svelte_batch_route -- --test-threads=1` | `running 12 tests` → 10 passed, 2 ignored (11 suite tests plus the census test) |
-| Transport equivalence (NAPI / WASM / bundler) | `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1` | `running 22 tests` → 21 passed, 1 ignored (the BND-2 Rollup acceptance target); 21 suite tests plus the census test |
+| Transport equivalence (NAPI / WASM / bundler) | `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1` | `running 23 tests` → 21 passed, 2 ignored (the BND-2 Rollup acceptance target and the TR-1 missing-node parity target); 22 suite tests plus the census test |
 | TypeScript observation domain (harness) | `npx vitest --run --root packages/framework-conformance-harness test/typescript-observation-domain.spec.mjs` | 22 passed (22) |
 
 The corrected public bundler measurements are green and run individually:
@@ -176,6 +176,7 @@ FAIL until their correction owner lands the product:
 | Rollup/non-Vite inline requested map | `cargo test -p verter_session --lib --features transport-authoritative the_bundler_rollup_inline_transform_preserves_requested_source_maps -- --ignored --test-threads=1 --nocapture` | `running 1 test` → fails at the final map-parity assertion, which reads the ARTIFACT (`publicTransformMap`) and reports `no source-map artifact was published (the map itself is null)` alongside `hostHasMap=true`, `publicTransformIsInline=true`, `publicTransformHasMap=false`; the earlier freshness, public-factory, include, inline-product, Svelte Rollup classification, and host-map assertions pass |
 | Svelte untyped props surface | `cargo test -p verter_session --lib --features bf2-authoritative an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript -- --ignored --test-threads=1 --nocapture` | `running 1 test` → fails because TypeScript observes `{}` rather than required `label` plus optional `disabled` |
 | Standalone CSS requested maps | `cargo test -p verter_session --lib --features bf2-authoritative the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css -- --ignored --test-threads=1 --nocapture` | `running 1 test` → fails because the passthrough branch publishes no requested map |
+| TR-1 missing-node transport parity | `cargo test -p verter_session --lib --features transport-authoritative the_transports_report_a_missing_node_the_same_way -- --ignored --test-threads=1 --nocapture` | `running 1 test` → fails at the parity assertion: `the transports still spell a missing node differently: napi {"outcome":"missing"}, wasm {"message":"HostError::MissingVirtualNode: /probe/Server.svelte","outcome":"error"}`; the earlier staleness guard and the two no-product assertions pass |
 
 The other ignored conformance, batch, and atomicity targets remain expected failures
 and are run one filter per command. See [`dispositions.md`](dispositions.md).
@@ -680,7 +681,11 @@ by an `#[ignore]`d characterization rather than a required-RED target, so item 6
 no longer turns on it. See [`dispositions.md`](dispositions.md),
 [`at2-deviation-memo.md`](at2-deviation-memo.md) (discharged) and
 [`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md),
-including the review seat that disputes the amendment's authority.
+and the act that names the row and closes the authority question,
+[`maintainer-act-at2-amendment.md`](maintainer-act-at2-amendment.md). The review seat
+that disputed the amendment's authority was upheld and answered by that act; its report
+is preserved verbatim in
+[`exhaustion-closure-reviews.md`](exhaustion-closure-reviews.md).
 
 ## The same hazard in the other direction
 

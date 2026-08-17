@@ -379,6 +379,14 @@ impl WasmVerterHost {
     /// Returns the compiled code, optional source map, language hint, and
     /// any compilation diagnostics.
     ///
+    /// Returns `null` if the virtual node does not exist (e.g. no `<script>`
+    /// block). A node that is absent is an ordinary negative answer about the
+    /// carrier's structure, not a failure, so it is reported as an absent
+    /// response rather than a throw — the same answer the native binding
+    /// gives, so a consumer written against either transport ports unchanged
+    /// and can tell "no such node" from a genuine failure without reading the
+    /// error text.
+    ///
     /// Throws if the query is invalid or the file is not found.
     #[wasm_bindgen(js_name = getVirtualFile)]
     pub fn get_virtual_file(&self, query: JsValue) -> Result<JsValue, JsValue> {
@@ -391,11 +399,17 @@ impl WasmVerterHost {
             None
         };
         let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
-        let result = catch_panic(|| self.inner.get_virtual_file(host_query))?.map_err(host_err)?;
-        let source = canonical_for_source
-            .as_deref()
-            .and_then(|canonical| self.inner.get_source(canonical));
-        to_wasm_value(&host_virtual_file_to_ffi(result, source.as_deref()))
+        let result = catch_panic(|| self.inner.get_virtual_file(host_query))?;
+        match classify_host_virtual_file(result) {
+            VirtualFileOutcome::Published(response) => {
+                let source = canonical_for_source
+                    .as_deref()
+                    .and_then(|canonical| self.inner.get_source(canonical));
+                to_wasm_value(&host_virtual_file_to_ffi(response, source.as_deref()))
+            }
+            VirtualFileOutcome::Absent => Ok(JsValue::NULL),
+            VirtualFileOutcome::Failed(err) => Err(host_err(err)),
+        }
     }
 
     /// Lists all virtual node kinds for a given canonical file ID.

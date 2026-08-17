@@ -1699,15 +1699,15 @@ impl NapiVerterHost {
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_virtual_file(host_query)
         }))?;
-        match result {
-            Ok(vf) => {
+        match classify_host_virtual_file(result) {
+            VirtualFileOutcome::Published(vf) => {
                 let source = canonical_for_source
                     .as_deref()
                     .and_then(|canonical| self.inner.get_source(canonical));
                 Ok(Some(host_virtual_file_to_napi(vf, source.as_deref())))
             }
-            Err(host::HostError::MissingVirtualNode { .. }) => Ok(None),
-            Err(e) => Err(host_error(e)),
+            VirtualFileOutcome::Absent => Ok(None),
+            VirtualFileOutcome::Failed(e) => Err(host_error(e)),
         }
     }
 

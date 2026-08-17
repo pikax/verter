@@ -19,7 +19,7 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
-current_block = "BF3"
+current_block = "BA0"
 
 [repository]
 remote = "https://github.com/pikax/verter"
@@ -340,28 +340,28 @@ notes = "Amended by AMD-007: predecessor changed from BF2 to BV0A; mapping scope
 
 [[block]]
 id = "BF3"
-status = "BLOCKED"
+status = "ACCEPTED"
 charter_digest = "e0e2600d12c1caa75fdeae51542c7d76abeb67f09c6a90c491e24e89816016cc"
 context_packet_digest = "a58c2c6d1e8f33ccbdf83ed6895ac8f59fc4f24b03a81d2b17d8d125c3e141d2"
-base_sha = "b980c668869ff2a2a3c622739ff54689bef1136c"
-candidate_sha = "0a1e8f6a738359e9e413cad428e1f759bcfc30f7"
-candidate_tree = "d468712cd994eb9755a83d75a8eb8a0233763386"
-accepted_sha = ""
-accepted_tree = ""
+base_sha = "0a1eee6dd47e2287aae5e5e35c59d7a28ea6c633"
+candidate_sha = "c6da941ee6ee1f3a2cf885309c420a700ceb8017"
+candidate_tree = "e6a4a6399f82580a081aeb6634811a33e7a263fd"
+accepted_sha = "c6da941ee6ee1f3a2cf885309c420a700ceb8017"
+accepted_tree = "e6a4a6399f82580a081aeb6634811a33e7a263fd"
 landing_equivalence_digest = ""
-evidence_digest = "15ffa6c75c7e24edd5306e138f686e38449828fe0f839cc367e68051be7f92cb"
+evidence_digest = "a82a78dd3bea733a4e6a23d67882c34ac75094c3a383be19e7c2f6be43da09c4"
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "NOT_PROVEN"
-architecture_review = "NOT_PROVEN"
-adversarial_review = "NOT_PROVEN"
-maintainer_decision = "PENDING"
-notes = "Exhaustion gaps worked; two remain. Procedure 3 CLOSED: the runtime axis now has an applied-proof plant driving a mounted-but-wrong render through the same comparison the live gate uses, proven red two-sidedly when that comparison is neutered; all six claimed axes now carry an independent plant plus a green unplanted control. Procedure 4 narrowed to one residue: four bundler aliases plus the style/inventory read are driven with host route-identity and negative controls, but the pre-compile lane recompile WRITE stays unattributable out of process, with its closure condition named (a metrics-enabled native build, not the shipped artifact). Procedure 6 ESCALATED and NOT closable here: an enumeration of all nine batch-entry construction sites shows the typed refusal lands on an atomic arm and the single non-atomic construction has no demonstrated reachable input, so the ratified AT-2 row is not an evidenced defect; an unprimed ruling holds that no track-level actor may amend a ratified row, so this needs a maintainer act. The ratified table is byte-unchanged and a deviation memo carrying the exact act requested is committed. The charter separate atomicity exit is met by a driven table over every reachable failing class on both lanes with 16 proven-applied RED mutations. Residues: invocation attribution CLOSED via a test-owned apply-counting observer that now fails the prior full-forgery plant; witness decoy NARROWED to compiler-derived function-item identity with the surviving hole measured and stated; whole-registration-set removal RAISED to a build error with the remainder dispositioned as gate-integrity row GI-21. Five external review legs, all reports committed under evidence/BF3/reviews/, every finding fixed, terminal confirm PASS. Gate PASS on the candidate tree: S1 24390/24390, S2 3 suites clean, S3 8624/8624; fmt/clippy/wasm-clippy/release-check clean; all eight correct-behaviour targets fail at their own assertions; harness 640/640; both validator modes OK. Reviews recorded NOT_PROVEN rather than BLOCKING: no seat finding is outstanding, what remains is unproven exit criteria - missing evidence, not violated behaviour. NOT acceptance-recommended. Detail: evidence/BF3/landing-record.md, reattestation.md, reviews/."
+conformance_review = "PASS"
+architecture_review = "PASS"
+adversarial_review = "PASS"
+maintainer_decision = "ACCEPTED"
+notes = "ACCEPTED by direct maintainer decision. All three mandates PASS on this exact candidate. Both final blockers were closed by a maintainer clarification act recorded verbatim, with each resolution placed beneath the reviewing seat unedited words. First: the act covers all three hunks of the correction owner obligation text, because the same dropped obligation is stated in three places and reverting one would leave that document self-contradictory - verified against the actual diff. Second: reclassifying the disputed row removes it from the exhaustion exit, recorded as a maintainer NARROWING of an unconditional exit rather than a reading of it, a distinction a review seat caught and the record now states. The architecture mandate, missing from an earlier round through an orchestrator scoping error, was re-commissioned as an external seat and ran four further rounds: three BLOCKING on real record-accuracy defects - a forward reference to an unwritten report, a surviving mischaracterization, a stale delta boundary, and whitespace an append introduced that falsified a verification claim - each fixed and returned to a FRESH seat; the sixth PASSED with no findings, re-deriving the closure rather than accepting it. All seven procedure items and all eight required-exit sentences EVIDENCED. Substantive outcome: a test-only audit with zero production behaviour change, thirteen findings dispositioned as ten DEFER to the four immediate correction owners with acceptance IDs and named ignored targets plus three REJECT. The reachability residual on the reclassified row stays open, UNKNOWN, ignored-characterized and owned by BA0; a future reproduction is a new finding with its own target. No production guard, typed refusal, withhold path, retraction or removal ID exists. Successors BA0, BS0, BCSS0 and BRT0 unlock on this acceptance; B2 and B3 stay locked until all four are accepted."
 
 [[block]]
 id = "BA0"
-status = "LOCKED"
+status = "READY"
 charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
@@ -382,7 +382,7 @@ notes = "Introduced by ratified AMD-009. Predecessor BF3; mandatory predecessor 
 
 [[block]]
 id = "BS0"
-status = "LOCKED"
+status = "READY"
 charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
@@ -403,7 +403,7 @@ notes = "Introduced by ratified AMD-009. Predecessor BF3; mandatory predecessor 
 
 [[block]]
 id = "BCSS0"
-status = "LOCKED"
+status = "READY"
 charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
@@ -424,7 +424,7 @@ notes = "Introduced by ratified AMD-009. Predecessor BF3; mandatory predecessor 
 
 [[block]]
 id = "BRT0"
-status = "LOCKED"
+status = "READY"
 charter_digest = ""
 context_packet_digest = ""
 base_sha = ""

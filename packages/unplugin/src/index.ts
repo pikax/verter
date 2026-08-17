@@ -1154,7 +1154,14 @@ function createFrameworkFactory(
 
         // Non-Vite mode: inline everything (no sub-request support).
         // TS stripping is handled by the host via forceJs: true in the profile.
-        return { code: compiledCode, map: null };
+        //
+        // The inline product IS the compiled module, so it carries the map the
+        // profile asked the host for — the same map the Vite branch above hands
+        // to the script sub-request. Returning `null` here would drop a map the
+        // host published and leave a non-Vite consumer with no way back to the
+        // authored SFC. Absent a requested map the host publishes none and this
+        // is `null`, which is what "no map" means to a bundler.
+        return { code: compiledCode, map: main.sourceMap ?? null };
       },
 
       async closeBundle() {
