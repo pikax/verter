@@ -26,7 +26,7 @@ against the live suite by
 | SV-4 | untyped `$props()` destructure publishes an empty props surface, no diagnostic | Svelte session-projector defect | DEFER | BS0, distinct item | BS0 acceptance, no later than plan close, before any downstream dispatch | `BF3-SV-4-PROPS-SURFACE` → `FC-TS-001` | `an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript` (`#[ignore]`d correct-surface target; TypeScript must see required `label` and optional `disabled`); characterized green by `an_untyped_svelte_props_destructure_publishes_a_props_surface_typescript_sees_as_empty` inside the pinned Svelte closure |
 | RT-1 | the batch route compiles `.svelte` as Vue and drops its refusals | public batch route / carrier-selection defect | DEFER | BRT0 | BRT0 acceptance, no later than plan close, before any downstream dispatch | `BF3-RT-1-BATCH-CARRIER-PARITY` → `FC-ROUTES-001` | `a_svelte_batch_matches_the_single_file_route_item_for_item` (`#[ignore]`d); characterized green by `a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier`, `the_svelte_runtime_refusals_do_not_fire_on_the_batch_route`, `the_host_backed_batch_lane_shows_the_same_svelte_language_divergence` |
 | AT-1 | a combined IDE-requesting compile publishes the TSX product after a runtime refusal | atomicity violation | DEFER | BA0 | BA0 acceptance, no later than plan close, before any downstream dispatch | `BF3-AT-1-COMBINED-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | `a_refused_combined_request_publishes_no_product_at_all` (`#[ignore]`d conformance target, added this round); characterized green by `a_refused_runtime_surface_still_publishes_the_ide_and_public_api_products` |
-| AT-2 | a batch entry publishes a product together with a genuine typed refusal | per-entry atomicity violation | DEFER | BA0, distinct item | BA0 acceptance, no later than plan close, before any downstream dispatch | `BF3-AT-2-BATCH-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | `a_genuinely_failing_batch_entry_publishes_no_partial_product` — see the observation note below |
+| AT-2 | the host-backed batch construction reads a product and an error list from the same response independently, so it COULD express both at once; no reachable input does. **Amended** — the original claim, that a batch entry publishes a product together with a genuine typed refusal, is REJECTED as not demonstrated | latent construction hazard, reachability unproven (not a demonstrated per-entry atomicity violation) | DEFER | BA0, distinct item | BA0 acceptance, no later than plan close, before any downstream dispatch | `BF3-AT-2-BATCH-REFUSAL-ATOMICITY` → `FC-ATOMIC-001` | `the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error` (`#[ignore]`d characterization of the hazard, NOT a required-RED target); reachable-class control `a_genuinely_failing_batch_entry_publishes_no_partial_product`; search control `searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_finds_none` — see the observation note below |
 | CSS-1 | the standalone CSS route accepts and ignores `sourcemap: true` | option/product-contract defect | DEFER | BCSS0 | BCSS0 acceptance, no later than plan close, before any downstream dispatch | `BF3-CSS-1-STANDALONE-SOURCEMAP` → `FC-OPTIONS-001` | `the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css` (`#[ignore]`d correct-behavior target, owned by BCSS0); characterized green by `the_standalone_css_spelling_publishes_css_and_ignores_its_source_map_axis` |
 | TR-1 | NAPI returns null where WASM throws for a missing product | portable transport-contract defect | DEFER | BRT0, distinct item | BRT0 acceptance, no later than plan close, before any downstream dispatch | `BF3-TR-1-MISSING-PRODUCT-PARITY` → `FC-ROUTES-001` | `the_transports_serialize_a_missing_node_differently` (green characterization; fails if either shape moves) |
 | RA-1 | `list_virtual_files` names `Main` for a component whose runtime surface is refused | parse-derived route-assembly artifact | REJECTED as a defect | — | — | — | `the_node_list_names_main_for_a_component_whose_runtime_surface_is_refused` (green characterization of the parse-derived list) |
@@ -34,17 +34,40 @@ against the live suite by
 
 ### Observation note on AT-2
 
-AT-2 is recorded exactly as ratified. **This block changed nothing in the
-ratified table above** — not the finding text, not the class, not the
-disposition, not the owner, not the acceptance id, not the gating test. What
-follows is measurement, recorded under the row rather than applied to it.
+**The AT-2 row above is AMENDED, and it is the only ratified row this block
+touched.** Read its provenance first, because it is the weakest link in the
+chain: the authority is the maintainer's standing ruling of 2026-08-17 on bug
+handling and the type waiver
+([`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md),
+verbatim), which is a GENERAL rule and does NOT name AT-2. Applying it to this
+row is the program orchestrator's reading. What the ruling states in its own
+words is rule 4 — a bug found during the program is captured as an `#[ignore]`d
+test with the fix deferred — together with its consequence that a finding which
+is not a demonstrated, reproduced defect must not carry a required-RED target.
+The amendment applied is the one
+[`at2-deviation-memo.md`](at2-deviation-memo.md) asked for, on the
+recommendation of the independent unprimed consult at
+[`at2-disposition-ruling.md`](at2-disposition-ruling.md): reject the ratified
+claim, reclassify as a latent construction hazard with reachability unproven,
+retain the DEFER to `BA0`, and drop the requirement that a Svelte-refusal
+atomicity target be RED. The class, finding text and gating column changed; the
+disposition, owner, resolution gate and acceptance ID did not. Everything else
+in the ratified table is untouched.
 
-**Item 6 is `NOT-EVIDENCED` for AT-2**, and stays so pending the maintainer act
-recommended in [`at2-deviation-memo.md`](at2-deviation-memo.md) (which reproduces
-the independent ruling verbatim, and the ruling itself is at
-[`at2-disposition-ruling.md`](at2-disposition-ruling.md)). No track-level actor
-may amend a ratified row, so the row is left exactly as it stands and the gap is
-named here.
+**The authority chain, stated without softening, because a review seat calls it
+insufficient.** The maintainer's verbatim act is GENERAL and does not name AT-2.
+The wording that matches the memo's requested act clause for clause is the
+PROGRAM ORCHESTRATOR's direction, not the maintainer's own words; what the
+maintainer supplied is the general rule that direction applies. The earlier
+independent consult also held that no track-level actor may amend a ratified
+row, and that holds here only if the standing act is read as the authorizing
+act. One review seat (Codex, this round) holds that it is not, and asks for an
+explicit maintainer act naming AT-2 or a revert of this row and the matching
+`BA0` lines. That objection is recorded rather than answered: if the chain is
+rejected, this row and those lines revert, and item 6 returns to
+`NOT-EVIDENCED`.
+
+The measurement that made the amendment necessary is unchanged, and follows.
 
 #### The construction-site enumeration
 
@@ -149,8 +172,50 @@ and without unrelated generations in between; and a fail-then-recover cycle — 
 asserts every resulting entry is atomic. Its own doc comment states plainly that
 it SEARCHES for the shape and does not prove it unreachable.
 
-None of this evidences the ratified AT-2 claim, and it is not offered as the
-ratified gate. It is the charter's separate atomicity exit, driven green.
+None of this evidences the ORIGINAL AT-2 claim, and none of it is offered as
+that claim's gate. It is the charter's separate atomicity exit, driven green.
+
+#### The amended row's own artifact
+
+The hazard's PRECONDITION is now carried by
+`the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error`
+in `svelte_batch_route_tests.rs`, `#[ignore]`d per rule 4 of the standing ruling.
+It is deliberately NOT a required-RED target and it passes today. It asserts two
+things through the public batch API, on the host-backed lane: a compile that
+SUCCEEDS while carrying a diagnostic is served by site 3 from a response that
+carries NO error-severity diagnostic (the response's diagnostics list is
+non-empty, so that is a reading rather than a vacuous check over an empty list),
+and a compile that genuinely FAILS answers `Err`, so its entry never comes from
+site 3 at all. The day a successful host-backed response carries an
+error-severity diagnostic, the first reading turns RED. That is the artifact
+`BA0` re-runs.
+
+**What it does not claim.** It does not prove site 3 READS its error list rather
+than writing a hardcoded empty one. Replacing that filter with `Vec::new()`
+leaves it green — two review seats proved exactly that — and the test's own doc
+comment says so. Deciding that half needs a synthetic response carrying a product
+and an error together, which needs a production seam this block does not own.
+
+**Its `#[ignore]` is a deliberate category mismatch, and costs no coverage.**
+Every other ignored target in these suites states a correct behaviour the product
+does not yet have, and FAILS. This one passes, because the finding it names is
+not a defect and therefore has no failing correct-behaviour to state; it is
+`#[ignore]`d because the standing ruling's rule 4 puts a deferred finding's
+artifact outside the default universe, not because it is expected to fail. Both
+review seats flagged the shape; it is recorded rather than disguised. No live
+coverage is lost: the same precondition is asserted by the NON-ignored
+`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`,
+whose host-backed half already requires the response to carry no error-severity
+diagnostic and which runs in the default suite.
+
+**Two plants settle what the reachability argument rests on**, each proven
+present, unique and absent from `HEAD` before its run and restored
+byte-identically:
+
+| plant | mutation | result |
+|---|---|---|
+| `PLANT_P4_ERROR_SEVERITY` | flip the producer of `XUnresolvedImportedMacroType` from `Diagnostic::warning` to `Diagnostic::error` | the entry reports the error and publishes `code_len=0`, `lang=None` — the `compile_diags.has_errors` gate turned the whole response into `Err`, so it landed on an atomic arm. An error-severity COMPILE diagnostic therefore cannot reach site 3 at all: this is the mechanism behind the reachability argument, measured rather than argued |
+| `PLANT_P5_OK_WITH_ERROR_DIAGNOSTIC` | merge an error-severity diagnostic into the response `get_virtual_file` returns on its SUCCESS path, downstream of that gate | the precondition now holds, the test turns RED naming it — and the entry carries `errors=[the planted message]` beside `code_len=480, lang=Some("ts")`. **The hazard is real as a construction property**; what is unproven is only whether any input can produce that response |
 
 ## Re-measured rows post-dating the ratified table
 

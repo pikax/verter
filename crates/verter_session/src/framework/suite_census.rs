@@ -369,7 +369,7 @@ fn the_svelte_batch_route_suite_is_present_and_non_vacuous() {
     assert_suite_is_not_vacuous(
         "svelte_batch_route",
         batch_route_witness(),
-        10,
+        11,
         "the_svelte_batch_route_suite_is_present_and_non_vacuous",
     );
 }
@@ -382,7 +382,7 @@ fn the_transport_route_equivalence_suite_is_present_and_non_vacuous() {
     assert_suite_is_not_vacuous(
         "transport_route_equivalence",
         transport_witness(),
-        20,
+        21,
         "the_transport_route_equivalence_suite_is_present_and_non_vacuous",
     );
 }

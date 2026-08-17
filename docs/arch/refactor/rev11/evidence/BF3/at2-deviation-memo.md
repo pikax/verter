@@ -1,10 +1,24 @@
 # Deviation memo — AT-2's ratified claim is not supported by any reachable instance
 
 **Raised by:** the track orchestrator closing this block's evidence gaps.
-**Status:** ESCALATED to the maintainer. Not dispositioned at track level, because the change it
-implies is to a RATIFIED findings row, which no track-level actor may amend.
-**Effect on this block:** owned-scope item 6 stays `NOT-EVIDENCED` for AT-2, and the block stays
-NOT acceptance-recommended.
+**Status:** **DISCHARGED.** The act this memo asked for now exists. The maintainer issued a standing
+ruling on bug handling and the type waiver on 2026-08-17
+([`maintainer-standing-ruling-bugs-and-types.md`](maintainer-standing-ruling-bugs-and-types.md)),
+whose rule 4 and anti-stub consequence decide every point this memo raised; the program orchestrator
+applied it to AT-2 and directed the amendment. The two byte locations this memo named — the `AT-2`
+row in [`dispositions.md`](dispositions.md) and the AT-2 obligation lines in
+[`../../charters/BA0.md`](../../charters/BA0.md) — are amended accordingly, and nothing else in the
+ratified findings table was touched. Read the standing ruling's own provenance note: the verbatim
+act does not name AT-2, and its application to this row is the program orchestrator's reading of a
+general rule.
+**Effect on this block:** owned-scope item 6 is no longer blocked on this escalation. Under the
+amended row AT-2 is not a genuine defect, so item 6's "every genuine defect" clause raises no
+defect-specific regression obligation for it; the hazard is carried by an `#[ignore]`d
+characterization instead.
+
+The record below is preserved exactly as it stood when the memo was open, because it is the evidence
+the act rests on. Where it says "this block edited neither" and "until that act exists", read it as
+the state BEFORE the ruling.
 
 ## What was found
 
