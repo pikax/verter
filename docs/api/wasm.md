@@ -122,7 +122,7 @@ The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 | `upsert(request)`                                                                           | `HostUpdateResult`         | Register/update a file                                        |
 | `applyBlockOverrides(request)`                                                              | `HostUpdateResult`         | Apply preprocessed block overrides                            |
 | `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`  | Get TSX or JSX for type checking                              |
-| `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse`  | Get compiled virtual file                                     |
+| `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse \| null` | Get compiled virtual file (`null` when the node does not exist) |
 | `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`    | List virtual nodes for a file                                 |
 | `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null` | Remove file from host                                         |
 | `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`          | Get analysis snapshot (native JS object)                      |

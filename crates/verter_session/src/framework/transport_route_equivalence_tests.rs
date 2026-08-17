@@ -375,19 +375,14 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
             );
         }
         HostOutcome::Missing => {
-            // The two transports serialize a MISSING node differently — NAPI
-            // returns a null response, WASM throws a typed
-            // `HostError::MissingVirtualNode`. Both faithfully mean "no
-            // product", and the divergence itself is pinned by
-            // `the_transports_serialize_a_missing_node_differently` below, so
-            // it is recorded rather than smoothed away here.
-            let missing_shaped = case["outcome"] == "missing"
-                || (case["outcome"] == "error"
-                    && case["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("MissingVirtualNode")));
-            assert!(
-                missing_shaped,
+            // Both transports report a MISSING node the same way: an absent
+            // response, never a throw. The contract itself is pinned by
+            // `the_transports_report_a_missing_node_the_same_way` below; this
+            // holds every other case in the suite to it too, so a transport
+            // that reintroduced a throw here could not pass by being
+            // "missing-shaped".
+            assert_eq!(
+                case["outcome"], "missing",
                 "{transport}/{label}: the host reported a missing node but the transport \
                  returned {case}"
             );
@@ -1159,21 +1154,6 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// A recorded cross-transport divergence
-// ══════════════════════════════════════════════════════════════════════════
-
-/// CHARACTERIZATION — the two transports serialize a MISSING virtual node
-/// differently.
-///
-/// For the same typed request (a `style` node on a component whose runtime
-/// surface was refused), the in-process host returns
-/// `Err(HostError::MissingVirtualNode)`. NAPI converts that into a NULL
-/// response; WASM converts it into a THROWN typed error. Both mean "no
-/// product" and neither leaks one, but a consumer written against one
-/// transport's shape does not port to the other unchanged.
-///
-/// Recorded, not corrected. It fails if either transport's shape moves.
 /// The audited-compile spelling, driven on BOTH transports.
 ///
 /// Two facts are pinned, and both were measured rather than assumed:
@@ -1250,81 +1230,42 @@ fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_tran
     );
 }
 
-#[test]
-fn the_transports_serialize_a_missing_node_differently() {
-    let napi = probe(
-        "napi",
-        "packages/native/scripts/probe-transport-surface.mjs",
-        NAPI_BUILD,
-    );
-    let wasm = probe(
-        "wasm",
-        "packages/wasm/scripts/probe-transport-surface.mjs",
-        WASM_BUILD,
-    );
+// ══════════════════════════════════════════════════════════════════════════
+// The missing-node transport contract
+// ══════════════════════════════════════════════════════════════════════════
 
-    // The in-process host's own answer for this request is a missing node —
-    // the fact both transports are converting.
-    let server = host_with(
-        "/probe/Server.svelte",
-        SUPPORTED_SVELTE,
-        verter_language::FileLanguage::svelte(),
-    );
-    assert_eq!(
-        host_node(
-            &server,
-            "/probe/Server.svelte",
-            VirtualNodeKind::Style { index: 0 },
-            &probe_profile(true, true),
-        ),
-        HostOutcome::Missing,
-        "the host route no longer reports a missing node here, so this comparison is stale"
-    );
-
-    assert_eq!(
-        napi["cases"]["svelteServerStyle"]["outcome"], "missing",
-        "the NAPI transport no longer returns a null response for a missing node: {}",
-        napi["cases"]["svelteServerStyle"]
-    );
-    assert_eq!(
-        wasm["cases"]["svelteServerStyle"]["outcome"], "error",
-        "the WASM transport no longer throws for a missing node: {}",
-        wasm["cases"]["svelteServerStyle"]
-    );
-    assert!(
-        wasm["cases"]["svelteServerStyle"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("MissingVirtualNode")),
-        "the WASM transport's missing-node error is no longer the typed one: {}",
-        wasm["cases"]["svelteServerStyle"]
-    );
-    // Neither leaks a product, whichever shape it chose.
-    for (transport, record) in [("napi", &napi), ("wasm", &wasm)] {
-        assert_eq!(
-            record["cases"]["svelteServerStyle"]["code"],
-            Value::Null,
-            "{transport}: a product crossed the boundary for a missing node"
-        );
-    }
-}
-
-/// The correct-behaviour target for the missing-node transport divergence: the
-/// two transports report a missing node the SAME way.
+/// The missing-node transport contract: the two transports report a missing
+/// node the SAME way.
 ///
-/// [`the_transports_serialize_a_missing_node_differently`] above characterizes
-/// the divergence, and by construction it fails if EITHER shape moves — so it
-/// cannot also be the acceptance gate for the correction, which must move
-/// exactly one of them. This target states the corrected behaviour instead. It
-/// FAILS today, at the parity assertion, because one transport answers with an
-/// absent response and the other throws.
+/// For a typed request whose in-process answer is
+/// `Err(HostError::MissingVirtualNode)`, both transports answer with an ABSENT
+/// response.
 ///
-/// It is deliberately SHAPE-NEUTRAL. Which spelling survives — a null/absent
-/// response or a typed throw — is the correction owner's design decision;
-/// asserting one of them here would pre-empt it. What the portable public
-/// contract owes is that ONE answer exists for both transports, that it is
-/// distinguishable from a published product, and that neither transport leaks
-/// a product while giving it.
-#[ignore = "missing-node transport parity: NAPI answers with an absent response where WASM throws"]
+/// The absent response is the settled shape rather than a throw because a node
+/// that does not exist is an ordinary negative answer about the carrier's
+/// structure — a `.vue` with no `<style>` block — not a failure. Under a throw
+/// a caller cannot separate "no such node" from an invalid query or an unknown
+/// file without matching the error TEXT; under an absent response the
+/// distinction is structural, and it is the answer the rest of both transports
+/// already give for absence (`getIde`, `remove`, the document structure).
+///
+/// BOTH ways a request reaches "no product" are driven, because a transport can
+/// serialize them differently and one of them alone would leave the other free
+/// to diverge:
+///
+/// * STRUCTURAL absence — the carrier compiles normally and the requested node
+///   does not exist (`style[0]` of an SFC with no `<style>` block);
+/// * absence reached THROUGH a refusal — the same node on a component whose
+///   runtime surface the server profile refused.
+///
+/// A SUCCESSFUL control on the same carrier as the structural case runs
+/// alongside them: without it an absent answer could equally be a host that
+/// never loaded the file.
+///
+/// What the portable public contract owes, and what this asserts: ONE answer
+/// exists for both transports across both absence classes, it is that absent
+/// response, it is distinguishable from a published product, and neither
+/// transport leaks a product while giving it.
 #[test]
 fn the_transports_report_a_missing_node_the_same_way() {
     let napi = probe(
@@ -1338,9 +1279,9 @@ fn the_transports_report_a_missing_node_the_same_way() {
         WASM_BUILD,
     );
 
-    // Staleness guard: the in-process host must still answer MISSING for this
+    // Staleness guards: the in-process host must still answer MISSING for each
     // request, or the transports are converting something else and the
-    // comparison below decides nothing.
+    // comparisons below decide nothing.
     let server = host_with(
         "/probe/Server.svelte",
         SUPPORTED_SVELTE,
@@ -1354,43 +1295,111 @@ fn the_transports_report_a_missing_node_the_same_way() {
             &probe_profile(true, true),
         ),
         HostOutcome::Missing,
-        "the host route no longer reports a missing node here, so this target is stale"
+        "the host route no longer reports a missing node for the refused Svelte carrier, so \
+         this target is stale"
     );
 
-    let napi_case = &napi["cases"]["svelteServerStyle"];
-    let wasm_case = &wasm["cases"]["svelteServerStyle"];
-
-    // True today, and it must survive the correction: a node that does not
-    // exist is never published as a product on either transport.
-    for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
-        assert_ne!(
-            case["outcome"], "published",
-            "{transport}: a missing node was published as a product: {case}"
-        );
-        assert_eq!(
-            case["code"],
-            Value::Null,
-            "{transport}: a product crossed the boundary for a missing node: {case}"
-        );
-    }
-
-    // The parity assertion — the half that is RED today.
+    let no_style = host_with(
+        "/probe/NoStyle.vue",
+        VUE_SFC,
+        verter_language::FileLanguage::vue(),
+    );
     assert_eq!(
-        napi_case["outcome"], wasm_case["outcome"],
-        "the transports still spell a missing node differently: napi {napi_case}, wasm {wasm_case}"
+        host_node(
+            &no_style,
+            "/probe/NoStyle.vue",
+            VirtualNodeKind::Style { index: 0 },
+            &probe_profile(false, true),
+        ),
+        HostOutcome::Missing,
+        "the host route no longer reports a missing node for a style-less SFC, so this target \
+         is stale"
     );
 
-    // Whichever spelling they agree on, it stays a TYPED answer a caller can
-    // classify rather than an anonymous failure.
-    if napi_case["outcome"] == "error" {
+    // The successful control, on the SAME carrier as the structural case.
+    let control = host_node(
+        &no_style,
+        "/probe/NoStyle.vue",
+        VirtualNodeKind::Main,
+        &probe_profile(false, true),
+    );
+    let HostOutcome::Published {
+        code: control_code, ..
+    } = &control
+    else {
+        panic!(
+            "the host no longer publishes the control node, so absence proves nothing: {control:?}"
+        )
+    };
+
+    for (label, napi_case, wasm_case) in [
+        (
+            "absence through a refusal",
+            &napi["cases"]["svelteServerStyle"],
+            &wasm["cases"]["svelteServerStyle"],
+        ),
+        (
+            "structural absence",
+            &napi["cases"]["vueMissingStyle"],
+            &wasm["cases"]["vueMissingStyle"],
+        ),
+    ] {
+        // True before the correction and it must survive it: a node that does
+        // not exist is never published as a product on either transport.
         for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
-            assert!(
-                case["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("MissingVirtualNode")),
-                "{transport}: the agreed missing-node error is not the typed one: {case}"
+            assert_ne!(
+                case["outcome"], "published",
+                "{transport}/{label}: a missing node was published as a product: {case}"
+            );
+            assert_eq!(
+                case["code"],
+                Value::Null,
+                "{transport}/{label}: a product crossed the boundary for a missing node: {case}"
             );
         }
+
+        // The parity assertion.
+        assert_eq!(
+            napi_case["outcome"], wasm_case["outcome"],
+            "{label}: the transports still spell a missing node differently: napi \
+             {napi_case}, wasm {wasm_case}"
+        );
+
+        // Parity alone is satisfied by BOTH transports throwing, which is not
+        // the settled contract — so the agreed spelling is pinned too. Stated
+        // per transport rather than once over the pair, so a failure names
+        // which one moved.
+        for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
+            assert_eq!(
+                case["outcome"], "missing",
+                "{transport}/{label}: a missing node is no longer reported as an absent \
+                 response: {case}"
+            );
+            assert_eq!(
+                case["message"],
+                Value::Null,
+                "{transport}/{label}: a missing node produced a thrown error rather than an \
+                 absent response: {case}"
+            );
+        }
+    }
+
+    // The control: the node that DOES exist on that carrier is published by
+    // both transports, with the host's own bytes. An absent answer above is
+    // therefore about the requested node, not about the file.
+    for (transport, record) in [("napi", &napi), ("wasm", &wasm)] {
+        let case = &record["cases"]["vueMissingStyleControl"];
+        assert_eq!(
+            case["outcome"], "published",
+            "{transport}: the successful control did not publish, so the absent answers above \
+             cannot be attributed to the requested node: {case}"
+        );
+        assert_eq!(
+            case["code"].as_str(),
+            Some(control_code.as_str()),
+            "{transport}: the successful control published something other than the host's \
+             own product"
+        );
     }
 }
 
@@ -2668,7 +2677,6 @@ fn the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_mo
 /// shape: it publishes a `?verter&type=script` wrapper whose loaded script
 /// already carries the host map, like the green Vite route above.
 #[test]
-#[ignore = "Rollup inline source-map parity: Rollup inline transform currently drops the host map"]
 fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
     let record = probe(
         "bundler",

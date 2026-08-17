@@ -289,6 +289,44 @@ pub fn host_virtual_file_to_ffi(
     }
 }
 
+/// A host virtual-file answer, classified for a transport boundary.
+///
+/// [`VirtualFileOutcome::Absent`] is the portable public contract's answer for
+/// a node that does not exist — an SFC with no `<style>` block asked for
+/// `style[0]`. It is an ordinary negative answer about the carrier's structure,
+/// not a failure, so every transport reports it as an absent response and
+/// reserves its failure channel for genuine failures.
+pub enum VirtualFileOutcome {
+    /// The requested node exists and its product is published.
+    Published(host::VirtualFileResponse),
+    /// The requested node does not exist. Not a failure.
+    Absent,
+    /// A genuine failure: an invalid query, an unknown file, a refused
+    /// compilation.
+    Failed(host::HostError),
+}
+
+/// Classify a host virtual-file answer for a transport boundary.
+///
+/// This is the ONE place the absent/failed split is decided. Every transport's
+/// virtual-file entry point routes through it and none of them classifies the
+/// host answer itself, so they cannot drift into reporting the same answer
+/// differently — a divergence would have to be reintroduced by removing a
+/// binding from this function, not by editing one in place.
+///
+/// A binding may still map a `HostError` to its own failure status elsewhere:
+/// what is confined here is the decision that an answer is ABSENT rather than
+/// failed.
+pub fn classify_host_virtual_file(
+    result: Result<host::VirtualFileResponse, host::HostError>,
+) -> VirtualFileOutcome {
+    match result {
+        Ok(response) => VirtualFileOutcome::Published(response),
+        Err(host::HostError::MissingVirtualNode { .. }) => VirtualFileOutcome::Absent,
+        Err(error) => VirtualFileOutcome::Failed(error),
+    }
+}
+
 /// Convert a host resolved ID to its FFI representation.
 pub fn host_resolved_id_to_ffi(input: host::ResolvedId) -> FfiResolvedId {
     FfiResolvedId {

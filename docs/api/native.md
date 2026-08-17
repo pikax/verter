@@ -191,7 +191,13 @@ const file = host.getVirtualFile({
 // file.diagnostics — compilation diagnostics
 ```
 
-**Returns:** `HostVirtualFileResponse`
+**Returns:** `HostVirtualFileResponse | null`
+
+`null` means the requested node does not exist — an SFC with no `<style>` block
+asked for `style[0]`, for instance. That is an ordinary negative answer about
+the carrier's structure, not a failure, and `@verter/wasm` answers it the same
+way. A genuine failure — an invalid query, an unknown file, a refused
+compilation — throws.
 
 #### `host.getPublicApi(canonicalId, mode?)`
 

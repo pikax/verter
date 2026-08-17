@@ -1977,6 +1977,49 @@ fn host_error_missing_virtual_node() {
     assert!(s.contains("/src/Y.vue"));
 }
 
+/// The absent/failed split every transport shares.
+///
+/// A node that does not exist is absent, not failed; every OTHER host error
+/// stays a failure. This is asserted here rather than at each binding because
+/// this is the only place either binding can get the answer from.
+#[test]
+fn a_missing_virtual_node_classifies_as_absent_and_every_other_error_as_failed() {
+    assert!(matches!(
+        classify_host_virtual_file(Err(host::HostError::MissingVirtualNode {
+            canonical_id: "/src/NoStyle.vue".to_string(),
+        })),
+        VirtualFileOutcome::Absent
+    ));
+
+    // The negative half: absence is exactly one host answer, not "anything
+    // that did not publish". Each of these must stay a failure, or a caller
+    // reading an absent response would read a real failure as "no such node".
+    for error in [
+        host::HostError::InvalidQuery,
+        host::HostError::MissingSource {
+            canonical_id: "/src/Gone.vue".to_string(),
+        },
+        host::HostError::CompileError(host::CompileFailure {
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: Vec::new(),
+                has_errors: true,
+            },
+            requested_mode: host::CompileCacheMode::Session,
+            actual_mode: host::CompileCacheMode::Session,
+            downgrade_reason: None,
+        }),
+    ] {
+        let label = host_error_to_string(&error);
+        assert!(
+            matches!(
+                classify_host_virtual_file(Err(error)),
+                VirtualFileOutcome::Failed(_)
+            ),
+            "{label} was classified as something other than a failure"
+        );
+    }
+}
+
 #[test]
 fn host_error_compile_error_with_diagnostics() {
     let err = host::HostError::CompileError(host::CompileFailure {
