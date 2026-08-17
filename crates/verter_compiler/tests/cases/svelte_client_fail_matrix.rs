@@ -1178,11 +1178,12 @@ const FAIL_MATRIX: &[FailRow] = &[
     // supported instance-script item; its positive topology is pinned by the
     // `matrix/effect_arrow` golden + the `effect_toplevel_statement_lowers_with_frame`
     // client test, and by `generated_effect_shapes_land_on_boundary` below.)
-    FailRow {
-        name: "prop_read_instance_script",
-        source: "<script>let { cb } = $props(); let c = $state(0); cb();</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
+    // (`prop_read_instance_script` removed — an instance-script prop READ is now
+    // a supported surface that lowers through the prop-read accessors, exactly
+    // as the official compiler emits it. Its positive shape is pinned by the
+    // `instance_script_prop_reads_lower_to_the_official_accessor_shapes` client
+    // test; the surviving WRITE half is the two rows below plus
+    // `props_instance_script_prop_write_stays_fail_closed`.)
     FailRow {
         name: "prop_write_in_if",
         source: "<script>let { a } = $props(); let c = $state(0); function r() { if (c) a = 2; }</script>\n<button onclick={() => c++}>{c}</button>\n",
@@ -2946,8 +2947,8 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // (the legacy `$.mutable_source` promotion is legacy-mode-only).
     assert_eq!(
         FAIL_MATRIX.len(),
-        208,
-        "the fail matrix pins 208 fail-closed rows — one documented \
+        207,
+        "the fail matrix pins 207 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \
@@ -3022,6 +3023,10 @@ fn fail_matrix_covers_every_documented_sub_shape() {
          TS-type-argument rows `effect_type_args` / `effect_pre_type_args` / \
          `effect_root_type_args_stmt` / `effect_root_type_args_init` (official \
          `rune_missing_parentheses` — the tracking spelling is a plain-JS parse \
-         error pinned at the official-reject rail))"
+         error pinned at the official-reject rail)). The instance-script prop-usage gate \
+         narrowed from any REFERENCE to a WRITE, so the `prop_read_instance_script` \
+         row is GONE — an instance-script prop READ lowers through the prop-read \
+         accessors exactly as official emits it, while every prop WRITE row stays \
+         — −1 row."
     );
 }

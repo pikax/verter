@@ -25,7 +25,7 @@ use verter_compiler::svelte::parser::template_ast::{
     SvelteAttributeKind, SvelteElementKind, SvelteNode,
 };
 use verter_semantic::analysis::framework_facts::svelte::{
-    SvelteInstanceExport, SvelteLegacyProp, SvelteScriptFacts,
+    ExactSveltePropsCalls, SvelteInstanceExport, SvelteLegacyProp, SvelteScriptFacts,
 };
 use verter_semantic::analysis::types::{
     AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding,
@@ -278,6 +278,15 @@ fn compute_svelte_surface(
 
 struct SvelteFactObservations<'a> {
     props_type: Option<&'a AuthoredTypePayloadRef>,
+    /// The EXACT `$props()` call inventory — the authored public-key geometry.
+    ///
+    /// Threaded on the `exact` arm ONLY. `ExactSveltePropsCalls` is the sealed
+    /// negative-evidence inventory whose ABSENCE is authoritative, so an empty
+    /// one proves the component declares no `$props()` call rather than meaning
+    /// "not computed". Leaving it `None` on the conservative arm is the whole
+    /// exactness guard: a partial or unavailable evidence arm can never
+    /// synthesise a props surface from geometry it did not prove complete.
+    props_calls: Option<&'a ExactSveltePropsCalls>,
     prop_defaults: Vec<&'a verter_semantic::analysis::types::AnalyzedDefaultValue>,
     bindable_members: Vec<&'a String>,
     legacy_props: Vec<&'a SvelteLegacyProp>,
@@ -290,6 +299,7 @@ impl<'a> SvelteFactObservations<'a> {
     fn exact(facts: &'a SvelteScriptFacts) -> Self {
         Self {
             props_type: facts.syntax().props_type.as_ref(),
+            props_calls: Some(facts.syntax().props_calls()),
             prop_defaults: facts.syntax().prop_defaults.iter().collect(),
             bindable_members: facts.syntax().bindable_members.iter().collect(),
             legacy_props: facts.syntax().legacy_props.iter().collect(),
@@ -304,6 +314,7 @@ impl<'a> SvelteFactObservations<'a> {
     ) -> Self {
         let mut facts = Self {
             props_type: None,
+            props_calls: None,
             prop_defaults: Vec::new(),
             bindable_members: Vec::new(),
             legacy_props: Vec::new(),
@@ -445,6 +456,104 @@ fn macro_surface_shell(
     }
 }
 
+/// PROPS for an UNTYPED `$props()` destructure, from the authored public-key
+/// geometry alone.
+///
+/// Reached only when there is no authored props type. Publishes one prop row
+/// per statically enumerated public key, with NO type annotation — downstream
+/// renders `unknown`, which is honest: the author wrote no type. Optionality is
+/// applied by the caller's shared `prop_defaults` pass, so a destructuring
+/// default or a `$bindable(<arg>)` fallback makes its key optional exactly as it
+/// does on the typed path.
+///
+/// Stays `Missing` — the propless answer — in three cases, each for its own
+/// reason:
+///
+/// - **No exact inventory.** Only the `exact` observation arm carries one. A
+///   partial or unavailable evidence arm must never synthesise a surface.
+/// - **No `$props()` call.** The absence is authoritative (the inventory is
+///   sealed negative evidence), so the component genuinely declares no runes
+///   props. Returning `Missing` here is load-bearing beyond honesty: the public
+///   API projector reads a `Missing` runes surface as "ask the LEGACY
+///   `export let` surface instead", so resolving present-but-empty would hide
+///   every legacy prop.
+/// - **An OPEN key domain.** A top-level rest element or a whole-object binding
+///   (`let props = $props()`) leaves the enumerated set incomplete. Publishing
+///   only the enumerated keys would produce a CLOSED TypeScript surface that
+///   rejects the extra props the author deliberately allowed — trading one
+///   wrong answer for another. There is no open-key props rendering on this
+///   surface yet, so the honest answer is to claim nothing.
+///
+/// `prop_origins` stays empty: an origin entry is a resolver-known
+/// `ResolvedTypeDeclaration`, and an untyped destructure key has no type
+/// declaration to point at. A synthesised one would be a fabricated route.
+fn runes_props_from_destructure_geometry(
+    facts: &SvelteFactObservations<'_>,
+) -> ResolvedMacroPayload {
+    let Some(props_calls) = facts.props_calls else {
+        return ResolvedOutcome::Missing;
+    };
+    let mut fields: Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> =
+        Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for call in props_calls.iter() {
+        if call.has_rest {
+            return ResolvedOutcome::Missing;
+        }
+        for key in &call.public_keys {
+            if !seen.insert(key.name.as_str()) {
+                continue;
+            }
+            let analysis = AnalyzedPropField {
+                name: key.name.clone(),
+                // Optionality is applied below from the shared defaults pass.
+                is_optional: false,
+                // The authored public-key token, carrier-absolute.
+                span: key.span,
+                // No authored type: downstream renders `unknown`.
+                type_annotation: None,
+                payload: None,
+                type_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+                resolution_source: TypeResolutionSource::Rust,
+                resolution_error: None,
+                declared_in_macro_type_arg: false,
+            };
+            fields.push(
+                crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                    analysis,
+                    verter_type_expr::facts::SourcePosition::unannotated(),
+                    verter_type_expr::PropCallableRole::Other,
+                ),
+            );
+        }
+    }
+    if fields.is_empty() {
+        return ResolvedOutcome::Missing;
+    }
+    let default_keys: std::collections::HashSet<&str> =
+        facts.prop_defaults.iter().map(|d| d.key.as_str()).collect();
+    for row in &mut fields {
+        if default_keys.contains(row.analysis.name.as_str()) {
+            row.analysis.is_optional = true;
+        }
+    }
+    ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
+        props: Some(PropsSurface {
+            fields,
+            index_signatures: Vec::new(),
+            prop_defaults: facts
+                .prop_defaults
+                .iter()
+                .map(|default| (*default).clone())
+                .collect(),
+            prop_origins: Vec::new(),
+        }),
+        ..Default::default()
+    }))
+}
+
 /// PROPS from the runes `$props()` type: navigate the captured props type to its
 /// one-level object surface through the shared engine and normalize as props.
 fn resolve_runes_props(
@@ -456,7 +565,13 @@ fn resolve_runes_props(
         return ResolvedOutcome::Missing;
     };
     let Some(props_type) = facts.props_type else {
-        return ResolvedOutcome::Missing;
+        // No authored props TYPE. The component may still declare props: an
+        // untyped `let { label, disabled = false } = $props()` names its public
+        // keys in the destructure itself, and that geometry is exact,
+        // span-bearing syntax evidence. Publish it rather than reporting the
+        // component propless — an empty surface here reaches TypeScript as
+        // `Component<{}>`, which rejects every prop the author declared.
+        return runes_props_from_destructure_geometry(facts);
     };
     // Navigate the props type to its one-level object surface ONCE, then derive
     // BOTH the published prop fields (via the shared normalizer) AND the

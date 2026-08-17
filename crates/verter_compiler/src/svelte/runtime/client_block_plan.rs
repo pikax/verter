@@ -117,7 +117,7 @@ impl<'a> SupportedClientIr<'a> {
                             AuthoredValueSurface::IfCondition,
                         )?;
                         let call_derived = value.has_call().then(|| PreparedDerivedRead {
-                            thunk_body: value.arrow_body(),
+                            thunk_body: value.arrow_body_mapped(),
                         });
                         Some(PreparedIfCondition {
                             value,
@@ -152,12 +152,13 @@ impl<'a> SupportedClientIr<'a> {
         let item_param = item_binding.map(|b| self.binding_name(b));
         let user_index_name = index_binding.map(|b| self.binding_name(b));
 
-        // The official flag bits (sans `EACH_IS_CONTROLLED`, OR'd in at emit). The item is
-        // reactive unless its binding is inert; the index is reactive only for a keyed each
-        // (its binding kind already encodes this — `EachSignal` keyed vs `PlainLocal`
-        // unkeyed); runes mode is immutable.
+        // The official flag bits (sans `EACH_IS_CONTROLLED`, OR'd in at emit). The item
+        // reactivity rule is the official one over the COLLECTION expression's resolved
+        // dependencies; the index is reactive only for a keyed each (its binding kind
+        // already encodes this — `EachSignal` keyed vs `PlainLocal` unkeyed); runes mode
+        // is immutable.
         let mut flags = 0u8;
-        if item_binding.is_some_and(|b| is_signal_kind(self.binding_kind(b))) {
+        if self.each_item_is_reactive(source, item, key) {
             flags |= EACH_ITEM_REACTIVE;
         }
         if index_binding.is_some_and(|b| is_signal_kind(self.binding_kind(b))) {
@@ -230,6 +231,25 @@ impl<'a> SupportedClientIr<'a> {
             body,
             else_body,
         })
+    }
+
+    /// The official item-reactivity rule, read from the ONE shared predicate the
+    /// lowering finalizer also drives — so the projected flag and the item
+    /// binding's read form can never disagree.
+    fn each_item_is_reactive(
+        &self,
+        source: ExprId,
+        item: Option<PatternId>,
+        key: Option<ExprId>,
+    ) -> bool {
+        super::lower_block::EachReactivityFacts {
+            expressions: &self.ir.analysis.expressions,
+            bindings: &self.ir.analysis.bindings,
+            scopes: &self.ir.analysis.scopes,
+            patterns: &self.ir.analysis.patterns,
+            runes: matches!(self.ir.component.mode, SvelteMode::Runes),
+        }
+        .each_item_is_reactive(source, item, key)
     }
 
     /// Whether the each BODY region's roots include an element bearing an

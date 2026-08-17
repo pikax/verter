@@ -5,6 +5,7 @@
 //! `LoweringCtx` / IR / scope helpers (including `super::lower_node` and
 //! `super::lower_children_in_scope`) through the parent module.
 
+use super::ir::PatternShape;
 use super::*;
 
 /// Lower a block construct into the IR, creating its body template scopes.
@@ -84,13 +85,159 @@ fn lower_branch_body(
     ts
 }
 
-/// Lower an `{#each}` block. The ITEM binding is a SIGNAL read (`EachSignal`),
-/// declared in the body scope so a same-name outer signal is shadowed. The INDEX
-/// binding is a signal ONLY for a KEYED each (where items reorder, so an item's
-/// index can change — official sets `EACH_INDEX_REACTIVE` and reads `$.get(i)`);
-/// for an UNKEYED each the index is positional and INERT (`PlainLocal`, read as
-/// the plain callback parameter `i`, NOT `$.get(i)`), matching the official
-/// `flags |= EACH_INDEX_REACTIVE` gate (`keyed && index`).
+/// The inputs the official item-reactivity rule reads, gathered so the LOWERING
+/// finalizer and the client BLOCK PLAN decide it from one implementation.
+///
+/// The two must not diverge: the flag the plan projects
+/// (`EACH_ITEM_REACTIVE`) and the READ FORM the item binding lowers to are two
+/// halves of one decision. With the flag clear the runtime hands the render
+/// callback the raw item, so a `$.get(item)` read would dereference a
+/// non-signal; with it set the callback receives a signal, so a plain read
+/// would yield the signal object.
+pub(super) struct EachReactivityFacts<'a, 'b> {
+    pub(super) expressions: &'a ExprArena<'b>,
+    pub(super) bindings: &'a BindingTable,
+    pub(super) scopes: &'a ScopeGraph,
+    pub(super) patterns: &'a [PatternBindings],
+    /// Whether the component compiles in runes mode.
+    pub(super) runes: bool,
+}
+
+impl EachReactivityFacts<'_, '_> {
+    /// The official `EACH_ITEM_REACTIVE` rule.
+    ///
+    /// The pinned official compiler walks the COLLECTION expression's resolved
+    /// dependencies and sets the bit for the first one that escapes the block's
+    /// scope, but only when the block is NON-runes, or the key is not the item
+    /// itself, or the collection subscribes a store. A collection with no
+    /// resolved dependency at all (a literal, a global call) leaves the bit
+    /// clear because the loop body never runs.
+    ///
+    /// Official additionally SKIPS a dependency whose binding does not escape
+    /// the each block's own scope — an expression-local one, e.g. the arrow
+    /// parameter in `{#each ((x) => [x])(1) as item}`, which official records
+    /// as a dependency and then skips by function depth. That filter is not
+    /// re-implemented here because the reference set it would filter never
+    /// arrives: expression-local parameters and declarations are removed from
+    /// an analyzed expression's stored `references` before resolution, so only
+    /// bindings captured from OUTSIDE the expression reach this loop. Those are
+    /// declared outside the block by construction — the collection is lowered
+    /// in the each's PARENT scope — so none of them would be skipped.
+    pub(super) fn each_item_is_reactive(
+        &self,
+        source: ExprId,
+        item: Option<PatternId>,
+        key: Option<ExprId>,
+    ) -> bool {
+        let source_expr = self.expressions.get(source);
+        let mut has_dependency = false;
+        let mut uses_store = false;
+        for reference in &source_expr.references {
+            // A free identifier resolving to NO declared binding is a global;
+            // official's dependency set carries bindings only.
+            let Some(kind) =
+                self.bindings
+                    .resolve_kind(self.scopes, source_expr.scope, &reference.name)
+            else {
+                continue;
+            };
+            has_dependency = true;
+            if matches!(kind, BindingRuntimeKind::StoreSubscription) {
+                uses_store = true;
+            }
+        }
+        if !has_dependency {
+            return false;
+        }
+        !self.runes || uses_store || !self.key_is_the_item(item, key)
+    }
+
+    /// The official `key_is_item` predicate: the each CONTEXT is a bare
+    /// identifier pattern, the KEY expression is a bare identifier, and the two
+    /// name the same binding.
+    ///
+    /// Both halves read typed facts — the pattern producer's observed
+    /// [`PatternShape`] and the key expression's own parsed root — never the
+    /// authored text. A single-name DESTRUCTURE (`{#each items as { id } (id)}`)
+    /// is not an identifier context and is `false`, exactly as official's
+    /// `node.context?.type === 'Identifier'` check decides it.
+    ///
+    /// The key is compared AFTER TypeScript-only wrappers are peeled, because
+    /// official runs this check on a TS-ERASED tree: `(item!)` and
+    /// `(item as T)` are the identifier `item` by the time official reaches the
+    /// transform, so they must be `key_is_item` here too.
+    fn key_is_the_item(&self, item: Option<PatternId>, key: Option<ExprId>) -> bool {
+        let (Some(item), Some(key)) = (item, key) else {
+            return false;
+        };
+        let pattern = &self.patterns[item.0 as usize];
+        if pattern.shape != PatternShape::BareIdentifier {
+            return false;
+        }
+        let [item_binding] = pattern.bindings.as_slice() else {
+            return false;
+        };
+        let item_name = self.bindings.get(*item_binding).name.as_str();
+        let key_expr = self.expressions.get(key);
+        let Some(key_root) = key_expr.parsed_expression() else {
+            return false;
+        };
+        super::expr::expr_wrapped_ident(key_root).is_some_and(|key_name| key_name == item_name)
+    }
+}
+
+/// Demote every `{#each}` ITEM binding the official item-reactivity rule leaves
+/// non-reactive from `EachSignal` to `PlainLocal`, so its reads lower PLAINLY.
+///
+/// Runs once the scope graph is complete and the component's final mode is
+/// known, because the rule reads both. Keeping the binding kind and the
+/// projected `EACH_ITEM_REACTIVE` flag on the same predicate is what stops the
+/// two from disagreeing — a keyed runes each whose key IS its item gets flag
+/// `20` AND a plain `item` read, which is exactly what the official compiler
+/// emits for it.
+pub(super) fn finalize_each_item_reactivity(ctx: &mut LoweringCtx, runes: bool) {
+    let mut demote: Vec<BindingId> = Vec::new();
+    {
+        let facts = EachReactivityFacts {
+            expressions: &ctx.expressions,
+            bindings: &ctx.bindings,
+            scopes: &ctx.scopes,
+            patterns: &ctx.patterns,
+            runes,
+        };
+        for node in &ctx.nodes {
+            let IrNode::Block(BlockIr::Each {
+                source, item, key, ..
+            }) = node
+            else {
+                continue;
+            };
+            if facts.each_item_is_reactive(*source, *item, *key) {
+                continue;
+            }
+            let Some(item) = item else {
+                continue;
+            };
+            demote.extend(ctx.patterns[item.0 as usize].bindings.iter().copied());
+        }
+    }
+    for binding in demote {
+        let info = ctx.bindings.get_mut(binding);
+        if info.kind == BindingRuntimeKind::EachSignal {
+            info.kind = BindingRuntimeKind::EachPlain;
+        }
+    }
+}
+
+/// Lower an `{#each}` block. The ITEM binding is declared as a SIGNAL read
+/// (`EachSignal`) in the body scope so a same-name outer signal is shadowed;
+/// [`finalize_each_item_reactivity`] demotes it to `PlainLocal` once the final
+/// mode and full scope graph make the official item-reactivity rule decidable.
+/// The INDEX binding is a signal ONLY for a KEYED each (where items reorder, so
+/// an item's index can change — official sets `EACH_INDEX_REACTIVE` and reads
+/// `$.get(i)`); for an UNKEYED each the index is positional and INERT
+/// (`PlainLocal`, read as the plain callback parameter `i`, NOT `$.get(i)`),
+/// matching the official `flags |= EACH_INDEX_REACTIVE` gate (`keyed && index`).
 fn lower_each_block(
     ctx: &mut LoweringCtx,
     block: &SvelteBlock,

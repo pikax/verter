@@ -38,9 +38,9 @@
 //!    therefore GREEN and discriminating in both directions: it fails if a
 //!    defect deepens AND if one is silently corrected.
 //!
-//! The correct official behaviour lives in the `#[ignore]`d conformance targets
-//! at the bottom of this file. Un-ignoring one is the acceptance gate for the
-//! correction it names. This module owns no correction.
+//! The correct official behaviour lives in the conformance targets at the
+//! bottom of this file, each asserting one required official outcome directly
+//! rather than through a recorded divergence. This module owns no correction.
 //!
 //! Run it with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
@@ -82,15 +82,94 @@ fn axis_table(report: &CellReport) -> String {
     rows.join(" ")
 }
 
+/// The divergence families an EMITTING cell's oracle report carries.
+///
+/// The empty set is UNREPRESENTABLE here by construction: the fields are private
+/// to this module and the only constructors are the three below, so
+/// `EmitsAndFails` cannot be written for a cell that diverges in no family. That
+/// state is its own variant, [`CharacterizedOutcome::EmitsAndPasses`], and the
+/// gate holds each arm to the matching oracle verdict. Before the split,
+/// `EmitsAndFails { structural: false, mapping: false }` was spellable and would
+/// have silently recorded a PASSING cell under a name asserting it fails — the
+/// gate never compared the verdict, only the two family booleans.
+mod emitted_divergences {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct EmittedDivergences {
+        structural: bool,
+        mapping: bool,
+    }
+
+    // The three constructors are the CLOSED set of legal divergence
+    // combinations. Two are unused while no recorded cell carries a structural
+    // divergence; they are retained because their absence is what would make
+    // the empty set spellable again — a caller needing "structural only" would
+    // otherwise reach for a raw struct literal.
+    #[allow(
+        dead_code,
+        reason = "the closed constructor set is the mechanism that makes the empty divergence \
+                  set unrepresentable; retaining every legal combination is the point"
+    )]
+    impl EmittedDivergences {
+        /// The candidate diverges structurally from its golden only.
+        pub(super) const fn structural_only() -> Self {
+            Self {
+                structural: true,
+                mapping: false,
+            }
+        }
+
+        /// The candidate's own source map is not truthful about its output, and
+        /// it is otherwise structurally conformant.
+        pub(super) const fn mapping_only() -> Self {
+            Self {
+                structural: false,
+                mapping: true,
+            }
+        }
+
+        /// Both families diverge.
+        pub(super) const fn structural_and_mapping() -> Self {
+            Self {
+                structural: true,
+                mapping: true,
+            }
+        }
+
+        pub(super) const fn structural(self) -> bool {
+            self.structural
+        }
+
+        pub(super) const fn mapping(self) -> bool {
+            self.mapping
+        }
+    }
+}
+
+use emitted_divergences::EmittedDivergences;
+
 /// The CURRENT outcome of one reachable client request, as this suite has
 /// measured it. Keyed by the fixture, because the request — not the golden — is
 /// the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CharacterizedOutcome {
+    /// The route emits a candidate and the oracle reports `pass`: no structural
+    /// divergence, no mapping divergence, and no other reason at all.
+    EmitsAndPasses,
     /// The route emits a candidate and the oracle reports `fail`, with at least
-    /// one reason mentioning each named axis and NO reason mentioning any other.
-    EmitsAndFails { structural: bool, mapping: bool },
+    /// one reason mentioning each named family and NO reason mentioning any
+    /// other.
+    EmitsAndFails(EmittedDivergences),
     /// The route refuses the runtime surface with this typed code.
+    ///
+    /// Currently carried by no client cell — every reachable client request
+    /// emits. The variant stays because a refusal remains a legal outcome the
+    /// gate must be able to record, and because the `Emitted`-where-`Refuses`
+    /// arm is what turns a silently corrected refusal into a failure rather
+    /// than a pass.
+    #[allow(
+        dead_code,
+        reason = "a refusal is a legal recorded outcome; no reachable client request has one today"
+    )]
     Refuses { diagnostic_code: &'static str },
 }
 
@@ -100,24 +179,18 @@ enum CharacterizedOutcome {
 /// target below stating what the official compiler does instead.
 fn characterized_client_outcome(fixture_path: &str) -> CharacterizedOutcome {
     match fixture_path {
-        // The `{#each}` flags argument carries `EACH_ITEM_REACTIVE` where the
-        // official compiler does not — see
-        // `each_flags_for_a_keyed_runes_each_match_the_official_compiler`.
-        // The emitted map also misses required authored anchors — see
-        // `the_client_source_map_covers_every_required_authored_anchor`.
-        "fixtures/svelte/basic-runes.svelte" => CharacterizedOutcome::EmitsAndFails {
-            structural: true,
-            mapping: true,
-        },
-        // Structurally conformant; only the map's authored coverage diverges.
-        "fixtures/svelte/legacy-slots.svelte" => CharacterizedOutcome::EmitsAndFails {
-            structural: false,
-            mapping: true,
-        },
-        // The official compiler accepts this component; Verter refuses it.
-        "fixtures/svelte/props-events.svelte" => CharacterizedOutcome::Refuses {
-            diagnostic_code: "svelte-runtime-unsupported-advanced-rune",
-        },
+        "fixtures/svelte/basic-runes.svelte" => CharacterizedOutcome::EmitsAndPasses,
+        "fixtures/svelte/legacy-slots.svelte" => CharacterizedOutcome::EmitsAndPasses,
+        // The component emits, and its instance-script prop reads match the
+        // official accessor shapes. Its own required map anchors are a script
+        // FUNCTION declaration and a shorthand attribute binding — two producer
+        // classes that still write unmapped fragments, characterized by
+        // `a_function_declaration_carries_its_authored_name_provenance` and
+        // `a_shorthand_attribute_binding_carries_its_authored_name_provenance`
+        // in the compiler crate.
+        "fixtures/svelte/props-events.svelte" => {
+            CharacterizedOutcome::EmitsAndFails(EmittedDivergences::mapping_only())
+        }
         other => panic!("no characterized outcome for the reachable request `{other}`"),
     }
 }
@@ -150,12 +223,12 @@ fn recorded_divergences(
 ) -> RecordedDivergences {
     let base = characterized_client_outcome(fixture_path);
     let structural = match base {
-        CharacterizedOutcome::EmitsAndFails { structural, .. } => structural,
-        CharacterizedOutcome::Refuses { .. } => false,
+        CharacterizedOutcome::EmitsAndFails(divergences) => divergences.structural(),
+        CharacterizedOutcome::EmitsAndPasses | CharacterizedOutcome::Refuses { .. } => false,
     };
     let mapping = match base {
-        CharacterizedOutcome::EmitsAndFails { mapping, .. } => mapping,
-        CharacterizedOutcome::Refuses { .. } => false,
+        CharacterizedOutcome::EmitsAndFails(divergences) => divergences.mapping(),
+        CharacterizedOutcome::EmitsAndPasses | CharacterizedOutcome::Refuses { .. } => false,
     };
     match reachability {
         RequestReachability::Reachable => RecordedDivergences {
@@ -419,6 +492,27 @@ fn every_committed_client_cell_is_driven_and_reaches_its_recorded_outcome() {
                 "── {} ──\n  mapping divergence {} (recorded: {})\n  reasons={:?}",
                 cell.golden_name,
                 if saw_mapping { "present" } else { "absent" },
+                expects.mapping,
+                report.reasons
+            ));
+        }
+        // The oracle's own VERDICT must agree with the recorded families. This
+        // is what makes an "emits and passes" record mean what its name says: a
+        // cell recorded with no divergence family must reach `pass`, and one
+        // recorded with a family must reach `fail`. Comparing only the family
+        // booleans left both readings open.
+        let expected_verdict = if expects.structural || expects.mapping {
+            "fail"
+        } else {
+            "pass"
+        };
+        if report.verdict != expected_verdict {
+            problems.push(format!(
+                "── {} ──\n  the oracle reported verdict `{}` where the recorded families \
+                 (structural={}, mapping={}) demand `{expected_verdict}`\n  reasons={:?}",
+                cell.golden_name,
+                report.verdict,
+                expects.structural,
                 expects.mapping,
                 report.reasons
             ));
@@ -709,72 +803,6 @@ const EACH_ITEM_REACTIVE: u32 = 1;
 /// (`constants.js:3` and `:5`; the golden's own emitted call is `$.each(ul, 20, …)`).
 const OFFICIAL_KEYED_RUNES_EACH_FLAGS: u32 = 20;
 
-/// CHARACTERIZATION — the `{#each}` flags argument currently carries
-/// `EACH_ITEM_REACTIVE` that the official compiler omits.
-///
-/// Verter sets the bit in
-/// `crates/verter_compiler/src/svelte/runtime/client_block_plan.rs:159-162`
-/// whenever the item binding is a signal kind. The pinned official compiler
-/// (`.oracle-checkouts/svelte/packages/svelte/src/compiler/phases/3-transform/client/visitors/EachBlock.js:45-83`)
-/// sets it only when a dependency escapes the block's function scope AND the
-/// block is non-runes, or the key is not the item, or a store is involved —
-/// none of which hold for `{#each items as item (item)}` in runes mode.
-///
-/// Discriminating in BOTH directions: it fails if the emitted flags change at
-/// all, so neither a deepening nor a silent partial correction passes.
-#[test]
-fn each_flags_for_a_keyed_runes_each_currently_add_the_item_reactive_bit() {
-    let (cell, code, _map) = emitted_module("basic-runes.svelte");
-    let flags = each_flags_argument(&code);
-    assert_eq!(
-        flags,
-        OFFICIAL_KEYED_RUNES_EACH_FLAGS | EACH_ITEM_REACTIVE,
-        "{}: the emitted `$.each` flags moved. Official emits \
-         {OFFICIAL_KEYED_RUNES_EACH_FLAGS}; this suite characterized \
-         {} (official | EACH_ITEM_REACTIVE). If the correction landed, un-ignore \
-         `each_flags_for_a_keyed_runes_each_match_the_official_compiler`.",
-        cell.golden_name,
-        OFFICIAL_KEYED_RUNES_EACH_FLAGS | EACH_ITEM_REACTIVE
-    );
-}
-
-/// CHARACTERIZATION — a runes `$props()` destructure read from the instance
-/// script is refused, with this exact typed code and message.
-///
-/// The pinned official `svelte@5.56.8` compiler ACCEPTS the same fixture (an
-/// independent invocation through the harness's own
-/// `src/invoke-svelte-oracle.mjs` produced 617 bytes of client JS with zero
-/// diagnostics). Verter refuses at
-/// `crates/verter_compiler/src/svelte/runtime/client_surface_script.rs:31-62`.
-#[test]
-fn a_runes_props_read_in_the_instance_script_is_currently_refused_with_its_typed_code() {
-    let cell = reachable_client_requests()
-        .into_iter()
-        .find(|cell| cell.fixture_path.ends_with("props-events.svelte"))
-        .expect("the reachable inventory carries the props-events request");
-    match cell.compile_through_shipped_route() {
-        SvelteRouteOutcome::Refused {
-            diagnostic_code,
-            message,
-        } => {
-            assert_eq!(
-                diagnostic_code, "svelte-runtime-unsupported-advanced-rune",
-                "the refusal code changed"
-            );
-            assert_eq!(
-                message,
-                "Svelte client emission does not yet support the `$props() non-interpolation \
-                 usage` rune form.",
-                "the refusal message changed"
-            );
-        }
-        other => panic!(
-            "the request is no longer refused ({other:?}). If the gap was closed, un-ignore \
-             `a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module`."
-        ),
-    }
-}
-
 /// Decode a candidate map's source-bearing segments into authored
 /// `(line, column)` pairs, through the crate's own validating map reader.
 fn source_bearing_positions(map: &str, code: &str) -> Vec<(u32, u32)> {
@@ -791,16 +819,20 @@ fn source_bearing_positions(map: &str, code: &str) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// CHARACTERIZATION — the exact authored coordinates the emitted client map
-/// currently carries, per reachable emitting request.
+/// The exact authored coordinates the emitted client map carries, per reachable
+/// emitting request.
 ///
 /// Settled by DECODING the candidate's own emitted `mappings` through
 /// [`validate_and_decode`] (the crate's validating map reader), not by reading
 /// a count off a report. Every source-bearing segment is enumerated; the
 /// authored coordinates are 0-based `(line, column)`.
 ///
-/// It fails if a single segment is added, removed or moved — so a coverage
-/// improvement is caught exactly like a regression.
+/// It fails if a single segment is added, removed or moved, so it holds the map
+/// in BOTH directions: a lost segment is a regression, and a segment appearing
+/// somewhere unaccounted for is an unreviewed provenance claim. The required
+/// anchors among these are separately demanded by
+/// [`the_client_source_map_covers_every_required_authored_anchor`]; this pins
+/// the WHOLE set, including the coordinates no anchor requires.
 #[test]
 fn the_client_source_map_currently_carries_only_these_authored_coordinates() {
     let mut observed: Vec<(String, Vec<(u32, u32)>)> = Vec::new();
@@ -815,11 +847,16 @@ fn the_client_source_map_currently_carries_only_these_authored_coordinates() {
     let expected: Vec<(String, Vec<(u32, u32)>)> = vec![
         (
             "fixtures/svelte/basic-runes.svelte".to_string(),
-            vec![(2, 2), (13, 11)],
+            // (1,6) the `count` in `let count = $state(0);`; (2,2) the `let` of
+            // the `items` statement; (6,7) the `count` in `{#if count > 0}`;
+            // (13,11) the `item` interpolation in the each body.
+            vec![(1, 6), (2, 2), (6, 7), (13, 11)],
         ),
         (
             "fixtures/svelte/legacy-slots.svelte".to_string(),
-            vec![(6, 25)],
+            // (1,13) the `title` in `export let title = "Untitled";`;
+            // (6,25) the `title` interpolation inside the named slot.
+            vec![(1, 13), (6, 25)],
         ),
     ];
     assert_eq!(
@@ -833,24 +870,20 @@ fn the_client_source_map_currently_carries_only_these_authored_coordinates() {
 // Conformance targets — the official behaviour each genuine defect must reach
 // ══════════════════════════════════════════════════════════════════════════
 
-/// CONFORMANCE TARGET — currently FAILS, deliberately `#[ignore]`d.
+/// CONFORMANCE TARGET — the `{#each}` flags argument equals the official value.
 ///
-/// **What is wrong:** for `{#each items as item (item)}` in runes mode Verter
-/// emits `$.each(ul, 21, …)`; the pinned official `svelte@5.56.8` compiler emits
-/// `$.each(ul, 20, …)`. Bit `1` is `EACH_ITEM_REACTIVE`
-/// (`.oracle-checkouts/svelte/packages/svelte/src/constants.js:1`), so Verter
-/// marks the item reactive where official does not. That changes the block's
-/// reactivity/effect topology, which the compiled-output conformance rule holds
-/// in contract rather than treating as cosmetic.
+/// For `{#each items as item (item)}` in runes mode the pinned official
+/// `svelte@5.56.8` compiler emits `$.each(ul, 20, …)` —
+/// `EACH_IS_CONTROLLED | EACH_ITEM_IMMUTABLE`, with `EACH_ITEM_REACTIVE` (bit
+/// `1`, `.oracle-checkouts/svelte/packages/svelte/src/constants.js:1`) CLEAR.
+/// The bit is the block's reactivity/effect topology, which the
+/// compiled-output conformance rule holds in contract rather than treating as
+/// cosmetic, and it is coupled to the item's read form: with it clear the
+/// runtime hands the render callback the raw item.
 ///
-/// **Official behaviour this demands:** the flags argument equals
-/// `EACH_IS_CONTROLLED | EACH_ITEM_IMMUTABLE` (20) with `EACH_ITEM_REACTIVE`
-/// clear.
-///
-/// **Acceptance:** un-ignoring this test is the acceptance gate for that
-/// correction. This module owns no correction.
+/// The per-axis official predicate behind it is pinned in the compiler crate by
+/// `each_item_reactivity_matches_the_official_predicate_on_every_axis`.
 #[test]
-#[ignore = "conformance target: Verter emits EACH_ITEM_REACTIVE where the pinned official compiler does not"]
 fn each_flags_for_a_keyed_runes_each_match_the_official_compiler() {
     let (cell, code, _map) = emitted_module("basic-runes.svelte");
     let flags = each_flags_argument(&code);
@@ -868,25 +901,19 @@ fn each_flags_for_a_keyed_runes_each_match_the_official_compiler() {
     );
 }
 
-/// CONFORMANCE TARGET — currently FAILS, deliberately `#[ignore]`d.
+/// CONFORMANCE TARGET — a component reading its `$props()` locals from the
+/// instance script publishes a runtime module.
 ///
-/// **What is wrong:** `props-events.svelte` reads its `$props()` locals from a
-/// function in the instance script (`ontoggle?.(!disabled)`), and Verter's
-/// prop-usage gate refuses the whole runtime surface for it
-/// (`crates/verter_compiler/src/svelte/runtime/client_surface_script.rs:31-62`),
-/// so `get_virtual_file(Main)` returns `RuntimeSurfaceRefused` and no module is
-/// published.
+/// `props-events.svelte` reads its props from a function in the instance script
+/// (`ontoggle?.(!disabled)`), which the pinned official `svelte@5.56.8` compiler
+/// ACCEPTS. The shipped route must therefore publish a module for it, importing
+/// the client runtime — the prop-usage gate refuses WRITES only.
 ///
-/// **Official behaviour this demands:** the pinned official `svelte@5.56.8`
-/// compiler ACCEPTS this component — an independent invocation through the
-/// harness's own `src/invoke-svelte-oracle.mjs` produced 617 bytes of client JS
-/// with zero diagnostics. So the shipped route must publish a runtime module for
-/// it, importing the client runtime.
-///
-/// **Acceptance:** un-ignoring this test is the acceptance gate for that
-/// correction.
+/// The emitted read SHAPES are pinned against the official output in the
+/// compiler crate by
+/// `instance_script_prop_reads_lower_to_the_official_accessor_shapes`; this
+/// asserts the public route publishes at all.
 #[test]
-#[ignore = "conformance target: the pinned official compiler accepts this component and Verter refuses it"]
 fn a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module() {
     let cell = reachable_client_requests()
         .into_iter()
@@ -908,26 +935,22 @@ fn a_runes_props_read_in_the_instance_script_compiles_to_a_runtime_module() {
     }
 }
 
-/// CONFORMANCE TARGET — currently FAILS, deliberately `#[ignore]`d.
+/// CONFORMANCE TARGET — the emitted client map covers every required authored
+/// anchor, and the mapping oracle reports no violation at all.
 ///
-/// **What is wrong:** the emitted client map's authored coverage is far narrower
-/// than the artifact it describes. Only fragments pushed as mapped code
-/// accumulate segments (`crates/verter_compiler/src/svelte/runtime/output.rs:121-130`),
-/// so script-region declarations carry no provenance at all. The harness's
-/// mapping oracle therefore reports `anchor-missing` and `anchor-span-coverage`
-/// for required authored anchors.
+/// Only fragments pushed as MAPPED code accumulate segments
+/// (`crates/verter_compiler/src/svelte/runtime/output.rs`), so a producer that
+/// writes plain text contributes no provenance. The anchors are the harness's
+/// own, defined at
+/// `packages/framework-conformance-harness/src/mapping-oracle.mjs`; the oracle
+/// is candidate-relative and never compares against the official map, so this is
+/// a requirement about the candidate's own truthfulness.
 ///
-/// **Official behaviour this demands:** the mapping axis reports NO violation —
-/// every required anchor for the fixture is satisfied by a segment. The anchors
-/// are the harness's own, defined at
-/// `packages/framework-conformance-harness/src/mapping-oracle.mjs:603-661`; the
-/// oracle is candidate-relative and never compares against the official map, so
-/// this is a requirement about the candidate's own truthfulness.
-///
-/// **Acceptance:** un-ignoring this test is the acceptance gate for that
-/// correction.
+/// The second half is the one that cannot be satisfied by over-claiming:
+/// mapping a generated-only token to an authored position would satisfy the
+/// anchor list and then fail the oracle's provenance rules, which this test also
+/// demands are clean.
 #[test]
-#[ignore = "conformance target: the emitted client map misses required authored anchors"]
 fn the_client_source_map_covers_every_required_authored_anchor() {
     // The required anchors, mirrored from the harness's own definitions
     // (`src/mapping-oracle.mjs:603-661`). 0-based authored `(line, column)`.

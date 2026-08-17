@@ -1,2 +1,3 @@
 svelte/basic-runes__client__runes1__dev0 => <div class="root"><p>zero</p><!----> <ul><li>a</li><li>b</li><li>c</li></ul></div>
 svelte/legacy-slots__client__runes0__dev0 => <div class="panel"><header>Untitled<!----></header> <main><!----></main></div>
+svelte/props-events__client__runes1__dev0 => <button></button>

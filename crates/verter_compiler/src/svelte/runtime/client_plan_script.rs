@@ -26,6 +26,17 @@ use super::expr_rewrite::PropRead;
 type LoweredScriptItems = (Vec<ClientScriptItem>, Option<String>, Vec<String>);
 
 impl<'a> SupportedClientIr<'a> {
+    /// The component-source byte offset the instance script's own coordinates
+    /// are relative to — the single conversion every instance-script mapping
+    /// applies before its ranges become component-source provenance.
+    fn instance_source_offset(&self) -> u32 {
+        self.ir
+            .analysis
+            .scripts
+            .instance_span
+            .map_or(0, |span| span.start)
+    }
+
     /// Lower the admitted non-import module-script statements from their
     /// canonical typed identities. Module statements use the lexical parent of
     /// the instance root and emit before template hoists; TypeScript erasure and
@@ -141,9 +152,47 @@ impl<'a> SupportedClientIr<'a> {
             // plan through the SHARED default lowering.
             if let Item::ExportLetProps { locals } = item {
                 for local in locals {
-                    let code = self.lower_export_let_prop(local, root_scope)?;
-                    items.push(ClientScriptItem::BodyStatement { code, mapped: None });
+                    let code = self.lower_export_let_prop(&local.name, root_scope)?;
+                    let mapped = expr_emit::declaration_name_mapped_code(
+                        code.clone(),
+                        &local.name,
+                        local.name_span.start,
+                    )
+                    .with_source_offset(self.instance_source_offset());
+                    items.push(ClientScriptItem::BodyStatement {
+                        code,
+                        mapped: Some(mapped),
+                    });
                 }
+                continue;
+            }
+            // A `$state(<primitive>)` declarator emits its own `let <name> = …`
+            // declaration, whose NAME token carries the authored declaration's
+            // provenance. Intercepted here (rather than through the rewriter
+            // dispatch below) so the mapping rides the same fragment the
+            // emitter produced.
+            if let Item::StatePrimitive {
+                name,
+                name_span,
+                init,
+            } = item
+            {
+                let rewritten = match init {
+                    Some(src) => Some(self.rewrite_source(src, root_scope)?),
+                    None => None,
+                };
+                let code = expr_emit::lower_state_primitive_item(
+                    name,
+                    rewritten.as_deref(),
+                    &self.ir.analysis.bindings,
+                );
+                let mapped =
+                    expr_emit::declaration_name_mapped_code(code.clone(), name, name_span.start)
+                        .with_source_offset(self.instance_source_offset());
+                items.push(ClientScriptItem::BodyStatement {
+                    code,
+                    mapped: Some(mapped),
+                });
                 continue;
             }
             match expr_emit::lower_simple_instance_item(item) {
@@ -171,12 +220,7 @@ impl<'a> SupportedClientIr<'a> {
                                 span: *span,
                             });
                         };
-                        let source_offset = self
-                            .ir
-                            .analysis
-                            .scripts
-                            .instance_span
-                            .map_or(0, |span| span.start);
+                        let source_offset = self.instance_source_offset();
                         let mapped = super::expr_rewrite::rewrite_script_statement(
                             statement,
                             program,
@@ -222,19 +266,6 @@ impl<'a> SupportedClientIr<'a> {
                         // A `$state` / `$state.raw` declarator: its INIT routes through the
                         // shared rewriter FIRST (a signal read inside a proxiable object init
                         // becomes `$.get`, TS is stripped), THEN the resolved `StateLowering`
-                        // wrapper (`$.state` / `$.proxy` / `$.state($.proxy(…))`) is applied.
-                        // A no-arg `$state()` has no init to rewrite (the `void 0` form).
-                        Item::StatePrimitive { name, init } => {
-                            let rewritten = match init {
-                                Some(src) => Some(self.rewrite_source(src, root_scope)?),
-                                None => None,
-                            };
-                            expr_emit::lower_state_primitive_item(
-                                name,
-                                rewritten.as_deref(),
-                                &self.ir.analysis.bindings,
-                            )
-                        }
                         // The `$props()` destructure: its PROP-SOURCE members lower
                         // to ONE `let <local> = $.prop($$props, <key>, <flags>[,
                         // <default>]), …;` declaration (default expressions rewrite
@@ -334,10 +365,11 @@ impl<'a> SupportedClientIr<'a> {
                         }
                         // `NeedsRewriter` is produced ONLY for the arms above; any other
                         // item reaching here is a classifier/lowering divergence.
-                        // (A `ReactiveStatement` was intercepted before this
-                        // dispatch — its registration lowers below.)
+                        // (A `ReactiveStatement` and a `StatePrimitive` were both
+                        // intercepted before this dispatch — the first registers
+                        // below, the second carries its own authored mapping.)
                         _ => unreachable!(
-                            "only GeneralStatement, StatePrimitive, PropsDestructure, MutableSourceLet, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                            "only GeneralStatement, PropsDestructure, MutableSourceLet, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
                         ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code, mapped: None });
@@ -486,6 +518,7 @@ impl<'a> SupportedClientIr<'a> {
                 | BindingRuntimeKind::StateProxy
                 | BindingRuntimeKind::Derived
                 | BindingRuntimeKind::EachSignal
+                | BindingRuntimeKind::EachPlain
                 | BindingRuntimeKind::AwaitSignal
                 | BindingRuntimeKind::LegacyConstDerived
                 | BindingRuntimeKind::TemplateDeclLocal
@@ -624,7 +657,11 @@ impl<'a> SupportedClientIr<'a> {
             Some(arg) => format!("$.prop($$props, {key}, {flags}, {arg})"),
             None => format!("$.prop($$props, {key}, {flags})"),
         };
-        Ok(format!("let {} = {call};", member.local))
+        Ok(format!(
+            "{}{} = {call};",
+            expr_emit::DECL_LET_PREFIX,
+            member.local
+        ))
     }
 
     /// Lower ONE `$props()` member DEFAULT into its `$.prop` initial argument,

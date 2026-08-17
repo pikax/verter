@@ -1126,16 +1126,29 @@ fn each_as_shadows_outer_signal() {
     // The each body scope is the inner template scope.
     let each_block = find_each_block(&ir);
     let body_scope = ir.template_scope(each_block_body(&ir, each_block)).scope;
-    let kind = ir
+    // IDENTITY, not kind: `name` in the each body must resolve to the binding
+    // the each CONTEXT declared, not to the outer `$state` one. Comparing the
+    // binding id is what makes this a shadowing assertion — the item's KIND
+    // depends on the official item-reactivity rule (this each's collection is a
+    // literal, so the item is non-reactive), and pinning the kind would make
+    // the test a reactivity assertion wearing a shadowing name.
+    let resolved = ir
         .analysis
-        .bindings
-        .resolve_kind(&ir.analysis.scopes, body_scope, "name")
+        .scopes
+        .resolve(&ir.analysis.bindings, body_scope, "name")
         .expect("name resolves in the each body scope");
+    let item_binding = match &ir.nodes[each_block] {
+        IrNode::Block(BlockIr::Each { item, .. }) => {
+            let item = item.expect("the each declares an item context");
+            ir.pattern_bindings(item)[0]
+        }
+        _ => panic!("not an each block"),
+    };
     assert_eq!(
-        kind,
-        BindingRuntimeKind::EachSignal,
-        "inside the each body, `name` is the each binding, not the outer signal"
+        resolved, item_binding,
+        "inside the each body, `name` must resolve to the each's own item binding"
     );
+    let kind = ir.analysis.bindings.get(resolved).kind;
     assert!(
         !matches!(kind, BindingRuntimeKind::StateSignal { .. }),
         "the shadowing each binding must NOT resolve as the outer $state signal"

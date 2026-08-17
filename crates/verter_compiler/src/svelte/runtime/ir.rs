@@ -141,6 +141,27 @@ pub struct RuntimeAnalysis<'a> {
 pub struct PatternBindings {
     /// The declared binding ids in source order.
     pub bindings: Vec<BindingId>,
+    /// The syntactic shape the pattern producer OBSERVED for this pattern.
+    pub shape: PatternShape,
+}
+
+/// The observed syntactic shape of a binding pattern.
+///
+/// Consumers that must distinguish a bare identifier context from a
+/// decomposition read this rather than counting declared names: a single-name
+/// destructure (`{ a }`) declares exactly one name yet is not an identifier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PatternShape {
+    /// Exactly one bare binding identifier (`item`).
+    BareIdentifier,
+    /// A destructuring pattern or a multi-name parameter list — anything that
+    /// is not a single bare identifier.
+    Decomposed,
+    /// The pattern was interned from already-parsed NAMES, so no syntactic
+    /// shape was observed. A consumer that needs the distinction must treat
+    /// this exactly as [`Self::Decomposed`], never as a bare identifier.
+    #[default]
+    Unobserved,
 }
 
 /// One template scope: a lexical region of the template (the root, an `{#each}`

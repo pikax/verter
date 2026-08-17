@@ -143,7 +143,7 @@ use verter_span::Span;
 
 use attr_lowering::lower_attributes;
 use expr::{
-    collect_expr_references_in, parse_debug_identifier_spans, parse_pattern_names, AnalyzedExpr,
+    collect_expr_references_in, parse_debug_identifier_spans, parse_pattern, AnalyzedExpr,
     BindingInfo, BindingRuntimeKind, BindingTable, ExprArena, ScopeGraph, ScopeId, ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
@@ -414,15 +414,22 @@ impl<'a> LoweringCtx<'a> {
     /// parse records a diagnostic and declares no names.
     fn push_pattern(&mut self, span: Span, scope: ScopeId, kind: BindingRuntimeKind) -> PatternId {
         let text = span_text(self.source, span);
-        let names = match parse_pattern_names(text) {
-            Ok(names) => names,
+        let (names, shape) = match parse_pattern(text) {
+            Ok(parsed) => (
+                parsed.names,
+                if parsed.bare_identifier {
+                    ir::PatternShape::BareIdentifier
+                } else {
+                    ir::PatternShape::Decomposed
+                },
+            ),
             Err(()) => {
                 self.errors.push(
                     "svelte-runtime-pattern-parse",
                     format!("could not parse binding pattern `{text}`"),
                     span,
                 );
-                Vec::new()
+                (Vec::new(), ir::PatternShape::Unobserved)
             }
         };
         let mut declared = Vec::with_capacity(names.len());
@@ -438,7 +445,10 @@ impl<'a> LoweringCtx<'a> {
             declared.push(binding);
         }
         let id = PatternId(self.patterns.len() as u32);
-        self.patterns.push(PatternBindings { bindings: declared });
+        self.patterns.push(PatternBindings {
+            bindings: declared,
+            shape,
+        });
         id
     }
 
@@ -465,7 +475,13 @@ impl<'a> LoweringCtx<'a> {
             declared.push(binding);
         }
         let id = PatternId(self.patterns.len() as u32);
-        self.patterns.push(PatternBindings { bindings: declared });
+        // No syntactic shape was observed here: the caller already reduced the
+        // declarator to names, so a consumer needing the bare-identifier
+        // distinction must fall back to the conservative reading.
+        self.patterns.push(PatternBindings {
+            bindings: declared,
+            shape: ir::PatternShape::Unobserved,
+        });
         id
     }
 }
@@ -821,6 +837,12 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     } else {
         SvelteMode::Legacy
     };
+    // With the final mode known and the scope graph complete, decide each
+    // `{#each}` item's reactivity by the official rule and demote the bindings
+    // it leaves non-reactive. The client block plan projects
+    // `EACH_ITEM_REACTIVE` from the SAME predicate, so the flag and the read
+    // form stay two halves of one decision.
+    lower_block::finalize_each_item_reactivity(&mut ctx, runes);
     // The official in-between MAYBE-RUNES fact (`analysis.maybe_runes`): a
     // non-runes component with no explicit `runes: false` override and no
     // definitively-legacy instance construct (a top-level labeled statement or an

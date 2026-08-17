@@ -51,10 +51,13 @@ const VUE_SFC =
 /// fanned-out batch result would be visible.
 const SUPPORTED_TWO =
   '<script>\n  let total = $state(7);\n</script>\n\n<span class="total">{total}</span>\n';
-/// The committed fixture whose Svelte runtime surface the client backend
-/// refuses (`$props()` read from the instance script).
+/// A component whose Svelte runtime surface the client backend refuses: an
+/// instance-script prop WRITE, which official lowers through the prop SETTER
+/// and this backend does not emit. An instance-script prop READ is a SUPPORTED
+/// surface, so a read-only component is no longer a refusal witness. These bytes
+/// are mirrored verbatim by the Rust transport-equivalence suite.
 const ADVANCED_RUNE_REFUSAL =
-  "<script>\n  let { label, disabled = false, ontoggle } = $props();\n\n  function onClick() {\n    ontoggle?.(!disabled);\n  }\n</script>\n\n<button {disabled} onclick={onClick}>{label}</button>\n";
+  "<script>\n  let { count = 0 } = $props();\n  function inc() { count += 1; }\n</script>\n\n<button onclick={inc}>{count}</button>\n";
 
 function virtualFile(host, canonicalId, kind, compileProfile, index) {
   const nodeKind = index === undefined ? { kind } : { kind, index };

@@ -108,9 +108,12 @@ const PROBE_SVELTE_ID: &str = "/probe/Plug.svelte";
 /// A second supported Svelte component, distinct from [`SUPPORTED_SVELTE`].
 const SUPPORTED_TWO: &str =
     "<script>\n  let total = $state(7);\n</script>\n\n<span class=\"total\">{total}</span>\n";
-/// The committed fixture whose Svelte runtime surface the client backend
-/// refuses (`$props()` read from the instance script).
-const ADVANCED_RUNE_REFUSAL: &str = "<script>\n  let { label, disabled = false, ontoggle } = $props();\n\n  function onClick() {\n    ontoggle?.(!disabled);\n  }\n</script>\n\n<button {disabled} onclick={onClick}>{label}</button>\n";
+/// A component whose Svelte runtime surface the client backend refuses: an
+/// instance-script prop WRITE, which official lowers through the prop SETTER
+/// and this backend does not emit. An instance-script prop READ is a SUPPORTED
+/// surface, so a read-only component is no longer a refusal witness. The bytes
+/// are mirrored verbatim by the NAPI probe script this suite compares against.
+const ADVANCED_RUNE_REFUSAL: &str = "<script>\n  let { count = 0 } = $props();\n  function inc() { count += 1; }\n</script>\n\n<button onclick={inc}>{count}</button>\n";
 
 fn batch_input(canonical: &str, source: &str) -> crate::host_compile::CompileBatchInput {
     crate::host_compile::CompileBatchInput {

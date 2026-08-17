@@ -521,6 +521,17 @@ impl PreparedTemplateValue {
             PreparedExpression::LegacySequence(seq) => format!("({})", seq.as_str()),
         }
     }
+
+    /// Mapped counterpart of [`Self::arrow_body`]. Both arms wrap in exactly one
+    /// paren pair, so the mapped form is the same wrap over the prepared
+    /// fragment's own ranges — the authored provenance survives into a derived
+    /// thunk instead of being flattened to text.
+    pub(super) fn arrow_body_mapped(&self) -> super::output::MappedCode {
+        match &self.expression {
+            PreparedExpression::Raw(text) => text.clone().wrapped("(", ")"),
+            PreparedExpression::LegacySequence(seq) => seq.clone().wrapped("(", ")"),
+        }
+    }
 }
 
 impl<'a> SupportedClientIr<'a> {
@@ -770,6 +781,11 @@ impl<'a> SupportedClientIr<'a> {
                 // is a plain getter, so the mapping stays total and exact).
                 BindingRuntimeKind::MutableSource
                 | BindingRuntimeKind::EachSignal
+                // A NON-reactive each item reads plainly too, and the
+                // demotion that mints it is runes-only, so this arm is
+                // unreachable in a definitely-legacy component — enumerated so
+                // the mapping stays total.
+                | BindingRuntimeKind::EachPlain
                 | BindingRuntimeKind::StoreSubscription
                 | BindingRuntimeKind::SnippetParam
                 | BindingRuntimeKind::StateSignal { .. }

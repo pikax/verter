@@ -161,6 +161,84 @@ fn host_with_svelte(
     (host, view)
 }
 
+/// Resolve the runes-props surface for a Svelte source through the SHARED
+/// framework-surface executor — the leg component-meta, the framework-surface
+/// wire executor and the public-API projector all consume.
+fn runes_props_surface(canonical: &str, source: &str) -> ResolvedMacroPayload {
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::RunesProps)
+}
+
+/// The published `(name, is_optional)` rows of a resolved props surface.
+fn props_rows(outcome: &ResolvedMacroPayload) -> Vec<(String, bool)> {
+    let ResolvedOutcome::Resolved(value) = outcome else {
+        panic!("the surface did not resolve: {outcome:?}");
+    };
+    let props = value
+        .props
+        .as_ref()
+        .expect("the resolved surface has props");
+    let mut rows: Vec<(String, bool)> = props
+        .fields
+        .iter()
+        .map(|field| (field.analysis.name.clone(), field.analysis.is_optional))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn an_untyped_props_destructure_resolves_through_the_shared_surface() {
+    // The correction lives in the SHARED executor leg, not in the public-API
+    // projector: this asks the executor directly, so component-meta and the
+    // framework-surface wire encoder — which never touch the projector — get
+    // the same answer. A projector-local fix would leave this RED.
+    let outcome = runes_props_surface(
+        "/UntypedProps.svelte",
+        "<script>\n  let { label, disabled = false } = $props();\n</script>\n\n<button {disabled}>{label}</button>\n",
+    );
+    assert_eq!(
+        props_rows(&outcome),
+        vec![("disabled".to_string(), true), ("label".to_string(), false),],
+        "the untyped destructure's public keys did not reach the shared props surface"
+    );
+}
+
+#[test]
+fn a_component_with_no_props_call_keeps_the_legacy_surface_reachable() {
+    // LOAD-BEARING, not merely honest: the public-API projector reads a MISSING
+    // runes surface as "this is a legacy component, ask the `export let`
+    // surface instead". Resolving present-but-empty here would silently hide
+    // every legacy prop, so a component with no `$props()` call at all must
+    // stay Missing.
+    let outcome = runes_props_surface(
+        "/LegacyOnly.svelte",
+        "<script>\n  export let title = \"Untitled\";\n</script>\n\n<p>{title}</p>\n",
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Missing),
+        "a component with no `$props()` call must not resolve a runes props surface: {outcome:?}"
+    );
+}
+
+#[test]
+fn an_open_rest_props_destructure_publishes_no_closed_surface() {
+    // A top-level rest element leaves the enumerated public-key set INCOMPLETE.
+    // Publishing only `label` would make TypeScript reject every prop the rest
+    // element deliberately accepts, so the surface claims nothing rather than
+    // claiming a closed set that is wrong.
+    let outcome = runes_props_surface(
+        "/RestProps.svelte",
+        "<script>\n  let { label, ...rest } = $props();\n</script>\n\n<p>{label}</p>\n",
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Missing),
+        "an open-key `$props()` destructure must not publish a closed surface: {outcome:?}"
+    );
+}
+
 #[test]
 fn unavailable_script_facts_surface_is_partial_not_missing() {
     let canonical = "/UnavailableFacts.svelte";
