@@ -133,14 +133,15 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 semantic_hash: [0u8; 16],
                 content_override_hash: 0,
                 css_hash_override: None,
-                outputs: Default::default(),
+                products: crate::types::CompileProducts::Produced {
+                    outputs: Default::default(),
+                    last_good_outputs: None,
+                    tsx: None,
+                    template_analysis: None,
+                },
                 diagnostics: Default::default(),
-                last_good_outputs: None,
                 last_access_tick: 0,
-                tsx: None,
-                template_analysis: None,
                 fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-                runtime_surface_refused: false,
             },
         );
     }

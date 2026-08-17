@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use crate::types::{
     BlockOverrideEntry, BlockOverrideRequest, CompileProfile, HostConfig, UpsertRequest,
-    VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -64,14 +63,18 @@ fn ide_profile() -> CompileProfile {
     }
 }
 
-fn compile(host: &VerterHost) -> crate::types::VirtualFileResponse {
-    host.get_virtual_file(VirtualQuery {
-        raw_id: None,
-        canonical_id: Some(CANONICAL.to_string()),
-        node_kind: Some(VirtualNodeKind::Main),
-        compile_profile: ide_profile(),
-    })
-    .expect("compile must serve")
+/// Drive the IDE identity's compile and report whether it was SERVED WARM.
+///
+/// These tests' subject is the published TSX. The identity asks for the IDE
+/// product only — it never asks for a runtime module — so the compile is driven
+/// through the IDE-ensure route, and the warm/cold fact is read from the slot
+/// predicate before the call rather than from a runtime response this identity
+/// does not produce.
+fn compile(host: &VerterHost) -> bool {
+    let served_warm = host.compile_slot_is_warm(CANONICAL, &ide_profile());
+    host.ensure_ide_compiled(CANONICAL, &ide_profile())
+        .expect("compile must serve");
+    served_warm
 }
 
 /// The published session slot's TSX — the LSP-facing surface the
@@ -109,8 +112,8 @@ fn compile_inside_the_analysis_commit_window_carries_the_snapshot_style_vbind_va
         "window sanity: the analysis snapshot must be absent",
     );
 
-    let raced = compile(&host);
-    assert!(!raced.cache_hit, "first compile must be cold");
+    let raced_served_warm = compile(&host);
+    assert!(!raced_served_warm, "first compile must be cold");
     let raced_tsx = published_tsx(&host)
         .expect("the snapshot-coherent raced compile must publish its session slot");
     // THE PIN: the compile input's style v-bind vars come from the same
@@ -145,9 +148,9 @@ fn compile_inside_the_analysis_commit_window_carries_the_snapshot_style_vbind_va
     // No over-decline: the raced compile's inputs are coherent with its
     // unmoved source, so the session publish must land and serve the
     // next request warm with the SAME bytes.
-    let warm = compile(&host);
+    let warm_served_warm = compile(&host);
     assert!(
-        warm.cache_hit,
+        warm_served_warm,
         "the snapshot-coherent raced compile must still publish its \
          session slot — coherence is restored by reading the one \
          snapshot, not by declining publication",
@@ -170,16 +173,16 @@ fn quiescent_compile_with_analysis_present_publishes_the_vbind_vars_warm() {
         "control sanity: the analysis snapshot must be present",
     );
 
-    let cold = compile(&host);
-    assert!(!cold.cache_hit, "first compile must be cold");
+    let cold_served_warm = compile(&host);
+    assert!(!cold_served_warm, "first compile must be cold");
     let cold_tsx = published_tsx(&host).expect("the quiescent compile must publish");
     assert!(
         cold_tsx.contains(VBIND_KEEPALIVE),
         "the quiescent compile must emit the v-bind keep-alive",
     );
 
-    let warm = compile(&host);
-    assert!(warm.cache_hit, "the quiescent entry must serve warm");
+    let warm_served_warm = compile(&host);
+    assert!(warm_served_warm, "the quiescent entry must serve warm");
     let warm_tsx = published_tsx(&host).expect("warm slot must keep serving the TSX");
     assert_eq!(warm_tsx, cold_tsx, "warm TSX must be byte-identical");
 }
@@ -236,8 +239,8 @@ fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
         "compiler-only usage roots must not publish foreign-space spans"
     );
 
-    let cold = compile(&host);
-    assert!(!cold.cache_hit);
+    let cold_served_warm = compile(&host);
+    assert!(!cold_served_warm);
     let tsx = host
         .get_ide(CANONICAL, &profile)
         .expect("the supplied-style compile must publish IDE output")

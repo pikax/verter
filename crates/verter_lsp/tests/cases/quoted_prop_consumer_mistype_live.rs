@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
-    VirtualNodeKind, VirtualQuery,
 };
 
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
@@ -149,21 +148,13 @@ fn compile_outputs() -> (String, Vec<CompanionFile>) {
         ..Default::default()
     };
 
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(COMP_ID.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(COMP_ID, &profile)
         .expect("component compilation should succeed");
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(CONSUMER_ID.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(CONSUMER_ID, &profile)
         .expect("consumer compilation should succeed");
 
     let comp_api = host

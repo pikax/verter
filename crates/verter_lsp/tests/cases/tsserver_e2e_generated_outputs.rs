@@ -23,7 +23,6 @@ use std::sync::Arc;
 
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
-    VirtualNodeKind, VirtualQuery,
 };
 
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
@@ -300,21 +299,13 @@ const outerLabel = 'outer'
         ..Default::default()
     };
 
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(child_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(child_id, &profile)
         .expect("child compilation should succeed");
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(parent_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(parent_id, &profile)
         .expect("parent compilation should succeed");
 
     let child_api = host
@@ -494,21 +485,13 @@ const outerLabel = 'outer'
         ..Default::default()
     };
 
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(child_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(child_id, &profile)
         .expect("child compilation should succeed");
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(parent_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(parent_id, &profile)
         .expect("parent compilation should succeed");
 
     let child_api = host
@@ -651,21 +634,13 @@ const outerLabel = 'outer'
         ..Default::default()
     };
 
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(child_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(child_id, &profile)
         .expect("child compilation should succeed");
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(parent_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(parent_id, &profile)
         .expect("parent compilation should succeed");
 
     let child_api = host
@@ -791,13 +766,9 @@ async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output(
         ..Default::default()
     };
 
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(app_id.to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })
+    // This identity asks for the IDE product, not a runtime module, so the
+    // compile is driven through the IDE-ensure route.
+    host.ensure_ide_compiled(app_id, &profile)
         .expect("fixture compilation should succeed");
 
     let app_ide = host

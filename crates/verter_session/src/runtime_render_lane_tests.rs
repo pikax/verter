@@ -234,9 +234,9 @@ fn rail_a_ide_carrier_is_distinct_from_render_output() {
     let src = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n";
     let render = render_one(&host, "/proj/Ide.vue", src);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render errors: {:?}",
-        render.errors
+        render.errors()
     );
 
     let profile = CompileProfile {
@@ -252,7 +252,7 @@ fn rail_a_ide_carrier_is_distinct_from_render_output() {
 
     assert_ne!(
         ide.code.as_ref(),
-        render.code.as_ref(),
+        render.code(),
         "IDE TSX carrier must NOT equal the render lane's Main output"
     );
     // The IDE carrier is a TSX type-check surface: it imports the Vue type
@@ -266,9 +266,9 @@ fn rail_a_ide_carrier_is_distinct_from_render_output() {
         ide.code
     );
     assert!(
-        !render.code.contains("@verter/types") && !render.code.contains("___VERTER___"),
+        !render.code().contains("@verter/types") && !render.code().contains("___VERTER___"),
         "render Main must NOT carry the IDE TSX type-surface scaffold:\n{}",
-        render.code
+        render.code()
     );
 }
 
@@ -357,28 +357,29 @@ fn runtime_render_matches_host_backed_wrapper_output() {
 
                 let tag = format!("{} prod={} map={}", case.name, prod, source_map);
                 assert!(
-                    render.errors.is_empty(),
+                    render.errors().is_empty(),
                     "[{tag}] render lane must succeed: {:?}",
-                    render.errors
+                    render.errors()
                 );
                 assert!(
-                    !render.code.is_empty(),
+                    !render.code().is_empty(),
                     "[{tag}] render Main must be non-empty"
                 );
                 assert_eq!(
-                    render.code.as_ref(),
+                    render.code(),
                     hb_code.as_ref(),
                     "[{tag}] RuntimeRender Main bytes must equal the getVirtualFile Main bytes.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
-                    render.code,
+                    render.code(),
                     hb_code
                 );
                 assert_eq!(
-                    render.source_map.as_ref().map(|s| s.as_ref()),
+                    render.source_map().as_ref().map(|s| s.as_ref()),
                     hb_map.as_ref().map(|s| s.as_ref()),
                     "[{tag}] RuntimeRender source map must equal the getVirtualFile source map",
                 );
                 assert_eq!(
-                    render.lang, hb_lang,
+                    render.lang(),
+                    hb_lang.as_deref(),
                     "[{tag}] RuntimeRender Main lang must equal the getVirtualFile Main lang",
                 );
                 // The cross-file-macro case must NOT be a false positive: the
@@ -386,9 +387,9 @@ fn runtime_render_matches_host_backed_wrapper_output() {
                 // (proves external_types was produced on the render lane).
                 if case.name == "cross-file-macro" {
                     assert!(
-                        render.code.contains("id") && render.code.contains("label"),
+                        render.code().contains("id") && render.code().contains("label"),
                         "[{tag}] resolved cross-file props must appear in render Main:\n{}",
-                        render.code
+                        render.code()
                     );
                 }
             }
@@ -401,7 +402,7 @@ fn runtime_render_matches_host_backed_wrapper_output() {
     // getVirtualFile path. The assembled Vue `Main` module carries no source
     // map of its own (the per-block maps ride on the Script / Template
     // virtual nodes, which the bundler requests separately), so
-    // `render.source_map` is `None` on both paths here — the parity assert
+    // `render.source_map()` is `None` on both paths here — the parity assert
     // is what discriminates a lane that diverged on the field, not a
     // non-empty-map expectation the Main node never satisfies. Dedicated
     // Script/Template source-map coverage lives in the carrier codegen +
@@ -423,16 +424,16 @@ fn runtime_render_unresolved_imported_macro_type_is_fatal() {
     let host_r = new_host();
     let render = render_one(&host_r, "/proj/Unresolved.vue", src);
     assert_eq!(
-        render.errors,
+        render.errors(),
         vec!["[/proj/Unresolved.vue] Authoritative runtime semantics for macro syntax index 0 are unresolved (missing-declaration).".to_owned()],
         "RuntimeRender must preserve the typed unavailable-root diagnostic"
     );
     assert!(
-        render.code.is_empty(),
+        render.code().is_empty(),
         "a fatal macro-root outcome must not emit partial component code"
     );
     assert!(
-        render.diagnostics.is_empty(),
+        render.diagnostics().is_empty(),
         "fatal outcomes must not leak a duplicate success-warning rail"
     );
 
@@ -440,7 +441,7 @@ fn runtime_render_unresolved_imported_macro_type_is_fatal() {
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Unresolved.vue", src);
     assert!(
-        !host_backed.errors.is_empty(),
+        !host_backed.errors().is_empty(),
         "HostBacked must also treat the unresolved imported macro as fatal"
     );
 }
@@ -462,16 +463,16 @@ fn runtime_render_missing_external_src_is_fatal() {
     let host = new_host();
     let render = render_one(&host, "/proj/LocalErr.vue", src);
     assert!(
-        !render.errors.is_empty(),
+        !render.errors().is_empty(),
         "a missing external src must remain fatal on RuntimeRender (got code: {:?})",
-        render.code
+        render.code()
     );
     // The SAME input is fatal on HostBacked too — the site is hard on both
     // lanes, so this is a genuine shared-fatal case, not a lane divergence.
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/LocalErr.vue", src);
     assert!(
-        !host_backed.errors.is_empty(),
+        !host_backed.errors().is_empty(),
         "the same missing external src must be fatal on HostBacked too"
     );
 }
@@ -493,12 +494,12 @@ fn runtime_render_resolved_wrong_shape_imported_macro_is_fatal() {
     let src = "<script setup lang=\"ts\">\nimport type { WrongProps } from './wrong'\ndefineProps<WrongProps>()\n</script>\n<template><div /></template>\n";
     let render = render_one(&host, "/proj/Wrong.vue", src);
     assert!(
-        !render.errors.is_empty(),
+        !render.errors().is_empty(),
         "a resolved-but-wrong-shape imported macro type must stay FATAL on \
          RuntimeRender (got code: {:?}, diagnostics: {:?})",
-        render.code,
+        render.code(),
         render
-            .diagnostics
+            .diagnostics()
             .iter()
             .map(|d| d.code.clone())
             .collect::<Vec<_>>()
@@ -517,9 +518,9 @@ fn runtime_render_syntax_error_is_fatal() {
     let host = new_host();
     let render = render_one(&host, "/proj/Syntax.vue", src);
     assert!(
-        !render.errors.is_empty(),
+        !render.errors().is_empty(),
         "an SFC syntax error must remain fatal on RuntimeRender (got code: {:?})",
-        render.code
+        render.code()
     );
 }
 
@@ -539,9 +540,9 @@ fn runtime_render_bypasses_stage_c_wrapper() {
     let host_r = new_host();
     let render = render_one(&host_r, "/proj/Bypass.vue", src);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render errors: {:?}",
-        render.errors
+        render.errors()
     );
 
     assert_eq!(
@@ -589,9 +590,9 @@ fn runtime_render_bypasses_stage_c_wrapper() {
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Bypass.vue", src);
     assert!(
-        host_backed.errors.is_empty(),
+        host_backed.errors().is_empty(),
         "host-backed errors: {:?}",
-        host_backed.errors
+        host_backed.errors()
     );
     assert!(
         host_h
@@ -645,9 +646,9 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     let with_dep = "<script setup lang=\"ts\">\nimport type { P } from './types'\ndefineProps<P>()\n</script>\n<template><div /></template>\n";
     let render1 = render_one(&host, owner, with_dep);
     assert!(
-        render1.errors.is_empty(),
+        render1.errors().is_empty(),
         "render1 errors: {:?}",
-        render1.errors
+        render1.errors()
     );
 
     // Baseline: whatever the RuntimeRender lane recorded, the workspace
@@ -666,9 +667,9 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     let no_dep = "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n";
     let render2 = render_one(&host, owner, no_dep);
     assert!(
-        render2.errors.is_empty(),
+        render2.errors().is_empty(),
         "render2 errors: {:?}",
-        render2.errors
+        render2.errors()
     );
 
     // A later HostBacked request on the SAME host for the owner: the
@@ -677,9 +678,9 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     // own deps; with no imports, the transitive set is empty.
     let host_backed = host_backed_one(&host, owner, no_dep);
     assert!(
-        host_backed.errors.is_empty(),
+        host_backed.errors().is_empty(),
         "host-backed errors: {:?}",
-        host_backed.errors
+        host_backed.errors()
     );
     let after_host_backed =
         crate::for_tests::workspace_semantic_transitive_deps_for_tests(&host, owner);
@@ -717,22 +718,26 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
 
     let dev = render_with_profile(&new_host(), canonical, src, dev_rp.clone(), None);
     let prod = render_with_profile(&new_host(), canonical, src, prod_rp.clone(), None);
-    assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
     assert!(
-        prod.errors.is_empty(),
+        dev.errors().is_empty(),
+        "dev render errors: {:?}",
+        dev.errors()
+    );
+    assert!(
+        prod.errors().is_empty(),
         "prod render errors: {:?}",
-        prod.errors
+        prod.errors()
     );
 
     // The profile FLOWS: dev and prod outputs differ (dev carries HMR /
     // dev-only code that prod strips). If render_profile were ignored, both
     // would be the same prod bytes.
     assert_ne!(
-        dev.code.as_ref(),
-        prod.code.as_ref(),
+        dev.code(),
+        prod.code(),
         "dev and prod RuntimeRender output must differ — render_profile must flow.\n--- DEV ---\n{}\n--- PROD ---\n{}",
-        dev.code,
-        prod.code
+        dev.code(),
+        prod.code()
     );
 
     // Each mode byte-matches the current getVirtualFile path under the SAME
@@ -750,14 +755,14 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
         &get_virtual_file_profile(prod_rp, None),
     );
     assert_eq!(
-        dev.code.as_ref(),
+        dev.code(),
         dev_hb.as_ref(),
         "dev RuntimeRender must byte-match getVirtualFile(dev profile).\n--- RENDER ---\n{}\n--- GVF ---\n{}",
-        dev.code,
+        dev.code(),
         dev_hb
     );
     assert_eq!(
-        prod.code.as_ref(),
+        prod.code(),
         prod_hb.as_ref(),
         "prod RuntimeRender must byte-match getVirtualFile(prod profile)"
     );
@@ -779,25 +784,25 @@ fn runtime_render_honors_vue_custom_element_script_profile() {
     let custom_render =
         render_with_profile(&new_host(), canonical, src, custom_element.clone(), None);
     assert!(
-        regular_render.errors.is_empty(),
+        regular_render.errors().is_empty(),
         "regular render errors: {:?}",
-        regular_render.errors
+        regular_render.errors()
     );
     assert!(
-        custom_render.errors.is_empty(),
+        custom_render.errors().is_empty(),
         "custom-element render errors: {:?}",
-        custom_render.errors
+        custom_render.errors()
     );
     assert!(
-        regular_render.code.contains("text: {}") && regular_render.code.contains("opaque: {}"),
+        regular_render.code().contains("text: {}") && regular_render.code().contains("opaque: {}"),
         "ordinary production must strip non-Boolean runtime types: {}",
-        regular_render.code
+        regular_render.code()
     );
     assert!(
-        custom_render.code.contains("text: { type: String }")
-            && custom_render.code.contains("opaque: { type: null }"),
+        custom_render.code().contains("text: { type: String }")
+            && custom_render.code().contains("opaque: { type: null }"),
         "custom-element production must retain every runtime type field: {}",
-        custom_render.code
+        custom_render.code()
     );
 
     let (host_backed, _, _) = host_backed_main_via_get_virtual_file(
@@ -807,7 +812,7 @@ fn runtime_render_honors_vue_custom_element_script_profile() {
         &get_virtual_file_profile(custom_element, None),
     );
     assert_eq!(
-        custom_render.code.as_ref(),
+        custom_render.code(),
         host_backed.as_ref(),
         "custom-element RuntimeRender must byte-match HostBacked"
     );
@@ -842,29 +847,29 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
         rp.clone(),
         Some("bbb222".to_string()),
     );
-    assert!(a.errors.is_empty(), "render a errors: {:?}", a.errors);
-    assert!(b.errors.is_empty(), "render b errors: {:?}", b.errors);
+    assert!(a.errors().is_empty(), "render a errors: {:?}", a.errors());
+    assert!(b.errors().is_empty(), "render b errors: {:?}", b.errors());
 
     // The explicit component id becomes the scope id (`data-v-<id>` /
     // `__scopeId "data-v-<id>"`). The exact id string must appear.
     assert!(
-        a.code.contains("aaa111"),
+        a.code().contains("aaa111"),
         "explicit component_id 'aaa111' must appear in the render Main scope id:\n{}",
-        a.code
+        a.code()
     );
     assert!(
-        !a.code.contains("bbb222"),
+        !a.code().contains("bbb222"),
         "render a must not carry the other id"
     );
     assert!(
-        b.code.contains("bbb222"),
+        b.code().contains("bbb222"),
         "explicit component_id 'bbb222' must appear in the render Main scope id:\n{}",
-        b.code
+        b.code()
     );
     // Different ids => different output (per-component identity flows).
     assert_ne!(
-        a.code.as_ref(),
-        b.code.as_ref(),
+        a.code(),
+        b.code(),
         "distinct per-input component_ids must produce distinct scoped output"
     );
 
@@ -876,10 +881,10 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
         &get_virtual_file_profile(rp, Some("aaa111".to_string())),
     );
     assert_eq!(
-        a.code.as_ref(),
+        a.code(),
         hb_a.as_ref(),
         "RuntimeRender with explicit component_id must byte-match getVirtualFile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
-        a.code,
+        a.code(),
         hb_a
     );
 }
@@ -908,16 +913,16 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_fatal() {
     let render = render_one(&host, "/proj/Mixed.vue", src);
 
     assert_eq!(
-        render.errors,
+        render.errors(),
         vec!["[/proj/Mixed.vue] Authoritative runtime semantics for macro syntax index 1 are unresolved (missing-declaration).".to_owned()],
         "the unavailable emits root must retain its exact typed failure identity"
     );
     assert!(
-        render.code.is_empty(),
+        render.code().is_empty(),
         "an unavailable root must not admit a partial component"
     );
     assert!(
-        render.diagnostics.is_empty(),
+        render.diagnostics().is_empty(),
         "fatal outcomes must not also populate the success-warning rail"
     );
 
@@ -926,9 +931,9 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_fatal() {
     let good_only_src = "<script setup lang=\"ts\">\nimport type { GoodProps } from './good'\ndefineProps<GoodProps>()\n</script>\n<template><div>{{ a }}</div></template>\n";
     let good_only = render_one(&host, "/proj/GoodOnly.vue", good_only_src);
     assert!(
-        good_only.errors.is_empty(),
+        good_only.errors().is_empty(),
         "good-only render errors: {:?}",
-        good_only.errors
+        good_only.errors()
     );
     let (good_only_hb, _, _) = host_backed_main_via_get_virtual_file(
         &host,
@@ -937,12 +942,12 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_fatal() {
         &get_virtual_file_profile(simple_render_profile(), None),
     );
     assert_eq!(
-        good_only.code.as_ref(),
+        good_only.code(),
         good_only_hb.as_ref(),
         "the resolved GoodProps surface must byte-match getVirtualFile when the \
          missing import is absent (proves GoodProps resolves + materializes on the \
          render lane).\n--- RENDER ---\n{}\n--- GVF ---\n{}",
-        good_only.code,
+        good_only.code(),
         good_only_hb
     );
 }
@@ -972,13 +977,13 @@ fn runtime_render_wrong_shape_with_missing_import_stays_fatal() {
     let src = "<script setup lang=\"ts\">\nimport type { MissingProps } from './nope'\nimport type { WrongEmits } from './wrongemits'\ndefineProps<MissingProps>()\ndefineEmits<WrongEmits>()\n</script>\n<template><div /></template>\n";
     let render = render_one(&host, "/proj/WrongPlusMissing.vue", src);
     assert!(
-        !render.errors.is_empty(),
+        !render.errors().is_empty(),
         "a wrong-shape imported macro co-occurring with a missing import must \
          stay FATAL — neither root may be rewritten into a warning \
          (got code: {:?}, diagnostics: {:?})",
-        render.code,
+        render.code(),
         render
-            .diagnostics
+            .diagnostics()
             .iter()
             .map(|d| format!("{:?}:{}", d.severity, d.code))
             .collect::<Vec<_>>()
@@ -1014,9 +1019,9 @@ fn runtime_render_leaves_prior_host_backed_axis_correct() {
     //    axis for the owner (it calls sync_transitive_macro_type_dependencies).
     let hb1 = host_backed_one(&host, owner, with_dep);
     assert!(
-        hb1.errors.is_empty(),
+        hb1.errors().is_empty(),
         "host-backed #1 errors: {:?}",
-        hb1.errors
+        hb1.errors()
     );
     let after_host_backed =
         crate::for_tests::workspace_semantic_transitive_deps_for_tests(&host, owner);
@@ -1035,16 +1040,16 @@ fn runtime_render_leaves_prior_host_backed_axis_correct() {
     //    the eventual HostBacked recompute re-syncs it.
     let no_dep = "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n";
     let r = render_one(&host, owner, no_dep);
-    assert!(r.errors.is_empty(), "render errors: {:?}", r.errors);
+    assert!(r.errors().is_empty(), "render errors: {:?}", r.errors());
 
     // 3. A later HostBacked request for the now-import-less owner must see
     //    the CURRENT (empty) semantic-transitive deps — the removed dep must
     //    NOT linger.
     let hb2 = host_backed_one(&host, owner, no_dep);
     assert!(
-        hb2.errors.is_empty(),
+        hb2.errors().is_empty(),
         "host-backed #2 errors: {:?}",
-        hb2.errors
+        hb2.errors()
     );
     let final_axis = crate::for_tests::workspace_semantic_transitive_deps_for_tests(&host, owner);
     assert!(
@@ -1127,16 +1132,16 @@ fn runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive
     );
 
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render must succeed: {:?}",
-        render.errors
+        render.errors()
     );
     // NEGATIVE: the wired route must be FOUND — neither the collector
     // missing-dep diagnostic nor the compiler unresolved-imported-macro
     // diagnostic may surface.
     assert!(
         !render
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
                 || d.code == "XUnresolvedImportedMacroType"),
@@ -1144,7 +1149,7 @@ fn runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive
          visible to the upper-drive compile input — ONE canonical identity, \
          not two; diagnostics: {:?}",
         render
-            .diagnostics
+            .diagnostics()
             .iter()
             .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
             .collect::<Vec<_>>()
@@ -1152,14 +1157,14 @@ fn runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive
     // POSITIVE: the resolved macro member names materialize in the render
     // `Main` — the types did NOT degrade to Unknown.
     assert!(
-        render.code.contains("alphaprop") && render.code.contains("omegaprop"),
+        render.code().contains("alphaprop") && render.code().contains("omegaprop"),
         "resolved alias-imported prop names must appear in render Main:\n{}",
-        render.code
+        render.code()
     );
     assert!(
-        render.code.contains("aliaschange"),
+        render.code().contains("aliaschange"),
         "resolved alias-imported emit name must appear in render Main:\n{}",
-        render.code
+        render.code()
     );
 }
 
@@ -1181,28 +1186,28 @@ fn runtime_render_upper_drive_input_single_hop_relative_import_control() {
 
     let render = render_with_profile(&host, "C:/proj/Rel.vue", src, simple_render_profile(), None);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "control render must succeed: {:?}",
-        render.errors
+        render.errors()
     );
     assert!(
         !render
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
                 || d.code == "XUnresolvedImportedMacroType"),
         "the single-hop relative control must resolve without the route \
          table; diagnostics: {:?}",
         render
-            .diagnostics
+            .diagnostics()
             .iter()
             .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
             .collect::<Vec<_>>()
     );
     assert!(
-        render.code.contains("relalpha"),
+        render.code().contains("relalpha"),
         "the relative-imported prop name must appear in render Main:\n{}",
-        render.code
+        render.code()
     );
 }
 
@@ -1225,19 +1230,19 @@ fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null(
         None,
     );
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "member-position miss must not abort the render lane: {:?}",
-        render.errors
+        render.errors()
     );
     let warning = render
-        .diagnostics
+        .diagnostics()
         .iter()
         .find(|d| d.code == "XUnresolvedImportedMacroType")
         .unwrap_or_else(|| {
             panic!(
                 "member-position miss must surface the typed compiler diagnostic: {:?}",
                 render
-                    .diagnostics
+                    .diagnostics()
                     .iter()
                     .map(|diagnostic| (
                         diagnostic.code.as_str(),
@@ -1254,9 +1259,11 @@ fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null(
     );
     // The member's runtime type degrades to `null` — the prop still exists.
     assert!(
-        render.code.contains("foo: { type: null, required: true }"),
+        render
+            .code()
+            .contains("foo: { type: null, required: true }"),
         "member with unresolvable type must degrade to `type: null`:\n{}",
-        render.code
+        render.code()
     );
 }
 
@@ -1279,30 +1286,30 @@ fn runtime_render_nested_missing_macro_type_is_silent() {
         None,
     );
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "nested miss must compile cleanly: {:?}",
-        render.errors
+        render.errors()
     );
     assert!(
         !render
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
                 || d.code == "XUnresolvedImportedMacroType"),
         "a nested reference is not needed for runtime codegen — no missing-dep \
          diagnostic may surface; diagnostics: {:?}",
         render
-            .diagnostics
+            .diagnostics()
             .iter()
             .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
             .collect::<Vec<_>>()
     );
     assert!(
         render
-            .code
+            .code()
             .contains("foo: { type: Object, required: true }"),
         "the member keeps its syntactic Object constructor:\n{}",
-        render.code
+        render.code()
     );
 }
 
@@ -1418,21 +1425,21 @@ fn runtime_render_consumes_stored_template_block_override() {
     // (upsert → preprocess/store overrides → render).
     let render = render_with_profile(&host, canonical, raw, rp, None);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render with a stored template override must succeed: {:?}",
-        render.errors
+        render.errors()
     );
     assert!(
-        render.code.contains("preprocessedpugmarker"),
+        render.code().contains("preprocessedpugmarker"),
         "the render Main must compile the PREPROCESSED template override, \
          not the raw block:\n{}",
-        render.code
+        render.code()
     );
     assert!(
-        !render.code.contains("rawpugtext"),
+        !render.code().contains("rawpugtext"),
         "the raw (un-preprocessed) template content must NOT reach the \
          render Main:\n{}",
-        render.code
+        render.code()
     );
 
     // Byte parity with the getVirtualFile oracle under the SAME profile +
@@ -1446,11 +1453,11 @@ fn runtime_render_consumes_stored_template_block_override() {
         })
         .expect("get_virtual_file(Main) must succeed with the stored override");
     assert_eq!(
-        render.code.as_ref(),
+        render.code(),
         resp.code.as_ref(),
         "RuntimeRender Main must byte-match getVirtualFile(Main) under the \
          SAME profile + SAME stored template override.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
-        render.code,
+        render.code(),
         resp.code
     );
 }
@@ -1486,21 +1493,21 @@ fn runtime_render_consumes_supplied_style_lang_projection() {
 
     let render = render_with_profile(&host, canonical, raw, rp, None);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render with supplied style content must succeed: {:?}",
-        render.errors
+        render.errors()
     );
     assert!(
-        render.code.contains("lang.css"),
+        render.code().contains("lang.css"),
         "the supplied style content must project its processed lang \
          (css) into the Main style import:\n{}",
-        render.code
+        render.code()
     );
     assert!(
-        !render.code.contains("lang.scss"),
+        !render.code().contains("lang.scss"),
         "the raw scss lang must NOT survive into the Main style import once \
          the override is stored:\n{}",
-        render.code
+        render.code()
     );
 
     let resp = host
@@ -1512,11 +1519,11 @@ fn runtime_render_consumes_supplied_style_lang_projection() {
         })
         .expect("get_virtual_file(Main) must succeed with the stored override");
     assert_eq!(
-        render.code.as_ref(),
+        render.code(),
         resp.code.as_ref(),
         "RuntimeRender Main must byte-match getVirtualFile(Main) under the \
          SAME profile + SAME supplied style content.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
-        render.code,
+        render.code(),
         resp.code
     );
 }
@@ -1545,12 +1552,16 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
         "the test drives the ABSENT tri-state"
     );
     let dev = render_with_profile(&new_host(), canonical, src, dev_rp.clone(), None);
-    assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
     assert!(
-        dev.code.contains("keepmecomment"),
+        dev.errors().is_empty(),
+        "dev render errors: {:?}",
+        dev.errors()
+    );
+    assert!(
+        dev.code().contains("keepmecomment"),
         "a DEV render with ABSENT comments must PRESERVE template comments \
          (compiler default !is_production):\n{}",
-        dev.code
+        dev.code()
     );
     let (dev_hb, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
@@ -1559,11 +1570,11 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
         &get_virtual_file_profile(dev_rp, None),
     );
     assert_eq!(
-        dev.code.as_ref(),
+        dev.code(),
         dev_hb.as_ref(),
         "dev RuntimeRender with ABSENT comments must byte-match \
          getVirtualFile under the same absent-comments profile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
-        dev.code,
+        dev.code(),
         dev_hb
     );
 
@@ -1571,14 +1582,14 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
     let prod_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
     let prod = render_with_profile(&new_host(), canonical, src, prod_rp.clone(), None);
     assert!(
-        prod.errors.is_empty(),
+        prod.errors().is_empty(),
         "prod render errors: {:?}",
-        prod.errors
+        prod.errors()
     );
     assert!(
-        !prod.code.contains("keepmecomment"),
+        !prod.code().contains("keepmecomment"),
         "a PROD render with ABSENT comments must STRIP template comments:\n{}",
-        prod.code
+        prod.code()
     );
     let (prod_hb, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
@@ -1587,7 +1598,7 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
         &get_virtual_file_profile(prod_rp, None),
     );
     assert_eq!(
-        prod.code.as_ref(),
+        prod.code(),
         prod_hb.as_ref(),
         "prod RuntimeRender with ABSENT comments must byte-match \
          getVirtualFile under the same absent-comments profile"
@@ -1600,14 +1611,14 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
     prod_keep_rp.comments = Some(true);
     let prod_keep = render_with_profile(&new_host(), canonical, src, prod_keep_rp.clone(), None);
     assert!(
-        prod_keep.errors.is_empty(),
+        prod_keep.errors().is_empty(),
         "prod+comments render errors: {:?}",
-        prod_keep.errors
+        prod_keep.errors()
     );
     assert!(
-        prod_keep.code.contains("keepmecomment"),
+        prod_keep.code().contains("keepmecomment"),
         "an EXPLICIT comments=true must preserve the comment even in prod:\n{}",
-        prod_keep.code
+        prod_keep.code()
     );
     let (prod_keep_hb, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
@@ -1616,7 +1627,7 @@ fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
         &get_virtual_file_profile(prod_keep_rp, None),
     );
     assert_eq!(
-        prod_keep.code.as_ref(),
+        prod_keep.code(),
         prod_keep_hb.as_ref(),
         "prod RuntimeRender with EXPLICIT comments=true must byte-match \
          getVirtualFile under the same profile"
@@ -1646,9 +1657,9 @@ fn runtime_render_threads_profile_filename_into_output() {
 
     let render = render_with_profile(&new_host(), canonical, src, rp.clone(), None);
     assert!(
-        render.errors.is_empty(),
+        render.errors().is_empty(),
         "render errors: {:?}",
-        render.errors
+        render.errors()
     );
 
     // Oracle under the SAME distinct filename: byte parity is the claim.
@@ -1659,11 +1670,11 @@ fn runtime_render_threads_profile_filename_into_output() {
         &get_virtual_file_profile(rp.clone(), None),
     );
     assert_eq!(
-        render.code.as_ref(),
+        render.code(),
         hb_named.as_ref(),
         "RuntimeRender must thread the profile `filename` into codegen \
          identically to getVirtualFile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
-        render.code,
+        render.code(),
         hb_named
     );
 
@@ -1680,7 +1691,7 @@ fn runtime_render_threads_profile_filename_into_output() {
         &get_virtual_file_profile(rp_unnamed, None),
     );
     assert_ne!(
-        render.code.as_ref(),
+        render.code(),
         hb_unnamed.as_ref(),
         "a render under a DISTINCT filename must not equal the \
          filename-less oracle — `filename` must actually reach codegen"

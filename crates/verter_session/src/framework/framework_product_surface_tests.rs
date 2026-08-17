@@ -746,30 +746,43 @@ fn a_refused_runtime_surface_publishes_no_javascript_no_css_and_no_source_map() 
     }
 }
 
-/// The other direction, recorded rather than asserted as a rule: the refusal is
-/// scoped to the RUNTIME product. The IDE/TSX projection and the public-API
-/// declaration are still published for the same refused component.
+/// The other direction: the refusal is scoped to the REQUESTING IDENTITY, not
+/// to the component.
 ///
-/// This is a characterization of the current contract, not an endorsement. It
-/// fails if either product starts or stops being published.
+/// The same source that refuses a runtime request still publishes its IDE
+/// product under a SEPARATE IDE-only identity, and its public-API declaration
+/// under the separate PublicApi identity. So atomicity is a property of one
+/// request's product set — not a blanket "this component publishes nothing".
+///
+/// The refusing cells' own profiles ask for the runtime product (they are
+/// bundler / SSR profiles), so the IDE half is deliberately driven under a
+/// DISTINCT identity here; asking the refusing identity for its IDE product is
+/// [`a_refused_combined_request_publishes_no_product_at_all`]'s subject.
 #[test]
-fn a_refused_runtime_surface_still_publishes_the_ide_and_public_api_products() {
+fn a_runtime_refusal_is_scoped_to_its_identity_and_leaves_the_other_identities_publishing() {
     for (label, canonical, source, profile, _) in refusal_cells() {
         let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
 
+        // The IDE-only identity: same knobs, but asking for the IDE product
+        // alone — so no runtime surface is requested and none can be refused.
+        let ide_profile = CompileProfile {
+            target: verter_compiler::compile::CompileTarget::IDE,
+            ..profile.clone()
+        };
         let ensured = host
-            .ensure_ide_compiled(canonical, &profile)
+            .ensure_ide_compiled(canonical, &ide_profile)
             .unwrap_or_else(|error| panic!("[{label}] ensure_ide_compiled: {error:?}"));
         assert!(
             ensured,
-            "[{label}] the IDE projection is withheld on a runtime refusal"
+            "[{label}] the IDE-only identity reports no IDE surface for a component whose \
+             RUNTIME surface is refused"
         );
         let ide = host
-            .get_ide(canonical, &profile)
+            .get_ide(canonical, &ide_profile)
             .unwrap_or_else(|| panic!("[{label}] no IDE product after a successful ensure"));
         assert!(
             !ide.code.is_empty(),
-            "[{label}] the IDE product is empty on a runtime refusal"
+            "[{label}] the IDE-only identity published an empty IDE product"
         );
 
         let public_api = host
@@ -1426,69 +1439,794 @@ fn the_diagnostics_route_answers_from_the_compile_slot_it_names() {
     }
 }
 
-/// CONFORMANCE TARGET — currently FAILS, deliberately `#[ignore]`d.
+/// A request identity that asks for BOTH the runtime products and the IDE
+/// product is ATOMIC over the products it asked for: when its runtime surface
+/// is refused it publishes NO product at all — no runtime module, no CSS, and
+/// no IDE/TSX artifact.
 ///
-/// **What is wrong:** a single compile request that asks for BOTH the runtime
-/// and the IDE product publishes the IDE/TSX product even when the runtime
-/// surface was refused. The carrier produces the IDE projection unconditionally
-/// of the runtime outcome
-/// (`crates/verter_compiler/src/svelte/carrier.rs:517-530`), so one request
-/// returns a typed refusal for one product and a published artifact for
-/// another.
+/// The refusal is a property of the REQUESTED-PRODUCT SET, not of the source.
+/// Four controls keep this from being satisfiable by "never publish anything":
 ///
-/// **Behaviour this demands:** a request that is refused publishes NO product —
-/// the IDE/TSX artifact is withheld alongside the runtime module, so the
-/// request's outcome is atomic across the products it asked for.
-///
-/// **Acceptance:** un-ignoring this test is the acceptance gate for that
-/// correction. This module owns no correction and adds no withholding path.
+/// * a DISTINCT IDE-only identity on the same refusing source still publishes a
+///   non-empty IDE product (no runtime product was asked for, so nothing can be
+///   refused);
+/// * the separate PublicApi identity still renders;
+/// * both orders — combined-first and IDE-only-first, on independent hosts —
+///   produce the same outcomes, so neither identity leaks into the other;
+/// * a SUPPORTED component under the SAME combined identity publishes BOTH its
+///   runtime module and a non-empty IDE product.
 #[test]
-#[ignore = "conformance target: a combined IDE-requesting compile publishes the TSX product after a runtime refusal"]
 fn a_refused_combined_request_publishes_no_product_at_all() {
-    for (label, canonical, source, profile) in [
-        (
-            "server-generate",
-            "/probe/AtomicIde.svelte",
-            SVELTE_STYLED,
-            CompileProfile {
-                target: verter_compiler::compile::CompileTarget::IDE,
-                ssr: true,
-                source_map: true,
-                ..CompileProfile::default()
+    use verter_compiler::compile::CompileTarget;
+
+    /// The combined identity: the runtime product set (`BUNDLER` — style,
+    /// script, template) AND the IDE product (`TSX`), asked for by ONE request.
+    fn combined(base: &CompileProfile) -> CompileProfile {
+        CompileProfile {
+            target: CompileTarget::BUNDLER | CompileTarget::IDE,
+            ..base.clone()
+        }
+    }
+
+    /// A DISTINCT identity that asks for the IDE product only.
+    fn ide_only(base: &CompileProfile) -> CompileProfile {
+        CompileProfile {
+            target: CompileTarget::IDE,
+            ..base.clone()
+        }
+    }
+
+    /// The combined request publishes NOTHING: the runtime node is the typed
+    /// refusal carrying the compiler's own code, every other node is absent,
+    /// and the IDE product is neither cached nor ensurable.
+    #[track_caller]
+    fn assert_combined_publishes_nothing(
+        label: &str,
+        host: &VerterHost,
+        canonical: &str,
+        profile: &CompileProfile,
+        expected_code: &str,
+    ) {
+        let main = read_node(host, canonical, VirtualNodeKind::Main, profile);
+        assert_eq!(
+            main,
+            NodeOutcome::Refused {
+                diagnostic_code: expected_code.to_string()
             },
+            "[{label}] the combined request's runtime product must be the typed refusal"
+        );
+
+        for kind in all_node_kinds() {
+            if kind == VirtualNodeKind::Main {
+                continue;
+            }
+            assert_eq!(
+                read_node(host, canonical, kind.clone(), profile),
+                NodeOutcome::Missing,
+                "[{label}] {kind:?} survived the combined request's runtime refusal"
+            );
+        }
+
+        assert!(
+            host.get_ide(canonical, profile).is_none(),
+            "[{label}] the IDE/TSX product was published under the refused combined identity"
+        );
+        match host.ensure_ide_compiled(canonical, profile) {
+            Err(HostError::RuntimeSurfaceRefused {
+                diagnostic_code, ..
+            }) => assert_eq!(
+                diagnostic_code, expected_code,
+                "[{label}] the IDE-ensure refusal names a different surface than the runtime one"
+            ),
+            other => panic!(
+                "[{label}] the combined request's IDE-ensure must be a typed \
+                 RuntimeSurfaceRefused — a refused request publishing an IDE projection is the \
+                 mixed outcome this test forbids. Got: {other:?}"
+            ),
+        }
+    }
+
+    /// The IDE-only identity on the SAME source still publishes: it asked for
+    /// no runtime product, so there is nothing to refuse.
+    #[track_caller]
+    fn assert_ide_only_still_publishes(
+        label: &str,
+        host: &VerterHost,
+        canonical: &str,
+        profile: &CompileProfile,
+    ) {
+        assert!(
+            host.ensure_ide_compiled(canonical, profile)
+                .unwrap_or_else(|error| panic!(
+                    "[{label}] ide-only ensure_ide_compiled: {error:?}"
+                )),
+            "[{label}] the IDE-only identity reports no IDE surface"
+        );
+        let ide = host
+            .get_ide(canonical, profile)
+            .unwrap_or_else(|| panic!("[{label}] no IDE product under the IDE-only identity"));
+        assert!(
+            !ide.code.is_empty(),
+            "[{label}] the IDE-only identity published an EMPTY IDE product"
+        );
+    }
+
+    for (label, canonical, source, base_profile, expected_code) in refusal_cells() {
+        let combined_profile = combined(&base_profile);
+        let ide_profile = ide_only(&base_profile);
+
+        // ── Order A: combined first, then the IDE-only identity. An earlier
+        //    combined refusal must not poison the separate IDE-only request.
+        let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
+        assert_combined_publishes_nothing(
+            &format!("{label}/combined-first"),
+            &host,
+            canonical,
+            &combined_profile,
+            &expected_code,
+        );
+        assert_ide_only_still_publishes(
+            &format!("{label}/combined-first"),
+            &host,
+            canonical,
+            &ide_profile,
+        );
+
+        // ── Order B: the IDE-only identity first, then the combined one. An
+        //    earlier IDE success must not leak into the combined refusal.
+        let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
+        assert_ide_only_still_publishes(
+            &format!("{label}/ide-first"),
+            &host,
+            canonical,
+            &ide_profile,
+        );
+        assert_combined_publishes_nothing(
+            &format!("{label}/ide-first"),
+            &host,
+            canonical,
+            &combined_profile,
+            &expected_code,
+        );
+
+        // ── Control: the PublicApi identity is independent of the compile
+        //    request's product set and still renders.
+        assert!(
+            host.get_public_api_with_mode(canonical, PublicApiMode::Public, None)
+                .unwrap_or_else(|error| panic!("[{label}] public api: {error:?}"))
+                .is_some(),
+            "[{label}] the separate public-API identity was withheld"
+        );
+    }
+
+    // ── Control: "refuse every combined request" must NOT satisfy the above. A
+    //    SUPPORTED component under the same combined identity publishes BOTH
+    //    its runtime module and a non-empty IDE product.
+    let supported = "/probe/AtomicSupported.svelte";
+    let host = host_with(
+        supported,
+        SVELTE_STYLED,
+        verter_language::FileLanguage::svelte(),
+    );
+    let supported_profile = combined(&bundler_profile(true));
+    match read_node(&host, supported, VirtualNodeKind::Main, &supported_profile) {
+        NodeOutcome::Published { code_len, .. } => assert!(
+            code_len > 0,
+            "the supported component published an EMPTY runtime module under the combined identity"
         ),
+        other => panic!(
+            "the supported component's runtime module was withheld under the combined identity — \
+             the correction over-reached into a clean compile. Got: {other:?}"
+        ),
+    }
+    assert!(
+        host.ensure_ide_compiled(supported, &supported_profile)
+            .expect("supported combined ensure_ide_compiled"),
+        "the supported component reports no IDE surface under the combined identity"
+    );
+    assert!(
+        !host
+            .get_ide(supported, &supported_profile)
+            .expect("the supported component has an IDE product under the combined identity")
+            .code
+            .is_empty(),
+        "the supported component's IDE product is empty under the combined identity"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// One transaction boundary: every route observes the same terminal answer,
+// and a request publishes all and only the products it asked for.
+// ══════════════════════════════════════════════════════════════════════════
+
+/// A Vue SFC carrying every runtime block kind — script, template, scoped
+/// style, AND a custom block — so a publication sweep can observe each virtual
+/// node kind appear or stay absent.
+const VUE_ALL_BLOCKS: &str = "<script setup lang=\"ts\">\nconst a: number = 1\n</script>\n<template><div class=\"x\">{{ a }}</div></template>\n<style scoped>.x{color:red}</style>\n<i18n>{\"en\":{\"k\":\"v\"}}</i18n>\n";
+
+/// The host's cold-compile counter — the ARTIFACT that says whether a call
+/// recompiled. Bumped once per cold run past the warm-hit consult.
+pub(crate) fn cold_runs(host: &VerterHost) -> u64 {
+    host.provenance_snapshot().compile_cold_runs
+}
+
+/// `ensure_compiled` reduced to a comparable answer.
+fn ensure_compiled_answer(host: &VerterHost, canonical: &str, profile: &CompileProfile) -> String {
+    match host.ensure_compiled(canonical, profile) {
+        Ok(()) => "Ok".to_string(),
+        Err(HostError::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => format!("Refused({diagnostic_code})"),
+        Err(HostError::MissingVirtualNode { .. }) => "MissingVirtualNode".to_string(),
+        Err(other) => format!("Other({other:?})"),
+    }
+}
+
+/// `ensure_compiled` gives the SAME answer for one identity whether it is
+/// served cold or warm.
+///
+/// Two cells, each a distinct way the two paths could disagree:
+///
+/// * a REFUSED identity — the cold path resolves the typed refusal, so the warm
+///   path must resolve it too rather than reporting a bare success from a
+///   validated slot whose cached arm it never inspected;
+/// * an identity that legitimately requests NO runtime module — it must not be
+///   told a `Main` it never asked for is missing, on either path.
+#[test]
+fn ensure_compiled_answers_the_same_cold_and_warm_for_one_identity() {
+    use verter_compiler::compile::CompileTarget;
+
+    // A refusing Svelte source under an identity that DOES ask for the runtime
+    // product, and a supported source under an IDE-only identity.
+    let cells: Vec<(
+        &str,
+        &str,
+        &str,
+        verter_language::FileLanguage,
+        CompileProfile,
+    )> = vec![
         (
-            "advanced-rune",
-            "/probe/AtomicIdeRune.svelte",
+            "refused/combined",
+            "/probe/EnsureRefused.svelte",
             SVELTE_PROPS_EVENTS,
+            verter_language::FileLanguage::svelte(),
             CompileProfile {
-                target: verter_compiler::compile::CompileTarget::IDE,
+                target: CompileTarget::BUNDLER | CompileTarget::IDE,
                 source_map: true,
                 ..CompileProfile::default()
             },
         ),
-    ] {
+        (
+            "supported/ide-only",
+            "/probe/EnsureIdeOnly.vue",
+            VUE_WITH_STYLE,
+            verter_language::FileLanguage::vue(),
+            CompileProfile {
+                target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+                ..CompileProfile::default()
+            },
+        ),
+        (
+            "supported/ide-only-svelte",
+            "/probe/EnsureIdeOnly.svelte",
+            SVELTE_STYLED,
+            verter_language::FileLanguage::svelte(),
+            CompileProfile {
+                target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+                ..CompileProfile::default()
+            },
+        ),
+    ];
+
+    for (label, canonical, source, language, profile) in cells {
+        let host = host_with(canonical, source, language);
+
+        let cold = ensure_compiled_answer(&host, canonical, &profile);
+        let after_cold = cold_runs(&host);
+        assert!(
+            after_cold > 0,
+            "[{label}] the first call did not compile at all, so there is no cold answer to \
+             compare a warm one against"
+        );
+
+        // The second call must be served from the warm slot the first one
+        // published. This is asserted on the ARTIFACT — the cold-compile
+        // counter — not on the returned string: two calls that both RECOMPILE
+        // also return equal strings, so string equality alone proves nothing
+        // about the warm path.
+        let warm = ensure_compiled_answer(&host, canonical, &profile);
+        let after_warm = cold_runs(&host);
+        assert_eq!(
+            after_cold, after_warm,
+            "[{label}] the second call RECOMPILED (cold runs {after_cold} -> {after_warm}), so \
+             it never exercised the warm path and the comparison below is cold-vs-cold"
+        );
+        assert_eq!(
+            cold, warm,
+            "[{label}] ensure_compiled answered differently cold vs warm for ONE identity \
+             (cold={cold}, warm={warm}) — the two paths do not observe the same transaction \
+             boundary"
+        );
+
+        // And the answer itself must be the right one, so "both paths agree on
+        // the WRONG answer" cannot satisfy the equality above.
+        match label {
+            "refused/combined" => assert!(
+                cold.starts_with("Refused("),
+                "[{label}] an identity that asked for a refused runtime product must answer the \
+                 typed refusal, got {cold}"
+            ),
+            _ => assert_eq!(
+                cold, "Ok",
+                "[{label}] an identity that asked for NO runtime module must not report a \
+                 missing Main, got {cold}"
+            ),
+        }
+    }
+}
+
+/// A refused transaction commits NO product-bearing scheduler artifact.
+///
+/// The scheduler artifact is the companion warm-hit substrate. A refusal
+/// published there as an artifact carrying an empty output map is a refusal
+/// re-encoded as an untyped successful empty compile: a consumer reading that
+/// substrate cannot tell it apart from a component that genuinely produced
+/// nothing.
+///
+/// The positive control is what keeps this from being satisfied by never
+/// committing an artifact at all.
+#[test]
+fn a_refused_transaction_commits_no_scheduler_artifact() {
+    use verter_compiler::compile::CompileTarget;
+
+    for (label, canonical, source, base_profile, _) in refusal_cells() {
+        let combined = CompileProfile {
+            target: CompileTarget::BUNDLER | CompileTarget::IDE,
+            ..base_profile
+        };
         let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
 
-        // The runtime product IS refused for this request.
-        let main = read_node(&host, canonical, VirtualNodeKind::Main, &profile);
+        // Drive the refusal through the public route.
         assert!(
-            matches!(main, NodeOutcome::Refused { .. }),
-            "[{label}] the runtime product is no longer refused ({main:?}), so this target is \
-             measuring something else"
+            matches!(
+                read_node(&host, canonical, VirtualNodeKind::Main, &combined),
+                NodeOutcome::Refused { .. }
+            ),
+            "[{label}] this cell no longer refuses, so it measures nothing"
         );
 
-        // Therefore no OTHER product of the same request may be published.
         assert!(
-            !host
-                .ensure_ide_compiled(canonical, &profile)
-                .unwrap_or_else(|error| panic!("[{label}] ensure_ide_compiled: {error:?}")),
-            "[{label}] the same request published an IDE projection alongside its typed runtime \
-             refusal"
+            !crate::for_tests::compile_scheduler_artifact_present_for_tests(
+                &host, canonical, &combined
+            ),
+            "[{label}] a REFUSED transaction committed a scheduler artifact — a consumer \
+             reading that substrate sees the refusal as a successful empty compile"
         );
         assert!(
-            host.get_ide(canonical, &profile).is_none(),
-            "[{label}] the IDE/TSX product survived the refusal"
+            !crate::for_tests::compile_scheduler_last_known_good_artifact_present_for_tests(
+                &host, canonical, &combined
+            ),
+            "[{label}] a refused transaction left an artifact behind in the map (invisible to \
+             the generation-coherent read, visible here)"
+        );
+    }
+
+    // Positive control: a SUPPORTED component under the same combined identity
+    // DOES commit its artifact, so "never commit" cannot satisfy the above.
+    let supported = "/probe/ArtifactSupported.svelte";
+    let host = host_with(
+        supported,
+        SVELTE_STYLED,
+        verter_language::FileLanguage::svelte(),
+    );
+    let combined = CompileProfile {
+        target: CompileTarget::BUNDLER | CompileTarget::IDE,
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    assert!(
+        matches!(
+            read_node(&host, supported, VirtualNodeKind::Main, &combined),
+            NodeOutcome::Published { .. }
+        ),
+        "the supported control stopped publishing its runtime module"
+    );
+    assert!(
+        crate::for_tests::compile_scheduler_artifact_present_for_tests(&host, supported, &combined),
+        "a SUCCESSFUL transaction must still commit its scheduler artifact — otherwise this \
+         test would pass by nothing ever being committed"
+    );
+}
+
+/// Every published virtual node kind was ASKED FOR by the request's target.
+///
+/// The requested-product set is the target's bits. A request that asks for CSS
+/// gets CSS and not a runtime module; a request that asks for template data
+/// gets no runtime products at all, even though producing template data
+/// legitimately runs script codegen as a prerequisite. A prerequisite is not a
+/// product.
+#[test]
+fn each_request_publishes_exactly_the_node_kinds_its_target_requested() {
+    use std::collections::BTreeSet;
+    use verter_compiler::compile::CompileTarget;
+
+    /// The node kinds actually published for `(canonical, profile)`, as a
+    /// comparable set. A refusal is a separate outcome and fails the sweep.
+    fn published(
+        host: &VerterHost,
+        canonical: &str,
+        profile: &CompileProfile,
+        label: &str,
+    ) -> BTreeSet<String> {
+        let mut set = BTreeSet::new();
+        for kind in all_node_kinds() {
+            match read_node(host, canonical, kind.clone(), profile) {
+                NodeOutcome::Published { .. } => {
+                    set.insert(format!("{kind:?}"));
+                }
+                NodeOutcome::Missing => {}
+                NodeOutcome::Refused { diagnostic_code } => panic!(
+                    "[{label}] {kind:?} answered a runtime refusal ({diagnostic_code}); this \
+                     sweep's sources are supported"
+                ),
+            }
+        }
+        set
+    }
+
+    fn set_of(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    let main = "Main";
+    let script = "Script";
+    let template = "Template";
+    let style = "Style { index: 0 }";
+    let custom = "Custom { index: 0 }";
+
+    // Every cell states the target and the EXACT node-kind set that target asks
+    // for. Vue carries all four runtime block kinds; Svelte's client module is a
+    // single ESM plus its scoped CSS.
+    let vue_cells: Vec<(&str, CompileTarget, BTreeSet<String>)> = vec![
+        // Style alone: CSS, and no runtime module.
+        ("STYLE", CompileTarget::STYLE, set_of(&[style])),
+        // Template data is not a runtime product; script codegen runs only as
+        // its prerequisite.
+        (
+            "ANALYSIS",
+            CompileTarget::ANALYSIS,
+            set_of(&[script, main, custom]),
+        ),
+        ("META", CompileTarget::META, set_of(&[script, main, custom])),
+        (
+            "IDE|TEMPLATE_DATA",
+            CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            set_of(&[]),
+        ),
+        ("IDE", CompileTarget::IDE, set_of(&[])),
+        // Positive controls.
+        (
+            "BUNDLER",
+            CompileTarget::BUNDLER,
+            set_of(&[main, script, template, style, custom]),
+        ),
+        (
+            "BUNDLER|IDE",
+            CompileTarget::BUNDLER | CompileTarget::IDE,
+            set_of(&[main, script, template, style, custom]),
+        ),
+    ];
+
+    for (label, target, expected) in vue_cells {
+        let canonical = format!("/probe/PubVue{label}.vue");
+        let canonical = canonical.replace(['|'], "_");
+        let host = host_with(
+            &canonical,
+            VUE_ALL_BLOCKS,
+            verter_language::FileLanguage::vue(),
+        );
+        let profile = CompileProfile {
+            target,
+            source_map: true,
+            ..CompileProfile::default()
+        };
+        assert_eq!(
+            published(&host, &canonical, &profile, label),
+            expected,
+            "[vue/{label}] the published node-kind set is not the set this target asked for"
+        );
+    }
+
+    let svelte_cells: Vec<(&str, CompileTarget, BTreeSet<String>)> = vec![
+        ("STYLE", CompileTarget::STYLE, set_of(&[style])),
+        ("ANALYSIS", CompileTarget::ANALYSIS, set_of(&[main])),
+        ("META", CompileTarget::META, set_of(&[main])),
+        (
+            "IDE|TEMPLATE_DATA",
+            CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            set_of(&[]),
+        ),
+        ("IDE", CompileTarget::IDE, set_of(&[])),
+        ("BUNDLER", CompileTarget::BUNDLER, set_of(&[main, style])),
+        (
+            "BUNDLER|IDE",
+            CompileTarget::BUNDLER | CompileTarget::IDE,
+            set_of(&[main, style]),
+        ),
+    ];
+
+    for (label, target, expected) in svelte_cells {
+        let canonical = format!("/probe/PubSvelte{label}.svelte");
+        let canonical = canonical.replace(['|'], "_");
+        let host = host_with(
+            &canonical,
+            SVELTE_STYLED,
+            verter_language::FileLanguage::svelte(),
+        );
+        let profile = CompileProfile {
+            target,
+            source_map: true,
+            ..CompileProfile::default()
+        };
+        assert_eq!(
+            published(&host, &canonical, &profile, label),
+            expected,
+            "[svelte/{label}] the published node-kind set is not the set this target asked for"
+        );
+    }
+
+    // Positive control on the IDE half: an IDE-bearing identity publishes NO
+    // runtime node yet still produces its IDE product, so "publish nothing"
+    // cannot satisfy the empty-set cells above.
+    for (label, canonical, source, language) in [
+        (
+            "vue",
+            "/probe/PubIdeControl.vue",
+            VUE_ALL_BLOCKS,
+            verter_language::FileLanguage::vue(),
+        ),
+        (
+            "svelte",
+            "/probe/PubIdeControl.svelte",
+            SVELTE_STYLED,
+            verter_language::FileLanguage::svelte(),
+        ),
+    ] {
+        let host = host_with(canonical, source, language);
+        let profile = CompileProfile {
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            ..CompileProfile::default()
+        };
+        assert!(
+            host.ensure_ide_compiled(canonical, &profile)
+                .unwrap_or_else(|error| panic!("[{label}] ensure_ide_compiled: {error:?}")),
+            "[{label}] the IDE-bearing identity reports no IDE surface"
+        );
+        assert!(
+            !host
+                .get_ide(canonical, &profile)
+                .unwrap_or_else(|| panic!("[{label}] no IDE product"))
+                .code
+                .is_empty(),
+            "[{label}] the IDE product is empty, so the empty runtime-set cells prove nothing"
+        );
+    }
+
+    // Positive control on the runtime half: the BUNDLER cells above must carry
+    // real bytes, not empty published nodes.
+    let canonical = "/probe/PubBundlerBytes.vue";
+    let host = host_with(
+        canonical,
+        VUE_ALL_BLOCKS,
+        verter_language::FileLanguage::vue(),
+    );
+    let profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    match read_node(&host, canonical, VirtualNodeKind::Main, &profile) {
+        NodeOutcome::Published { code_len, .. } => assert!(
+            code_len > 0,
+            "the BUNDLER control published an EMPTY runtime module"
+        ),
+        other => panic!("the BUNDLER control stopped publishing its runtime module: {other:?}"),
+    }
+}
+
+/// PRE-EXISTING DIVERGENCE, characterized — not introduced by, and not fixed
+/// by, the transaction-boundary work in this suite.
+///
+/// Under [`CompileCacheMode::Content`], `ensure_ide_compiled` answers
+/// `Ok(true)` while an immediately following `get_ide` answers `None`. That
+/// contradicts `ensure_ide_compiled`'s own documented contract, which states
+/// that `Ok(true)` means "an immediate `get_ide` returns `Some`".
+///
+/// **Why it happens.** `ensure_ide_compiled` reads the `tsx` off the value
+/// `ensure_compile_artifacts` just computed, which exists regardless of WHICH
+/// cache node the result was published to. `get_ide` reads only the
+/// fact-validated SESSION slot (`peek_tsx`). A `Content`-mode compile publishes
+/// to the content-addressed node instead, so the session slot stays empty and
+/// the two routes disagree.
+///
+/// **Pre-existing.** Both halves are byte-identical on the base commit
+/// `dd84e5fa2`: `ensure_ide_compiled` ended `Ok(served.tsx.is_some())` and
+/// `get_ide` read `session_node.peek_tsx(&cc, profile_hash)?`. Neither was
+/// touched by the atomicity work — only the refusal arm was added to
+/// `ensure_ide_compiled`.
+///
+/// **Why `#[ignore]`d.** This test asserts the CORRECT contract, so it FAILS
+/// today. It is ignored rather than fixed because the disposition of a
+/// pre-existing divergence is not this suite's to make, and because "fixing" it
+/// by weakening the assertion would erase the finding. Run it explicitly with
+/// `--ignored` to observe the divergence. When the two routes are reconciled,
+/// remove the `#[ignore]` and this test passes unchanged.
+///
+/// The `Session`-mode leg is asserted LIVE below it, so the contract is not
+/// unguarded in the mode every interactive consumer actually uses.
+#[test]
+#[ignore = "pre-existing: Content-mode ensure_ide_compiled reports Ok(true) while get_ide reads the session slot and answers None"]
+fn ensure_ide_compiled_and_get_ide_agree_under_content_cache_mode() {
+    use crate::types::CompileCacheMode;
+    use verter_compiler::compile::CompileTarget;
+
+    let canonical = "/probe/ContentModeIde.vue";
+    let host = host_with(
+        canonical,
+        VUE_WITH_STYLE,
+        verter_language::FileLanguage::vue(),
+    );
+    let profile = CompileProfile {
+        target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+        requested_mode: CompileCacheMode::Content,
+        ..CompileProfile::default()
+    };
+
+    let ensured = host
+        .ensure_ide_compiled(canonical, &profile)
+        .expect("the IDE-ensure must not fail for a supported Vue SFC");
+    assert!(
+        ensured,
+        "precondition: a Vue SFC HAS an IDE surface, so the ensure must report one"
+    );
+    assert!(
+        host.get_ide(canonical, &profile).is_some(),
+        "`ensure_ide_compiled` returning Ok(true) documents that an IMMEDIATE `get_ide` \
+         returns Some; under Content mode it returns None because the ensure reads the \
+         freshly-computed value while `get_ide` reads only the fact-validated session slot"
+    );
+}
+
+/// The live half of the contract above, in the mode every interactive consumer
+/// uses: under `Session` mode `ensure_ide_compiled` reporting an IDE surface
+/// means `get_ide` really can read one.
+#[test]
+fn ensure_ide_compiled_and_get_ide_agree_under_session_cache_mode() {
+    use crate::types::CompileCacheMode;
+    use verter_compiler::compile::CompileTarget;
+
+    for (label, canonical, source, language) in [
+        (
+            "vue",
+            "/probe/SessionModeIde.vue",
+            VUE_WITH_STYLE,
+            verter_language::FileLanguage::vue(),
+        ),
+        (
+            "svelte",
+            "/probe/SessionModeIde.svelte",
+            SVELTE_STYLED,
+            verter_language::FileLanguage::svelte(),
+        ),
+    ] {
+        let host = host_with(canonical, source, language);
+        let profile = CompileProfile {
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            requested_mode: CompileCacheMode::Session,
+            ..CompileProfile::default()
+        };
+        assert!(
+            host.ensure_ide_compiled(canonical, &profile)
+                .unwrap_or_else(|error| panic!("[{label}] ensure_ide_compiled: {error:?}")),
+            "[{label}] the carrier HAS an IDE surface"
+        );
+        assert!(
+            host.get_ide(canonical, &profile).is_some(),
+            "[{label}] `ensure_ide_compiled` reported an IDE surface but `get_ide` reads none"
+        );
+    }
+}
+
+/// Reading a TARGET-EXCLUDED node under a warm identity must not recompile.
+///
+/// With target-scoped publication, a node's ABSENCE is the terminal, correct
+/// result for an identity whose target never asked for it. If the warm gate
+/// treats that absence as an incomplete compile it recompiles — every read,
+/// forever, and never produces the node, because the compile is deterministic
+/// for a validated slot.
+///
+/// This is directly reachable: the LSP lists a carrier's parse-derived runtime
+/// nodes and reads each under its `IDE | TEMPLATE_DATA` profile, and MCP probes
+/// fixed optional node kinds.
+///
+/// Asserted on the ARTIFACT — the host's cold-compile counter — because the
+/// returned `MissingVirtualNode` is identical whether or not a recompile
+/// happened, so the outcome alone proves nothing.
+#[test]
+fn reading_a_target_excluded_node_under_a_warm_identity_does_not_recompile() {
+    use verter_compiler::compile::CompileTarget;
+
+    for (label, canonical, source, language) in [
+        (
+            "vue",
+            "/probe/ExcludedNodeWarm.vue",
+            VUE_ALL_BLOCKS,
+            verter_language::FileLanguage::vue(),
+        ),
+        (
+            "svelte",
+            "/probe/ExcludedNodeWarm.svelte",
+            SVELTE_STYLED,
+            verter_language::FileLanguage::svelte(),
+        ),
+    ] {
+        let host = host_with(canonical, source, language);
+        // An identity that asks for the IDE product and template data — and so
+        // for NO runtime node at all.
+        let profile = CompileProfile {
+            target: CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+            ..CompileProfile::default()
+        };
+
+        // Warm the identity once.
+        assert!(
+            host.ensure_ide_compiled(canonical, &profile)
+                .unwrap_or_else(|error| panic!("[{label}] ensure_ide_compiled: {error:?}")),
+            "[{label}] the carrier has an IDE surface"
+        );
+        let warmed = cold_runs(&host);
+        assert!(warmed > 0, "[{label}] nothing compiled, so nothing is warm");
+
+        // Now read every runtime node this identity excluded. Each is correctly
+        // Missing — and each must be answered from the warm slot.
+        for kind in all_node_kinds() {
+            let outcome = read_node(&host, canonical, kind.clone(), &profile);
+            assert_eq!(
+                outcome,
+                NodeOutcome::Missing,
+                "[{label}] {kind:?} is not excluded by this target, so this cell measures \
+                 nothing"
+            );
+            let after = cold_runs(&host);
+            assert_eq!(
+                warmed, after,
+                "[{label}] reading target-excluded {kind:?} triggered a cold recompile \
+                 (cold runs {warmed} -> {after}). The compile is deterministic for a validated \
+                 slot, so the recompile can never produce the node — it is futile work on every \
+                 read, forever"
+            );
+        }
+
+        // Reading them AGAIN must still not recompile: the first read must not
+        // have quietly republished a slot that only now satisfies the gate.
+        for kind in all_node_kinds() {
+            let _ = read_node(&host, canonical, kind.clone(), &profile);
+        }
+        assert_eq!(
+            warmed,
+            cold_runs(&host),
+            "[{label}] a second sweep of target-excluded nodes recompiled"
+        );
+
+        // Control: the IDE product this identity DID ask for is still served,
+        // so "answer everything from a stale warm slot" is not what passed.
+        assert!(
+            !host
+                .get_ide(canonical, &profile)
+                .unwrap_or_else(|| panic!("[{label}] no IDE product"))
+                .code
+                .is_empty(),
+            "[{label}] the requested IDE product went missing"
         );
     }
 }

@@ -42,9 +42,27 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str, lang: FileLanguage) 
 
 /// An IDE-target compile profile (`CompileTarget::IDE` ⇒ the `TSX` bit), the
 /// profile the LSP uses. Drives `want_ide` through the carrier.
+///
+/// It asks for the IDE product ONLY. A request under this identity does not ask
+/// for a runtime product, so it neither publishes one nor can be refused one —
+/// tests that assert on a runtime `Main` / `Style` node use
+/// [`runtime_and_ide_profile`] instead.
 fn ide_profile() -> CompileProfile {
     CompileProfile {
         target: CompileTarget::IDE,
+        ..CompileProfile::default()
+    }
+}
+
+/// A COMBINED compile profile: the runtime products (`BUNDLER` ⇒ style, script,
+/// template) AND the IDE product (`TSX`), asked for by one request identity.
+///
+/// This is the identity for any test that reads BOTH a runtime virtual node and
+/// the IDE projection, since each product is published only to a request that
+/// asked for it.
+fn runtime_and_ide_profile() -> CompileProfile {
+    CompileProfile {
+        target: CompileTarget::BUNDLER | CompileTarget::IDE,
         ..CompileProfile::default()
     }
 }
@@ -118,12 +136,13 @@ fn vue_ide_output_is_byte_identical_through_the_carrier() {
 
 #[test]
 fn vue_ensure_ide_compiled_does_not_change_main_behavior() {
-    // The IDE-ensure path is ADDITIVE: a Vue file still produces its runtime
-    // Main, and `ensure_ide_compiled` populates the IDE slot without disturbing
-    // it. (Regression: carrier routing must not break the existing Main path.)
+    // The IDE-ensure path is ADDITIVE: under an identity that asks for BOTH the
+    // runtime and the IDE product, a Vue file still produces its runtime Main and
+    // `ensure_ide_compiled` populates the IDE slot without disturbing it.
+    // (Regression: carrier routing must not break the existing Main path.)
     let host = host();
     upsert(&host, "/src/App.vue", VUE_SRC, FileLanguage::vue());
-    let profile = ide_profile();
+    let profile = runtime_and_ide_profile();
 
     // ensure_ide_compiled populates the IDE.
     assert!(host.ensure_ide_compiled("/src/App.vue", &profile).unwrap());
@@ -238,7 +257,9 @@ fn svelte_ensure_ide_compiled_preserves_supported_legacy_main() {
         SVELTE_SRC,
         FileLanguage::svelte(),
     );
-    let profile = ide_profile();
+    // BOTH products are read below (the IDE projection AND the runtime Main), so
+    // the request identity must ask for both.
+    let profile = runtime_and_ide_profile();
 
     // The Svelte carrier satisfies the IDE ensure (Ok(true)) …
     let ensured = host
@@ -305,7 +326,7 @@ fn svelte_runes_component_emits_a_runtime_main() {
     // The §1.2 conformance fixture: `$state` + bind + a delegated event.
     let src = "<script>\n\tlet name = $state('world');\n\tlet count = $state(0);\n</script>\n\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n";
     upsert(&host, "/src/App.svelte", src, FileLanguage::svelte());
-    let profile = ide_profile();
+    let profile = runtime_and_ide_profile();
 
     let main = main_code(&host, "/src/App.svelte", &profile)
         .expect("a runes Svelte component must produce a runtime Main node");
@@ -432,7 +453,11 @@ fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
     // carrier parse backs the racing pair.
     let host = host();
     upsert(&host, "/src/App.vue", VUE_SRC, FileLanguage::vue());
-    let profile = ide_profile();
+    // The race is between an IDE demand and a RUNTIME demand on ONE identity,
+    // so that identity must ask for both products — otherwise the two threads
+    // are asking a request for something it never requested, and what coalesces
+    // is not what either consumer wanted.
+    let profile = runtime_and_ide_profile();
 
     // Baseline AFTER upsert: the upsert performed the single carrier parse.
     // Measure the delta the racing compile pair adds — it must add NO further
@@ -556,21 +581,22 @@ fn svelte_projector_diagnostic_reaches_diagnostics_snapshot() {
 }
 
 #[test]
-fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_yet_ide_resolves() {
+fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_scoped_to_that_identity(
+) {
     // R6: requesting the runtime `Main` of a Svelte component whose runtime surface
     // is REFUSED (here a STANDALONE `<svelte:fragment>` — the transparent-wrapper surface,
     // still refused; the window/document/body host + `<svelte:element>` + `<svelte:boundary>` +
     // `<svelte:head>` surfaces now EMIT, so a still-refused special fixture is a standalone
     // `<svelte:fragment>`) yields the EXPLICIT `HostError::RuntimeSurfaceRefused` (carrying the
     // precise `svelte-runtime-unsupported-*` reason) — NOT a silent `MissingVirtualNode`, and NOT
-    // a successful compile. YET the IDE projection (`get_ide`) still resolves (type-checking
-    // survives). RED against the prior host path (which ignored `runtime_surface_refused` and
-    // collapsed the request to a generic missing node, indistinguishable from a clean IDE-only
-    // carrier).
+    // a successful compile. The refusal is TERMINAL for that identity — it publishes no
+    // sibling product — while a SEPARATE IDE-only identity on the same source still
+    // resolves, so type-checking survives.
     let host = host();
     let source = "<script>let c = $state(true);</script>\n<svelte:fragment>hi</svelte:fragment>\n";
     upsert(&host, "/src/Refused.svelte", source, FileLanguage::svelte());
-    let profile = ide_profile();
+    // The runtime product IS requested — that is what makes the refusal reachable.
+    let profile = runtime_and_ide_profile();
 
     // The runtime `Main` request is an EXPLICIT refusal carrying the precise reason.
     match host.get_virtual_file(VirtualQuery {
@@ -602,15 +628,30 @@ fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_yet_
         Err(e) => panic!("unexpected error for the refused runtime request: {e:?}"),
     }
 
-    // The IDE projection STILL resolves (type-checking survives the runtime refusal).
+    // The refusing identity published NOTHING — not even the IDE projection.
     assert!(
-        host.ensure_ide_compiled("/src/Refused.svelte", &profile)
-            .unwrap(),
-        "the IDE projection must still compile for a runtime-refused component"
+        matches!(
+            host.ensure_ide_compiled("/src/Refused.svelte", &profile),
+            Err(HostError::RuntimeSurfaceRefused { .. })
+        ),
+        "the refusing identity must not publish an IDE projection beside its typed refusal"
     );
     assert!(
-        host.get_ide("/src/Refused.svelte", &profile).is_some(),
-        "the IDE `tsx` must resolve even though the runtime surface was refused"
+        host.get_ide("/src/Refused.svelte", &profile).is_none(),
+        "the refusing identity published no product, so nothing is cached to peek"
+    );
+
+    // A SEPARATE IDE-only identity STILL resolves: it asked for no runtime
+    // product, so type-checking survives the other identity's refusal.
+    let ide_only = ide_profile();
+    assert!(
+        host.ensure_ide_compiled("/src/Refused.svelte", &ide_only)
+            .expect("the IDE-only identity is never refused a runtime surface"),
+        "the IDE-only identity must still compile for a runtime-refused component"
+    );
+    assert!(
+        host.get_ide("/src/Refused.svelte", &ide_only).is_some(),
+        "the IDE `tsx` must resolve under an identity that asked only for it"
     );
 }
 
@@ -625,10 +666,11 @@ fn svelte_style_virtual_node_carries_the_demanded_css_source_map() {
     let host = host();
     let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
     upsert(&host, "/src/Styled.svelte", source, FileLanguage::svelte());
+    // The scoped-CSS virtual node is a RUNTIME product, so the request identity
+    // must ask for the runtime products.
     let profile = CompileProfile {
-        target: CompileTarget::IDE,
         source_map: true,
-        ..CompileProfile::default()
+        ..runtime_and_ide_profile()
     };
     let resp = host
         .get_virtual_file(VirtualQuery {
@@ -677,9 +719,11 @@ fn svelte_template_and_style_edit_invalidates_runtime_artifacts() {
     let canonical = "/src/Edited.svelte";
     let before = "<script>let count = $state(0);</script>\n<style>button{color:red}</style>\n<button onclick={() => count += 1}>before {count}</button>\n";
     let after = "<script>let count = $state(0);</script>\n<style>button{color:blue}</style>\n<button onclick={() => count += 1}>after {count}</button>\n";
+    // Runtime artifacts (`Main` + `Style`) are read below, so the identity asks
+    // for the runtime products.
     let profile = CompileProfile {
         source_map: true,
-        ..ide_profile()
+        ..runtime_and_ide_profile()
     };
 
     upsert(&host, canonical, before, FileLanguage::svelte());
@@ -787,7 +831,7 @@ fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module(
     let host = host();
     let source = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
     upsert(&host, "/src/Ok.svelte", source, FileLanguage::svelte());
-    let profile = ide_profile();
+    let profile = runtime_and_ide_profile();
     let code = main_code(&host, "/src/Ok.svelte", &profile)
         .expect("a supported runes component returns a Main module");
     assert!(
@@ -802,12 +846,12 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
     // wrapper surface, still refused with `svelte-runtime-unsupported-component`; the
     // window/document/body host + `<svelte:element>` + `<svelte:boundary>` + `<svelte:head>`
     // surfaces now EMIT); its IDE projection still resolves.
-    // A WARM cached runtime refusal (`runtime_surface_refused = true`, no `Main`
-    // output) must SATISFY a `get_virtual_file(Main)` demand from the cache — the
-    // serve gate (`compile_serve_satisfies_demand`) treats a `Main` demand as
-    // satisfied when the served result is a runtime refusal, so the second request
-    // is served from the warm slot (it still yields the typed `RuntimeSurfaceRefused`)
-    // rather than falling through to a COLD recompile.
+    // A WARM cached runtime refusal (the payload-free refusal arm — no product of
+    // any kind) must SATISFY a `get_virtual_file(Main)` demand from the cache — the
+    // serve gate (`compile_serve_satisfies_demand`) treats a refusal as terminal
+    // for every demand, so the second request is served from the warm slot (it
+    // still yields the typed `RuntimeSurfaceRefused`) rather than falling through
+    // to a COLD recompile.
     //
     // DISCRIMINATING via the feature-independent `compile_cold_runs` provenance rail
     // (bumped once per cold run past the warm-hit consult): RED against the pre-fix
@@ -821,7 +865,9 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
         source,
         FileLanguage::svelte(),
     );
-    let profile = ide_profile();
+    // The runtime product IS requested here — that is what makes the refusal
+    // reachable at all.
+    let profile = runtime_and_ide_profile();
 
     let request = || {
         host.get_virtual_file(VirtualQuery {
@@ -881,15 +927,33 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
          recompile (cold runs: {cold_after_first} -> {cold_after_second})"
     );
 
-    // The IDE projection still resolves (type-checking survives the runtime refusal).
+    // The refusal is TERMINAL for the requesting identity: it published no
+    // product, so that identity has no IDE projection either.
     assert!(
-        host.ensure_ide_compiled("/src/RefusedCached.svelte", &profile)
-            .unwrap(),
-        "the IDE projection must still compile for a runtime-refused component"
+        matches!(
+            host.ensure_ide_compiled("/src/RefusedCached.svelte", &profile),
+            Err(HostError::RuntimeSurfaceRefused { .. })
+        ),
+        "the refusing identity must report its refusal from the IDE-ensure path too, \
+         never publish an IDE projection beside it"
     );
     assert!(
         host.get_ide("/src/RefusedCached.svelte", &profile)
+            .is_none(),
+        "the refusing identity published no product, so nothing is cached to peek"
+    );
+
+    // A SEPARATE IDE-only identity on the same source asks for no runtime
+    // product, so it cannot be refused one and still type-checks.
+    let ide_only = ide_profile();
+    assert!(
+        host.ensure_ide_compiled("/src/RefusedCached.svelte", &ide_only)
+            .expect("the IDE-only identity is never refused a runtime surface"),
+        "the IDE-only identity must still compile for a runtime-refused component"
+    );
+    assert!(
+        host.get_ide("/src/RefusedCached.svelte", &ide_only)
             .is_some(),
-        "the IDE `tsx` must resolve even though the runtime surface was refused"
+        "the IDE `tsx` must resolve under an identity that asked only for it"
     );
 }

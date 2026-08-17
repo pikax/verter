@@ -95,7 +95,43 @@ impl CompileTarget {
     /// `docs/arch/future/ide-compile-synchronous-extras.md`. Do not widen this
     /// back to `needs_script()` without reading that document first.
     pub fn needs_runtime_prop_constructors(self) -> bool {
+        // Same condition as [`Self::publishes_runtime_module`], stated once:
+        // the constructors exist only for output that carries the runtime
+        // module. The two are named separately because they are separate
+        // questions — if one ever needs to move, it can, without silently
+        // dragging the other with it.
+        self.publishes_runtime_module()
+    }
+
+    /// Whether the request asks for the ASSEMBLED runtime module — the `Main`
+    /// virtual node and the custom-block side-files it imports.
+    ///
+    /// NARROWER than [`Self::needs_runtime_module`], which also includes
+    /// `STYLE`. A `STYLE`-only request asks for the component's CSS: that
+    /// genuinely requires the runtime compile (a carrier's scoped CSS is
+    /// produced by it, and it can genuinely be refused), but it does NOT ask
+    /// for the executable module, so no `Main` is published for it.
+    pub fn publishes_runtime_module(self) -> bool {
         self.intersects(Self::SCRIPT | Self::TEMPLATE)
+    }
+
+    /// Whether the request asks for RUNTIME output products — the executable
+    /// main module and its script / template / style side-files.
+    ///
+    /// This is the RUNTIME half of the requested-product set, the companion of
+    /// [`Self::needs_tsx`] (the IDE half) and [`Self::needs_template_data`].
+    /// A carrier attempts its runtime compile — and can therefore refuse a
+    /// runtime surface — only when this is true.
+    ///
+    /// Deliberately NOT [`Self::needs_script`]: that predicate is also switched
+    /// on by `TEMPLATE_DATA`, because template-data extraction consumes script
+    /// BINDINGS. Template data is not a runtime product, and the LSP's
+    /// interactive profile is `IDE | TEMPLATE_DATA` — reading `needs_script`
+    /// here would make every LSP request ask for runtime output it never
+    /// consumes, and tie its IDE surface to a runtime outcome it did not
+    /// request.
+    pub fn needs_runtime_module(self) -> bool {
+        self.intersects(Self::STYLE | Self::SCRIPT | Self::TEMPLATE)
     }
 
     /// Whether VDOM/Vapor/SSR template codegen should run.

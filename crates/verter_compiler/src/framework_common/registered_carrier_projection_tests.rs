@@ -16,8 +16,8 @@ use verter_language::{
 };
 
 use super::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
-    RuntimeCompileOptions, RuntimeCompileOutput, TemplateFacts,
+    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
+    ParseOptions, RuntimeCompileOptions, TemplateFacts,
 };
 use super::registered_carrier_projection::{
     materialize_registered_carrier_for_tests,
@@ -118,7 +118,7 @@ impl CarrierCompiler for CountingCarrierCompiler {
         artifact: &verter_language::FrameworkParseArtifact,
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+    ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
         self.inner.compile_bundle(source, artifact, opts, alloc)
     }
 }

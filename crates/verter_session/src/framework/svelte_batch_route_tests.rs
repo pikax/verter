@@ -256,9 +256,9 @@ fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
     );
     let batched = &entries[0];
     assert!(
-        batched.errors.is_empty(),
+        batched.errors().is_empty(),
         "the batch reported errors for a component the single-file route publishes: {:?}",
-        batched.errors
+        batched.errors()
     );
     // TYPED route evidence, not a look at the bytes: the batch host's own
     // registered adapter for this canonical is the VUE one.
@@ -287,7 +287,7 @@ fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
         "the single-file route no longer registers this component under the Svelte adapter"
     );
     assert_ne!(
-        batched.code.as_ref(),
+        batched.code(),
         code.as_str(),
         "the two routes now agree, so the characterized divergence is gone"
     );
@@ -304,8 +304,8 @@ fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
             &single_file_profile(false, true),
         ),
         SingleFileOutcome::Published {
-            code: batched.code.to_string(),
-            has_map: batched.source_map.is_some(),
+            code: batched.code().to_string(),
+            has_map: batched.source_map().is_some(),
         },
         "the batch's output is no longer what the Vue-registered single-file route produces for \
          the same source"
@@ -328,11 +328,11 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
     );
     assert!(
         !advanced[0]
-            .errors
+            .errors()
             .iter()
             .any(|error| error.contains("svelte-runtime-unsupported-advanced-rune")),
         "the batch now surfaces the advanced-rune refusal: {:?}",
-        advanced[0].errors
+        advanced[0].errors()
     );
     // POSITIVE: the batch published exactly the Vue-registered single-file
     // route's bytes for these source bytes. Without this the assertion above
@@ -345,8 +345,8 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
             &single_file_profile(false, true),
         ),
         SingleFileOutcome::Published {
-            code: advanced[0].code.to_string(),
-            has_map: advanced[0].source_map.is_some(),
+            code: advanced[0].code().to_string(),
+            has_map: advanced[0].source_map().is_some(),
         },
         "the batch's output for the refusal-shaped input is no longer what the Vue-registered \
          single-file route produces"
@@ -376,11 +376,11 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
     );
     assert!(
         !server[0]
-            .errors
+            .errors()
             .iter()
             .any(|error| error.contains("svelte-runtime-unsupported-server-generate")),
         "the batch now surfaces the server-generate refusal: {:?}",
-        server[0].errors
+        server[0].errors()
     );
     // POSITIVE, same reasoning, on the server-profile lane.
     assert_eq!(
@@ -391,8 +391,8 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
             &single_file_profile(true, true),
         ),
         SingleFileOutcome::Published {
-            code: server[0].code.to_string(),
-            has_map: server[0].source_map.is_some(),
+            code: server[0].code().to_string(),
+            has_map: server[0].source_map().is_some(),
         },
         "the batch's server-lane output is no longer what the Vue-registered single-file route \
          produces"
@@ -432,9 +432,9 @@ fn the_host_backed_batch_lane_shows_the_same_svelte_language_divergence() {
         "the host-backed lane registered this canonical under a different adapter than Vue"
     );
     assert!(
-        entries[1].errors.is_empty(),
+        entries[1].errors().is_empty(),
         "the host-backed lane now reports an error for the refused component: {:?}",
-        entries[1].errors
+        entries[1].errors()
     );
     // POSITIVE: both entries carry exactly the Vue-registered single-file
     // route's bytes under the host-backed lane's own bundler preset.
@@ -451,8 +451,8 @@ fn the_host_backed_batch_lane_shows_the_same_svelte_language_divergence() {
                 &bundler,
             ),
             SingleFileOutcome::Published {
-                code: entry.code.to_string(),
-                has_map: entry.source_map.is_some(),
+                code: entry.code().to_string(),
+                has_map: entry.source_map().is_some(),
             },
             "{}: the host-backed lane's output is no longer what the Vue-registered single-file \
              route produces",
@@ -508,29 +508,31 @@ fn batch_ordering_is_stable_and_items_do_not_contaminate_each_other() {
             },
         );
         assert_eq!(
-            entries[index].code, alone[0].code,
+            entries[index].code(),
+            alone[0].code(),
             "{}: the entry's bytes differ from the same input compiled alone, so a neighbour \
              influenced it",
             input.canonical_id
         );
         assert_eq!(
-            entries[index].source_map.is_some(),
-            alone[0].source_map.is_some(),
+            entries[index].source_map().is_some(),
+            alone[0].source_map().is_some(),
             "{}: map presence differs from the same input compiled alone",
             input.canonical_id
         );
     }
     assert_ne!(
-        entries[0].code, entries[2].code,
+        entries[0].code(),
+        entries[2].code(),
         "the two distinct inputs produced identical bytes, so this batch cannot detect a \
          fanned-out result"
     );
     // The middle item leaves no residue in its neighbours.
     assert!(
-        entries[0].errors.is_empty() && entries[2].errors.is_empty(),
+        entries[0].errors().is_empty() && entries[2].errors().is_empty(),
         "a neighbouring item contaminated a sibling: {:?} / {:?}",
-        entries[0].errors,
-        entries[2].errors
+        entries[0].errors(),
+        entries[2].errors()
     );
     // And every entry reports the canonical it was asked about.
     for (entry, input) in entries.iter().zip(&inputs) {
@@ -560,15 +562,16 @@ fn the_batch_source_map_axis_publishes_only_what_was_requested() {
     );
 
     assert!(
-        with_map[0].source_map.is_some(),
+        with_map[0].source_map().is_some(),
         "the batch withheld a requested source map"
     );
     assert!(
-        without_map[0].source_map.is_none(),
+        without_map[0].source_map().is_none(),
         "the batch published a source map that was never requested"
     );
     assert_eq!(
-        with_map[0].code, without_map[0].code,
+        with_map[0].code(),
+        without_map[0].code(),
         "the batch's source-map axis changed the emitted module bytes"
     );
 }
@@ -618,29 +621,32 @@ fn a_svelte_batch_matches_the_single_file_route_item_for_item() {
     for (entry, input) in entries.iter().zip(&inputs) {
         match single_file(&single, &input.canonical_id, &profile) {
             SingleFileOutcome::Published { code, has_map } => {
-                if entry.code.as_ref() != code.as_str() {
+                if entry.code() != code.as_str() {
                     divergences.push(format!(
                         "{}: bytes differ\n  batch:  {}\n  single: {}",
-                        entry.canonical_id, entry.code, code
+                        entry.canonical_id,
+                        entry.code(),
+                        code
                     ));
                 }
-                if entry.source_map.is_some() != has_map {
+                if entry.source_map().is_some() != has_map {
                     divergences.push(format!("{}: map presence differs", entry.canonical_id));
                 }
             }
             SingleFileOutcome::Refused { diagnostic_code } => {
                 if !entry
-                    .errors
+                    .errors()
                     .iter()
                     .any(|error| error.contains(&diagnostic_code))
                 {
                     divergences.push(format!(
                         "{}: the single-file route refused with `{diagnostic_code}`, the batch \
                          reported {:?}",
-                        entry.canonical_id, entry.errors
+                        entry.canonical_id,
+                        entry.errors()
                     ));
                 }
-                if !entry.code.is_empty() || entry.source_map.is_some() {
+                if !entry.code().is_empty() || entry.source_map().is_some() {
                     divergences.push(format!(
                         "{}: the batch published a partial product for a refused item",
                         entry.canonical_id
@@ -860,13 +866,13 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
     let id = &entry.canonical_id;
     let row = format!("{class:?}/{lane:?}");
     assert!(
-        !entry.errors.is_empty(),
+        !entry.errors().is_empty(),
         "{row}: `{id}` reported no error at all, so this row is not measuring a failing entry"
     );
     match class {
         FailingClass::DuplicateCanonicalConflict => {
             assert_eq!(
-                entry.errors,
+                entry.errors(),
                 vec!["duplicate canonical_id with conflicting source in batch".to_string()],
                 "{row}: `{id}` did not fail with the batch's own per-canonical conflict error, so \
                  it entered some other class"
@@ -881,7 +887,7 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
             // message here would mean this row is measuring the successful
             // arm, where "no product" is not the property under test.
             let prefix = format!("[{id}] ");
-            for message in &entry.errors {
+            for message in entry.errors() {
                 assert!(
                     message.starts_with(&prefix),
                     "{row}: `{id}` carries an error that is not prefixed with its canonical id, so \
@@ -891,17 +897,17 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
             }
             assert!(
                 entry
-                    .errors
+                    .errors()
                     .iter()
                     .any(|message| message.contains("Interpolation end sign was not found.")),
                 "{row}: `{id}` failed, but not with the template-parse diagnostic this row drives: \
                  {:?}",
-                entry.errors
+                entry.errors()
             );
         }
         FailingClass::OtherHostError => {
             assert_eq!(
-                entry.errors,
+                entry.errors(),
                 vec![format!(
                     "[{id}] host error: compile profile grammar differs from registered grammar"
                 )],
@@ -911,21 +917,21 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
         }
         FailingClass::Panic => {
             assert_eq!(
-                entry.errors.len(),
+                entry.errors().len(),
                 1,
                 "{row}: a caught panic renders exactly one error: {:?}",
-                entry.errors
+                entry.errors()
             );
             assert!(
-                entry.errors[0].starts_with(&format!("[{id}] compiler panic: ")),
+                entry.errors()[0].starts_with(&format!("[{id}] compiler panic: ")),
                 "{row}: `{id}` failed, but not through the coordinator's panic conversion: {:?}",
-                entry.errors
+                entry.errors()
             );
             assert!(
-                entry.errors[0].contains("synthetic panic"),
+                entry.errors()[0].contains("synthetic panic"),
                 "{row}: the panic body is not the injected one, so some OTHER panic produced this \
                  entry: {:?}",
-                entry.errors
+                entry.errors()
             );
         }
     }
@@ -936,22 +942,22 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
 fn assert_publishes_no_product(row: &str, entry: &CompileBatchEntry) {
     let id = &entry.canonical_id;
     assert!(
-        entry.code.is_empty(),
+        entry.code().is_empty(),
         "{row}: `{id}` published {} bytes of code alongside its failure {:?}:\n{}",
-        entry.code.len(),
-        entry.errors,
-        entry.code
+        entry.code().len(),
+        entry.errors(),
+        entry.code()
     );
     assert!(
-        entry.source_map.is_none(),
+        entry.source_map().is_none(),
         "{row}: `{id}` published a source map alongside its failure {:?}",
-        entry.errors
+        entry.errors()
     );
     assert!(
-        entry.lang.is_none(),
+        entry.lang().is_none(),
         "{row}: `{id}` reported an output language ({:?}) alongside its failure {:?}",
-        entry.lang,
-        entry.errors
+        entry.lang(),
+        entry.errors()
     );
 }
 
@@ -962,16 +968,16 @@ fn assert_publishes_no_product(row: &str, entry: &CompileBatchEntry) {
 fn assert_publishes_cleanly(row: &str, entry: &CompileBatchEntry) {
     let id = &entry.canonical_id;
     assert!(
-        entry.errors.is_empty(),
+        entry.errors().is_empty(),
         "{row}: `{id}` should have published cleanly but reported {:?}",
-        entry.errors
+        entry.errors()
     );
     assert!(
-        !entry.code.is_empty(),
+        !entry.code().is_empty(),
         "{row}: `{id}` reported no failure but published no code either"
     );
     assert!(
-        entry.lang.is_some(),
+        entry.lang().is_some(),
         "{row}: `{id}` published code but no output language"
     );
 }
@@ -1105,9 +1111,9 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
         // (a) ordinary success — product published, nothing reported.
         assert_publishes_cleanly(&row, &entries[0]);
         assert!(
-            entries[0].diagnostics.is_empty(),
+            entries[0].diagnostics().is_empty(),
             "{row}: an ordinary success carries no diagnostics: {:?}",
-            entries[0].diagnostics
+            entries[0].diagnostics()
         );
 
         // (b) warning-only — the compile SUCCEEDS while carrying a
@@ -1116,7 +1122,7 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
         match lane {
             Lane::RuntimeRender => {
                 let warning = entries[1]
-                    .diagnostics
+                    .diagnostics()
                     .iter()
                     .find(|diagnostic| diagnostic.code == "XUnresolvedImportedMacroType")
                     .unwrap_or_else(|| {
@@ -1124,7 +1130,7 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
                             "{row}: the warning-only input carried no unresolved-macro-type \
                              diagnostic, so this control is not measuring a warning: {:?}",
                             entries[1]
-                                .diagnostics
+                                .diagnostics()
                                 .iter()
                                 .map(|diagnostic| (
                                     diagnostic.code.as_str(),
@@ -1142,10 +1148,10 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
             }
             Lane::HostBacked => {
                 assert!(
-                    entries[1].diagnostics.is_empty(),
+                    entries[1].diagnostics().is_empty(),
                     "{row}: the host-backed entry surfaces no success-warning list by \
                      construction, so a non-empty one means the lane changed: {:?}",
-                    entries[1].diagnostics
+                    entries[1].diagnostics()
                 );
                 // The source really IS warning-carrying on this lane: read
                 // the same canonical back off the response the batch used.
@@ -1195,53 +1201,40 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
     }
 }
 
-/// The latent host-backed construction hazard's PRECONDITION, characterized.
+/// The re-examination artifact for the host-backed construction, now that the
+/// construction it named has been corrected.
 ///
-/// This is the artifact for a finding that is NOT a demonstrated defect. Of
-/// the nine `CompileBatchEntry` constructions on the batch route, eight write
-/// a hardcoded empty product beside their errors; the host-backed
-/// SUCCESSFUL-RESPONSE construction is the only one that reads the product and
-/// the error list from the same response. That shape could express a product
-/// beside a fatal-looking error list — but only if it is ever HANDED a
-/// successful response carrying an error-severity diagnostic. That precondition
-/// is what this test measures, and it is the half a public-API test can decide.
+/// **What it named.** Of the nine batch-entry constructions, the host-backed
+/// SUCCESSFUL-RESPONSE one used to read the product and the error list from the
+/// same response — it derived `errors` by severity-filtering the response's
+/// diagnostics while independently retaining that response's product. That
+/// shape COULD have expressed a product beside a fatal-looking error list, but
+/// only if it were ever handed a successful response carrying an error-severity
+/// diagnostic. No reachable input demonstrated that; it was a latent
+/// construction hazard, never a demonstrated defect.
 ///
-/// Two readings, on the host-backed lane:
+/// **What is true now.** The mixed shape is gone from the type: an entry
+/// carries a [`CompileBatchOutcome`] whose failure arm has no product field, and
+/// the host-backed construction picks its arm from the TYPED terminal result —
+/// `Ok(response)` produces, `Err(HostError)` fails — rather than from the
+/// severity of a successful response's diagnostics. So the precondition below
+/// no longer gates anything: even if a successful response DID carry an
+/// error-severity diagnostic, the entry built from it would still be a
+/// well-formed produced entry rather than a product paired with errors.
 ///
-/// 1. A compile that SUCCEEDS while carrying a diagnostic is served by that
-///    construction from a response that carries NO error-severity diagnostic.
-///    The response's diagnostics list is non-empty (it carries a warning), so
-///    "no error" is a real reading and not a vacuous one over an empty list.
-/// 2. A compile that genuinely FAILS never reaches that construction at all:
-///    the same request answers `Err`, so its entry is built by one of the
-///    hardcoded-empty arms, and it publishes nothing.
+/// This test therefore measures the precondition that used to matter, and
+/// asserts the property that now holds regardless of it: on the host-backed
+/// lane, a diagnostic-carrying compile that SUCCEEDS publishes its product and
+/// reports nothing, and a compile that genuinely FAILS answers `Err`, publishes
+/// nothing, and reports its errors.
 ///
-/// **What this deliberately does NOT prove.** It does not prove the
-/// construction READS its error list from the response rather than writing a
-/// hardcoded empty one — replacing that filter with an empty literal leaves
-/// this test green, and it is written not to claim otherwise. Deciding that
-/// half needs a synthetic response carrying a product and an error together,
-/// which needs a seam in production code that this suite does not own. It is
-/// recorded as an open residue for the correction owner, not smuggled in as a
-/// claim here.
-///
-/// It is `#[ignore]`d deliberately, and it is NOT a RED target: it passes
-/// today, by design. It is the re-examination artifact its correction owner
-/// re-runs — the day a successful host-backed response carries an
-/// error-severity diagnostic, reading 1 turns RED, the precondition holds, and
-/// the hazard has become reachable. Making it a required-RED gate today would
-/// mean asserting a defect nobody has reproduced.
-///
-/// That combination — `#[ignore]`d AND passing — is a deliberate category
-/// mismatch with every other ignored target in this suite, which states a
-/// correct behaviour the product does not yet have and therefore FAILS. This
-/// one is the named artifact for a finding that is not a defect, so it has no
-/// failing correct-behaviour to state. Nothing is lost by ignoring it: the same
-/// precondition is asserted LIVE, on the same lane, by the non-ignored
-/// [`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`],
-/// whose host-backed half already requires the response to carry no
-/// error-severity diagnostic. This test exists so that requirement has a name
-/// the amended finding can point at.
+/// It stays `#[ignore]`d and it stays PASSING, exactly as before — it is the
+/// named artifact its finding points at, not a RED gate. The live, non-ignored
+/// coverage of the same lane is
+/// [`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`]
+/// (behaviour) and
+/// [`a_batch_outcome_cannot_express_a_product_beside_an_error`] (the structure
+/// that now makes the hazard unrepresentable).
 #[ignore]
 #[test]
 fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error() {
@@ -1260,8 +1253,7 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
     assert_eq!(entries.len(), 2, "{row}: one entry per input");
 
     // 1. The SUCCESS half — served by the response-reading construction. The
-    //    PRECONDITION is read first, so a failure names it rather than naming
-    //    the pairing it causes one line later.
+    //    old precondition is read first, so a change there is named directly.
     let response = batch_host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
@@ -1296,9 +1288,9 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.severity == crate::HostSeverity::Error),
-        "{row}: a SUCCESSFUL host-backed response now carries an error-severity diagnostic — the \
-         latent construction hazard is reachable, and this entry pairs that error list with the \
-         response's product: {:?}",
+        "{row}: a SUCCESSFUL host-backed response now carries an error-severity diagnostic. That \
+         is no longer a hazard — the entry below is still atomic — but it is a change worth \
+         knowing about: {:?}",
         response
             .diagnostics
             .diagnostics
@@ -1310,12 +1302,28 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
             ))
             .collect::<Vec<_>>()
     );
-    // The precondition holds, so the entry this construction built is clean:
-    // a product, and no errors beside it.
+    // The entry that construction built is a produced one: a product, and no
+    // errors beside it — now by the shape of the outcome, not by the
+    // precondition above holding.
     assert_publishes_cleanly(row, &entries[0]);
+    assert!(
+        matches!(
+            entries[0].outcome,
+            crate::host_compile::CompileBatchOutcome::Produced { .. }
+        ),
+        "{row}: a successful host-backed compile must take the PRODUCED arm"
+    );
 
-    // 2. The FAILURE half — never reaches that construction.
+    // 2. The FAILURE half — answers `Err`, so it never reaches that
+    //    construction and publishes nothing.
     assert_publishes_no_product(row, &entries[1]);
+    assert!(
+        matches!(
+            entries[1].outcome,
+            crate::host_compile::CompileBatchOutcome::Failed { .. }
+        ),
+        "{row}: a genuinely failing host-backed compile must take the FAILED arm"
+    );
     let failure = batch_host.get_virtual_file(VirtualQuery {
         raw_id: None,
         canonical_id: Some(failing_id.clone()),
@@ -1325,15 +1333,127 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
     assert!(
         failure.is_err(),
         "{row}: the failing input answered Ok, so its entry WAS built by the response-reading \
-         construction and the hazard is reachable through an ordinary compile failure"
+         construction rather than a failure arm"
+    );
+}
+
+/// The STRUCTURE, asserted directly: a batch outcome cannot express a product
+/// beside an error, and cannot express a failure that reports nothing.
+///
+/// The `match` is EXHAUSTIVE with no wildcard arm, so adding a variant to
+/// [`CompileBatchOutcome`] is a COMPILE error here rather than an unexamined
+/// third shape. Within each arm, only that arm's fields are in scope — which is
+/// the point: the produced arm has no `errors` to read and the failed arm has no
+/// `code` / `lang` / `source_map` to read, so the mixed state is not something
+/// this test has to look for. It also drives the two real conversion directions
+/// through the public batch API so the arms are not merely declarable but
+/// actually reached.
+#[test]
+fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
+    use crate::host_compile::CompileBatchOutcome;
+
+    let row = "structure/CompileBatchOutcome";
+    // A component that compiles, and one whose template cannot parse. Driving
+    // BOTH in one batch is what makes each arm reached rather than asserted.
+    let ok_id = "/atomic/OutcomeShapeOk.vue".to_string();
+    let bad_id = "/atomic/OutcomeShapeBad.vue".to_string();
+    let entries = host().compile_many(
+        vec![
+            batch_input(&ok_id, WARNS_WITHOUT_FAILING),
+            batch_input(&bad_id, TEMPLATE_THAT_FAILS_TO_PARSE),
+        ],
+        CompileBatchOptions::default(),
+        Lane::HostBacked.target(),
+    );
+    assert_eq!(entries.len(), 2, "{row}: one entry per input");
+
+    let mut produced_seen = 0usize;
+    let mut failed_seen = 0usize;
+    for entry in &entries {
+        match &entry.outcome {
+            CompileBatchOutcome::Produced {
+                code,
+                lang,
+                source_map,
+                diagnostics,
+            } => {
+                produced_seen += 1;
+                // The produced arm exposes a product. There is no `errors`
+                // binding to check — the arm has no such field.
+                assert!(
+                    !code.is_empty(),
+                    "{row}: `{}` took the produced arm with an EMPTY product",
+                    entry.canonical_id
+                );
+                assert!(
+                    lang.is_some(),
+                    "{row}: `{}` produced code but no output language",
+                    entry.canonical_id
+                );
+                let _ = source_map;
+                assert!(
+                    diagnostics
+                        .iter()
+                        .all(|d| d.severity != crate::HostSeverity::Error),
+                    "{row}: `{}` carries an ERROR in its success diagnostics",
+                    entry.canonical_id
+                );
+                // The read projection agrees with the arm.
+                assert!(
+                    entry.errors().is_empty(),
+                    "{row}: a produced entry reported errors"
+                );
+            }
+            CompileBatchOutcome::Failed { errors } => {
+                failed_seen += 1;
+                // The failed arm exposes errors, non-empty by construction.
+                // There is no `code` / `lang` / `source_map` binding to check.
+                assert!(
+                    !errors.as_slice().is_empty(),
+                    "{row}: `{}` took the failed arm with NO error —                      NonEmptyErrors is supposed to make that unconstructible",
+                    entry.canonical_id
+                );
+                // The read projections agree with the arm.
+                assert!(
+                    entry.code().is_empty()
+                        && entry.lang().is_none()
+                        && entry.source_map().is_none()
+                        && entry.diagnostics().is_empty(),
+                    "{row}: a failed entry projected a product",
+                );
+            }
+        }
+    }
+    assert_eq!(
+        (produced_seen, failed_seen),
+        (1, 1),
+        "{row}: the batch must reach BOTH arms, or this test proves only one of them"
+    );
+
+    // The non-empty invariant, at the constructor: an empty list is replaced by
+    // the caller's stated fallback rather than published as an empty failure.
+    let recovered = crate::host_compile::NonEmptyErrors::new(Vec::new(), || "fallback".to_string());
+    assert_eq!(
+        recovered.as_slice(),
+        ["fallback".to_string()],
+        "{row}: an empty error list must become the stated fallback, never an empty failure"
+    );
+    let kept = crate::host_compile::NonEmptyErrors::new(vec!["real".to_string()], || {
+        panic!("the fallback must not run when the list is non-empty")
+    });
+    assert_eq!(
+        kept.as_slice(),
+        ["real".to_string()],
+        "{row}: a non-empty error list must be preserved verbatim"
     );
 }
 
 /// A SEARCH for one specific shape, not a proof that it cannot exist.
 ///
-/// The host-backed lane's successful-response construction is the ONLY one
-/// that reads a product and an error list independently, so it is the only
-/// place a batch entry could express both at once. The known upstream way to
+/// The host-backed lane's successful-response construction USED to be the only
+/// one that read a product and an error list independently — it is now a typed
+/// sum arm that cannot express both, and this search is what would turn RED if
+/// some change made the mixed shape reachable again. The known upstream way to
 /// produce a successful response carrying error diagnostics is the dev
 /// last-known-good serve, which pairs a PREVIOUS compile's outputs with a NEW
 /// compile's error diagnostics. Reaching it needs a compile of UNCHANGED
@@ -1360,19 +1480,19 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
     /// nothing, whatever produced it.
     #[track_caller]
     fn assert_atomic(step: &str, entry: &CompileBatchEntry) {
-        if entry.errors.is_empty() {
+        if entry.errors().is_empty() {
             return;
         }
         assert!(
-            entry.code.is_empty() && entry.source_map.is_none() && entry.lang.is_none(),
+            entry.code().is_empty() && entry.source_map().is_none() && entry.lang().is_none(),
             "{step}: `{}` served a product alongside {} error(s) — the mixed outcome this test \
              searches for. errors={:?} lang={:?} map={} code:\n{}",
             entry.canonical_id,
-            entry.errors.len(),
-            entry.errors,
-            entry.lang,
-            entry.source_map.is_some(),
-            entry.code
+            entry.errors().len(),
+            entry.errors(),
+            entry.lang(),
+            entry.source_map().is_some(),
+            entry.code()
         );
     }
 
@@ -1418,10 +1538,10 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
             lane.target(),
         );
         assert!(
-            !failed[0].errors.is_empty(),
+            !failed[0].errors().is_empty(),
             "{lane:?}: the recompile did not fail, so this sequence never reached the state it \
              searches: {:?}",
-            failed[0].code
+            failed[0].code()
         );
         assert_atomic(&format!("{lane:?}/fail-after-last-good"), &failed[0]);
         assert_publishes_cleanly(
@@ -1448,7 +1568,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
             lane.target(),
         );
         assert!(
-            !failed[0].errors.is_empty(),
+            !failed[0].errors().is_empty(),
             "{lane:?}: the advanced-view recompile did not fail, so this sequence never reached \
              the state it searches"
         );
@@ -1474,7 +1594,8 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
         assert_atomic(&format!("{lane:?}/reread-unchanged"), &reread[0]);
         assert_publishes_cleanly(&format!("{lane:?}/reread-unchanged"), &reread[0]);
         assert_eq!(
-            reread[0].code, cold[0].code,
+            reread[0].code(),
+            cold[0].code(),
             "{lane:?}: the unchanged re-request served different bytes than the compile that \
              populated the slot"
         );
@@ -1495,7 +1616,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
             lane.target(),
         );
         assert!(
-            !broken[0].errors.is_empty(),
+            !broken[0].errors().is_empty(),
             "{lane:?}: the cycle's middle request did not fail"
         );
         assert_atomic(&format!("{lane:?}/cycle-broken"), &broken[0]);
@@ -1507,7 +1628,8 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
         assert_atomic(&format!("{lane:?}/cycle-recovered"), &recovered[0]);
         assert_publishes_cleanly(&format!("{lane:?}/cycle-recovered"), &recovered[0]);
         assert_eq!(
-            recovered[0].code, first[0].code,
+            recovered[0].code(),
+            first[0].code(),
             "{lane:?}: the recovered request served different bytes than the first successful one"
         );
     }

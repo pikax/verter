@@ -3821,18 +3821,17 @@ const height = ref('100px')
         target: CompileTarget::IDE,
         ..profile()
     };
-    let response = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some("/src/Regression.vue".to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: ide_profile,
-        })
+    // The IDE identity asks for the IDE product, not the runtime module, so the
+    // compile is driven through the IDE-ensure route and its diagnostics read
+    // from the diagnostics route for that same identity.
+    host.ensure_ide_compiled("/src/Regression.vue", &ide_profile)
         .expect("IDE compile should succeed for this SFC");
+    let diagnostics = host
+        .get_diagnostics("/src/Regression.vue", &ide_profile)
+        .expect("the IDE compile publishes a diagnostics snapshot");
 
     // No DuplicateAttribute in compile-phase diagnostics
-    let dup_compile: Vec<_> = response
-        .diagnostics
+    let dup_compile: Vec<_> = diagnostics
         .diagnostics
         .iter()
         .filter(|d| d.code == "DuplicateAttribute")
@@ -3842,7 +3841,7 @@ const height = ref('100px')
         "compile should not produce DuplicateAttribute diagnostics, got: {dup_compile:?}"
     );
     assert!(
-        !response.diagnostics.has_errors,
+        !diagnostics.has_errors,
         "compile should have no errors at all"
     );
 }

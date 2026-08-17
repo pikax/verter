@@ -1152,11 +1152,13 @@ pub(crate) fn resolve_component_for(
             };
             // ANALYSIS-facing (NOT IDE-sync): this drives the shared compile to
             // populate the file's analysis/template-data, then reads
-            // `get_analysis` — it does NOT consume IDE TSX. The result is
-            // ignored; the compile side-effect populates the analysis store
-            // before the (Main-less-carrier) `MissingVirtualNode`, so a Svelte
-            // carrier's analysis still lands. Kept on `ensure_compiled`
-            // deliberately: it wants the analysis surface, not the IDE surface.
+            // `get_analysis` — it does NOT consume IDE TSX. Kept on
+            // `ensure_compiled` deliberately: it wants the analysis surface, not
+            // the IDE surface, and that route now asks for the TRANSACTION
+            // rather than a product, so it no longer reports a missing `Main`.
+            // The result is ignored, but note a carrier whose runtime surface is
+            // REFUSED terminates the transaction with no products at all — its
+            // template analysis does not land, and `get_analysis` answers None.
             let _ = host.ensure_compiled(canonical_id, &profile);
             analysis = host.get_analysis(canonical_id);
         }

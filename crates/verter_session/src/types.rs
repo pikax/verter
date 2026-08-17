@@ -2472,10 +2472,13 @@ pub enum HostError {
     /// The carrier REFUSED to produce the requested RUNTIME surface for an
     /// unsupported construct (a fail-closed runtime outcome). DISTINCT from a
     /// generic missing node: the runtime artifact was REQUESTED and explicitly
-    /// refused, with the precise reason in `diagnostic_code` / `message`. The IDE
-    /// projection is still produced (type-checking survives); a runtime-requesting
-    /// consumer reads this rather than mistaking the absent node for an IDE-only
-    /// carrier.
+    /// refused, with the precise reason in `diagnostic_code` / `message`.
+    ///
+    /// The refusal is TERMINAL for the requesting identity: that transaction
+    /// publishes NO product, so the IDE projection is withheld alongside the
+    /// runtime module. A SEPARATE identity that asks only for the IDE product
+    /// requests no runtime surface, so it cannot be refused one and still
+    /// type-checks.
     #[error("runtime surface refused for '{canonical_id}': {diagnostic_code}: {message}")]
     RuntimeSurfaceRefused {
         /// The canonical id of the refused file.
@@ -2805,6 +2808,122 @@ pub enum PublicApiMode {
     Declaration,
 }
 
+/// What a compile transaction COMMITTED for one `(canonical, profile)`.
+///
+/// A sum, not a product set beside a refusal flag. The refusal arm carries no
+/// product field of any kind — no virtual-node outputs, no last-good outputs, no
+/// IDE `tsx`, no template analysis — so a committed refusal cannot hold a
+/// sibling product for the same request identity. The refusal is nonetheless
+/// CACHEABLE: it is the final, payload-free answer for that identity, so a
+/// refused component is not recompiled on every request.
+///
+/// `clippy::large_enum_variant` is allowed rather than boxing the produced arm:
+/// the produced arm is the overwhelmingly common case and this value lives
+/// inside the compile slot / cached value it describes, so boxing would add an
+/// allocation and a pointer hop to every warm read purely to shrink the rare
+/// refusal arm's footprint.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CompileProducts {
+    /// The compile produced the requested product set.
+    Produced {
+        outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+        last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
+        /// Combined TSX output for LSP type checking. Not a virtual file.
+        tsx: Option<CachedTsx>,
+        /// Template analysis extracted during compilation. Populated when
+        /// the analysis scope includes template flags (TPL_COMPONENTS, etc.).
+        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    },
+    /// The carrier fail-closed on the runtime surface this request asked for.
+    /// The reason is carried STRUCTURALLY, so no consumer recovers it by
+    /// scanning diagnostic text for a framework-specific code prefix.
+    RuntimeSurfaceRefused {
+        diagnostic_code: Arc<str>,
+        message: Arc<str>,
+    },
+}
+
+impl CompileProducts {
+    /// The committed virtual-node outputs; `None` on a refusal (which has none).
+    pub(crate) fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced { outputs, .. } => Some(outputs),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// Mutable access to the committed outputs, for per-node eviction. Test-only,
+    /// matching its sole caller (`cache::invalidate_nodes`).
+    #[cfg(test)]
+    pub(crate) fn outputs_mut(
+        &mut self,
+    ) -> Option<&mut FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced { outputs, .. } => Some(outputs),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// Mutable access to the last-good outputs, for per-node eviction. Test-only,
+    /// matching its sole caller (`cache::invalidate_nodes`).
+    #[cfg(test)]
+    pub(crate) fn last_good_outputs_mut(
+        &mut self,
+    ) -> Option<&mut FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced {
+                last_good_outputs, ..
+            } => last_good_outputs.as_mut(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The committed last-good outputs; `None` on a refusal.
+    pub(crate) fn last_good_outputs(
+        &self,
+    ) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced {
+                last_good_outputs, ..
+            } => last_good_outputs.as_ref(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The committed IDE artifact; `None` on a refusal (which has none).
+    pub(crate) fn tsx(&self) -> Option<&CachedTsx> {
+        match self {
+            Self::Produced { tsx, .. } => tsx.as_ref(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The structural refusal reason, when this transaction was refused.
+    /// `None` on the produced arm, which has no refusal to report.
+    pub(crate) fn refusal(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Produced { .. } => None,
+            Self::RuntimeSurfaceRefused {
+                diagnostic_code,
+                message,
+            } => Some((diagnostic_code, message)),
+        }
+    }
+
+    /// The committed template analysis; `None` on a refusal.
+    pub(crate) fn template_analysis(
+        &self,
+    ) -> Option<&verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+        match self {
+            Self::Produced {
+                template_analysis, ..
+            } => template_analysis.as_ref(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
@@ -2819,20 +2938,12 @@ pub(crate) struct CompileSlot {
     /// un-overridden Svelte compile) is a null pointer, so the discriminant is
     /// zero-cost off the override path.
     pub(crate) css_hash_override: Option<Arc<str>>,
-    pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// What this transaction committed — the produced product set, OR a
+    /// payload-free runtime refusal. See [`CompileProducts`].
+    pub(crate) products: CompileProducts,
     pub(crate) diagnostics: DiagnosticsSnapshot,
-    pub(crate) last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
     #[allow(dead_code)]
     pub(crate) last_access_tick: u64,
-    /// Combined TSX output for LSP type checking. Not a virtual file.
-    pub(crate) tsx: Option<CachedTsx>,
-    /// Template analysis extracted during compilation. Populated when
-    /// the analysis scope includes template flags (TPL_COMPONENTS, etc.).
-    /// Stored per-slot for future per-profile access; the latest is also
-    /// copied to `FileEntry::template_analysis` for the public API.
-    #[allow(dead_code)]
-    pub(crate) template_analysis:
-        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
     /// R3/R26/R28 cold-compute fact signature. Accumulated by the
     /// `with_fact_tracer` scope wrapping the compile cold-compute
     /// pass; every per-`Member`, per-`MemberPresence`,
@@ -2853,10 +2964,6 @@ pub(crate) struct CompileSlot {
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
     pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature,
-    /// Whether the carrier fail-closed on an unsupported runtime surface (the typed
-    /// runtime-refusal signal). Survives a warm hit so a runtime-requesting consumer
-    /// reads the refusal from this flag, not a diagnostic-code prefix.
-    pub(crate) runtime_surface_refused: bool,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

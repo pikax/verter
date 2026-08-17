@@ -21,9 +21,9 @@ use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
-use verter_compiler::compile::format_import_specifier;
+use verter_compiler::compile::{format_import_specifier, CompileTarget};
 use verter_compiler::framework_common::{
-    CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
+    CarrierCompileOutcome, CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
 
 /// Surface a fail-closed assembled-map outcome as a compile error.
@@ -171,13 +171,18 @@ fn plugin_versions_hash() -> Hash16 {
 
 /// What a compile request demands of the shared compile result.
 ///
-/// The shared compile (`ensure_compile_artifacts`) produces the WHOLE
-/// artifact set — every virtual node PLUS the IDE `CachedTsx` — in one pass;
-/// the demand is checked AFTER that shared result. `get_virtual_file` demands
-/// a specific virtual node; the IDE-ensure path demands the IDE projection
+/// On a fresh SUCCESSFUL compile, the shared compile
+/// (`ensure_compile_artifacts`) produces the products the request's TARGET
+/// asked for — not a whole artifact set — in one pass; a compile that FAILED
+/// under the dev last-known-good policy instead serves the PREVIOUS compile's
+/// products. Either way the demand is checked AFTER that shared result. `get_virtual_file` demands a
+/// specific virtual node; the IDE-ensure path demands the IDE projection
 /// WITHOUT requesting any virtual node (notably NOT `Main`), so a carrier that
-/// projects only an IDE surface (Svelte) satisfies it without a runtime
-/// `Main`.
+/// projects only an IDE surface satisfies it without a runtime `Main`.
+///
+/// The demand does NOT steer the compute, and for a validated serve it no
+/// longer gates a `VirtualNode` read either: see
+/// [`VerterHost::compile_serve_satisfies_demand`] for why absence is terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompileDemand {
     /// A specific virtual node (the `get_virtual_file` projection target).
@@ -185,16 +190,32 @@ pub(crate) enum CompileDemand {
     /// The IDE (`CachedTsx`) projection — satisfied iff the served result
     /// carries a `tsx`. NEVER routed through `VirtualNode(Main)`.
     Ide,
+    /// The TRANSACTION itself, with no specific product demanded: satisfied by
+    /// any completed compile for this identity. This is `ensure_compiled`'s
+    /// demand — it asks whether the compile has run and been cached, not
+    /// whether some particular node is present. Demanding a product here would
+    /// misreport a component that legitimately has none (a style-less SFC, or
+    /// an identity whose target asks for no runtime module) as a failure.
+    Compiled,
 }
 
-/// The shared compile result `ensure_compile_artifacts` returns: the full
-/// served virtual-node map, the IDE `CachedTsx` (populated even when no
-/// `Main` node exists), and the request metadata callers project from.
+/// The shared compile result `ensure_compile_artifacts` returns: the served
+/// virtual-node map, the IDE `CachedTsx`, and the request metadata callers
+/// project from.
+///
+/// On a fresh SUCCESSFUL compile the served set is exactly the products this
+/// identity's target asked for, and the `tsx` is present iff the target carries
+/// the `TSX` bit. One exception: a compile that FAILED under the dev
+/// last-known-good policy serves `stale = true` with the PREVIOUS compile's
+/// virtual nodes and NO `tsx` at all, even for a TSX-bearing target. So an
+/// absent `tsx` means either "the target did not ask for one" or "this serve is
+/// a stale fallback"; `stale` is what tells them apart.
 pub(crate) struct CompileServe {
-    /// Per-virtual-node-kind outputs for this `(canonical, profile)`.
-    pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
-    /// The combined IDE output, present when the compile produced one.
-    pub(crate) tsx: Option<CachedTsx>,
+    /// What the compile transaction committed for this `(canonical, profile)`
+    /// — the produced product set (virtual nodes + the IDE `tsx`), OR a
+    /// payload-free runtime refusal. A SUM, so a refused request cannot serve a
+    /// sibling product under the same identity.
+    pub(crate) products: ServedProducts,
     /// The effective file meta for `render_single_id`.
     pub(crate) meta: FileMeta,
     /// The diagnostics snapshot from this serve.
@@ -209,12 +230,186 @@ pub(crate) struct CompileServe {
     pub(crate) actual_mode: CompileCacheMode,
     /// The first downgrade reason, when one fired.
     pub(crate) downgrade_reason: Option<DowngradeReason>,
-    /// Whether the carrier FAIL-CLOSED on an unsupported runtime surface (no `Main`
-    /// produced) — the TYPED runtime-refusal signal sourced from the carrier
-    /// bundle's `runtime_surface_refused`. A runtime-requesting consumer reads THIS
-    /// flag (never the diagnostic-code prefix) to turn a requested-but-absent `Main`
-    /// into an explicit `RuntimeSurfaceRefused`.
-    pub(crate) runtime_surface_refused: bool,
+}
+
+/// The product half of a [`CompileServe`], as a sum.
+///
+/// A carrier that fail-closed on the runtime surface a request asked for serves
+/// [`Self::RuntimeSurfaceRefused`], which carries NO product — not a virtual
+/// node, not the IDE `tsx`. That is what makes a refused request atomic: there
+/// is no representation in which it also published something. The refusal
+/// reason is carried STRUCTURALLY, never recovered by scanning the diagnostics
+/// for a framework-specific code prefix.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ServedProducts {
+    Produced {
+        /// Per-virtual-node-kind outputs for this `(canonical, profile)`.
+        outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+        /// The combined IDE output, present when the compile produced one.
+        tsx: Option<CachedTsx>,
+    },
+    RuntimeSurfaceRefused {
+        diagnostic_code: Arc<str>,
+        message: Arc<str>,
+    },
+}
+
+impl ServedProducts {
+    /// The served virtual-node outputs; `None` on a refusal (which has none).
+    pub(crate) fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced { outputs, .. } => Some(outputs),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The served IDE artifact; `None` on a refusal (which has none).
+    pub(crate) fn tsx(&self) -> Option<&CachedTsx> {
+        match self {
+            Self::Produced { tsx, .. } => tsx.as_ref(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The structural refusal reason, when the request was refused.
+    pub(crate) fn refusal(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Produced { .. } => None,
+            Self::RuntimeSurfaceRefused {
+                diagnostic_code,
+                message,
+            } => Some((diagnostic_code, message)),
+        }
+    }
+}
+
+/// Project a CACHED transaction onto the served surface. The refusal arm maps
+/// to the refusal arm; there is no path from a refusal to a product.
+fn served_products_from_cached(cached: crate::types::CompileProducts) -> ServedProducts {
+    match cached {
+        crate::types::CompileProducts::Produced { outputs, tsx, .. } => {
+            ServedProducts::Produced { outputs, tsx }
+        }
+        crate::types::CompileProducts::RuntimeSurfaceRefused {
+            diagnostic_code,
+            message,
+        } => ServedProducts::RuntimeSurfaceRefused {
+            diagnostic_code,
+            message,
+        },
+    }
+}
+
+/// What a FRESH cold compile committed, before the last-good rail is composed.
+///
+/// The pipeline-local sum the cold path carries between `compile_entry` and the
+/// two sinks (the cache publish and the serve). Both sinks are fed by an
+/// exhaustive projection off this value, so neither can pair a refusal with a
+/// product.
+#[allow(clippy::large_enum_variant)]
+enum CompiledProducts {
+    Produced {
+        outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+        tsx: Option<CachedTsx>,
+        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    },
+    RuntimeSurfaceRefused {
+        diagnostic_code: Arc<str>,
+        message: Arc<str>,
+    },
+}
+
+impl CompiledProducts {
+    fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
+        match self {
+            Self::Produced { outputs, .. } => Some(outputs),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    fn template_analysis(
+        &self,
+    ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+        match self {
+            Self::Produced {
+                template_analysis, ..
+            } => template_analysis.clone(),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    /// The cacheable value. `stale_last_good` is the previous compile's outputs
+    /// when THIS serve fell back to them; otherwise a produced transaction
+    /// remembers its own outputs as last-good. A refusal committed no output, so
+    /// its arm takes neither.
+    fn to_cached(
+        &self,
+        stale_last_good: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
+    ) -> crate::types::CompileProducts {
+        match self {
+            Self::Produced {
+                outputs,
+                tsx,
+                template_analysis,
+            } => crate::types::CompileProducts::Produced {
+                outputs: outputs.clone(),
+                last_good_outputs: stale_last_good.or_else(|| Some(outputs.clone())),
+                tsx: tsx.clone(),
+                template_analysis: template_analysis.clone(),
+            },
+            Self::RuntimeSurfaceRefused {
+                diagnostic_code,
+                message,
+            } => crate::types::CompileProducts::RuntimeSurfaceRefused {
+                diagnostic_code: Arc::clone(diagnostic_code),
+                message: Arc::clone(message),
+            },
+        }
+    }
+
+    fn into_served(self) -> ServedProducts {
+        match self {
+            Self::Produced { outputs, tsx, .. } => ServedProducts::Produced { outputs, tsx },
+            Self::RuntimeSurfaceRefused {
+                diagnostic_code,
+                message,
+            } => ServedProducts::RuntimeSurfaceRefused {
+                diagnostic_code,
+                message,
+            },
+        }
+    }
+}
+
+/// The TERMINAL outcome of one [`VerterHost::compile_entry`] transaction.
+///
+/// A sum: the refusal arm carries no product field, so a compile that
+/// fail-closed on the runtime surface its request asked for cannot hand a
+/// sibling artifact to the publish or serve paths.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CompileEntryOutcome {
+    Produced(CompileEntryProducts),
+    RuntimeSurfaceRefused(CompileEntryRefusal),
+}
+
+/// The products of a successful compile transaction.
+pub(crate) struct CompileEntryProducts {
+    pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    pub(crate) diagnostics: DiagnosticsSnapshot,
+    pub(crate) tsx: Option<CachedTsx>,
+    pub(crate) template_analysis:
+        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template_class_admission:
+        crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
+}
+
+/// A compile transaction that fail-closed on the runtime surface it was asked
+/// for. Carries the structural reason and the diagnostics it reports — and NO
+/// product of any kind.
+pub(crate) struct CompileEntryRefusal {
+    pub(crate) diagnostic_code: Arc<str>,
+    pub(crate) message: Arc<str>,
+    pub(crate) diagnostics: DiagnosticsSnapshot,
 }
 
 /// BY-VALUE observation of what
@@ -704,28 +899,40 @@ impl VerterHost {
                     // return `Ok(())` without recompiling.
                     let session_node =
                         crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                    if session_node
-                        .lookup(
-                            &cc,
-                            profile_hash,
-                            &hd.parse.semantic_hash,
-                            coh,
-                            profile.svelte_css_hash_override.as_deref(),
-                            || {
-                                // Test-only: count store-view reads that
-                                // actually happened — i.e. AFTER the cheap
-                                // predicates passed. A cold/profile/hash miss
-                                // never reaches this callback, so the counter
-                                // stays flat on those paths.
-                                #[cfg(test)]
-                                crate::resolver_store::record_compile_warm_validation_view_read();
-                                self.resolver_store_view_read().current()
-                            },
-                            |current_view, sig| self.compile_slot_facts_validate(current_view, sig),
-                        )
-                        .is_some()
-                    {
-                        return Ok(());
+                    if let Some(hit) = session_node.lookup(
+                        &cc,
+                        profile_hash,
+                        &hd.parse.semantic_hash,
+                        coh,
+                        profile.svelte_css_hash_override.as_deref(),
+                        || {
+                            // Test-only: count store-view reads that
+                            // actually happened — i.e. AFTER the cheap
+                            // predicates passed. A cold/profile/hash miss
+                            // never reaches this callback, so the counter
+                            // stays flat on those paths.
+                            #[cfg(test)]
+                            crate::resolver_store::record_compile_warm_validation_view_read();
+                            self.resolver_store_view_read().current()
+                        },
+                        |current_view, sig| self.compile_slot_facts_validate(current_view, sig),
+                    ) {
+                        // The warm answer is the CACHED TERMINAL ARM, not the
+                        // mere existence of a validated slot. A cached refusal
+                        // is the final answer for this identity, so it must be
+                        // reported here exactly as the cold path reports it —
+                        // otherwise the same request succeeds warm and fails
+                        // cold.
+                        return match hit.products.refusal() {
+                            Some((diagnostic_code, message)) => {
+                                Err(HostError::RuntimeSurfaceRefused {
+                                    canonical_id: canonical.clone(),
+                                    diagnostic_code: diagnostic_code.to_string(),
+                                    message: message.to_string(),
+                                })
+                            }
+                            None => Ok(()),
+                        };
                     }
                 }
             }
@@ -733,15 +940,22 @@ impl VerterHost {
 
         self.hydrate_compile_blockers(&canonical);
 
-        // Cache miss â€” compile by requesting the Main virtual file.
-        // This populates ALL cached outputs (script, template, styles, TSX, etc.)
-        // for the given profile.
-        let _ = self.get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some(canonical),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile.clone(),
-        })?;
+        // Cache miss — drive the shared compile. The demand is
+        // `CompileDemand::Compiled`: this route asks whether the transaction
+        // for `(canonical, profile)` has run and been cached, NOT whether some
+        // particular product exists. Demanding `Main` here would report a
+        // missing runtime module to an identity whose target never asked for
+        // one, and would disagree with the warm path above.
+        let served =
+            self.ensure_compile_artifacts(canonical.clone(), profile, CompileDemand::Compiled)?;
+        // Same projection as the warm arm, so both answer identically.
+        if let Some((diagnostic_code, message)) = served.products.refusal() {
+            return Err(HostError::RuntimeSurfaceRefused {
+                canonical_id: canonical,
+                diagnostic_code: diagnostic_code.to_string(),
+                message: message.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -1068,44 +1282,30 @@ impl VerterHost {
             CompileDemand::VirtualNode(node_kind.clone()),
         )?;
 
-        let found = match served.outputs.get(&node_kind) {
+        // A transaction that fail-closed on the runtime surface it was asked for
+        // committed NO product, so there is nothing to project. A `Main` request
+        // — the runtime product itself — receives the EXPLICIT typed refusal,
+        // carrying the carrier's own code and message read STRUCTURALLY off the
+        // served refusal (never sniffed out of the diagnostics by code prefix).
+        // Every OTHER node kind stays the generic `MissingVirtualNode`, so a
+        // caller asking for a node this carrier never emits is not told a
+        // runtime surface was refused.
+        if let Some((diagnostic_code, message)) = served.products.refusal() {
+            if node_kind == VirtualNodeKind::Main {
+                return Err(HostError::RuntimeSurfaceRefused {
+                    canonical_id: canonical_id.clone(),
+                    diagnostic_code: diagnostic_code.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            return Err(HostError::MissingVirtualNode {
+                canonical_id: canonical_id.clone(),
+            });
+        }
+
+        let found = match served.products.outputs().and_then(|o| o.get(&node_kind)) {
             Some(found) => found,
             None => {
-                // A REQUESTED `Main` runtime node that is absent is examined for a
-                // RUNTIME REFUSAL via the TYPED `runtime_surface_refused` flag the
-                // carrier set on its bundle (threaded onto `CompileServe`): a carrier
-                // that fail-closed on an unsupported runtime construct emits no
-                // `Main` and sets the flag. Such a request is an EXPLICIT refusal —
-                // distinct from a generic missing node and from an IDE-only carrier —
-                // so a runtime-requesting consumer reads `RuntimeSurfaceRefused` and
-                // cannot mistake the absent node for a clean compile. The host reads
-                // the FRAMEWORK-NEUTRAL typed flag, never a framework-specific
-                // diagnostic-code prefix; the precise per-surface code/message is
-                // recovered from the refusal diagnostic for the error payload. The
-                // IDE `tsx` is still produced (the `Ide` demand resolves it). Every
-                // OTHER missing node stays the generic `MissingVirtualNode`.
-                if node_kind == VirtualNodeKind::Main && served.runtime_surface_refused {
-                    // Recover the precise per-surface code + message from the
-                    // refusal diagnostic the carrier lifted (a non-fatal Warning).
-                    let (diagnostic_code, message) = served
-                        .diagnostics
-                        .diagnostics
-                        .iter()
-                        .find(|d| d.code.starts_with("svelte-runtime-unsupported-"))
-                        .map(|d| (d.code.clone(), d.message.clone()))
-                        .unwrap_or_else(|| {
-                            (
-                                "runtime-surface-refused".to_string(),
-                                "the carrier fail-closed on an unsupported runtime surface"
-                                    .to_string(),
-                            )
-                        });
-                    return Err(HostError::RuntimeSurfaceRefused {
-                        canonical_id: canonical_id.clone(),
-                        diagnostic_code,
-                        message,
-                    });
-                }
                 return Err(HostError::MissingVirtualNode {
                     canonical_id: canonical_id.clone(),
                 });
@@ -1406,10 +1606,8 @@ impl VerterHost {
                 // node's output + diagnostics, which are identical in shape
                 // across modes.
                 struct WarmHit {
-                    outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+                    products: crate::types::CompileProducts,
                     diagnostics: DiagnosticsSnapshot,
-                    tsx: Option<CachedTsx>,
-                    runtime_surface_refused: bool,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
                     CompileCacheMode::Stateless => None,
@@ -1452,10 +1650,8 @@ impl VerterHost {
                                 },
                             )
                             .map(|hit| WarmHit {
-                                outputs: hit.outputs,
+                                products: hit.products,
                                 diagnostics: hit.diagnostics,
-                                tsx: hit.tsx,
-                                runtime_surface_refused: hit.runtime_surface_refused,
                             })
                     }),
                     CompileCacheMode::Content => {
@@ -1465,10 +1661,8 @@ impl VerterHost {
                         self.compile_output_pure_content()
                             .peek(key)
                             .map(|value| WarmHit {
-                                outputs: value.outputs.clone(),
+                                products: value.products.clone(),
                                 diagnostics: value.diagnostics.clone(),
-                                tsx: value.tsx.clone(),
-                                runtime_surface_refused: value.runtime_surface_refused,
                             })
                     }
                 };
@@ -1500,8 +1694,7 @@ impl VerterHost {
                     // falls through to a cold recompute that produces the
                     // missing surface.
                     let serve = CompileServe {
-                        outputs: hit.outputs,
-                        tsx: hit.tsx,
+                        products: served_products_from_cached(hit.products),
                         meta: hit_meta,
                         diagnostics: hit.diagnostics,
                         stale: false,
@@ -1509,7 +1702,6 @@ impl VerterHost {
                         requested_mode,
                         actual_mode,
                         downgrade_reason: classification.first_downgrade_reason(),
-                        runtime_surface_refused: hit.runtime_surface_refused,
                     };
                     if Self::compile_serve_satisfies_demand(&serve, &demand) {
                         return Ok(serve);
@@ -1707,23 +1899,34 @@ impl VerterHost {
             let result = self.compile_entry(&compile_input, profile);
             (result, None)
         };
+        // The committed products of this transaction, plus the diagnostics it
+        // reports. A refusal contributes NO product half at all — its arm never
+        // constructs `outputs` / `tsx` / template analysis — which is exactly
+        // why "refused AND published" cannot be expressed downstream.
         let (
-            compiled_outputs,
+            compiled_products,
             diagnostics,
             stale,
-            compiled_tsx,
-            compiled_template_analysis,
             template_class_admission,
-            runtime_surface_refused,
         ) = match compile_result {
-            Ok((outputs, diagnostics, tsx, tpl, class_admission, refused)) => (
-                outputs,
-                diagnostics,
+            Ok(CompileEntryOutcome::Produced(produced)) => (
+                CompiledProducts::Produced {
+                    outputs: produced.outputs,
+                    tsx: produced.tsx,
+                    template_analysis: produced.template_analysis,
+                },
+                produced.diagnostics,
                 false,
-                tsx,
-                tpl,
-                class_admission,
-                refused,
+                produced.template_class_admission,
+            ),
+            Ok(CompileEntryOutcome::RuntimeSurfaceRefused(refusal)) => (
+                CompiledProducts::RuntimeSurfaceRefused {
+                    diagnostic_code: refusal.diagnostic_code,
+                    message: refusal.message,
+                },
+                refusal.diagnostics,
+                false,
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
             ),
             Err(diagnostics) => {
                 let publication_fence = self.block_content.admission_fence.lock();
@@ -1754,15 +1957,17 @@ impl VerterHost {
                     && policy == CompileErrorPolicy::DevServeLastKnownGood;
                 if serve_last_good {
                     if let Some(last_good) = fallback_last_good.clone() {
-                        // A last-good serve is not a fresh runtime refusal.
+                        // A last-good serve is a PRODUCED outcome carrying the
+                        // previous compile's outputs — never a runtime refusal.
                         (
-                            last_good,
+                            CompiledProducts::Produced {
+                                outputs: last_good,
+                                tsx: None,
+                                template_analysis: None,
+                            },
                             diagnostics,
                             true,
-                            None,
-                            None,
                             crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
-                            false,
                         )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
@@ -1803,20 +2008,19 @@ impl VerterHost {
 
         // The freshly compiled value, shared by the Session and Content
         // publish paths. Stateless drops it after returning the response.
+        // The last-good rail belongs to the PRODUCED arm only: a refusal committed
+        // no output, so there is nothing to remember as last-good, and the
+        // conversion cannot smuggle one in.
         let compile_output_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
             captured_semantic_hash,
             content_override_hash,
             profile.svelte_css_hash_override.as_deref().map(Arc::from),
-            compiled_outputs.clone(),
-            diagnostics.clone(),
-            if stale {
+            compiled_products.to_cached(if stale {
                 fallback_last_good.clone()
             } else {
-                Some(compiled_outputs.clone())
-            },
-            compiled_tsx.clone(),
-            compiled_template_analysis.clone(),
-            runtime_surface_refused,
+                None
+            }),
+            diagnostics.clone(),
         );
 
         // The `latest_diagnostics` + generation bump runs for EVERY mode
@@ -1923,6 +2127,21 @@ impl VerterHost {
                         admission,
                         crate::cache_runtime::SignatureAdmission::Cacheable(_)
                     );
+                    // The scheduler artifact carries PRODUCTS. A refused
+                    // transaction has none, and an artifact holding its empty
+                    // output map would re-encode the refusal as an untyped
+                    // successful empty compile on that substrate — the one thing
+                    // the typed terminal result exists to prevent. So a refusal
+                    // takes the SAME no-publish branch an overflowed admission
+                    // already takes below: commit nothing, evict any prior.
+                    //
+                    // Nothing depends on artifact presence for completion here.
+                    // `commit_artifact` also signals + terminalizes pending
+                    // Artifact DAG identities, but this crate never submits a
+                    // `TaskKind::Artifact`, and the no-publish branch is already
+                    // a reachable terminal outcome of this exact site.
+                    let commits_artifact = is_cacheable
+                        && matches!(compiled_products, CompiledProducts::Produced { .. });
                     if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
                         let session_node =
                             crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
@@ -1947,7 +2166,7 @@ impl VerterHost {
                         // parse-affecting profile extractions decline (the
                         // slot stores the DEFAULT extraction of the
                         // canonical's own inline bytes only).
-                        if let Some(template_analysis) = compiled_template_analysis.clone() {
+                        if let Some(template_analysis) = compiled_products.template_analysis() {
                             self.persist_raw_template_analysis(
                                 &canonical_id,
                                 Arc::new(template_analysis),
@@ -1963,46 +2182,53 @@ impl VerterHost {
                                 },
                             );
                         }
+                    }
 
-                        // Commit to scheduler artifact snapshot (scheduler
-                        // path only). Gated on `Cacheable` admission so the
-                        // carrier invariant holds at the artifact substrate
-                        // layer too — a refused compile must not be observable
-                        // via `try_get_artifact` or pending Artifact requests.
-                        self.scheduler.commit_artifact(
-                            &canonical_id,
-                            profile_hash,
-                            verter_scheduler::node::ArtifactSnapshot {
-                                generation: source_snap.generation,
+                    // The artifact substrate carries PRODUCTS, so the commit is
+                    // sourced from the PRODUCED arm's own outputs — there is no
+                    // path here that turns an absent product set into an empty
+                    // committed map. A refused-admission compile and a refused
+                    // runtime surface both fall to the same eviction arm.
+                    match compiled_products.outputs().filter(|_| commits_artifact) {
+                        Some(outputs) => {
+                            self.scheduler.commit_artifact(
+                                &canonical_id,
                                 profile_hash,
-                                data: Arc::new(crate::host_executor::HostArtifactData {
-                                    outputs: compiled_outputs.clone(),
-                                    diagnostics: diagnostics.clone(),
-                                }),
-                            },
-                        );
-                    } else {
-                        // Refused admission. Symmetrically evict any prior
-                        // scheduler artifact snapshot so `try_get_artifact`
-                        // and pending Artifact requests cannot return a stale
-                        // result on the companion warm-hit substrate; no fresh
-                        // artifact is committed.
-                        //
-                        // The eviction is gated on the compile's
-                        // start-of-compile generation captured on the
-                        // request's single source snapshot: a slow refused
-                        // compile that started at generation N can race with
-                        // a fast successful compile at N+k that already
-                        // committed a newer artifact, and an unconditional
-                        // evict would clobber it. Passing the captured start
-                        // generation as `max_generation` makes the eviction
-                        // symmetric with `commit_artifact`'s own
-                        // node-generation rejection.
-                        self.scheduler.remove_artifact_if_not_newer_than(
-                            &canonical_id,
-                            profile_hash,
-                            source_snap.generation,
-                        );
+                                verter_scheduler::node::ArtifactSnapshot {
+                                    generation: source_snap.generation,
+                                    profile_hash,
+                                    data: Arc::new(crate::host_executor::HostArtifactData {
+                                        outputs: outputs.clone(),
+                                        diagnostics: diagnostics.clone(),
+                                    }),
+                                },
+                            );
+                        }
+                        None => {
+                            // No product to commit — either the admission was
+                            // refused (overflow) or the transaction refused its
+                            // runtime surface. Symmetrically evict any prior
+                            // scheduler artifact snapshot so `try_get_artifact`
+                            // and pending Artifact requests cannot return a
+                            // stale result on the companion warm-hit substrate;
+                            // no fresh artifact is committed.
+                            //
+                            // The eviction is gated on the compile's
+                            // start-of-compile generation captured on the
+                            // request's single source snapshot: a slow compile
+                            // that started at generation N can race with a fast
+                            // successful compile at N+k that already committed a
+                            // newer artifact, and an unconditional evict would
+                            // clobber it. Passing the captured start generation
+                            // as `max_generation` makes the eviction symmetric
+                            // with `commit_artifact`'s own node-generation
+                            // rejection.
+                            self.scheduler.remove_artifact_if_not_newer_than(
+                                &canonical_id,
+                                profile_hash,
+                                source_snap.generation,
+                            );
+                        }
                     }
                 }
             }
@@ -2011,14 +2237,17 @@ impl VerterHost {
 
         // Write per-profile state to files (WASM path only).
 
-        // The shared cold compile produced the WHOLE artifact set (every
-        // virtual node + the IDE `CachedTsx`). Return it; the caller projects
-        // the surface its demand requires (`get_virtual_file` projects a node;
-        // `ensure_ide_compiled` checks the `tsx`). The demand is NOT consulted
-        // here — a complete compute serves both surfaces.
+        // Return the serve; the caller projects the surface its demand requires
+        // (`get_virtual_file` projects a node; `ensure_ide_compiled` checks the
+        // `tsx`). The demand is NOT consulted here: on a fresh SUCCESSFUL
+        // compile the compute already produced every product this identity's
+        // target named, so re-checking one could only reject a complete result.
+        // A serve that fell back to dev last-known-good (`stale`) is the
+        // exception — it carries the previous compile's virtual nodes and no
+        // `tsx`, so an IDE demand against it is unsatisfied and recomputes on
+        // the next request (see `compile_serve_satisfies_demand`).
         Ok(CompileServe {
-            outputs: compiled_outputs,
-            tsx: compiled_tsx,
+            products: compiled_products.into_served(),
             meta,
             diagnostics,
             stale,
@@ -2026,28 +2255,46 @@ impl VerterHost {
             requested_mode: classification.requested_mode,
             actual_mode,
             downgrade_reason,
-            runtime_surface_refused,
         })
     }
 
-    /// Whether a served compile result satisfies the demand. The shared
-    /// authority for the WARM-hit serve gate: a `VirtualNode` demand needs the
-    /// node present; an `Ide` demand needs a `tsx`.
+    /// Whether a served compile result satisfies the demand — the shared
+    /// authority for the WARM-hit serve gate.
     ///
-    /// A `Main` demand is ALSO satisfied by a RUNTIME REFUSAL: a carrier that
-    /// fail-closed on an unsupported runtime surface produces no `Main` output but
-    /// sets `runtime_surface_refused`. That refusal is the FINAL, cacheable answer to
-    /// a `Main` request (`get_virtual_file` turns the absent-`Main`-but-refused serve
-    /// into a typed `RuntimeSurfaceRefused`), so a warm cached refusal must SATISFY
-    /// the demand and be reused — never fall through to a cold recompile that would
-    /// re-derive the same refusal on every request.
+    /// A validated serve is TERMINAL for a `VirtualNode` demand whether or not
+    /// the node is present. A SUCCESSFUL compile is deterministic for a given
+    /// `(canonical, profile)` once the slot's own-content hashes and cross-file
+    /// fact signature validate, so recompiling cannot turn an absent node into a
+    /// present one — it would re-derive byte-identical outputs. (A slot
+    /// published by the dev last-known-good fallback is the exception: it holds
+    /// a FAILED compile's stale outputs, so a recompile could differ. Its
+    /// virtual nodes are still not re-demanded here — only the `Ide` arm below
+    /// retries — because a stale runtime node is served, not absent.) And with
+    /// target-scoped publication a node's absence is usually the CORRECT
+    /// terminal answer: the identity's target never asked for it. Treating that
+    /// absence as an incomplete compile would recompile on every read of a
+    /// target-excluded node, forever, and still return `MissingVirtualNode`.
+    /// Product absence is not a recovery signal; an incomplete compile would be
+    /// a bug to fix at its source, not to paper over here.
+    ///
+    /// A RUNTIME REFUSAL likewise satisfies EVERY demand. It is the FINAL,
+    /// payload-free answer for that identity — no product was committed and none
+    /// ever will be for these inputs — so `get_virtual_file` and
+    /// `ensure_ide_compiled` both project a typed outcome from it.
+    ///
+    /// The `Ide` demand is the ONE arm that still requires its product, and
+    /// deliberately so: a `Produced` slot carrying `tsx: None` under a
+    /// TSX-bearing profile is exactly what the dev last-known-good fallback
+    /// publishes when a compile FAILS (it republishes the previous outputs with
+    /// no IDE artifact), and that policy is the host default. Recomputing there
+    /// is the retry that lets a transient failure heal, not a futile re-derive.
     fn compile_serve_satisfies_demand(serve: &CompileServe, demand: &CompileDemand) -> bool {
-        match demand {
-            CompileDemand::VirtualNode(kind) => {
-                serve.outputs.contains_key(kind)
-                    || (*kind == VirtualNodeKind::Main && serve.runtime_surface_refused)
-            }
-            CompileDemand::Ide => serve.tsx.is_some(),
+        match &serve.products {
+            ServedProducts::RuntimeSurfaceRefused { .. } => true,
+            ServedProducts::Produced { tsx, .. } => match demand {
+                CompileDemand::VirtualNode(_) | CompileDemand::Compiled => true,
+                CompileDemand::Ide => tsx.is_some(),
+            },
         }
     }
 
@@ -2086,9 +2333,16 @@ impl VerterHost {
     /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
     ///   non-carrier / a carrier that declined IDE): no error, simply nothing
     ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
-    ///   caller's profile happened to lack the TSX target".
-    /// * `Err(_)` — a real failure (missing source, compile error, …); a real
-    ///   failure is NEVER collapsed into `Ok(false)`.
+    ///   caller's profile happened to lack the TSX target", and never a
+    ///   refusal.
+    /// * `Err(HostError::RuntimeSurfaceRefused)` — the caller's profile ALSO
+    ///   asked for a runtime product and the carrier fail-closed on it. The
+    ///   transaction committed nothing, so there is no IDE artifact to report:
+    ///   that is a real failure of this request, NOT a "no IDE surface" answer,
+    ///   and it is never collapsed into `Ok(false)`. A profile that asks for the
+    ///   IDE product alone cannot reach this arm.
+    /// * `Err(_)` — any other real failure (missing source, compile error, …); a
+    ///   real failure is NEVER collapsed into `Ok(false)`.
     ///
     /// `get_ide` stays a PURE cached read — it never computes on read; this is
     /// the explicit ensure path callers invoke first.
@@ -2128,8 +2382,16 @@ impl VerterHost {
         // subsequent `get_ide` read share the SAME normalized profile, so the
         // slot the `CachedTsx` lands in is exactly the one `get_ide` peeks.
         let ide_profile = Self::ide_normalized_profile(profile);
-        let served = self.ensure_compile_artifacts(canonical, &ide_profile, CompileDemand::Ide)?;
-        Ok(served.tsx.is_some())
+        let served =
+            self.ensure_compile_artifacts(canonical.clone(), &ide_profile, CompileDemand::Ide)?;
+        if let Some((diagnostic_code, message)) = served.products.refusal() {
+            return Err(HostError::RuntimeSurfaceRefused {
+                canonical_id: canonical,
+                diagnostic_code: diagnostic_code.to_string(),
+                message: message.to_string(),
+            });
+        }
+        Ok(served.products.tsx().is_some())
     }
 
     /// List all virtual node kinds for a file (Main, Script, Template, Style, Custom).
@@ -2761,25 +3023,12 @@ impl VerterHost {
         true
     }
 
-    #[allow(clippy::type_complexity)]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn compile_entry(
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
-    ) -> Result<
-        (
-            FxHashMap<VirtualNodeKind, CachedVirtualFile>,
-            DiagnosticsSnapshot,
-            Option<CachedTsx>,
-            Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
-            // Whether the carrier fail-closed on an unsupported runtime surface (the
-            // TYPED runtime-refusal signal, sourced from the bundle).
-            bool,
-        ),
-        DiagnosticsSnapshot,
-    > {
+    ) -> Result<CompileEntryOutcome, DiagnosticsSnapshot> {
         let mut diagnostics = snapshot.parse_diagnostics.clone();
 
         // Test-only observable: the per-file source re-clone the
@@ -2871,6 +3120,11 @@ impl VerterHost {
             comments: profile.comments,
             delimiters: profile.delimiters.clone(),
             custom_elements: profile.custom_elements.clone(),
+            // The RUNTIME products are requested when the profile target
+            // carries a runtime output bit. The target bits already participate
+            // in `profile_hash`, so the publication identity carries the
+            // requested-product set — no cache is re-keyed for this.
+            want_runtime: profile.target.needs_runtime_module(),
             // IDE TSX is requested when the profile target carries the TSX bit.
             want_ide: profile.target.needs_tsx(),
             // Template facts are requested by the active analysis scope OR an
@@ -2943,13 +3197,13 @@ impl VerterHost {
             );
         }
 
-        let compiled = match compiler.compile_bundle(
+        let outcome = match compiler.compile_bundle(
             snapshot.source.as_ref(),
             artifact,
             &runtime_opts,
             &alloc,
         ) {
-            Ok(bundle) => bundle,
+            Ok(outcome) => outcome,
             Err(unsupported) => {
                 let code = match unsupported {
                     CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
@@ -2976,10 +3230,48 @@ impl VerterHost {
             }
         };
 
-        // Capture the TYPED runtime-refusal signal BEFORE the bundle's fields are
-        // moved out below (the `Main` body / blocks are consumed when assembling the
-        // outputs), so the final `CompileServe`/cache record can carry it.
-        let runtime_surface_refused = compiled.runtime_surface_refused();
+        // A carrier that fail-closed on the runtime surface THIS request asked
+        // for returns a product-free refusal, and the transaction ends here: no
+        // outputs are assembled, no IDE artifact is lifted, no template analysis
+        // is built. Its non-fatal diagnostics still reach the host snapshot so
+        // the reason is visible to the diagnostics route.
+        let compiled = match outcome {
+            CarrierCompileOutcome::Produced(bundle) => bundle,
+            CarrierCompileOutcome::RuntimeSurfaceRefused(refusal) => {
+                let mut refusal_diags = diagnostics;
+                let mut lifted: Vec<HostDiagnostic> = refusal
+                    .diagnostics
+                    .iter()
+                    .map(|d| HostDiagnostic {
+                        severity: match d.severity {
+                            RuntimeDiagnosticSeverity::Error => HostSeverity::Error,
+                            RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
+                            RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
+                        },
+                        code: d.code.clone(),
+                        message: d.message.clone(),
+                        span: d.span,
+                    })
+                    .collect();
+                // The refusal's own reason, surfaced as the NON-FATAL diagnostic
+                // it has always been: it is not a compile error, it is the
+                // terminal answer for this request's runtime product.
+                lifted.push(HostDiagnostic {
+                    severity: HostSeverity::Warning,
+                    code: refusal.diagnostic_code.clone(),
+                    message: refusal.message.clone(),
+                    span: refusal.span,
+                });
+                refusal_diags = refusal_diags.merge(DiagnosticsSnapshot::from_vec(lifted));
+                return Ok(CompileEntryOutcome::RuntimeSurfaceRefused(
+                    CompileEntryRefusal {
+                        diagnostic_code: Arc::from(refusal.diagnostic_code.as_str()),
+                        message: Arc::from(refusal.message.as_str()),
+                        diagnostics: refusal_diags,
+                    },
+                ));
+            }
+        };
 
         // Lift the bundle's framework-neutral diagnostics into the host
         // `DiagnosticsSnapshot` (a Svelte projector diagnostic reaches the
@@ -3015,7 +3307,20 @@ impl VerterHost {
         // projects ONLY an IDE surface (Svelte today) emits NO `Main` node —
         // `get_virtual_file(Main)` then reports missing until that carrier
         // emits a runtime surface.
-        if compiled.has_runtime_surface() {
+        // PUBLICATION is per-product: a virtual node enters `outputs` only when
+        // its own bit is in the request's target. The compile may legitimately
+        // produce more than that — Vue's template-data extraction runs script
+        // codegen as a PREREQUISITE, and a carrier's scoped CSS comes out of the
+        // same runtime compile as its module — but a prerequisite is not a
+        // product, so it never enters the published set. This gates at the point
+        // of insertion rather than filtering an assembled map, so an unrequested
+        // product is never published in the first place.
+        let publish_runtime_module = profile.target.publishes_runtime_module();
+        let publish_script = profile.target.contains(CompileTarget::SCRIPT);
+        let publish_template = profile.target.contains(CompileTarget::TEMPLATE);
+        let publish_style = profile.target.needs_style();
+
+        if publish_runtime_module && compiled.has_runtime_surface() {
             let (main_code, main_source_map) = match &compiled.main.body_code {
                 // A carrier that emits its own self-contained ESM body uses it
                 // verbatim (e.g. Svelte's official-shaped runtime output),
@@ -3071,7 +3376,7 @@ impl VerterHost {
             );
         }
 
-        if let Some(script) = compiled.script {
+        if let Some(script) = compiled.script.filter(|_| publish_script) {
             outputs.insert(
                 VirtualNodeKind::Script,
                 CachedVirtualFile {
@@ -3087,7 +3392,7 @@ impl VerterHost {
             );
         }
 
-        if let Some(template) = compiled.template {
+        if let Some(template) = compiled.template.filter(|_| publish_template) {
             let code = if template.imports.is_empty() {
                 template.code
             } else {
@@ -3119,7 +3424,12 @@ impl VerterHost {
             );
         }
 
-        for (i, style) in compiled.styles.into_iter().enumerate() {
+        for (i, style) in compiled
+            .styles
+            .into_iter()
+            .enumerate()
+            .filter(|_| publish_style)
+        {
             // The compiler-produced CSS and map already reflect the single
             // host-selected block artifact. There is no ordinal override
             // layer at this boundary.
@@ -3138,7 +3448,16 @@ impl VerterHost {
             );
         }
 
-        for (i, block) in compiled.custom_blocks.into_iter().enumerate() {
+        // Custom blocks have no target bit of their own. They ride with the
+        // runtime module: the host's `Main` assembly emits their virtual imports
+        // (`crate::compile::assemble_vue_main_module`), so a `Custom` node with
+        // no `Main` would have no importer.
+        for (i, block) in compiled
+            .custom_blocks
+            .into_iter()
+            .enumerate()
+            .filter(|_| publish_runtime_module)
+        {
             outputs.insert(
                 VirtualNodeKind::Custom { index: i },
                 CachedVirtualFile {
@@ -3213,17 +3532,13 @@ impl VerterHost {
             )
         });
 
-        Ok((
+        Ok(CompileEntryOutcome::Produced(CompileEntryProducts {
             outputs,
-            compile_diags,
-            cached_tsx,
+            diagnostics: compile_diags,
+            tsx: cached_tsx,
             template_analysis,
             template_class_admission,
-            // The TYPED runtime-refusal signal the carrier set on the bundle (no
-            // `Main` was produced for an unsupported runtime surface), captured
-            // before the bundle's fields were moved out.
-            runtime_surface_refused,
-        ))
+        }))
     }
 
     /// Render-only sibling of [`Self::compile_entry`]: produces the SAME
@@ -3306,6 +3621,11 @@ impl VerterHost {
             comments: profile.comments,
             delimiters: profile.delimiters.clone(),
             custom_elements: profile.custom_elements.clone(),
+            // The render lane's whole subject is the runtime `Main` module, so
+            // it always asks for the runtime products regardless of the
+            // caller's target bits — mirroring the lane's own contract
+            // (`CompileManyTarget::RuntimeRender`), not the profile's.
+            want_runtime: true,
             want_ide: profile.target.needs_tsx(),
             want_template_data: scope.needs_template_analysis()
                 || profile.target.needs_template_data(),
@@ -3391,7 +3711,17 @@ impl VerterHost {
             &runtime_opts,
             &alloc,
         ) {
-            Ok(bundle) => bundle,
+            // The render lane's whole subject is the runtime `Main`, so a
+            // refusal is simply the absence of the thing it was asked to
+            // render — the same typed outcome the HostBacked route reports.
+            Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(refusal)) => {
+                return Err(HostError::RuntimeSurfaceRefused {
+                    canonical_id: snapshot.canonical_id.clone(),
+                    diagnostic_code: refusal.diagnostic_code,
+                    message: refusal.message,
+                });
+            }
+            Ok(CarrierCompileOutcome::Produced(bundle)) => bundle,
             // Site 5 (`CompileUnsupported`) stays FATAL.
             Err(unsupported) => {
                 let code = match unsupported {

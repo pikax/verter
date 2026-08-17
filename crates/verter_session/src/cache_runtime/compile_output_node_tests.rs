@@ -41,12 +41,13 @@ fn value(semantic_hash: Hash16) -> CompileOutputValue {
         semantic_hash,
         0u64,
         None,
-        FxHashMap::default(),
+        crate::types::CompileProducts::Produced {
+            outputs: FxHashMap::default(),
+            last_good_outputs: None,
+            tsx: None,
+            template_analysis: None,
+        },
         DiagnosticsSnapshot::default(),
-        None,
-        None,
-        None,
-        false,
     )
 }
 
@@ -57,12 +58,13 @@ fn value_with_css_override(semantic_hash: Hash16, css_override: &str) -> Compile
         semantic_hash,
         0u64,
         Some(Arc::from(css_override)),
-        FxHashMap::default(),
+        crate::types::CompileProducts::Produced {
+            outputs: FxHashMap::default(),
+            last_good_outputs: None,
+            tsx: None,
+            template_analysis: None,
+        },
         DiagnosticsSnapshot::default(),
-        None,
-        None,
-        None,
-        false,
     )
 }
 
@@ -397,7 +399,12 @@ fn session_peek_last_good_misses_when_validate_facts_returns_false() {
     }]);
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
     let mut v = value([0x12u8; 16]);
-    v.last_good_outputs = Some(FxHashMap::default());
+    if let crate::types::CompileProducts::Produced {
+        last_good_outputs, ..
+    } = &mut v.products
+    {
+        *last_good_outputs = Some(FxHashMap::default());
+    }
     node.publish(&mut state, 42, admission, v, 0);
 
     let last_good = node.peek_last_good(&state, 42, |_sig| false);
@@ -422,7 +429,12 @@ fn session_peek_last_good_serves_on_empty_fact_rail_without_validator_call() {
     let mut state = ProfileState::default();
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     let mut v = value([0x34u8; 16]);
-    v.last_good_outputs = Some(FxHashMap::default());
+    if let crate::types::CompileProducts::Produced {
+        last_good_outputs, ..
+    } = &mut v.products
+    {
+        *last_good_outputs = Some(FxHashMap::default());
+    }
     node.publish(&mut state, 42, admission, v, 0);
 
     let last_good = node.peek_last_good(&state, 42, |_sig| {
@@ -450,12 +462,13 @@ fn session_peek_output_returns_per_kind_pair() {
         [0u8; 16],
         0,
         None,
-        outputs,
+        crate::types::CompileProducts::Produced {
+            outputs,
+            last_good_outputs: None,
+            tsx: None,
+            template_analysis: None,
+        },
         DiagnosticsSnapshot::default(),
-        None,
-        None,
-        None,
-        false,
     );
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value, 0);

@@ -32,10 +32,10 @@ use crate::compile::{
     template_unit_used_vars,
 };
 use crate::framework_common::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
-    RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
+    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
+    ParseOptions, RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock,
+    RuntimeDiagnostic, RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock,
+    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
 };
 use crate::framework_common::ctx::{receive_vue_carrier_token, CarrierCompilerCtx};
 use crate::framework_common::generated_chunk::{
@@ -276,6 +276,11 @@ impl VueCarrierCompiler {
             opts.custom_elements.clone(),
             alloc,
         );
+        // This helper compiles the projected SCRIPT UNIT, so the `SCRIPT` bit is
+        // its own subject, not a requested product: the unit's bindings are what
+        // BOTH the runtime script block and the IDE shell below are built from.
+        // Whether the resulting runtime block is PUBLISHED onto the bundle is
+        // what `want_runtime` decides, further down.
         let mut script_target = CompileTarget::SCRIPT;
         if opts.want_ide {
             script_target |= CompileTarget::TSX;
@@ -313,7 +318,10 @@ impl VueCarrierCompiler {
         let mut carrier_view = parsed.clone();
         carrier_view.script_node = None;
         carrier_view.script_setup_node = None;
-        let mut carrier_target = CompileTarget::BUNDLER;
+        let mut carrier_target = CompileTarget::empty();
+        if opts.want_runtime {
+            carrier_target |= CompileTarget::BUNDLER;
+        }
         if opts.want_ide {
             carrier_target |= CompileTarget::TSX;
         }
@@ -368,7 +376,12 @@ impl VueCarrierCompiler {
             )],
             SourceMapFidelity::Approximate,
         );
-        bundle.script = Some(script);
+        // The runtime script block is PUBLISHED only when the request asked for
+        // a runtime product; an IDE-only request keeps the unit's semantics
+        // (they compose the shell below) without emitting its runtime block.
+        if opts.want_runtime {
+            bundle.script = Some(script);
+        }
         bundle.diagnostics.extend(script_bundle.diagnostics);
 
         if opts.want_ide {
@@ -570,6 +583,17 @@ impl CarrierCompiler for VueCarrierCompiler {
                     &RuntimeCompileOptions {
                         filename: opts.filename.clone(),
                         source_map: !opts.skip_source_map,
+                        // `compile_ide`'s ONLY product is the IDE artifact —
+                        // it discards every other field of this bundle and
+                        // publishes nothing. It asks for the runtime lowering
+                        // because Vue's supplied-block-content IDE composition
+                        // consumes the runtime template chunk to fill the
+                        // generated hole; that lowering is a PREREQUISITE of
+                        // the IDE artifact here, not a second published
+                        // product. The requested-product set that decides what
+                        // the host PUBLISHES is the one the session threads
+                        // into `compile_bundle`, not this local scaffolding.
+                        want_runtime: true,
                         want_ide: true,
                         embed_ambient_types: opts.embed_ambient_types,
                         block_content: opts.block_content.clone(),
@@ -577,7 +601,8 @@ impl CarrierCompiler for VueCarrierCompiler {
                     },
                     &alloc,
                 )?
-                .tsx
+                .into_produced()
+                .and_then(|bundle| bundle.tsx)
                 .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
                     adapter_id: self.adapter_id(),
                 });
@@ -669,7 +694,7 @@ impl CarrierCompiler for VueCarrierCompiler {
         artifact: &FrameworkParseArtifact,
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+    ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
         let Some(parsed) = self.parsed_sfc(artifact) else {
             return Err(CompileUnsupported::NoIdeProjection {
                 adapter_id: self.adapter_id(),
@@ -722,8 +747,11 @@ impl CarrierCompiler for VueCarrierCompiler {
                 });
             }
             (None, Some(input)) => {
+                // Vue emits a runtime surface or a genuine compile error; it
+                // never fail-closes on an unsupported runtime surface.
                 return self
-                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc);
+                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc)
+                    .map(CarrierCompileOutcome::Produced);
             }
             (None, None) => {}
         }
@@ -739,12 +767,16 @@ impl CarrierCompiler for VueCarrierCompiler {
             && !opts.force_vapor
             && !opts.ssr;
 
-        // The Vue runtime target. The host's old `compile_entry` always
-        // emitted the bundler blocks (script/template/styles/custom) and
-        // additionally requested the IDE TSX + template-data bits when its
-        // scope required them; the `want_*` flags drive the SAME target
-        // composition so the produced blocks stay byte-identical.
-        let mut target = CompileTarget::BUNDLER;
+        // The Vue target is composed from the REQUESTED-PRODUCT SET, starting
+        // empty: the runtime bundler bits only under `want_runtime`, TSX only
+        // under `want_ide`, template data only under `want_template_data`. A
+        // successful compile therefore emits all and only the products the
+        // request asked for. `CompileTarget::IDE` is the TSX bit alone (see
+        // `compile::types`), so TSX codegen does not require the runtime bits.
+        let mut target = CompileTarget::empty();
+        if opts.want_runtime {
+            target |= CompileTarget::BUNDLER;
+        }
         if opts.want_ide {
             target |= CompileTarget::TSX;
         }
@@ -1237,7 +1269,10 @@ impl CarrierCompiler for VueCarrierCompiler {
             }
         }
 
-        Ok(bundle)
+        // Vue emits a runtime surface or a genuine compile error; it never
+        // fail-closes on an unsupported runtime surface the way Svelte does, so
+        // its outcome is always `Produced`.
+        Ok(CarrierCompileOutcome::Produced(bundle))
     }
 }
 
@@ -1374,9 +1409,6 @@ pub fn vue_result_to_runtime_bundle(
         tsx,
         template_data: result.template_data,
         diagnostics,
-        // Vue always emits a runtime surface (or a genuine compile error); it never
-        // fails closed on an unsupported runtime surface the way Svelte does.
-        runtime_surface_refused: false,
         // The RESOLVED inline topology — the compiler already merged the
         // render into `setup()` when true, so host assembly takes the inline
         // branch (no render attach, no setup-return filter).
@@ -1407,6 +1439,7 @@ fn exact_slice_source_map(source: &str, source_start: u32, output: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::framework_common::carrier_compiler::CompileBundleProducedExt;
     use crate::framework_common::{
         carrier_compiler::OutputSourceSpaceKind, RuntimeBlockContentInput,
         RuntimeBlockContentInputs,
@@ -1717,7 +1750,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
-        let result = compiler.compile_bundle(
+        let result = compiler.compile_bundle_expect_produced(
             source,
             &artifact,
             &RuntimeCompileOptions {
@@ -1749,7 +1782,7 @@ mod tests {
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact,
                 &RuntimeCompileOptions {
@@ -1798,7 +1831,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
-        let result = compiler.compile_bundle(
+        let result = compiler.compile_bundle_expect_produced(
             source,
             &artifact,
             &RuntimeCompileOptions {
@@ -1828,7 +1861,7 @@ mod tests {
         );
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
-        let result = compiler.compile_bundle(
+        let result = compiler.compile_bundle_expect_produced(
             source,
             &artifact_for(source),
             &RuntimeCompileOptions {
@@ -1863,7 +1896,7 @@ mod tests {
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact,
                 &RuntimeCompileOptions {
@@ -1931,7 +1964,7 @@ mod tests {
         };
         let alloc = oxc_allocator::Allocator::new();
 
-        let bundle = compiler.compile_bundle(
+        let bundle = compiler.compile_bundle_expect_produced(
             source,
             &artifact,
             &RuntimeCompileOptions {
@@ -2003,7 +2036,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2047,7 +2080,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2094,7 +2127,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2152,7 +2185,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2190,7 +2223,7 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2222,7 +2255,7 @@ mod tests {
         let source = "<template lang=\"pug\">div</template>\n<script setup>\nconst a = 1";
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
-        let result = compiler.compile_bundle(
+        let result = compiler.compile_bundle_expect_produced(
             source,
             &artifact_for(source),
             &RuntimeCompileOptions {
@@ -2273,7 +2306,7 @@ mod tests {
                 },
             ),
         ] {
-            let result = compiler.compile_bundle(
+            let result = compiler.compile_bundle_expect_produced(
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
@@ -2304,7 +2337,7 @@ mod tests {
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
         let output = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 source,
                 &artifact,
                 &RuntimeCompileOptions {
@@ -2368,7 +2401,7 @@ mod tests {
             "<template><div>{{ count }}</div></template>"
         );
         let native = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 native_source,
                 &artifact_for(native_source),
                 &RuntimeCompileOptions {
@@ -2389,7 +2422,7 @@ mod tests {
             "<template><div>{{ count }}</div></template>"
         );
         let native_plain = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 native_plain_source,
                 &artifact_for(native_plain_source),
                 &RuntimeCompileOptions {
@@ -2414,7 +2447,7 @@ mod tests {
             "<script setup>const count = 1</script>"
         );
         let external = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 external_source,
                 &artifact_for(external_source),
                 &RuntimeCompileOptions {
@@ -2475,7 +2508,7 @@ mod tests {
             ),
         ] {
             let ide = compiler
-                .compile_bundle(
+                .compile_bundle_expect_produced(
                     source,
                     &artifact_for(source),
                     &RuntimeCompileOptions {
@@ -2525,7 +2558,7 @@ mod tests {
             "<template><div>{{ count }}</div></template>"
         );
         let projected_setup = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 projected_setup_source,
                 &artifact_for(projected_setup_source),
                 &RuntimeCompileOptions {
@@ -2556,7 +2589,7 @@ mod tests {
             "<script setup>const count = 1</script>"
         );
         let external_template = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 external_template_source,
                 &artifact_for(external_template_source),
                 &RuntimeCompileOptions {
@@ -2590,7 +2623,7 @@ mod tests {
             "<script>export default { data: () => ({ count: 1 }) }</script>"
         );
         let external_plain = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 external_plain_source,
                 &artifact_for(external_plain_source),
                 &RuntimeCompileOptions {
@@ -2625,7 +2658,7 @@ mod tests {
             "<script setup>const count = 1</script>"
         );
         let external_both = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 external_both_source,
                 &artifact_for(external_both_source),
                 &RuntimeCompileOptions {
@@ -2653,7 +2686,7 @@ mod tests {
 
         let external_no_script_source = "<template src=\"./view.html\"></template>";
         let external_no_script = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 external_no_script_source,
                 &artifact_for(external_no_script_source),
                 &RuntimeCompileOptions {
@@ -2683,7 +2716,7 @@ mod tests {
             "<script setup>const count = 1</script>"
         );
         let supplied_inline = compiler
-            .compile_bundle(
+            .compile_bundle_expect_produced(
                 supplied_inline_source,
                 &artifact_for(supplied_inline_source),
                 &RuntimeCompileOptions {
