@@ -15,19 +15,31 @@
 //! That placement leaves the reverse hole: deleting this module too, in the
 //! same adjacent edit, would restore the vacuous green. The registration is
 //! therefore MUTUAL and compile-enforced rather than conventional — this module
-//! reads each suite's own `CENSUS_WITNESS_PATH` constant, and each suite calls
-//! [`covers`] from a test of its own. Removing any ONE of the four `mod`
+//! NAMES each suite's own witness test as an ITEM, and each suite calls
+//! [`covers`] from that same test. Removing any ONE of the four `mod`
 //! declarations is a build error, not a filter that quietly matches less.
 //!
-//! Each row is bound to the suite that OWNS it, not merely to a location: the
-//! constant is the full path of that suite's own witness test, this module
-//! requires a test of exactly that path to exist in the listing, and the module
-//! it counts is DERIVED from it. Location checks alone prove only a location
-//! class, so a suite emptied and repointed at another direct sibling with tests
-//! of its own would otherwise clear its floor on that sibling's tests.
-//! Removing all four at once is not decidable from inside this binary; it is
-//! the general execution-attestation problem, and no in-binary check is
-//! pretended here.
+//! Each row is bound to the suite that OWNS it, not merely to a location, and
+//! not to a string that suite chose: the row names the witness test ITEM, the
+//! compiler answers with that item's own path ([`witness_identity`]), this
+//! module requires a test of exactly that path to exist in the listing, and the
+//! module it counts is DERIVED from it. A path a suite could hand over as a
+//! `&str` may name any module — including one that happens to define a
+//! same-named test — whereas a path written here has to RESOLVE, so a row can
+//! only ever count a module that really declares the item this file names.
+//! Location checks alone prove only a location class, so a suite emptied and
+//! repointed at another direct sibling with tests of its own would otherwise
+//! clear its floor on that sibling's tests.
+//!
+//! Removing all four `mod` declarations in ONE edit is not decidable from a
+//! module that goes with them, so the anchor is OUTSIDE this evidence suite
+//! altogether: `framework::script_facts`'s own test module consumes
+//! [`counts_tests_in`], which makes deleting this module a build error there
+//! too. That still does not close the general execution-attestation problem — a
+//! binary cannot attest to a universe it was never given — and no scanner is
+//! added here to pretend otherwise. Closing it needs an inventory derived
+//! OUTSIDE this binary and compared against what the binary reports, which is
+//! not something an in-binary check can supply.
 //!
 //! The count is INDEPENDENTLY DISCOVERED, never a hand-maintained list of
 //! expected test names: the census re-execs this same binary with
@@ -37,15 +49,42 @@
 
 use std::process::{Command, Stdio};
 
-// Each suite's module path is read from the SUITE, not written down here, so
-// this module cannot compile once a suite it censuses is gone. The suites in
-// turn consume [`covers`], so neither side's `mod` declaration can be removed
-// without a build error — the registration is a compile-time dependency, not a
-// convention two hand-written lists are expected to keep.
-use super::framework_product_surface_tests::CENSUS_WITNESS_PATH as PRODUCT_SURFACE_WITNESS;
-use super::svelte_batch_route_tests::CENSUS_WITNESS_PATH as BATCH_ROUTE_WITNESS;
+/// The compiler's own name for the item `witness` refers to.
+///
+/// `F` is inferred as the referenced function's ITEM type — a distinct
+/// zero-sized type per function DEFINITION — so `type_name` answers with that
+/// definition's full path. This is what makes a census row an identity rather
+/// than a claim: the argument has to resolve to an item the named module really
+/// declares, and no module can hand over a path to a test it does not define.
+///
+/// The reference must never be coerced to a `fn()` POINTER on the way in, which
+/// is why this takes `&F` and not `fn()`: a pointer erases every function to the
+/// single type `fn()`, and with it the identity being measured.
+pub(crate) fn witness_identity<F>(_witness: &F) -> &'static str {
+    std::any::type_name::<F>()
+}
+
+// Each suite's identity comes from an item NAMED here, so this module cannot
+// compile once a suite it censuses is gone. The suites in turn consume
+// [`covers`], so neither side's `mod` declaration can be removed without a build
+// error — the registration is a compile-time dependency, not a convention two
+// hand-written lists are expected to keep.
+fn product_surface_witness() -> &'static str {
+    witness_identity(
+        &super::framework_product_surface_tests::this_suite_is_registered_with_the_census,
+    )
+}
+
+fn batch_route_witness() -> &'static str {
+    witness_identity(&super::svelte_batch_route_tests::this_suite_is_registered_with_the_census)
+}
+
 #[cfg(feature = "transport-authoritative")]
-use super::transport_route_equivalence_tests::CENSUS_WITNESS_PATH as TRANSPORT_WITNESS;
+fn transport_witness() -> &'static str {
+    witness_identity(
+        &super::transport_route_equivalence_tests::this_suite_is_registered_with_the_census,
+    )
+}
 
 /// This module's own compiler-derived path.
 const CENSUS_RAW_PATH: &str = module_path!();
@@ -93,15 +132,17 @@ fn libtest_witness_path(raw_witness_path: &str) -> String {
 }
 
 /// The suite paths are USED as counting prefixes, so each must be a unique
-/// suite identity. A suite owns its own constant, so without this a suite that
-/// widened it — to an ancestor module, say — would count its siblings' tests,
-/// or the census's own, as its own and clear its floor while carrying nothing.
+/// suite identity. Each one is DERIVED from the witness item its census row
+/// names, so without this a row whose witness sat in an ancestor module — the
+/// census's own parent, say — would count its siblings' tests, or the census's
+/// own, as its own and clear its floor while carrying nothing.
 ///
 /// Each property is asserted separately so the failure names which one broke.
 #[track_caller]
 fn assert_suite_paths_are_distinct_identities() {
     let census = census_module();
-    let prefixes: Vec<String> = CENSUSED_WITNESSES
+    let witnesses = censused_witnesses();
+    let prefixes: Vec<String> = witnesses
         .iter()
         .map(|raw| libtest_module_prefix(witness_module(raw)))
         .collect();
@@ -115,7 +156,7 @@ fn assert_suite_paths_are_distinct_identities() {
     let (census_parent, _) = CENSUS_RAW_PATH
         .rsplit_once("::")
         .expect("the census is not at the crate root");
-    for witness in CENSUSED_WITNESSES {
+    for witness in &witnesses {
         let raw = witness_module(witness);
         let segment = raw
             .strip_prefix(census_parent)
@@ -161,24 +202,49 @@ fn assert_suite_paths_are_distinct_identities() {
 }
 
 /// The suites this census carries a test for.
+///
+/// Not a list of strings: each entry is the compiler's answer for an item this
+/// module NAMES, so the list cannot name a suite that does not exist.
 #[cfg(feature = "transport-authoritative")]
-const CENSUSED_WITNESSES: &[&str] = &[
-    PRODUCT_SURFACE_WITNESS,
-    BATCH_ROUTE_WITNESS,
-    TRANSPORT_WITNESS,
-];
+fn censused_witnesses() -> Vec<&'static str> {
+    vec![
+        product_surface_witness(),
+        batch_route_witness(),
+        transport_witness(),
+    ]
+}
 /// Without the feature the transport suite is not compiled in, and neither is
 /// its census test — the documented and separately recorded vacuous case.
 #[cfg(not(feature = "transport-authoritative"))]
-const CENSUSED_WITNESSES: &[&str] = &[PRODUCT_SURFACE_WITNESS, BATCH_ROUTE_WITNESS];
+fn censused_witnesses() -> Vec<&'static str> {
+    vec![product_surface_witness(), batch_route_witness()]
+}
 
-/// Whether this census carries a test for the suite at `module_path`.
+/// Whether this census carries a test for the suite that owns `witness`.
 ///
-/// Each suite asserts its own membership from INSIDE itself. That call is what
-/// closes the second half of the mutual dependency: deleting this module breaks
-/// every suite's compile, exactly as deleting a suite breaks this one's.
-pub(crate) fn covers(module_path: &str) -> bool {
-    CENSUSED_WITNESSES.contains(&module_path)
+/// Each suite asserts its own membership from INSIDE itself, passing a
+/// reference to its OWN witness test so the identity compared is the compiler's
+/// rather than either side's spelling of it. That call is what closes the second
+/// half of the mutual dependency: deleting this module breaks every suite's
+/// compile, exactly as deleting a suite breaks this one's.
+pub(crate) fn covers<F>(witness: &F) -> bool {
+    censused_witnesses().contains(&witness_identity(witness))
+}
+
+/// Whether any census row's count would include tests declared in
+/// `raw_module_path` (a `module_path!()`).
+///
+/// A census row counts by module PREFIX, so a module that is a censused suite —
+/// or that sits inside one — has its tests counted toward that suite's floor.
+/// Modules outside this evidence suite consume this to assert the converse: that
+/// their own tests can never be borrowed to clear somebody else's floor. That
+/// consumption is also the anchor holding this module in the build from outside
+/// the set of `mod` declarations it censuses.
+pub(crate) fn counts_tests_in(raw_module_path: &str) -> bool {
+    censused_witnesses().into_iter().any(|witness| {
+        let counted = witness_module(witness);
+        raw_module_path == counted || raw_module_path.starts_with(&format!("{counted}::"))
+    })
 }
 
 /// Every test this binary reports for ITSELF, by full path.
@@ -256,8 +322,8 @@ fn assert_suite_is_not_vacuous(suite: &str, raw_witness_path: &str, floor: usize
     assert!(
         listed.contains(&witness),
         "{suite}: no test named `{witness}` exists in this binary, so the module being counted is \
-         not the suite that registered this census row — either the suite was emptied, or its \
-         constant points at a module that does not own this witness"
+         not the suite that registered this census row — either the suite was emptied, or the \
+         witness item this row names resolves into a module that does not declare it as a test"
     );
 
     let counted: Vec<&String> = listed
@@ -292,7 +358,7 @@ fn assert_suite_is_not_vacuous(suite: &str, raw_witness_path: &str, floor: usize
 fn the_framework_product_surface_suite_is_present_and_non_vacuous() {
     assert_suite_is_not_vacuous(
         "framework_product_surface",
-        PRODUCT_SURFACE_WITNESS,
+        product_surface_witness(),
         23,
         "the_framework_product_surface_suite_is_present_and_non_vacuous",
     );
@@ -302,8 +368,8 @@ fn the_framework_product_surface_suite_is_present_and_non_vacuous() {
 fn the_svelte_batch_route_suite_is_present_and_non_vacuous() {
     assert_suite_is_not_vacuous(
         "svelte_batch_route",
-        BATCH_ROUTE_WITNESS,
-        8,
+        batch_route_witness(),
+        10,
         "the_svelte_batch_route_suite_is_present_and_non_vacuous",
     );
 }
@@ -315,8 +381,8 @@ fn the_svelte_batch_route_suite_is_present_and_non_vacuous() {
 fn the_transport_route_equivalence_suite_is_present_and_non_vacuous() {
     assert_suite_is_not_vacuous(
         "transport_route_equivalence",
-        TRANSPORT_WITNESS,
-        15,
+        transport_witness(),
+        20,
         "the_transport_route_equivalence_suite_is_present_and_non_vacuous",
     );
 }

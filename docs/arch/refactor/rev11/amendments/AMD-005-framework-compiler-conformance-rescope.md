@@ -126,8 +126,11 @@ The executable charters are:
 Existing responsibilities are amended by [`../charters/B2.md`](../charters/B2.md),
 [`B3.md`](../charters/B3.md), [`B4.md`](../charters/B4.md), [`B5.md`](../charters/B5.md),
 [`B6.md`](../charters/B6.md), [`C3.md`](../charters/C3.md), and
-[`C4.md`](../charters/C4.md). K2 still owns transport carriers and their conversion
-into B3's request; it may not reinterpret framework semantics.
+[`C4.md`](../charters/C4.md). K2 owns the final typed
+framework-private carrier representation and removal of the residual
+`Any + Send + Sync` erasure; it may not reinterpret framework semantics and performs
+no second semantic conversion. Conversion of the production routes reachable at B3's
+dispatch into B3's canonical request is B3's, per AMD-010 §3.
 
 ## 6. Canonical request and option policy
 

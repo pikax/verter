@@ -1271,6 +1271,151 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
     );
 }
 
+/// The RUNTIME axis discriminates too: a candidate that MOUNTS but renders the
+/// wrong markup is caught.
+///
+/// The plants above all run through the oracle CLI, which reports the runtime
+/// axis `not-applicable` for a Svelte client golden; the runtime comparison is
+/// the separate mount performed by [`compare_mounted_render`], and this proves
+/// THAT comparison is not a stub. The planted defect is deliberately one the
+/// official runtime accepts — the module still mounts — so what fails is the
+/// rendered markup and nothing else. A plant that merely crashed the mount
+/// would only prove the comparison notices a broken module.
+#[test]
+fn the_runtime_comparison_detects_a_planted_wrong_render() {
+    let base = reachable_client_requests()
+        .into_iter()
+        .find(|cell| cell.runes && cell.fixture_path.ends_with("basic-runes.svelte"))
+        .expect("the reachable inventory carries the basic-runes client request");
+    // The same baseline every other plant starts from: the golden's OWN
+    // recorded artifact.
+    let (pristine_code, _) = pristine_baseline(&base.golden_name);
+
+    // The markup this suite pins for THIS golden, so the plant can be judged
+    // against the pin as well as against the golden mount.
+    let pin_prefix = format!("{} => ", base.golden_name);
+    let pinned_markup = CLIENT_RENDERED_MARKUP
+        .lines()
+        .find_map(|line| line.strip_prefix(&pin_prefix))
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: the pinned client markup records no line for this golden",
+                base.golden_name
+            )
+        });
+
+    // Unplanted control FIRST: the pristine artifact mounted against itself
+    // must agree, on the pinned runtime, before any plant below can be trusted.
+    let control = compare_mounted_render(
+        &format!("{}-runtime-control", base.golden_name),
+        &pristine_code,
+        &pristine_code,
+    );
+    assert_eq!(
+        control.runtime_version, SVELTE_PINNED_PACKAGE_VERSION,
+        "the control did not run against the pinned runtime"
+    );
+    assert!(
+        control.golden_ok,
+        "the control's golden module did not mount: {}",
+        control.golden_error
+    );
+    assert!(
+        control.candidate_ok,
+        "the control's candidate module did not mount: {}",
+        control.candidate_error
+    );
+    assert!(
+        control.divergence.is_none(),
+        "the unplanted control diverged, so no plant below could be trusted to discriminate: {:?}",
+        control.divergence
+    );
+    assert_eq!(
+        control.candidate_html, pinned_markup,
+        "the control rendered markup other than the markup this suite pins for it"
+    );
+
+    // ---- runtime: render the wrong markup, but still mount ------------------
+    //
+    // `root_1` is the template the `alternate` branch instantiates, and `count`
+    // starts at 0, so this is markup the control run above actually rendered.
+    // Retemplating it is invisible to every other axis's oracle and to the
+    // module's structure — only the MOUNT sees it.
+    const RUNTIME_MARKER: &str = "GATE-RUNTIME-PLANT";
+    const PRISTINE_TEMPLATE: &str = "<p>zero</p>";
+    assert!(
+        control.candidate_html.contains(PRISTINE_TEMPLATE),
+        "the control did not render `{PRISTINE_TEMPLATE}`, so retemplating it would not change \
+         what the candidate renders: {}",
+        control.candidate_html
+    );
+    let planted_code =
+        pristine_code.replacen(PRISTINE_TEMPLATE, &format!("<p>{RUNTIME_MARKER}</p>"), 1);
+    assert_plant_applied("runtime", &pristine_code, &planted_code, RUNTIME_MARKER);
+
+    let planted = compare_mounted_render(
+        &format!("{}-runtime-plant", base.golden_name),
+        &planted_code,
+        &pristine_code,
+    );
+    assert!(
+        planted.golden_ok,
+        "the planted run's golden module did not mount, so it decides nothing: {}",
+        planted.golden_error
+    );
+    // THE POINT OF THIS PLANT: the defect is a WRONG RENDER, not a crash.
+    assert!(
+        planted.candidate_ok,
+        "the planted candidate failed to MOUNT, so this proves only that the comparison notices a \
+         broken module — not that it notices a module which renders the wrong markup: {}",
+        planted.candidate_error
+    );
+    assert!(
+        planted.divergence.is_some(),
+        "the runtime comparison did not detect the planted wrong render; candidate rendered {:?}, \
+         golden rendered {:?}",
+        planted.candidate_html,
+        planted.golden_html
+    );
+    assert!(
+        planted.candidate_html.contains(RUNTIME_MARKER),
+        "the planted candidate did not render the planted marker, so the plant never reached the \
+         mount: {}",
+        planted.candidate_html
+    );
+    assert!(
+        !planted.golden_html.contains(RUNTIME_MARKER),
+        "the plant leaked into the golden module's render: {}",
+        planted.golden_html
+    );
+    assert_ne!(
+        planted.candidate_html, planted.golden_html,
+        "the planted candidate rendered exactly what the golden rendered"
+    );
+    // The pinned markup is a second, independent catch of the same defect.
+    assert_ne!(
+        planted.candidate_html, pinned_markup,
+        "the pinned client markup would not have caught the planted wrong render either"
+    );
+
+    // Control re-run: the pristine baseline still agrees AFTER the plant, so no
+    // plant leaked into shared harness state.
+    let control_after = compare_mounted_render(
+        &format!("{}-runtime-control-after", base.golden_name),
+        &pristine_code,
+        &pristine_code,
+    );
+    assert!(
+        control_after.divergence.is_none(),
+        "the control stopped agreeing after the plant ran: {:?}",
+        control_after.divergence
+    );
+    assert_eq!(
+        control_after.candidate_html, pinned_markup,
+        "the control's render moved after the plant ran"
+    );
+}
+
 /// The exact candidate-envelope bytes the CLI receives.
 fn candidate_envelope(code: &str, map: &str, diagnostics: &Value) -> String {
     json!({
@@ -1536,6 +1681,96 @@ fn execute_client_modules(label: &str, modules: &[(&str, &str)]) -> Value {
     })
 }
 
+/// What the CANDIDATE renders once mounted, pinned exactly. Matching the
+/// golden proves agreement; this proves the agreed-on markup is still the
+/// markup this suite recorded.
+const CLIENT_RENDERED_MARKUP: &str = include_str!("../../svelte_client_rendered_markup.txt");
+
+/// One candidate-against-golden mount, as the runtime axis judges it.
+struct MountedComparison {
+    /// The svelte version the executor actually BOUND for this mount.
+    runtime_version: String,
+    candidate_ok: bool,
+    golden_ok: bool,
+    /// Each module's mount error, exactly as the executor reported it (the JSON
+    /// `null` when it mounted).
+    candidate_error: String,
+    golden_error: String,
+    /// What each module rendered.
+    candidate_html: String,
+    golden_html: String,
+    /// `None` when the candidate mounted AND rendered exactly what the golden
+    /// rendered. Otherwise the divergence, ready to report.
+    divergence: Option<String>,
+}
+
+/// Mount a candidate and a golden module against the pinned official client
+/// runtime and compare what they rendered.
+///
+/// THE runtime-axis comparison. The live gate below and the mutation-
+/// discrimination test above both drive THIS function, so a planted wrong
+/// render is judged by exactly the code that judges the shipped route's output
+/// — not by a second copy of it that could drift into agreeing with anything.
+fn compare_mounted_render(
+    label: &str,
+    candidate_code: &str,
+    golden_code: &str,
+) -> MountedComparison {
+    let executed = execute_client_modules(
+        label,
+        &[("candidate", candidate_code), ("golden", golden_code)],
+    );
+    // THE CONTROL MUST BE THE PINNED RUNTIME. The compiled module reaches its
+    // runtime through a BARE `svelte/internal/client` specifier, which Node
+    // resolves by walking up from wherever the module is written. A different
+    // copy one directory further up binds a SECOND runtime instance whose
+    // `init_operations` never ran, and the mount dies inside the official
+    // runtime with an opaque `undefined.call`. The executor therefore reports
+    // the runtime it actually bound, and this pins it.
+    let runtime = &executed["runtime"];
+    assert_eq!(
+        runtime["version"].as_str(),
+        Some(SVELTE_PINNED_PACKAGE_VERSION),
+        "{label}: the client executor bound svelte {} instead of the pinned {}; the mount would \
+         be measuring a different runtime",
+        runtime["version"],
+        SVELTE_PINNED_PACKAGE_VERSION
+    );
+
+    let golden_run = &executed["golden"];
+    let candidate_run = &executed["candidate"];
+
+    let divergence = if candidate_run["ok"] != Value::Bool(true) {
+        Some(format!(
+            "── {label} ──\n  the candidate did not mount: {}",
+            candidate_run["error"]
+        ))
+    } else if candidate_run["html"] != golden_run["html"] {
+        Some(format!(
+            "── {label} ──\n  rendered markup differs\n  candidate: {}\n  golden:    {}",
+            candidate_run["html"], golden_run["html"]
+        ))
+    } else {
+        None
+    };
+
+    MountedComparison {
+        runtime_version: runtime["version"].as_str().unwrap_or_default().to_string(),
+        candidate_ok: candidate_run["ok"] == Value::Bool(true),
+        golden_ok: golden_run["ok"] == Value::Bool(true),
+        candidate_error: candidate_run["error"].to_string(),
+        golden_error: golden_run["error"].to_string(),
+        candidate_html: rendered_html(candidate_run),
+        golden_html: rendered_html(golden_run),
+        divergence,
+    }
+}
+
+/// The markup one executed module rendered, as a plain string.
+fn rendered_html(run: &Value) -> String {
+    run["html"].as_str().unwrap_or("<not a string>").to_string()
+}
+
 /// The client RUNTIME axis, driven for every reachable client request that
 /// emits a module.
 ///
@@ -1551,11 +1786,6 @@ fn execute_client_modules(label: &str, modules: &[(&str, &str)]) -> Value {
 /// rendered markup compared.
 #[test]
 fn every_emitting_client_request_mounts_and_renders_what_the_golden_renders() {
-    /// What the CANDIDATE renders once mounted, pinned exactly. Matching the
-    /// golden proves agreement; this proves the agreed-on markup is still the
-    /// markup this suite recorded.
-    const CLIENT_RENDERED_MARKUP: &str = include_str!("../../svelte_client_rendered_markup.txt");
-
     let mut compared = 0usize;
     let mut divergences = Vec::new();
     let mut rendered = Vec::new();
@@ -1572,53 +1802,23 @@ fn every_emitting_client_request_mounts_and_renders_what_the_golden_renders() {
             .unwrap_or_else(|| panic!("{}: the record carries no code", cell.golden_name))
             .to_string();
 
-        let executed = execute_client_modules(
-            &cell.golden_name,
-            &[("candidate", &code), ("golden", &golden_code)],
-        );
-        // THE CONTROL MUST BE THE PINNED RUNTIME. The compiled module reaches
-        // its runtime through a BARE `svelte/internal/client` specifier, which
-        // Node resolves by walking up from wherever the module is written. A
-        // different copy one directory further up binds a SECOND runtime
-        // instance whose `init_operations` never ran, and the mount dies inside
-        // the official runtime with an opaque `undefined.call`. The executor
-        // therefore reports the runtime it actually bound, and this pins it.
-        let runtime = &executed["runtime"];
-        assert_eq!(
-            runtime["version"].as_str(),
-            Some(SVELTE_PINNED_PACKAGE_VERSION),
-            "{}: the client executor bound svelte {} instead of the pinned {}; the mount would \
-             be measuring a different runtime",
-            cell.golden_name,
-            runtime["version"],
-            SVELTE_PINNED_PACKAGE_VERSION
-        );
+        let comparison = compare_mounted_render(&cell.golden_name, &code, &golden_code);
 
-        let golden_run = &executed["golden"];
-        let candidate_run = &executed["candidate"];
-
-        assert_eq!(
-            golden_run["ok"], true,
+        assert!(
+            comparison.golden_ok,
             "{}: the official module did not mount, so this smoke cannot decide anything: {}",
-            cell.golden_name, golden_run["error"]
+            cell.golden_name, comparison.golden_error
         );
-        if candidate_run["ok"] != Value::Bool(true) {
-            divergences.push(format!(
-                "── {} ──\n  the candidate did not mount: {}",
-                cell.golden_name, candidate_run["error"]
-            ));
-            continue;
-        }
-        if candidate_run["html"] != golden_run["html"] {
-            divergences.push(format!(
-                "── {} ──\n  rendered markup differs\n  candidate: {}\n  golden:    {}",
-                cell.golden_name, candidate_run["html"], golden_run["html"]
-            ));
+        if let Some(divergence) = comparison.divergence {
+            divergences.push(divergence);
+            if !comparison.candidate_ok {
+                // A candidate that never mounted rendered no markup to pin.
+                continue;
+            }
         }
         rendered.push(format!(
             "{} => {}",
-            cell.golden_name,
-            candidate_run["html"].as_str().unwrap_or("<not a string>")
+            cell.golden_name, comparison.candidate_html
         ));
         compared += 1;
     }

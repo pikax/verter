@@ -96,6 +96,11 @@ benchmark-results.json
 tmp/
 .tmp-tsgo-checks/
 scratchpad/
+# On-disk fixtures the bundler-route probe allocates per invocation. The parent
+# is stable so the fixtures stay inside the repository (the plugin resolves
+# `vue/compiler-sfc` relative to the repo root); each run removes only its own
+# child directory.
+.verter-probe-fixtures/
 
 # Platform binaries are staged by CI at package time, never committed.
 packages/verter-lsp/npm/*/verter-lsp
