@@ -123,51 +123,33 @@ pub(crate) struct CompileOutputValue {
     /// u64 collision can never serve a result carrying a different scope class
     /// (the exact-override warm-hit discriminant).
     pub css_hash_override: Option<Arc<str>>,
-    /// Per-virtual-node-kind outputs (Script, Template, Style, Main,
-    /// Custom).
-    pub outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// What the compile transaction committed — the produced product set
+    /// (per-kind outputs, last-good outputs, IDE `tsx`, template analysis), OR a
+    /// payload-free runtime refusal. Being a SUM is what keeps a refusal from
+    /// carrying a sibling product under the same request identity, and it is
+    /// also why the refusal reason is read structurally here rather than
+    /// recovered by sniffing a framework-specific diagnostic-code prefix.
+    pub products: crate::types::CompileProducts,
     /// Snapshot of compile diagnostics published with this entry.
     pub diagnostics: DiagnosticsSnapshot,
-    /// Optional last-good outputs for `DevServeLastKnownGood`.
-    pub last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
-    /// Optional combined TSX output (IDE / LSP).
-    pub tsx: Option<CachedTsx>,
-    /// Optional template-analysis snapshot extracted during compile.
-    pub template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
-    /// Whether the carrier FAIL-CLOSED on an unsupported runtime surface (no
-    /// `Main` produced). The TYPED runtime-refusal signal the carrier sets on its
-    /// [`RuntimeCompileOutput`](verter_compiler::framework_common::RuntimeCompileOutput);
-    /// threaded onto the cached value so a runtime-requesting consumer reads the
-    /// refusal from this flag, NOT by sniffing the diagnostic-code prefix
-    /// (framework-neutral — the host never parses a framework-specific code).
-    pub runtime_surface_refused: bool,
 }
 
 impl CompileOutputValue {
     /// Build a value from a compile-tier publish record. Threads the
-    /// content-override + semantic hashes and the per-kind outputs unchanged.
-    #[allow(clippy::too_many_arguments)]
+    /// content-override + semantic hashes and the committed products unchanged.
     pub(crate) fn from_compile_record(
         semantic_hash: Hash16,
         content_override_hash: u64,
         css_hash_override: Option<Arc<str>>,
-        outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+        products: crate::types::CompileProducts,
         diagnostics: DiagnosticsSnapshot,
-        last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
-        tsx: Option<CachedTsx>,
-        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
-        runtime_surface_refused: bool,
     ) -> Self {
         Self {
             semantic_hash,
             content_override_hash,
             css_hash_override,
-            outputs,
+            products,
             diagnostics,
-            last_good_outputs,
-            tsx,
-            template_analysis,
-            runtime_surface_refused,
         }
     }
 }
@@ -552,10 +534,8 @@ impl CompileOutputNodeFactValidatedSession {
             return None;
         }
         Some(SessionLookupHit {
-            outputs: slot.outputs.clone(),
+            products: slot.products.clone(),
             diagnostics: slot.diagnostics.clone(),
-            tsx: slot.tsx.clone(),
-            runtime_surface_refused: slot.runtime_surface_refused,
         })
     }
 
@@ -585,14 +565,10 @@ impl CompileOutputNodeFactValidatedSession {
                     semantic_hash: value.semantic_hash,
                     content_override_hash: value.content_override_hash,
                     css_hash_override: value.css_hash_override,
-                    outputs: value.outputs,
+                    products: value.products,
                     diagnostics: value.diagnostics,
-                    last_good_outputs: value.last_good_outputs,
                     last_access_tick,
-                    tsx: value.tsx,
-                    template_analysis: value.template_analysis,
                     fact_dep_signature: signature,
-                    runtime_surface_refused: value.runtime_surface_refused,
                 };
                 profile_state.compile_slot_insert_for_node(profile_hash, slot);
                 SessionPublishOutcome::Admitted
@@ -627,7 +603,7 @@ impl CompileOutputNodeFactValidatedSession {
     ) -> Option<CachedTsx> {
         profile_state
             .compile_slot_for_node(profile_hash)
-            .and_then(|slot| slot.tsx.clone())
+            .and_then(|slot| slot.products.tsx().cloned())
     }
 
     /// Read-only access to the last-good outputs, when present. Used
@@ -665,7 +641,7 @@ impl CompileOutputNodeFactValidatedSession {
         if !slot.fact_dep_signature.facts.is_empty() && !validate_facts(&slot.fact_dep_signature) {
             return None;
         }
-        slot.last_good_outputs.clone()
+        slot.products.last_good_outputs().cloned()
     }
 
     /// Read-only access to the full set of outputs for a given
@@ -678,7 +654,7 @@ impl CompileOutputNodeFactValidatedSession {
         node_kind: &VirtualNodeKind,
     ) -> Option<(CachedVirtualFile, DiagnosticsSnapshot)> {
         let slot = profile_state.compile_slot_for_node(profile_hash)?;
-        let output = slot.outputs.get(node_kind)?.clone();
+        let output = slot.products.outputs()?.get(node_kind)?.clone();
         Some((output, slot.diagnostics.clone()))
     }
 
@@ -713,7 +689,7 @@ impl CompileOutputNodeFactValidatedSession {
     ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
         profile_state
             .compile_slot_for_node(profile_hash)
-            .and_then(|slot| slot.template_analysis.clone())
+            .and_then(|slot| slot.products.template_analysis().cloned())
     }
 }
 
@@ -725,15 +701,11 @@ impl Default for CompileOutputNodeFactValidatedSession {
 
 /// Result of a successful [`CompileOutputNodeFactValidatedSession::lookup`].
 pub(crate) struct SessionLookupHit {
-    /// Per-virtual-node-kind outputs.
-    pub outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
+    /// What the cached transaction committed — the produced product set OR a
+    /// payload-free runtime refusal.
+    pub products: crate::types::CompileProducts,
     /// Diagnostics snapshot from compile time.
     pub diagnostics: DiagnosticsSnapshot,
-    /// Optional combined TSX output (IDE / LSP).
-    pub tsx: Option<CachedTsx>,
-    /// Whether the carrier fail-closed on an unsupported runtime surface (the typed
-    /// runtime-refusal signal carried on the cached value).
-    pub runtime_surface_refused: bool,
 }
 
 /// Result of [`CompileOutputNodeFactValidatedSession::publish`].

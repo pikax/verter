@@ -1904,10 +1904,15 @@ impl NapiVerterHost {
     ///
     /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
     /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
-    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
-    /// surface — regardless of the caller's runtime target — and `false` ONLY
-    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
-    /// failure (missing source / compile error) rejects.
+    /// produces the IDE surface. Returns `true` when the carrier HAS an IDE
+    /// surface, and `false` ONLY for a genuine no-IDE-surface file (a
+    /// non-carrier / plain script).
+    ///
+    /// A profile that ALSO asks for a runtime product makes this a COMBINED
+    /// request identity: if the carrier fail-closes on that runtime surface the
+    /// transaction publishes nothing, and this rejects the typed runtime-surface
+    /// refusal rather than reporting a missing IDE surface. A real failure
+    /// (missing source / compile error) rejects too.
     #[napi(js_name = "ensureIdeCompiled")]
     pub fn ensure_ide_compiled(
         &self,
@@ -2456,22 +2461,42 @@ impl NapiVerterHost {
         }))?;
         Ok(entries
             .into_iter()
-            .map(|e| NapiCompileBatchEntry {
-                canonicalId: e.canonical_id,
-                code: e.code.to_string(),
-                sourceMap: e.source_map.map(|s| s.to_string()),
-                lang: e.lang,
-                errors: e.errors,
-                diagnostics: e
-                    .diagnostics
-                    .iter()
-                    .map(napi_diagnostic_from_host)
-                    .collect(),
-                durationMs: e.duration_ms,
-                cacheHit: e.cache_hit,
-                requestedMode: e.requested_mode.to_string(),
-                actualMode: e.actual_mode.to_string(),
-                downgradeReason: e.downgrade_reason.map(|r| r.to_string()),
+            .map(|e| {
+                // Flatten the typed outcome ARM BY ARM, exhaustively (no
+                // wildcard — a new variant is a compile error here, not a
+                // silently mis-serialized entry). The JS-visible shape is
+                // unchanged: success emits the product with an empty error
+                // list, failure emits an empty product with the errors.
+                let (code, source_map, lang, errors, diagnostics) = match e.outcome {
+                    host_compile::CompileBatchOutcome::Produced {
+                        code,
+                        lang,
+                        source_map,
+                        diagnostics,
+                    } => (
+                        code.to_string(),
+                        source_map.map(|s| s.to_string()),
+                        lang,
+                        Vec::new(),
+                        diagnostics.iter().map(napi_diagnostic_from_host).collect(),
+                    ),
+                    host_compile::CompileBatchOutcome::Failed { errors } => {
+                        (String::new(), None, None, errors.into_vec(), Vec::new())
+                    }
+                };
+                NapiCompileBatchEntry {
+                    canonicalId: e.canonical_id,
+                    code,
+                    sourceMap: source_map,
+                    lang,
+                    errors,
+                    diagnostics,
+                    durationMs: e.duration_ms,
+                    cacheHit: e.cache_hit,
+                    requestedMode: e.requested_mode.to_string(),
+                    actualMode: e.actual_mode.to_string(),
+                    downgradeReason: e.downgrade_reason.map(|r| r.to_string()),
+                }
             })
             .collect())
     }

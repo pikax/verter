@@ -504,12 +504,12 @@ fn every_committed_client_cell_is_driven_and_reaches_its_recorded_outcome() {
 /// The refusal is decided in `compile_client`'s step (0)
 /// (`crates/verter_compiler/src/svelte/runtime/client_compile.rs:113-119`),
 /// which returns `ClientCompileError::Unsupported(ServerGenerate)` before any
-/// other pipeline stage. The carrier turns that into a non-fatal bundle
-/// diagnostic and sets `runtime_surface_refused`
-/// (`crates/verter_compiler/src/svelte/carrier.rs:442-457`), and the host turns
-/// the absent `Main` plus that flag into `HostError::RuntimeSurfaceRefused`
-/// carrying the per-surface code and message
-/// (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1088-1109`).
+/// other pipeline stage. The carrier turns that into a product-free
+/// `CarrierCompileOutcome::RuntimeSurfaceRefused` carrying the reason
+/// structurally (`crates/verter_compiler/src/svelte/carrier.rs`), and the host
+/// reads that typed refusal straight onto `HostError::RuntimeSurfaceRefused`
+/// with its per-surface code and message
+/// (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`).
 ///
 /// This test only RECORDS that behaviour. It adds nothing to the refusal.
 #[test]

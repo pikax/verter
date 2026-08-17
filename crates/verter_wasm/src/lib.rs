@@ -528,10 +528,15 @@ impl WasmVerterHost {
     ///
     /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
     /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
-    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
-    /// surface — regardless of the caller's runtime target — and `false` ONLY
-    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
-    /// failure (missing source / compile error) throws.
+    /// produces the IDE surface. Returns `true` when the carrier HAS an IDE
+    /// surface, and `false` ONLY for a genuine no-IDE-surface file (a
+    /// non-carrier / plain script).
+    ///
+    /// A profile that ALSO asks for a runtime product makes this a COMBINED
+    /// request identity: if the carrier fail-closes on that runtime surface the
+    /// transaction publishes nothing, and this throws the typed runtime-surface
+    /// refusal rather than reporting a missing IDE surface. A real failure
+    /// (missing source / compile error) throws too.
     #[wasm_bindgen(js_name = ensureIdeCompiled)]
     pub fn ensure_ide_compiled(
         &self,

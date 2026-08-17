@@ -94,9 +94,12 @@ fn compile_many_stage_b_uses_one_atomic_upsert_batch() {
     );
     assert_eq!(entries.len(), N, "every input position must be returned");
     assert!(
-        entries.iter().all(|e| e.errors.is_empty()),
+        entries.iter().all(|e| e.errors().is_empty()),
         "all cold inputs must compile cleanly: {:?}",
-        entries.iter().map(|e| &e.errors).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|e| e.errors().to_vec())
+            .collect::<Vec<_>>()
     );
 
     let epochs = host.scheduler.test_take_batch_admit_epochs();
@@ -156,9 +159,12 @@ fn compile_many_duplicate_canonical_dedups_to_one_batch_request_and_reports_all_
     assert_eq!(entries[1].canonical_id, "/A.vue");
     assert_eq!(entries[2].canonical_id, "/B.vue");
     assert!(
-        entries.iter().all(|e| e.errors.is_empty()),
+        entries.iter().all(|e| e.errors().is_empty()),
         "identical-source dup is NOT a conflict; all positions compile cleanly: {:?}",
-        entries.iter().map(|e| &e.errors).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|e| e.errors().to_vec())
+            .collect::<Vec<_>>()
     );
 
     let epochs = host.scheduler.test_take_batch_admit_epochs();
@@ -229,9 +235,9 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
         );
         assert_eq!(entries.len(), 1);
         assert!(
-            entries[0].errors.is_empty(),
+            entries[0].errors().is_empty(),
             "input must compile cleanly: {:?}",
-            entries[0].errors
+            entries[0].errors()
         );
     }
 

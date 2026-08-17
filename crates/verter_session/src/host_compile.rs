@@ -115,20 +115,9 @@ pub struct CompileBatchInput {
 #[derive(Clone)]
 pub struct CompileBatchEntry {
     pub canonical_id: String,
-    pub code: Arc<str>,
-    pub source_map: Option<Arc<str>>,
-    /// The compiled `Main` module language (`"ts"` / `"js"` / `"jsx"`),
-    /// derived identically across both lanes. `None` on an error/panic
-    /// outcome. Bundler consumers (vite sub-request routing) read it.
-    pub lang: Option<String>,
-    pub errors: Vec<String>,
-    /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
-    /// compile, kept separate from the fatal `errors`. RuntimeRender uses this
-    /// for closed row-local degradation (for example, an unavailable member
-    /// type rendered as `null`). An unavailable authoritative macro root stays
-    /// fatal and never produces partial code. Always empty on the `HostBacked`
-    /// lane and on any fatal outcome.
-    pub diagnostics: Vec<HostDiagnostic>,
+    /// What this input's compile produced — a product, OR errors. A SUM, so an
+    /// entry cannot express a product beside an error list.
+    pub outcome: CompileBatchOutcome,
     pub duration_ms: f64,
     pub cache_hit: bool,
     /// The compile cache mode the caller requested for this input.
@@ -140,6 +129,143 @@ pub struct CompileBatchEntry {
     /// The highest-priority reason the requested mode was constrained,
     /// or `None` when no reason fired.
     pub downgrade_reason: Option<DowngradeReason>,
+}
+
+/// What one batch input's compile produced.
+///
+/// A sum, not a product set beside an error list. [`Self::Produced`] has no
+/// error field; [`Self::Failed`] has no product field of ANY kind, and its
+/// errors are non-empty BY CONSTRUCTION — the only constructor rejects an empty
+/// list. So "a published product alongside a fatal error" and "a failure that
+/// reports nothing" are both unrepresentable rather than filtered out after the
+/// fact.
+///
+/// Which arm an entry takes is decided by the TYPED terminal result of the
+/// compile — an `Ok` response versus an `Err(HostError)` — never by
+/// severity-filtering a successful response's diagnostics.
+#[derive(Clone, Debug)]
+pub enum CompileBatchOutcome {
+    /// Compiled. Carries the product, plus any NON-error diagnostics.
+    Produced {
+        code: Arc<str>,
+        /// The compiled `Main` module language (`"ts"` / `"js"` / `"jsx"`),
+        /// derived identically across both lanes. Bundler consumers (vite
+        /// sub-request routing) read it.
+        lang: Option<String>,
+        source_map: Option<Arc<str>>,
+        /// Non-fatal WARNING-severity diagnostics of a SUCCESSFUL compile.
+        /// RuntimeRender uses this for closed row-local degradation (for
+        /// example, an unavailable member type rendered as `null`). An
+        /// unavailable authoritative macro root stays fatal and never produces
+        /// partial code, so it cannot appear here. Always empty on the
+        /// `HostBacked` lane, whose warnings ride in the response diagnostics.
+        diagnostics: Vec<HostDiagnostic>,
+    },
+    /// Failed. Carries the errors and NO product.
+    Failed { errors: NonEmptyErrors },
+}
+
+/// A non-empty error list. The ONLY way to build one rejects an empty input, so
+/// a [`CompileBatchOutcome::Failed`] that reports nothing cannot be constructed.
+#[derive(Clone, Debug)]
+pub struct NonEmptyErrors(Vec<String>);
+
+impl NonEmptyErrors {
+    /// Build from `errors`, falling back to `if_empty` when the list is empty.
+    ///
+    /// The fallback is REQUIRED rather than optional: a failure arm always has
+    /// something to say, and a caller that filtered its diagnostics down to
+    /// nothing must still name the failure instead of publishing an empty one.
+    #[must_use]
+    pub fn new(errors: Vec<String>, if_empty: impl FnOnce() -> String) -> Self {
+        if errors.is_empty() {
+            Self(vec![if_empty()])
+        } else {
+            Self(errors)
+        }
+    }
+
+    /// Build from a single error message.
+    #[must_use]
+    pub fn one(error: String) -> Self {
+        Self(vec![error])
+    }
+
+    /// The errors. Never empty.
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Consume into the underlying list. Never empty.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<String> {
+        self.0
+    }
+}
+
+impl CompileBatchOutcome {
+    /// Build the failure arm from a single message.
+    #[must_use]
+    pub fn failed(error: String) -> Self {
+        Self::Failed {
+            errors: NonEmptyErrors::one(error),
+        }
+    }
+}
+
+/// Arm-by-arm READ projections of [`CompileBatchEntry::outcome`].
+///
+/// These are the same exhaustive flatten the FFI boundary performs, offered
+/// once so consumers do not each re-derive it. They are reads: the mixed state
+/// stays unconstructible, because there is no constructor here — a produced
+/// entry reports no errors and a failed entry reports no product, by the shape
+/// of the sum rather than by a filter.
+impl CompileBatchEntry {
+    /// The compiled `Main` code; empty on a failure (which published none).
+    #[must_use]
+    pub fn code(&self) -> &str {
+        match &self.outcome {
+            CompileBatchOutcome::Produced { code, .. } => code,
+            CompileBatchOutcome::Failed { .. } => "",
+        }
+    }
+
+    /// The compiled `Main` language; `None` on a failure.
+    #[must_use]
+    pub fn lang(&self) -> Option<&str> {
+        match &self.outcome {
+            CompileBatchOutcome::Produced { lang, .. } => lang.as_deref(),
+            CompileBatchOutcome::Failed { .. } => None,
+        }
+    }
+
+    /// The compiled `Main` source map; `None` on a failure.
+    #[must_use]
+    pub fn source_map(&self) -> Option<&Arc<str>> {
+        match &self.outcome {
+            CompileBatchOutcome::Produced { source_map, .. } => source_map.as_ref(),
+            CompileBatchOutcome::Failed { .. } => None,
+        }
+    }
+
+    /// The fatal errors; empty on a success (which has none).
+    #[must_use]
+    pub fn errors(&self) -> &[String] {
+        match &self.outcome {
+            CompileBatchOutcome::Produced { .. } => &[],
+            CompileBatchOutcome::Failed { errors } => errors.as_slice(),
+        }
+    }
+
+    /// The non-fatal diagnostics of a successful compile; empty on a failure.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[HostDiagnostic] {
+        match &self.outcome {
+            CompileBatchOutcome::Produced { diagnostics, .. } => diagnostics,
+            CompileBatchOutcome::Failed { .. } => &[],
+        }
+    }
 }
 
 /// The batch-level compiler-visible render profile for the
@@ -568,11 +694,7 @@ impl VerterHost {
                     let requested = input.requested_mode.unwrap_or(default_mode);
                     return CompileBatchEntry {
                         canonical_id: input.canonical_id.clone(),
-                        code: Arc::from(""),
-                        source_map: None,
-                        lang: None,
-                        errors: vec![err.clone()],
-                        diagnostics: Vec::new(),
+                        outcome: CompileBatchOutcome::failed(err.clone()),
                         duration_ms: 0.0,
                         cache_hit: false,
                         requested_mode: requested,
@@ -688,11 +810,7 @@ impl VerterHost {
         if let Some(err) = precomputed_error {
             return CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
-                code: Arc::from(""),
-                source_map: None,
-                lang: None,
-                errors: vec![err],
-                diagnostics: Vec::new(),
+                outcome: CompileBatchOutcome::failed(err),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
                 requested_mode,
@@ -741,28 +859,27 @@ impl VerterHost {
         let id_prefix = format!("[{}] ", input.canonical_id);
 
         match result {
+            // A successful response IS the produced arm. The variant is
+            // decided by the TYPED terminal result — `Ok` here, `Err` below —
+            // never by severity-filtering this response's diagnostics: a
+            // genuine failure (including a refused runtime surface) arrives as
+            // `Err(HostError)` and takes a failure arm.
             Ok(response) => {
-                let errors: Vec<String> = response
-                    .diagnostics
-                    .diagnostics
-                    .iter()
-                    .filter(|d| d.severity == HostSeverity::Error)
-                    .map(|d| d.message.clone())
-                    .collect();
                 // The cache-hit determination, actual mode, and downgrade
                 // reason are all authoritative on the response (decided at
                 // the single classification site inside `get_virtual_file`).
                 CompileBatchEntry {
                     canonical_id: input.canonical_id.clone(),
-                    code: response.code,
-                    source_map: response.source_map,
-                    lang: response.lang,
-                    errors,
-                    // HostBacked warnings ride in the response diagnostics and
-                    // are not re-surfaced as a distinct success-warning list.
-                    // RuntimeRender exposes successful row-local degradation
-                    // warnings through `diagnostics`.
-                    diagnostics: Vec::new(),
+                    outcome: CompileBatchOutcome::Produced {
+                        code: response.code,
+                        lang: response.lang,
+                        source_map: response.source_map,
+                        // HostBacked warnings ride in the response diagnostics
+                        // and are not re-surfaced as a distinct success-warning
+                        // list. RuntimeRender exposes successful row-local
+                        // degradation warnings through this field.
+                        diagnostics: Vec::new(),
+                    },
                     duration_ms,
                     cache_hit: response.cache_hit,
                     requested_mode: response.requested_mode,
@@ -785,23 +902,20 @@ impl VerterHost {
             // mode — so the error entry mirrors the success entry's mode
             // surface instead of resetting to the request.
             Err(HostError::CompileError(failure)) => {
-                let mut errors: Vec<String> = failure
+                let errors: Vec<String> = failure
                     .diagnostics
                     .diagnostics
                     .iter()
                     .filter(|d| d.severity == HostSeverity::Error)
                     .map(|d| format!("{id_prefix}{}", d.message))
                     .collect();
-                if errors.is_empty() {
-                    errors.push(format!("{id_prefix}compile error (no diagnostic messages)"));
-                }
                 CompileBatchEntry {
                     canonical_id: input.canonical_id.clone(),
-                    code: Arc::from(""),
-                    source_map: None,
-                    lang: None,
-                    errors,
-                    diagnostics: Vec::new(),
+                    outcome: CompileBatchOutcome::Failed {
+                        errors: NonEmptyErrors::new(errors, || {
+                            format!("{id_prefix}compile error (no diagnostic messages)")
+                        }),
+                    },
                     duration_ms,
                     cache_hit: false,
                     requested_mode: failure.requested_mode,
@@ -811,11 +925,7 @@ impl VerterHost {
             }
             Err(host_err) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
-                code: Arc::from(""),
-                source_map: None,
-                lang: None,
-                errors: vec![format!("{id_prefix}host error: {host_err}")],
-                diagnostics: Vec::new(),
+                outcome: CompileBatchOutcome::failed(format!("{id_prefix}host error: {host_err}")),
                 duration_ms,
                 cache_hit: false,
                 requested_mode,
@@ -840,11 +950,12 @@ impl VerterHost {
         match self.render_only_main(&input.canonical_id, per_input_profile) {
             Ok(render) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
-                code: render.code,
-                source_map: render.source_map,
-                lang: render.lang,
-                errors: Vec::new(),
-                diagnostics: render.diagnostics,
+                outcome: CompileBatchOutcome::Produced {
+                    code: render.code,
+                    lang: render.lang,
+                    source_map: render.source_map,
+                    diagnostics: render.diagnostics,
+                },
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 // The render lane consults no host cache node, so a render
                 // is never a "warm hit" and always reports `false`. The
@@ -856,23 +967,20 @@ impl VerterHost {
                 downgrade_reason: None,
             },
             Err(HostError::CompileError(failure)) => {
-                let mut errors: Vec<String> = failure
+                let errors: Vec<String> = failure
                     .diagnostics
                     .diagnostics
                     .iter()
                     .filter(|d| d.severity == HostSeverity::Error)
                     .map(|d| format!("{id_prefix}{}", d.message))
                     .collect();
-                if errors.is_empty() {
-                    errors.push(format!("{id_prefix}compile error (no diagnostic messages)"));
-                }
                 CompileBatchEntry {
                     canonical_id: input.canonical_id.clone(),
-                    code: Arc::from(""),
-                    source_map: None,
-                    lang: None,
-                    errors,
-                    diagnostics: Vec::new(),
+                    outcome: CompileBatchOutcome::Failed {
+                        errors: NonEmptyErrors::new(errors, || {
+                            format!("{id_prefix}compile error (no diagnostic messages)")
+                        }),
+                    },
                     duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                     cache_hit: false,
                     requested_mode,
@@ -882,11 +990,7 @@ impl VerterHost {
             }
             Err(host_err) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
-                code: Arc::from(""),
-                source_map: None,
-                lang: None,
-                errors: vec![format!("{id_prefix}host error: {host_err}")],
-                diagnostics: Vec::new(),
+                outcome: CompileBatchOutcome::failed(format!("{id_prefix}host error: {host_err}")),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
                 requested_mode,
@@ -911,14 +1015,10 @@ fn compile_panic_entry(
 ) -> CompileBatchEntry {
     CompileBatchEntry {
         canonical_id: input.canonical_id.clone(),
-        code: Arc::from(""),
-        source_map: None,
-        lang: None,
-        errors: vec![format!(
+        outcome: CompileBatchOutcome::failed(format!(
             "[{}] compiler panic: {}",
             input.canonical_id, message
-        )],
-        diagnostics: Vec::new(),
+        )),
         duration_ms: 0.0,
         cache_hit: false,
         requested_mode: effective_mode,

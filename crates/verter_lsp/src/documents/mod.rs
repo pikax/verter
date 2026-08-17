@@ -567,10 +567,10 @@ impl DocumentRegistry {
             .notify_upsert(&canonical_id, Arc::clone(&submitted_source));
 
         // Trigger compilation to populate the TSX cache (upsert only parses).
-        // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node — a
-        // Main-less carrier (Svelte) projects only `CachedTsx`, so
-        // `ensure_ide_compiled` populates it where `ensure_compiled` (which
-        // demands `Main`) would not. `get_ide` below then reads the source map.
+        // IDE-sync: drive the IDE/TSX surface explicitly. This profile asks for
+        // the IDE product and template data, so it publishes no runtime node at
+        // all; `ensure_ide_compiled` is the route that serves what is read.
+        // `get_ide` below then reads the source map.
         let carrier_compile = is_carrier.then(|| {
             self.host
                 .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())

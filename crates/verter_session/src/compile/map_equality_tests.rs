@@ -2312,7 +2312,9 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
             },
             &allocator,
         )
-        .expect("the Vue carrier produces a runtime bundle for a valid fixture");
+        .expect("the Vue carrier produces a runtime bundle for a valid fixture")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     let profile = CompileProfile {
         filename: Some(canonical_id.clone()),
@@ -2625,7 +2627,9 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
             },
             &allocator,
         )
-        .expect("the Vue carrier produces a runtime bundle for a valid fixture");
+        .expect("the Vue carrier produces a runtime bundle for a valid fixture")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     let profile = CompileProfile {
         filename: None,

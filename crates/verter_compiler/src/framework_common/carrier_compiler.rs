@@ -344,7 +344,7 @@ pub struct TemplateFacts {
 /// only the options it supports (Vue ignores Svelte-specific output knobs
 /// and vice-versa). A framework whose runtime output needs a richer option
 /// extends this struct (a compile-visible decision), never a side channel.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeCompileOptions {
     /// The carrier file name for component-name + source-map identity.
     /// `None` falls back to the framework default.
@@ -381,6 +381,15 @@ pub struct RuntimeCompileOptions {
     pub delimiters: Option<(String, String)>,
     /// Tag names treated as custom elements (skip component resolution).
     pub custom_elements: Option<Vec<String>>,
+    /// When true, request the RUNTIME output products — the executable main
+    /// module and its script / template / style side-files.
+    ///
+    /// The runtime half of the requested-product set, alongside
+    /// [`want_ide`](Self::want_ide) and
+    /// [`want_template_data`](Self::want_template_data). A carrier attempts its
+    /// runtime compile ONLY when this is true, so a request that did not ask
+    /// for a runtime product can never be refused one.
+    pub want_runtime: bool,
     /// When true, ALSO request the IDE (`tsx`) artifact in the same pass so
     /// the host populates its `CachedTsx` slot from one compile.
     pub want_ide: bool,
@@ -414,6 +423,44 @@ pub struct RuntimeCompileOptions {
     /// framework's resolution-specific DTOs out of the cross-framework
     /// contract.
     pub framework_extras: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl Default for RuntimeCompileOptions {
+    /// The plain RUNTIME compile: the runtime products are requested, the IDE
+    /// and template-data products are not.
+    ///
+    /// Written out rather than derived because [`want_runtime`](Self::want_runtime)
+    /// must default to `true`. This struct is the option set for
+    /// `compile_bundle`, whose subject is the runtime module; a derived `false`
+    /// would make the default request ask for NO product at all and answer with
+    /// a silently empty bundle instead of a compile.
+    fn default() -> Self {
+        Self {
+            filename: None,
+            is_production: false,
+            custom_element: false,
+            source_map: false,
+            ssr: false,
+            runtime_module_name: None,
+            component_id: None,
+            svelte_css_hash_override: None,
+            force_js: false,
+            force_vapor: false,
+            comments: None,
+            delimiters: None,
+            custom_elements: None,
+            want_runtime: true,
+            want_ide: false,
+            want_template_data: false,
+            types_module_name: None,
+            embed_ambient_types: false,
+            conditional_root_narrowing: false,
+            strict_slots: false,
+            block_content: RuntimeBlockContentInputs::default(),
+            inline: None,
+            framework_extras: None,
+        }
+    }
 }
 
 /// One compiler-owned block input selected by the registered host.
@@ -591,10 +638,14 @@ pub struct RuntimeCustomBlock {
 /// every field the host's runtime assembly + virtual-file population needs:
 /// the framework-owned main body (when the carrier emits one directly), the
 /// block side-files, styles + custom blocks, the scope id, the IDE artifact
-/// (when requested in the same pass), template facts, and diagnostics. A
-/// carrier that cannot produce a runtime module (Svelte today) returns the
-/// bundle with `main.body_code = None` AND no block side-files — the host
-/// detects the absence of a runtime surface and populates only the IDE slot.
+/// (when requested in the same pass), template facts, and diagnostics.
+///
+/// It carries only what the request ASKED FOR: a field is populated when its
+/// `want_*` option was set, so a bundle is not a whole-artifact set. A carrier
+/// that FAIL-CLOSES on a requested runtime surface does not produce a bundle at
+/// all — it returns the product-free
+/// [`CarrierCompileOutcome::RuntimeSurfaceRefused`] arm instead, so there is no
+/// shape in which a refusal carries an IDE artifact beside it.
 ///
 /// Not `Clone` — `RawTemplateData` is move-only, and the bundle is consumed
 /// once by the host's virtual-file population.
@@ -623,17 +674,6 @@ pub struct RuntimeCompileOutput {
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
     pub diagnostics: Vec<RuntimeDiagnostic>,
-    /// Whether the carrier REFUSED to produce a runtime surface for an
-    /// unsupported construct (a fail-closed runtime outcome), DISTINCT from
-    /// "no runtime surface was requested / this carrier is IDE-only". A
-    /// consumer REQUESTING the runtime artifact reads this to distinguish a
-    /// genuine unsupported-runtime refusal (no `Main`, the precise reason in
-    /// `diagnostics`) from a clean compile — so it cannot mistake an absent
-    /// `Main` for a successful runtime compile. The matching IDE artifact is
-    /// still produced (type-checking survives); the refusal diagnostics stay
-    /// NON-FATAL (`has_errors()` is false) so the IDE compile is not killed.
-    /// A carrier that emits a runtime surface (Vue) leaves this `false`.
-    pub runtime_surface_refused: bool,
     /// Whether the render function was inlined into `setup()` (Vue production
     /// topology). When true, `script` contains the complete component and
     /// `template` is `None` — host assembly must NOT attach a standalone
@@ -662,16 +702,99 @@ impl RuntimeCompileOutput {
             .iter()
             .any(|d| d.severity == RuntimeDiagnosticSeverity::Error)
     }
+}
 
-    /// Whether the carrier REFUSED a runtime surface for an unsupported
-    /// construct (a fail-closed runtime outcome). A runtime-requesting consumer
-    /// uses this — together with `has_runtime_surface() == false` — to treat the
-    /// outcome as a runtime refusal rather than a successful compile, while the
-    /// IDE artifact (`tsx`) and the non-fatal diagnostics keep type-checking
-    /// alive. NEVER true on a clean compile (a refusal sets it AND omits `Main`).
+/// Test-only convenience over [`CarrierCompiler::compile_bundle`] for fixtures
+/// whose carrier is known to PRODUCE.
+///
+/// Deliberately test-only: production code matches the outcome exhaustively, so
+/// a refusal can never be unwrapped into "some bundle" there. A test that is
+/// ABOUT the refusal calls `compile_bundle` directly and matches the arm.
+#[cfg(test)]
+pub(crate) trait CompileBundleProducedExt {
+    fn compile_bundle_expect_produced(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
+}
+
+#[cfg(test)]
+impl<T: CarrierCompiler + ?Sized> CompileBundleProducedExt for T {
+    fn compile_bundle_expect_produced(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        self.compile_bundle(source, artifact, opts, alloc)
+            .map(|outcome| {
+                outcome
+                    .into_produced()
+                    .expect("this fixture's carrier produces a runtime surface")
+            })
+    }
+}
+
+/// Why a carrier FAIL-CLOSED on the runtime surface a request asked for.
+///
+/// The reason is carried STRUCTURALLY — a stable code plus its message and
+/// span — so a consumer reads it from typed fields rather than recovering it by
+/// scanning diagnostic text for a framework-specific prefix.
+#[derive(Debug, Clone)]
+pub struct RuntimeSurfaceRefusal {
+    /// The framework-defined stable code for the refused surface.
+    pub diagnostic_code: String,
+    /// Human-readable reason.
+    pub message: String,
+    /// Optional carrier-absolute source span of the refusing construct.
+    pub span: Option<verter_span::Span>,
+    /// Diagnostics accumulated BEFORE the refusal (non-fatal). A refusal
+    /// carries no product, so these are the whole of what it reports.
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+/// The carrier's TERMINAL result for one compile request.
+///
+/// A sum, not a product-plus-flag: a refusal carries NO output of any kind, so
+/// "the runtime surface was refused AND a sibling product was published under
+/// the same request identity" is not representable. A request whose runtime
+/// surface fail-closes therefore yields no `tsx`, no `main`, no styles and no
+/// template data — the request's outcome is atomic across the products it asked
+/// for.
+///
+/// A carrier that was NOT asked for a runtime product (`want_runtime == false`)
+/// attempts no runtime compile and so can only ever be [`Self::Produced`].
+///
+/// `clippy::large_enum_variant` is allowed rather than boxing the produced arm.
+/// The bundle is ~1.6 KiB, but this value is returned once per compile and
+/// destructured immediately by its single caller, and the bundle was ALREADY
+/// returned by value before this sum existed — so boxing would add a heap
+/// allocation to every compile that the previous shape did not pay, purely to
+/// shrink the rare refusal arm's stack footprint.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum CarrierCompileOutcome {
+    /// The compile produced the requested product set.
+    Produced(RuntimeCompileOutput),
+    /// The requested runtime surface was refused. No product accompanies it.
+    RuntimeSurfaceRefused(RuntimeSurfaceRefusal),
+}
+
+impl CarrierCompileOutcome {
+    /// The produced bundle, or `None` when the runtime surface was refused.
+    ///
+    /// There is deliberately no accessor that yields products from the refusal
+    /// arm — the refusal simply has none.
     #[must_use]
-    pub fn runtime_surface_refused(&self) -> bool {
-        self.runtime_surface_refused
+    pub fn into_produced(self) -> Option<RuntimeCompileOutput> {
+        match self {
+            Self::Produced(output) => Some(output),
+            Self::RuntimeSurfaceRefused(_) => None,
+        }
     }
 }
 
@@ -741,12 +864,18 @@ pub trait CarrierCompiler: Send + Sync {
     /// cached artifact or a fresh carrier parse of the merged source.
     ///
     /// The carrier owns the typed downcast and native compile and returns a
-    /// neutral [`RuntimeCompileOutput`] re-expressing every field the host's
-    /// runtime assembly + virtual-file population needs. A carrier that
-    /// cannot yet produce a runtime module for the requested target returns
-    /// a typed [`CompileUnsupported`]. A carrier whose framework projects
-    /// ONLY an IDE surface (Svelte today) returns a bundle whose `main`
-    /// body is absent and that carries the IDE artifact when `want_ide`.
+    /// [`CarrierCompileOutcome`]: either a neutral [`RuntimeCompileOutput`]
+    /// re-expressing every field the host's runtime assembly + virtual-file
+    /// population needs, or a product-free
+    /// [`RuntimeSurfaceRefusal`]. A carrier that cannot serve the
+    /// requested target AT ALL returns a typed [`CompileUnsupported`].
+    ///
+    /// The carrier produces exactly the products the request asked for: the
+    /// runtime module and its side-files under `want_runtime`, the IDE artifact
+    /// under `want_ide`, template facts under `want_template_data`. It attempts
+    /// the runtime compile only under `want_runtime`, so a request that did not
+    /// ask for a runtime product can never be refused one — and a request that
+    /// IS refused publishes nothing at all.
     ///
     /// The adapter's codegen owns its own `CodeTransform` (the single
     /// source of truth for generated-code edits); the returned `code` /
@@ -757,7 +886,7 @@ pub trait CarrierCompiler: Send + Sync {
         artifact: &FrameworkParseArtifact,
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
+    ) -> Result<CarrierCompileOutcome, CompileUnsupported>;
 }
 
 #[cfg(test)]
@@ -936,7 +1065,7 @@ mod contract_tests {
             _artifact: &FrameworkParseArtifact,
             _opts: &RuntimeCompileOptions,
             _alloc: &oxc_allocator::Allocator,
-        ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
             // The fixture produces no runtime module — the typed unsupported
             // answer (invariant 4), never a silent empty bundle.
             Err(CompileUnsupported::NoIdeProjection {

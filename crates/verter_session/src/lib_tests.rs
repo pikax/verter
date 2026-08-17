@@ -756,14 +756,15 @@ fn invalidate_nodes_removes_last_good() {
             semantic_hash: [0; 16],
             content_override_hash: 0,
             css_hash_override: None,
-            outputs,
+            products: crate::types::CompileProducts::Produced {
+                outputs,
+                last_good_outputs: last_good,
+                tsx: None,
+                template_analysis: None,
+            },
             diagnostics: DiagnosticsSnapshot::default(),
-            last_good_outputs: last_good,
             last_access_tick: 1,
-            tsx: None,
-            template_analysis: None,
             fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            runtime_surface_refused: false,
         },
     );
 
@@ -773,10 +774,18 @@ fn invalidate_nodes_removes_last_good() {
     );
 
     let slot = slots.get(&42).unwrap();
-    assert!(!slot.outputs.contains_key(&VirtualNodeKind::Main));
-    assert!(!slot.outputs.contains_key(&VirtualNodeKind::Template));
+    assert!(!slot
+        .products
+        .outputs()
+        .unwrap()
+        .contains_key(&VirtualNodeKind::Main));
+    assert!(!slot
+        .products
+        .outputs()
+        .unwrap()
+        .contains_key(&VirtualNodeKind::Template));
     // last_good_outputs also cleared for these nodes
-    let last_good = slot.last_good_outputs.as_ref().unwrap();
+    let last_good = slot.products.last_good_outputs().unwrap();
     assert!(!last_good.contains_key(&VirtualNodeKind::Main));
     assert!(!last_good.contains_key(&VirtualNodeKind::Template));
 }
@@ -3515,14 +3524,15 @@ mod upsert_compile_cache_tests {
                     semantic_hash: [0; 16],
                     content_override_hash: 0,
                     css_hash_override: None,
-                    outputs: Default::default(),
+                    products: crate::types::CompileProducts::Produced {
+                        outputs: Default::default(),
+                        last_good_outputs: None,
+                        tsx: None,
+                        template_analysis: None,
+                    },
                     diagnostics: Default::default(),
-                    last_good_outputs: None,
                     last_access_tick: 0,
-                    tsx: None,
-                    template_analysis: None,
                     fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-                    runtime_surface_refused: false,
                 },
             );
         }

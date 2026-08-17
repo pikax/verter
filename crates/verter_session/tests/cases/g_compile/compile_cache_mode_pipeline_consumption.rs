@@ -371,8 +371,8 @@ fn compile_many_honors_per_input_requested_mode() {
     );
 
     // Both compiled to real output.
-    assert!(!results[0].code.is_empty());
-    assert!(!results[1].code.is_empty());
+    assert!(!results[0].code().is_empty());
+    assert!(!results[1].code().is_empty());
 }
 
 /// A `compile_many` Content warm hit must report `cache_hit == true` on
@@ -482,7 +482,7 @@ fn compile_many_error_after_downgrade_reports_true_mode() {
     let entry = &results[0];
 
     assert!(
-        !entry.errors.is_empty(),
+        !entry.errors().is_empty(),
         "the missing macro type dep must surface a compile error"
     );
     assert_eq!(

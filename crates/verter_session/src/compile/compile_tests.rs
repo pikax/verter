@@ -503,7 +503,9 @@ fn assemble_main_module_template_only_sfc() {
             },
             &alloc,
         )
-        .expect("vue carrier produces a runtime bundle");
+        .expect("vue carrier produces a runtime bundle")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     // script should be None for template-only SFC
     assert!(
@@ -568,7 +570,9 @@ fn assemble_main_module_inline_topology() {
             },
             &alloc,
         )
-        .expect("vue carrier produces a runtime bundle");
+        .expect("vue carrier produces a runtime bundle")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     // Inline compile: no separate template block, topology flag set.
     assert!(result.inline, "bundle must carry the inline topology flag");
@@ -653,7 +657,9 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
             },
             &alloc,
         )
-        .expect("vue carrier produces a runtime bundle");
+        .expect("vue carrier produces a runtime bundle")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     let profile = CompileProfile::default();
     let meta = FileMeta {

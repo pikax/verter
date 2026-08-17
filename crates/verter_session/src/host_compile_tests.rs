@@ -93,11 +93,11 @@ fn compile_many_returns_in_input_order() {
             "Stage D must preserve input position {i}"
         );
         assert!(
-            entry.errors.is_empty(),
+            entry.errors().is_empty(),
             "well-formed input {i} produced unexpected errors: {:?}",
-            entry.errors
+            entry.errors()
         );
-        assert!(!entry.code.is_empty(), "input {i} produced no code");
+        assert!(!entry.code().is_empty(), "input {i} produced no code");
     }
 }
 
@@ -138,8 +138,8 @@ fn compile_many_warm_cache_reuses_compile_results() {
 
     for (i, (a, b)) in r1.iter().zip(r2.iter()).enumerate() {
         assert_eq!(
-            a.code.as_ref(),
-            b.code.as_ref(),
+            a.code(),
+            b.code(),
             "warm-hit must produce byte-identical code at position {i}"
         );
     }
@@ -166,15 +166,15 @@ fn compile_many_isolates_per_file_errors() {
     );
     assert_eq!(entries.len(), 3);
     assert!(
-        entries[0].errors.is_empty(),
+        entries[0].errors().is_empty(),
         "/A.vue should compile cleanly"
     );
     assert!(
-        !entries[1].errors.is_empty(),
+        !entries[1].errors().is_empty(),
         "/B.vue should report at least one parse/compile error"
     );
     assert!(
-        entries[2].errors.is_empty(),
+        entries[2].errors().is_empty(),
         "/C.vue should compile cleanly"
     );
 }
@@ -197,9 +197,9 @@ fn compile_many_records_all_errors_not_just_first() {
     );
     assert_eq!(entries.len(), 1);
     assert!(
-        !entries[0].errors.is_empty(),
+        !entries[0].errors().is_empty(),
         "multi-error template should produce at least one error: {:?}",
-        entries[0].errors
+        entries[0].errors()
     );
     // Note: the parser's exact error count varies, so we assert >=1
     // here. The discriminating multi-error test is
@@ -232,19 +232,19 @@ fn compile_many_isolates_panics() {
     assert_eq!(entries.len(), 3);
 
     assert!(
-        entries[0].errors.is_empty(),
+        entries[0].errors().is_empty(),
         "/before.vue should not be affected by panic in /__panic__.vue"
     );
 
     let panic_entry = &entries[1];
     assert_eq!(panic_entry.canonical_id, PANIC_INJECT_SENTINEL);
     assert_eq!(
-        panic_entry.errors.len(),
+        panic_entry.errors().len(),
         1,
         "panic should yield exactly one error message: {:?}",
-        panic_entry.errors
+        panic_entry.errors()
     );
-    let msg = &panic_entry.errors[0];
+    let msg = &panic_entry.errors()[0];
     assert!(
         msg.starts_with(&format!("[{}] compiler panic: ", PANIC_INJECT_SENTINEL)),
         "panic error message should be prefixed with canonical id and \"compiler panic:\": {msg}"
@@ -255,7 +255,7 @@ fn compile_many_isolates_panics() {
     );
 
     assert!(
-        entries[2].errors.is_empty(),
+        entries[2].errors().is_empty(),
         "/after.vue should not be affected by panic in /__panic__.vue"
     );
 }
@@ -285,14 +285,14 @@ fn compile_many_dedup_conflicting_source_rejects_entire_group() {
         assert_eq!(entry.canonical_id, "/A.vue");
         assert!(
             entry
-                .errors
+                .errors()
                 .iter()
                 .any(|e| e.contains("duplicate canonical_id with conflicting source")),
             "Stage B should reject /A.vue at position {i} with duplicate-conflict error: {:?}",
-            entry.errors
+            entry.errors()
         );
         assert!(
-            entry.code.is_empty(),
+            entry.code().is_empty(),
             "rejected /A.vue should have empty code"
         );
     }
@@ -300,9 +300,9 @@ fn compile_many_dedup_conflicting_source_rejects_entire_group() {
     let b = &entries[2];
     assert_eq!(b.canonical_id, "/B.vue");
     assert!(
-        b.errors.is_empty(),
+        b.errors().is_empty(),
         "/B.vue should compile cleanly even when sibling /A.vue is rejected: {:?}",
-        b.errors
+        b.errors()
     );
 }
 
@@ -362,8 +362,8 @@ fn compile_many_compiles_each_canonical_once() {
     // Stage D fan-out clones one Arc to all 5 positions.
     for i in 1..5 {
         assert!(
-            Arc::ptr_eq(&entries[0].code, &entries[i].code),
-            "entries[0].code and entries[{i}].code must share the same Arc allocation \
+            std::ptr::eq(entries[0].code().as_ptr(), entries[i].code().as_ptr()),
+            "entries[0].code() and entries[{i}].code() must share the same Arc allocation \
              (Stage D clones the Arc, not the string)"
         );
     }
@@ -467,20 +467,20 @@ fn compile_many_compile_error_preserves_all_diagnostics() {
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert!(
-        !entry.errors.is_empty(),
+        !entry.errors().is_empty(),
         "multi-error template should produce at least one error message"
     );
     // If the codegen path returned `HostError::CompileError`, every
     // error message is prefixed with `[/multi-error.vue]`. If the
     // path returned `Ok(VirtualFileResponse)` with non-fatal
-    // diagnostics, messages come from `response.diagnostics` and are
+    // diagnostics, messages come from `response.diagnostics()` and are
     // NOT prefixed (they're the raw diagnostic message). Either path
     // is a valid contract — the discriminating property is "all
     // diagnostics surfaced", not "exactly two errors". The hard
     // assertion: no message is the literal "compile error" string,
     // which would indicate the previous bug where
     // `format!("host error: {host_err}")` collapsed the variant.
-    for msg in &entry.errors {
+    for msg in entry.errors() {
         assert!(
             msg.trim() != "compile error",
             "diagnostics must be unpacked from CompileError, not Display'd. Got: {msg:?}"
@@ -515,10 +515,10 @@ fn compile_many_default_pool_has_8mib_stack() {
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert!(
-        entry.errors.is_empty(),
+        entry.errors().is_empty(),
         "200-deep nested <div> compile must not overflow worker stack \
          (always-local-pool guarantee). Errors: {:?}",
-        entry.errors
+        entry.errors()
     );
 }
 
@@ -659,9 +659,9 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     );
     assert_eq!(entries.len(), 1);
     assert!(
-        entries[0].errors.is_empty(),
+        entries[0].errors().is_empty(),
         "compile_many input must compile cleanly: {:?}",
-        entries[0].errors
+        entries[0].errors()
     );
 
     // Primary discriminator: pool-id token equals THIS host's pool_id.
@@ -856,9 +856,9 @@ fn host_cpu_threads_some_zero_constructs_default_pool() {
     );
     assert_eq!(entries.len(), 1);
     assert!(
-        entries[0].errors.is_empty(),
+        entries[0].errors().is_empty(),
         "compile_many must succeed under Some(0) (treated-as-None) config: {:?}",
-        entries[0].errors
+        entries[0].errors()
     );
 }
 
@@ -894,8 +894,8 @@ fn host_cpu_threads_some_explicit_constructs_pool() {
     );
     assert_eq!(entries.len(), 1);
     assert!(
-        entries[0].errors.is_empty(),
+        entries[0].errors().is_empty(),
         "compile_many must succeed under Some(2) config: {:?}",
-        entries[0].errors
+        entries[0].errors()
     );
 }

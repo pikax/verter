@@ -72,7 +72,9 @@ fn assemble_inline_vapor_module(source: &str) -> String {
             },
             &allocator,
         )
-        .expect("the Vue carrier produces a runtime bundle for this fixture");
+        .expect("the Vue carrier produces a runtime bundle for this fixture")
+        .into_produced()
+        .expect("the Vue carrier produces a runtime surface; it never refuses one");
 
     let profile = CompileProfile {
         filename: Some(canonical_id.clone()),
