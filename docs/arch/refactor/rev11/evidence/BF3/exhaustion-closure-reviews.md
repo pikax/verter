@@ -293,3 +293,36 @@ FINDINGS — none
 PLANTS YOU AUTHORED — none
 git status --porcelain: <empty>
 ````
+
+---
+
+## The locator point this seat named, answered by maintainer act
+
+The confirm seat above passed on the conformance question and was nonetheless precise about where
+the remedy was incomplete, in its own words:
+
+> The act record separately notes that its BA0 locator enumerates lines 28 and 37 but not the same
+> operative consequence restated at BA0 lines 59-62 …; that narrower architecture-governance issue
+> does not undo the as-stated remedy, whose first alternative did not require a revert or an
+> exhaustive BA0 locator once the maintainer named and amended AT-2.
+
+That reading held two things apart correctly: the conformance finding it was asked about was
+discharged, AND the governance question the locator points at was still open. The architecture seat
+met that same question head-on, ruled the escalation CORRECT, and stated the only two ways out —
+*"only the maintainer can confirm coverage or direct reversion."*
+
+**The maintainer confirmed coverage.** A clarification act rules that the naming act covers all
+three `BA0.md` hunks: the charter states the same required-RED Svelte-refusal obligation in the
+findings-table row, the Required procedure paragraph, and the Required-exits paragraph, so dropping
+that obligation — which the naming act authorizes — necessarily edits every location stating it. The
+third hunk introduces no instruction the act does not already reach and grants `BA0` no scope, and
+reverting it would leave the charter self-contradictory. The same act separately rules that
+reclassifying `AT-2` removes it from BF3's exhaustion obligation, closing the second item the
+architecture seat held open.
+
+The act is recorded in full at
+[`maintainer-act-at2-scope-clarification.md`](maintainer-act-at2-scope-clarification.md); its effect
+on the architecture seat's two open points is recorded beneath that seat's own report in
+[`architecture-mandate-review.md`](architecture-mandate-review.md). No byte is changed by it — it
+describes coverage of bytes already landed. Nothing in either seat's verdict above is altered: this
+seat's `PASS` stands as issued, and its note stands as issued, now with the answer beneath it.

@@ -328,6 +328,10 @@ gate-integrity row (`docs/arch/gate-integrity-ledger.md`, GI-21) with its owner 
 outstanding, and `CLAUDE.md` says of that rule in its own words that it currently fails its own test.
 No block closes it by running more targeted filters.
 
+Both items were put to the maintainer, who ruled on each. The resolution is recorded beneath the
+seat's verbatim report below, not in place of it — see
+[The two open points, resolved](#the-two-open-points-resolved-by-maintainer-act).
+
 ### What the seat did NOT re-run
 
 Stated in its own report rather than inferred: the correction targets for SV-1 through SV-4, RT-1,
@@ -390,4 +394,587 @@ PLANTS YOU AUTHORED
 R2-AT2-INJECT | added `errors.push("REVIEW-R2-AT2-INJECTED-ERROR")` immediately after the HostBacked success arm's diagnostic collection in `crates/verter_session/src/host_compile.rs` | marker absent before (`0`), exactly once after (`1`); SHA `13f2cd52dfa8b87daa856fc553636a70785df0c014db1f5c0ff6eda974153730` -> `a227ccd8cfb87b2d0e135f811921b05621e1a6b1798c184e39700bb925a020b0` | named ignored test exited 101, `running 1 test`, RED at `svelte_batch_route_tests.rs:1315` because the successful entry reported the planted error; after restore the ignored test and live warning-only control each ran `1 passed` | restored SHA `13f2cd52dfa8b87daa856fc553636a70785df0c014db1f5c0ff6eda974153730`, marker `0`, `git diff --exit-code -- host_compile.rs` clean
 
 git status --porcelain: EMPTY
+````
+
+---
+
+## The two open points, resolved by maintainer act
+
+The seat's round-2 report above is unedited, and it is right where it stands. Both items it held
+open were held open for the same reason: the maintainer's naming act described its own coverage more
+narrowly than the act's operative sentence reached, and the seat refused to close that gap by
+inference. Refusing was correct. Neither point was a defect in the landed work, and neither was a
+track-level decision — the seat said so in its own words on the first (*"only the maintainer can
+confirm coverage or direct reversion"*) and located the second precisely as an act whose *"stated
+effect names item 6 only"*.
+
+The maintainer was asked directly and issued a clarification act on both. It is recorded in full at
+[`maintainer-act-at2-scope-clarification.md`](maintainer-act-at2-scope-clarification.md).
+
+**Point 1 — `BF3-A4`, the act's byte enumeration.** RULED: the act covers all three hunks. `BA0.md`
+states the same required-RED Svelte-refusal obligation in three places — the findings-table row, the
+Required procedure paragraph, and the Required-exits paragraph — so dropping that obligation, which
+the naming act authorizes, necessarily edits every location stating it. The third hunk introduces no
+instruction the act does not already cover and grants `BA0` no scope. The act also records why
+reversion is the wrong remedy: it would leave the charter self-contradictory, with the rejected
+obligation still live in one paragraph after being removed from the other two.
+
+This answers the seat's requirement as the seat itself framed it. The seat named two acceptable
+outcomes — the maintainer confirms coverage, or the maintainer directs reversion — and the first was
+taken by the only actor entitled to take it. The bytes are unchanged: the act authorizes no edit,
+and all three hunks stand exactly as they were when the seat inspected them and confirmed identical
+blob IDs against `9104e0be7`.
+
+**Point 2 — Required-exits sentence 1 and the "exhaust the retained inventory" objective.** RULED:
+reclassifying `AT-2` removes it from the exhaustion obligation. The act's reason, in its own words,
+is that *"BF3's exhaustion exit requires evidence for every GENUINE failure"* — which, as the next
+paragraph sets out, is the maintainer NARROWING that exit to genuine failures for this row, not a
+description of the charter's existing wording. The naming act reclassified `AT-2` as a latent
+construction hazard with reachability unproven, explicitly NOT a demonstrated defect, so under that
+narrowing it leaves the genuine-failure set entirely and there is no failure left for the exit to
+demand evidence of.
+
+**This is an amendment, not a reading of the charter's existing words, and the distinction matters.**
+The Required-exits paragraph's first two sentences — *"The full retained inventory has actual
+results"* and *"`UNPROVEN` records an open proof gap and cannot count as exhaustion"* — are
+unconditional as written; only the THIRD sentence carries the "Every genuine failure" qualifier. So
+the act is not observing that the exit already spoke only to genuine failures. It is the maintainer
+NARROWING that obligation to exclude one reclassified row, which is an act only the maintainer can
+take — precisely why the seat was right to route it here rather than resolve it. Sentences 1 and 2
+continue to bind every other row unconditionally, and every retained product/route row in
+`framework_product_surface_inventory.json` carries an actual driven result independently of this
+act.
+
+**The residual is not closed and is not claimed closed.** It stays recorded as `UNKNOWN` in
+[`dispositions.md`](dispositions.md), stays carried by the `#[ignore]`d characterization, and stays
+owned by `BA0`, which must remove the hazard as a construction property whether or not anyone ever
+reaches it. If it is ever demonstrated reachable, that reproduction is a NEW finding with its own
+RED target — as the amended `BA0` charter already states in the very hunk point 1 is about.
+
+**What the act does not do.** It accepts nothing. BF3 is not accepted, `BA0` is not accepted, B2 and
+B3 stay locked, `maintainer_decision` stays `PENDING`, and no production guard, typed refusal,
+withhold path, retraction or removal ID is authorized. It authorizes no byte beyond what is already
+landed.
+
+---
+
+## Round 3 — the mandate re-run on the resolved state
+
+The same seat and the same discipline, a fresh `codex exec` process with no memory of either earlier
+round, on the tree with the clarification act recorded. The prompt was neutral ("is this correct?"),
+stated that `BLOCKING` and `NOT-EVIDENCED` are legitimate outcomes, gave the maintainer acts as
+authority context without indicating any expected outcome, and told the seat in terms not to soften a
+verdict because two rounds had already run and not to manufacture a finding to look rigorous.
+
+It was a TARGETED re-run in one respect only: the seat was permitted to CARRY a charter item from
+round 2 instead of re-executing it, but only by stating the check it ran itself showing this delta
+does not touch that item. An item neither personally evidenced nor carried with such a check was
+`NOT-EVIDENCED` by default. It still counted the charter's procedure items and Required-exits
+sentences independently — seven and eight — and gave a per-item verdict for every one.
+
+`ARCHITECTURE VERDICT: BLOCKING`, with four findings, one at P1.
+
+**On the two points the act was issued for, the seat agreed.** Point 1: *"The treatment of the third
+`BA0.md` hunk is substantively correct"* — it re-derived the three hunks itself, confirmed each
+removes the required-RED Svelte-refusal obligation, confirmed the third replacement does not enlarge
+`BA0`, and confirmed no byte was smuggled in under a describing act (`git diff --quiet` clean on both
+paths, with SHA-256 on both). Point 2: *"The act reaches the exhaustion issue on its own terms"*,
+citing governance's reservation of amendment authority to the maintainer, and it separately verified
+that the record preserves what is NOT closed — reachability still `UNKNOWN`, the characterization and
+`BA0` ownership retained, a future reproduction still a new finding with its own RED target, nothing
+accepted.
+
+**Every procedure item and every Required-exits sentence came back `EVIDENCED`**, including the two
+rows round 2 left open. Its per-item table is reproduced in the verbatim report below.
+
+### The four findings, and their dispositions
+
+| id | rank | disposition |
+|---|---|---|
+| `BF3-R3-2` — the record claims a resolved-state re-run that is not in the tree | P1 | **FIXED by this section.** The claim was written before the run it described. This report is that run, recorded. Round 4 confirmed FIXED. |
+| `BF3-R3-1` — the record misdescribes the charter's own exit wording | P2 | **FIXED as a record correction.** The act is a maintainer NARROWING of an unconditional exit, not a reading of it. Round 4 found the first pass PARTLY FIXED — one unqualified sentence survived — and it is now corrected too. |
+| `BF3-R3-3` — the landing record's tail describes the previous delta | P2 | **FIXED.** Its verification section and proposed transition are rewritten for this delta. Round 4 found the first pass PARTLY FIXED on a stale line count, since removed. |
+| `BF3-R3-4` — the WIP commit subject is not a conventional type | P3 | **FIXED at squash.** The branch squashes to one `docs(arch):` commit. Round 4 ruled the remedy genuine. |
+
+**`BF3-R3-1` is the substantive one, and the seat was right.** The record had written the act's
+second clarification as though BF3's exhaustion exit already spoke only to genuine failures. It does
+not: the Required-exits paragraph's first two sentences are unconditional, and only the third carries
+the "Every genuine failure" qualifier. Reading the act as interpretive would misattribute a
+maintainer amendment to the charter's existing text — the same class of error, in the opposite
+direction, as inferring authority from a general ruling. The act is now recorded for what it is: the
+maintainer narrowing an unconditional obligation to exclude one reclassified row, an act only the
+maintainer can take. The maintainer's own words are quoted verbatim and unedited; the correction is
+in the record's framing around them, in
+[`maintainer-act-at2-scope-clarification.md`](maintainer-act-at2-scope-clarification.md), in this
+file, and in [`landing-record.md`](landing-record.md).
+
+**`BF3-R3-2` was a genuine ordering defect.** The clarification record's "Where this act's effect is
+recorded" section promised a resolved-state mandate re-run before that run existed. The seat refused
+to accept a forward reference as evidence, which is the correct standard — the fix is that the run
+happened and is recorded here, not that the sentence was softened.
+
+No finding touched production code, a ratified findings row, a charter, or a test. The seat verified
+that itself: the delta is four evidence documents, `crates/`, `packages/` and `scripts/` untouched,
+`git diff --check` clean.
+
+### Round 3 — verbatim report
+
+````
+ARCHITECTURE VERDICT: BLOCKING
+
+## Q1
+
+The treatment of the third `BA0.md` hunk is substantively correct.
+
+- `git diff --unified=0 b75fcebc…HEAD -- …/BA0.md` produced exactly three hunks: the findings row, required procedure, and required exits. Each removes the required-RED Svelte-refusal obligation.
+- The clarification expressly rules that all three are covered (`maintainer-act-at2-scope-clarification.md:45-56`). That directly satisfies round 2’s requirement that the maintainer either confirm coverage or direct reversion.
+- The third replacement does not enlarge BA0: it restates the naming act’s retained DEFER and removal of the required-RED target (`BA0.md:59-63`).
+- Nothing claims broader byte authority: the act says it authorizes no further byte (`maintainer-act-at2-scope-clarification.md:74-79`).
+
+No byte was smuggled in. `git diff --quiet 0a1eee6dd..HEAD -- BA0.md dispositions.md` exited 0. SHA-256 before/after:
+
+- `BA0.md`: `0854eaa7d695a70529ead5fa68935c1ca8e6acbbe9ebabf6ffb54488e30cec04`
+- `dispositions.md`: `af71f6ac738a9ead35ce7f012307a1ef52da0bebd3d6d4944b75263f54369867`
+
+## Q2
+
+The act reaches the exhaustion issue on its own terms: it directly rules, “reclassifying AT-2 removes it from the exhaustion obligation” (`maintainer-act-at2-scope-clarification.md:58-67`). Governance reserves formal rescope/amendment authority to the maintainer (`governance.md:12-21`), so this is not a track-level inference.
+
+The record also accurately preserves what is not closed:
+
+- Reachability remains `UNKNOWN` (`dispositions.md:120-128`).
+- The characterization and BA0 ownership remain (`maintainer-act-at2-scope-clarification.md:69-72,124-131`).
+- A future reachable reproduction remains a new finding requiring its own RED target.
+- BF3 and BA0 remain unaccepted, and B2/B3 remain locked (`maintainer-act-at2-scope-clarification.md:74-79,133-135`).
+
+However, the explanation misdescribes BF3’s original text. BF3’s objective requires exhaustion of the retained inventory (`BF3.md:12-15`), and exit sentences 1–2 unconditionally require actual results and forbid `UNPROVEN` from counting as exhaustion (`BF3.md:45-46`). Only sentence 3 is scoped to “Every genuine failure” (`BF3.md:46-49`). The record repeatedly says the exhaustion exit itself was already addressed only to genuine failures (`maintainer-act-at2-scope-clarification.md:62-67`; `landing-record.md:1027-1034`). The correct characterization is that the maintainer act normatively narrows/removes AT-2 from that obligation—not that BF3’s existing words already imposed only a genuine-failure condition.
+
+## Q3
+
+I independently counted seven numbered procedure items and eight Required-exits sentences.
+
+For carried rows, my carry check was:
+
+`git diff --quiet 0a1eee6dd..HEAD -- <all cited source, test, inventory, disposition, charter, DAG, and ledger paths>`
+
+It exited 0 and printed:
+
+`CARRY-CHECK: underlying procedure/exit evidence paths unchanged`
+
+## Q4
+
+The exact delta is four BF3 evidence documents, `+291/-0`:
+
+- three modified Markdown files;
+- one new clarification-act Markdown file.
+
+There is no production, test, fixture, build, charter, findings-row, DAG, or ledger edit. `crates/`, `packages/`, and `scripts/` were unchanged. `git diff --check 0a1eee6dd..HEAD` produced no diagnostics.
+
+The preserved round-2 verdict is not substantively weakened; the delta appends the maintainer resolution beneath it. No ratified row or charter was edited.
+
+The delta nevertheless introduces unsupported or internally stale governance claims:
+
+- It says an architecture mandate re-run on the resolved state is already recorded, but the file contains only rounds 1 and 2, both predating the clarification (`maintainer-act-at2-scope-clarification.md:139-141`).
+- The landing record’s final proposed transition still says both points need maintainer action (`landing-record.md:1092-1099`), contradicting its newly added resolution at `:1005-1044`.
+- Its “Verification for this delta” still describes the prior test-plus-doc delta rather than `0a1eee6dd..HEAD` (`landing-record.md:1046-1057`).
+
+## Q5
+
+- Stub Prevention: no test or implementation changed. The round-2 discrimination evidence remains intact and all underlying files passed the carry check. No new test stub was introduced.
+- No phase archaeology in production code: satisfied; no production path changed.
+- No program vocabulary in source/commits: source side satisfied because `crates/`, `packages/`, and `scripts/` are untouched; the commit subject contains no revision/block identifier. Program documents are expressly exempt (`CLAUDE.md:625-630`).
+- Testing-Hermeticity: satisfied for this delta; no test, fixture, external-corpus reference, or test configuration changed (`CLAUDE.md:487-491`).
+- Verification Must Prove Execution: not satisfied by the claim at `maintainer-act-at2-scope-clarification.md:139-141`; no resolved-state architecture re-run is present in the tree. The broader pre-existing repository gap remains explicitly owned by GI-21 (`gate-integrity-ledger.md:43`).
+- Commit convention: violated. HEAD is `wip: record clarification act and resolutions`, while the repository requires an enumerated conventional type (`CLAUDE.md:615-623`).
+
+## PER-ITEM TABLE
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| Procedure 1 — build/run shipped-path Svelte gate | EVIDENCED | CARRIED from round 2 (`architecture-mandate-review.md:382-386`); official-gate source unchanged by the carry check. |
+| Procedure 2 — exact six client cells and server refusal | EVIDENCED | CARRIED from round 2; round-1 detail is preserved at `architecture-mandate-review.md:156`; gate and cell-record paths unchanged. |
+| Procedure 3 — independent plant per claimed axis | EVIDENCED | CARRIED from round 2; preserved evidence at `architecture-mandate-review.md:158`; official-gate source unchanged. |
+| Procedure 4 — retained reachable-success products/routes | EVIDENCED | CARRIED from round 2’s reruns (`architecture-mandate-review.md:362`); inventory/product/batch/transport sources unchanged. |
+| Procedure 5 — classify every mismatch before ownership | EVIDENCED | Personally verified classifications for SV/RT/AT/CSS/TR/RA at `dispositions.md:21-33` and BND at `:256-259`. |
+| Procedure 6 — regression for every genuine defect | EVIDENCED | CARRIED from round 2 (`architecture-mandate-review.md:363`); all correction-target files unchanged. AT-2 is not a genuine defect under the naming act. |
+| Procedure 7 — named owner and acceptance/test ID; no guard/removal | EVIDENCED | Personally verified `dispositions.md:23-31,256-259`; delta contains no production or removal-ID edit. |
+| Exit 1 — full retained inventory has actual results | EVIDENCED | Round-2 reachable-inventory execution carried from `architecture-mandate-review.md:362`; the maintainer directly removes AT-2 from this obligation at `maintainer-act-at2-scope-clarification.md:58-67`. |
+| Exit 2 — `UNPROVEN` is an open gap and not exhaustion | EVIDENCED | Residual remains UNKNOWN and expressly unclosed at `dispositions.md:120-128` and `maintainer-act-at2-scope-clarification.md:124-131`; it is not represented as an exhausted inventory row. |
+| Exit 3 — every genuine failure has evidence/regression/owner/ID | EVIDENCED | CARRIED from round 2 (`architecture-mandate-review.md:366`); dispositions and all target files unchanged. |
+| Exit 4 — non-vacuous FC-ATOMIC-001 | EVIDENCED | CARRIED from round 2 (`architecture-mandate-review.md:382-386`); product/batch tests unchanged. |
+| Exit 5 — route parity, mutations, owner regressions replace guards | EVIDENCED | CARRIED from round 2 (`architecture-mandate-review.md:367`); relevant suites unchanged. |
+| Exit 6 — if no genuine failure exists, only per-failure clauses vacuous | EVIDENCED | Antecedent is false: nine genuine rows remain at `dispositions.md:23-31,256-259`. Round 2 likewise recorded the sentence as vacuous (`architecture-mandate-review.md:382-385`). |
+| Exit 7 — AMD-009 ratified and four predecessors exist | EVIDENCED | CARRIED from round 2; `program-dag.toml:81-103` still contains BA0/BS0/BCSS0/BRT0 after BF3. |
+| Exit 8 — B2/B3 locked pending six acceptances | EVIDENCED | CARRIED from round 2; predecessor lists remain at `program-dag.toml:117-127`, while BF3 is BLOCKED and correction owners LOCKED (`program-state.toml:341-365`). |
+
+## NEW FINDINGS
+
+- `BF3-R3-1` — P2 — The record inaccurately describes BF3’s exhaustion objective and first two exit sentences as applying only to genuine failures. The actual text is unconditional; only sentence 3 uses that qualifier. Location: `maintainer-act-at2-scope-clarification.md:62-67` and `landing-record.md:1027-1034`. Fix: characterize the act as the maintainer’s normative narrowing/removal of AT-2 from the otherwise broader obligation, rather than attributing that limitation to BF3’s existing wording.
+
+- `BF3-R3-2` — P1 — The clarification record claims an independent architecture re-run on the resolved state is already recorded, but `architecture-mandate-review.md` contains only the two pre-clarification rounds plus actor-authored resolution prose. Location: `maintainer-act-at2-scope-clarification.md:139-141`. Fix: remove the claim until this independent report is recorded, or append and bind the actual resolved-state mandate report.
+
+- `BF3-R3-3` — P2 — The landing record ends with a current-looking proposed transition saying both maintainer rulings are still needed, contradicting the resolution added earlier in the same file; its verification section also describes the wrong delta boundary. Location: `landing-record.md:1046-1057,1077-1100`. Fix: mark the old proposal/verification section superseded and add a correctly bounded post-clarification transition after the independent review result exists.
+
+- `BF3-R3-4` — P3 — HEAD’s subject `wip: record clarification act and resolutions` does not use one of the repository’s prescribed conventional commit types. Rule: `CLAUDE.md:615-623`. Fix: amend or squash to an allowed subject such as `docs(arch): record clarification act and resolutions`.
+
+## PLANTS YOU AUTHORED
+
+none
+
+git status --porcelain:
+
+```text
+```
+````
+
+---
+
+## Round 4 — the confirm on the round-3 fix delta
+
+A fix delta is not self-certifying. This block's entire history is the distinction between recording
+an objection and having authority over it, and between satisfying an objection and being the one to
+declare it satisfied — so the four round-3 fixes went back to a fresh external seat rather than being
+closed by the actor who wrote them. Same discipline: `codex exec`, `gpt-5.6-sol`, effort `high`, a
+new process, a neutral prompt that quoted all four findings verbatim, stated that re-affirming the
+round-3 position is legitimate if the fixes do not hold, and told the seat not to manufacture a
+finding to look rigorous or block on something it had not verified.
+
+`ARCHITECTURE VERDICT: BLOCKING`, **one new finding at P3**, two findings FIXED, two PARTLY FIXED.
+
+| finding | round-4 ruling |
+|---|---|
+| `BF3-R3-2` (P1) | **FIXED.** The seat checked that the round-3 report now in the tree is a genuine independent report — first-person checks, full per-item table, its own findings and plants declaration — and not the actor's summary of one. |
+| `BF3-R3-4` (P3) | **FIXED by the stated landing remedy.** The squash to one `docs(arch):` commit is a genuine remedy; the interim `wip:` subjects are not the landed state. |
+| `BF3-R3-1` (P2) | **PARTLY FIXED.** The correction is accurate and appears in all three files, and the maintainer's quoted words were proven unedited — the seat extracted the blockquote at both ends of the fix delta and got the same SHA-256. But one actor-authored sentence still asserted the mischaracterization unqualifiedly before the paragraph that corrects it. |
+| `BF3-R3-3` (P2) | **PARTLY FIXED.** The superseded markers and the new sections' path boundary are right; the quoted line count was stale. |
+| `BF3-R4-1` (P3, new) | The verification section quoted a `git diff --stat` figure that the next evidence commit invalidated. |
+
+**Both residuals are closed, and both were real.** The surviving sentence in this file's Point 2 now
+attributes the "every GENUINE failure" reading to the act as the act's own words and forwards to the
+paragraph that explains it is a narrowing — a contradiction followed by a correction is still a
+contradiction on the page, and the seat was right to say so. And `BF3-R4-1` is closed the way the
+seat itself suggested: the volatile shortstat is REMOVED rather than refreshed, because a line count
+inside a file that keeps growing as evidence is appended to it will go stale again on the next
+commit. The exact `--name-status` enumeration is the boundary claim and does not move.
+
+Everything else the seat checked came back clean. All seven procedure items and all eight
+Required-exits sentences stay `EVIDENCED`, with its own carry check (`git diff --name-status` over
+the fix delta, plus a targeted `git diff --quiet` over the charter, dispositions, inventory-bearing
+evidence, `BA0`, the DAG and the ledger, exit 0). The fix delta touches no production, test, fixture,
+build, charter, DAG, ledger or ratified-findings-row byte; the round-3 verdict was appended to, never
+weakened; the maintainer blockquote is byte-identical. It independently reproduced the whole
+verification set — `cargo fmt --all --check` exit 0, the three documentation guards at 14 passed,
+both ledger validator modes OK at 62 blocks, `git diff --check` empty — and ruled the no-gate
+reasoning sound for a documentation-only delta under the standing gate-scope rule.
+
+### Round 4 — verbatim report
+
+Two mechanical normalizations were applied to the seat's output, and nothing else. **First**, it
+emitted absolute worktree paths inside its markdown links; those are machine-specific and a
+repository guard forbids committing them, so each link was reduced to its basename-and-line citation
+(`[x](/Users/.../docs/.../BF3.md:12)` → `` `BF3.md:12` ``). **Second**, trailing whitespace was
+stripped: the seat's markdown hard breaks left two spaces at line ends, which `git diff --check`
+reports as a defect, and this file's own verification claims that check produces no output. Every
+word, verdict, finding and figure is the seat's own.
+
+````
+ARCHITECTURE VERDICT: BLOCKING
+
+## Q1
+
+- `BF3-R3-1` — **PARTLY FIXED.** The correction accurately recognizes that the objective and exit sentences 1–2 are unconditional, while only sentence 3 says “Every genuine failure” (`BF3.md:12`, `BF3.md:45`). Correct normative-narrowing language now appears in the clarification record (`maintainer-act-at2-scope-clarification.md:105`), architecture record (`architecture-mandate-review.md:434`), and landing record (`landing-record.md:1030`). However, actor-authored prose still states unqualifiedly that “BF3’s exhaustion exit requires evidence for every GENUINE failure” (`architecture-mandate-review.md:428`). The following paragraph contradicts/corrects it, but the mischaracterization itself remains.
+
+  The maintainer quotation was not altered by the fix: extracting the blockquote at `e14b4e61c` and HEAD produced the same SHA-256, `e0578cf3ca54473ee252c39f6e16357ce9aeab8c08bd98eb62e410076a6ee702`; byte comparison exited 0. The quoted words remain at `maintainer-act-at2-scope-clarification.md:33`.
+
+- `BF3-R3-2` — **FIXED.** A distinct verbatim round-3 report is now recorded after the actor-authored resolution prose (`architecture-mandate-review.md:517`). It contains the independent seat’s `BLOCKING` verdict, first-person checks, full per-item table, four findings, plants declaration, and clean-status output (`architecture-mandate-review.md:520`). This matches the independently run report described in the review context; it is not merely the preceding actor summary.
+
+- `BF3-R3-3` — **PARTLY FIXED.** Both stale sections are expressly marked superseded (`landing-record.md:1050`, `landing-record.md:1085`). The replacement verification and acceptance-transition sections follow the independent report and correctly hold architecture review at `BLOCKING` pending this confirmation (`landing-record.md:1161`, `landing-record.md:1224`). Their path boundary is correct, but the claimed shortstat is not: the record says `508 insertions`, while current `0a1eee6dd..HEAD` is `4 files changed, 631 insertions(+), 2 deletions(-)` (`landing-record.md:1166`).
+
+- `BF3-R3-4` — **FIXED by the stated landing remedy.** The present three `wip:` commits are not the proposed landed state. Squashing them into one `docs(arch): …` commit is a genuine remedy under the allowed conventional types (`CLAUDE.md:615`, `architecture-mandate-review.md:494`). The final description must also continue to omit BF3/revision/block vocabulary.
+
+## Q2
+
+The fix delta is exactly three modified BF3 evidence documents, `352 insertions(+), 14 deletions(-)`. It introduces one new record defect: the `508 insertions` claim became stale when the final 123-line landing-record commit was added.
+
+It introduces no production, test, fixture, build, charter, DAG, ledger, or ratified-findings-row change. `git diff --quiet e14b4e61c..HEAD` exited 0 for the BF3/BA0 charters, dispositions, exhaustion review, DAG, and ledger. The round-3 verbatim verdict remains `BLOCKING`; it was appended, not weakened. The maintainer blockquote remains byte-identical.
+
+The new tables claiming all four findings are `FIXED` (`architecture-mandate-review.md:487`, `landing-record.md:1134`) consequently overstate the present result for R3-1 and R3-3.
+
+## Q3
+
+All seven procedure items and all eight Required-exits sentences remain **EVIDENCED**.
+
+My carry check was `git diff --name-status e14b4e61c..HEAD`: it lists only the architecture review, landing record, and clarification record. A targeted `git diff --quiet` over the charter, dispositions, inventory-bearing evidence, BA0 charter, DAG, ledger, and preserved exhaustion review exited 0. Thus no source, test, inventory row, classification, owner/acceptance mapping, predecessor, or lock state underlying the round-3 per-item table changed. The framing correction strengthens the accuracy of exits 1–2; the remaining prose/stat defects do not reverse any item’s evidence.
+
+## Q4
+
+- **Stub Prevention:** satisfied. Neither boundary changes a test or implementation, so no stub, placeholder, or non-discriminating assertion was introduced (`CLAUDE.md:562`).
+
+- **No program vocabulary:** satisfied for file content. All changes are within the expressly exempt program document tree; `crates/`, `packages/`, and `scripts/` are untouched (`CLAUDE.md:625`). The squashed commit subject must describe the documentation change without `BF3`, `rev11`, or another block/program identifier.
+
+- **Commit convention:** the stated squash remedy is valid. A final subject such as `docs(arch): record clarification act and resolutions` uses an allowed type and contains no program identifier (`CLAUDE.md:617`).
+
+- **No phase archaeology / Testing-Hermeticity:** not implicated because no production or test path changed.
+
+## Q5
+
+The verification discipline is sound for this documentation-only delta under the stated maintainer rule. The complete `0a1eee6dd..HEAD` name-status enumeration proves—not merely asserts—that no source, test, fixture, build, charter, ledger, or DAG file changed. Running the canonical gate would therefore violate the standing delta-scope rule and was correctly omitted.
+
+I independently reproduced:
+
+- `cargo fmt --all --check` — exit 0.
+- Document guards — 12 portability-module tests plus the two other named guards: 14 passed, 0 failed, 0 ignored.
+- Live ledger validator — OK, 62 blocks.
+- Template ledger validator — OK, 62 blocks.
+- `git diff --check 0a1eee6dd..HEAD` — no output.
+
+Thus the claimed runs are consistent with current execution. The exception is the separate stale shortstat claim identified above.
+
+## NEW FINDINGS
+
+- `BF3-R4-1` — **P3** — The current-delta verification records the intermediate shortstat `4 files changed, 508 insertions(+), 2 deletions(-)`, but current `0a1eee6dd..HEAD` is `4 files changed, 631 insertions(+), 2 deletions(-)`. Location: `landing-record.md:1166`. Fix: update the count after all final evidence is recorded, or remove the volatile numeric shortstat and retain the exact name-status boundary.
+
+## PLANTS YOU AUTHORED
+
+none
+
+git status --porcelain:
+
+```text
+```
+````
+
+---
+
+## Round 5 — the confirm on the round-4 residuals
+
+Same discipline, a fifth fresh process. The prompt quoted round 4's residuals verbatim, and — because
+this is an evidence file that records seat reports, so every recorded report changes the file that
+records it — it stated the regress openly and asked the seat to judge the proposed closure rather
+than discover it: that the last change is purely additive and factual, an append of the seat's own
+verbatim report plus a summary, and that this append is intended to be the only subsequent change
+before the branch squashes and fast-forwards.
+
+`ARCHITECTURE VERDICT: BLOCKING`, **one new finding at P3** — and it was caused by the recording act
+itself, exactly the class the prompt asked about.
+
+**Both round-4 residuals: genuinely fixed.** On `BF3-R3-1`: *"The surviving sentence now attributes
+the disputed wording to the maintainer act and explicitly identifies it as a narrowing, not the
+charter's original meaning."* On `BF3-R3-3`/`BF3-R4-1`: *"The live verification removes the volatile
+shortstat and retains the exact name-status boundary"*, with the obsolete numbers surviving only
+inside the labelled historical round-4 report. It re-proved the maintainer blockquote byte-identical
+across three commits by SHA-256, re-affirmed all seven procedure items and all eight Required-exits
+sentences `EVIDENCED` under its own carry check, and confirmed the record stays honest on every open
+item — `AT-2` still `UNKNOWN` and owned by `BA0`, nothing accepted, nothing unlocked.
+
+**`BF3-R5-1` (P3): the append introduced trailing whitespace.** The round-4 report's markdown hard
+breaks left two spaces at a line end, so `git diff --check` over the block delta reported a
+diagnostic while this block's verification claimed that check produces no output. A cosmetic byte,
+but the claim it falsified is a verification claim, and the seat was right that a closure which
+"preserves every asserted invariant" is the whole basis for the additive-recording argument.
+
+Fixed as the seat itself prescribed: the whitespace is normalized, the normalization is disclosed
+alongside the path reduction in the reproduction note above, and `git diff --check` is rerun after
+the final append. Round 2 had ruled the same whitespace class REJECTED-as-intentional inside verbatim
+reports; that ruling was about not rewriting quoted bytes in an already-landed file, and it does not
+license a live verification claim that the tree contradicts.
+
+### Round 5 — verbatim report
+
+Reproduced with the same two mechanical normalizations disclosed above — absolute worktree paths
+reduced to basename-and-line citations, trailing whitespace stripped — and nothing else.
+
+````
+ARCHITECTURE VERDICT: BLOCKING
+
+## Q1
+
+`BF3-R3-1` is genuinely fixed. The surviving sentence now attributes the disputed wording to the maintainer act and explicitly identifies it as a narrowing, not the charter’s original meaning (`architecture-mandate-review.md:428`, `architecture-mandate-review.md:437`; compare `BF3.md:45`).
+
+The maintainer blockquote is byte-identical at `e14b4e61c`, `66a9500a3`, and HEAD: SHA-256 `e0578cf3ca54473ee252c39f6e16357ce9aeab8c08bd98eb62e410076a6ee702`; direct comparison exited 0 (`maintainer-act-at2-scope-clarification.md:33`).
+
+`BF3-R3-3`/`BF3-R4-1` is also genuinely fixed. The live verification removes the volatile shortstat and retains the exact name-status boundary (`landing-record.md:1181`). The obsolete numbers survive only inside the clearly labelled verbatim historical round-4 report (`architecture-mandate-review.md:670`).
+
+## Q2
+
+The residual delta is exactly two modified BF3 evidence files, `152 insertions(+), 14 deletions(-)`. The whole delta remains exactly four BF3 evidence files. No production, test, fixture, build, charter, DAG, ledger, or ratified-row path changed.
+
+The round-4 `BLOCKING` verdict and findings remain unweakened (`architecture-mandate-review.md:642`, `architecture-mandate-review.md:677`). Its disclosed basename-citation reduction is consistent with the supplied excerpts; the recorded report contains no machine-specific link target, and the machine-root guard passes (`architecture-mandate-review.md:672`).
+
+However, the append introduced one new defect: a two-space blank line at `architecture-mandate-review.md:683`. Consequently, `git diff --check 0a1eee6dd..HEAD` now reports trailing whitespace, contradicting the current-tree “no output” claim at `landing-record.md:1219`.
+
+## Q3
+
+All seven procedure items and all eight Required-exits sentences remain `EVIDENCED` (`architecture-mandate-review.md:590`).
+
+My carry check was:
+
+- `git diff --name-status 66a9500a3..HEAD` — only the architecture review and landing record.
+- Targeted `git diff --quiet` over both charters, dispositions, exhaustion review, DAG, ledger, `crates/`, `packages/`, and `scripts/` — exit 0.
+- The full per-item evidence table remains unchanged (`architecture-mandate-review.md:594`).
+
+The new whitespace defect does not alter any underlying procedure or exit evidence.
+
+## Q4
+
+The record remains honest on substantive state:
+
+- `AT-2` reachability remains `UNKNOWN`, open, and owned by `BA0` (`dispositions.md:120`, `maintainer-act-at2-scope-clarification.md:151`, `landing-record.md:1253`).
+- The act explicitly accepts neither BF3 nor BA0 and unlocks neither B2 nor B3 (`maintainer-act-at2-scope-clarification.md:74`).
+- BF3 remains `BLOCKED` with `maintainer_decision = "PENDING"` (`program-state.toml:341`).
+- BA0, BS0, BCSS0, BRT0, B2, and B3 remain locked (`program-state.toml:362`; `program-state.toml:447`).
+
+## Q5
+
+Stub Prevention is unaffected because neither boundary changes implementation or tests (`CLAUDE.md:562`). Program vocabulary appears only in the expressly exempt program-document tree; source paths are untouched (`CLAUDE.md:625`).
+
+The proposed single squashed `docs(arch): …` landing shape satisfies the conventional-commit rule, provided its final subject contains no revision or block identifier (`CLAUDE.md:615`). The current `wip:` subjects are acceptable only because they will not be the landed history.
+
+Skipping the canonical gate is correct under the stated documentation/test-only gate-scope rule (`landing-record.md:1190`). I reproduced:
+
+- `cargo fmt --all --check` — exit 0.
+- Three document guards — 14 passed.
+- Both ledger validators — OK, 62 blocks each.
+- `git diff --check 0a1eee6dd..HEAD` — exit 2, one trailing-whitespace diagnostic.
+
+The proposed additive-recording closure is sound only when the final append preserves every asserted invariant. Here it did not. Normalize the hard-break whitespace, disclose that normalization alongside the path reduction, and rerun `git diff --check` after all final evidence is appended.
+
+## NEW FINDINGS
+
+- `BF3-R5-1` — **P3** — The appended round-4 report introduces trailing whitespace at `architecture-mandate-review.md:683`, causing `git diff --check 0a1eee6dd..HEAD` to fail while `landing-record.md:1219` claims no output. Fix: remove the two spaces, update the reproduction disclosure to include that normalization, and rerun the check after the final evidence append.
+
+## PLANTS YOU AUTHORED
+
+none
+
+git status --porcelain:
+
+```text
+```
+````
+
+---
+
+## Round 6 — the mandate closes
+
+Same discipline, a sixth fresh process, on the tree with round 5's residual fixed and its report
+recorded. The prompt again stated the recording regress openly, named round 5's own prescription as
+what had been applied, described the two disclosed normalizations as the invariant-preserving
+practice, and said in terms that if the block is correct, saying so is the right answer — while
+keeping `BLOCKING` and `NOT-EVIDENCED` legitimate and forbidding a finding manufactured to look
+rigorous.
+
+**`ARCHITECTURE VERDICT: PASS`. No findings. No plants needed.**
+
+It did not take the closure on the record's word. It re-ran `git diff --check` over both the residual
+and the whole block delta (both exit 0), and it PROVED the normalization claim rather than accepting
+it: comparing the round-4 report at `b8049b3af` with `HEAD` after stripping trailing whitespace was
+byte-identical, *"the sole normalized line changed from bytes `20 20 0a` to `0a`. No verdict,
+finding, figure, or wording changed."* It re-proved the maintainer blockquote byte-identical by
+SHA-256 across four commits, and it checked round 5's own quoted insertion figure against the actual
+range.
+
+All seven procedure items and all eight Required-exits sentences: `EVIDENCED`, in its own table, with
+its own carry check over both charters, `dispositions.md`, the exhaustion evidence, the product
+inventory, the DAG, the ledger, `crates/`, `packages/` and `scripts/` (exit 0).
+
+On the two governance points the clarification act was issued for, it agreed with both and with how
+they are bounded: the first *"properly covers all three existing `BA0.md` hunks without authorizing
+new scope or bytes"*; the second is *"correctly presented as a maintainer-authored normative
+narrowing for `AT-2`, not as an interpretation of BF3's unconditional inventory language"*, with that
+authority belonging to the maintainer under `governance.md`. And it verified what stays open rather
+than assuming it: `AT-2` reachability still explicitly `UNKNOWN`, its correction still owned by
+`BA0`, nothing accepted, nothing unlocked, and the live ledger still `BLOCKED` / `BLOCKING` /
+`PENDING` with all six downstream blocks locked.
+
+Repository rules satisfied. No canonical gate run, correctly, under the standing documentation-only
+rule — and it reproduced the whole narrow verification set itself.
+
+### Round 6 — verbatim report
+
+Reproduced with the same two disclosed mechanical normalizations — absolute worktree paths reduced to
+basename-and-line citations, trailing whitespace stripped — and nothing else.
+
+````
+ARCHITECTURE VERDICT: PASS
+
+## Q1
+
+`BF3-R5-1` is fixed. `git diff --check 0a1eee6dd..HEAD` and `git diff --check b8049b3af..HEAD` both produced no output and exited 0, matching the live verification claim (`landing-record.md:1220-1233`).
+
+The two normalizations are accurately disclosed immediately before round 4 and again before round 5: absolute paths become `basename:line` citations and trailing whitespace is stripped (`architecture-mandate-review.md:670-678`, `architecture-mandate-review.md:782-785`). Comparing round 4 at `b8049b3af` with `HEAD` after stripping trailing whitespace was byte-identical; the sole normalized line changed from bytes `20 20 0a` to `0a`. No verdict, finding, figure, or wording changed. Round 5’s historical `152 insertions(+), 14 deletions(-)` figure also exactly matches `66a9500a3..b8049b3af` (`architecture-mandate-review.md:798-804`).
+
+The prescribed normalization and final check are recorded where the finding is resolved (`architecture-mandate-review.md:770-780`, `architecture-mandate-review.md:840-844`).
+
+## Q2
+
+No new defect.
+
+The residual delta contains exactly two modified BF3 evidence files; the whole block contains exactly four BF3 evidence files. No production, test, fixture, build, charter, DAG, ledger, or ratified findings-row path changed (`landing-record.md:1193-1208`).
+
+The round-4 `BLOCKING` verdict and findings remain intact (`architecture-mandate-review.md:642-650`). The maintainer blockquote at `maintainer-act-at2-scope-clarification.md:33-79` has identical SHA-256 at `e14b4e61c`, `66a9500a3`, `b8049b3af`, and `HEAD`: `e0578cf3ca54473ee252c39f6e16357ce9aeab8c08bd98eb62e410076a6ee702`. Direct comparison exited 0.
+
+## Q3
+
+All verdicts remain `EVIDENCED`. I ran `git diff --quiet b8049b3af..HEAD` over both charters, dispositions, exhaustion evidence, the product inventory, DAG, ledger, `crates/`, `packages/`, and `scripts/`; it exited 0. The residual name-status lists only the architecture review and landing record. The underlying per-item evidence remains at `architecture-mandate-review.md:590-608`.
+
+| Item | Verdict |
+|---|---|
+| Procedure 1 | EVIDENCED |
+| Procedure 2 | EVIDENCED |
+| Procedure 3 | EVIDENCED |
+| Procedure 4 | EVIDENCED |
+| Procedure 5 | EVIDENCED |
+| Procedure 6 | EVIDENCED |
+| Procedure 7 | EVIDENCED |
+| Required exit 1 | EVIDENCED |
+| Required exit 2 | EVIDENCED |
+| Required exit 3 | EVIDENCED |
+| Required exit 4 | EVIDENCED |
+| Required exit 5 | EVIDENCED |
+| Required exit 6 | EVIDENCED |
+| Required exit 7 | EVIDENCED |
+| Required exit 8 | EVIDENCED |
+
+## Q4
+
+The block is correctly recorded and bounded.
+
+The first clarification properly covers all three existing `BA0.md` hunks without authorizing new scope or bytes (`maintainer-act-at2-scope-clarification.md:45-56`, `maintainer-act-at2-scope-clarification.md:81-103`). The second is correctly presented as a maintainer-authored normative narrowing for `AT-2`, not as an interpretation of BF3’s unconditional inventory language (`maintainer-act-at2-scope-clarification.md:105-130`, `architecture-mandate-review.md:428-446`). That authority belongs to the maintainer (`governance.md:12-21`).
+
+`AT-2` reachability remains explicitly `UNKNOWN` and open (`dispositions.md:120-128`). Its construction-hazard correction remains owned by `BA0` (`BA0.md:20-28`, `BA0.md:37-50`; `maintainer-act-at2-scope-clarification.md:151-158`).
+
+Nothing is accepted or unlocked by the act (`maintainer-act-at2-scope-clarification.md:74-79`). The live ledger still has BF3 `BLOCKED`, architecture `BLOCKING`, and maintainer decision `PENDING`; BA0, BS0, BCSS0, BRT0, B2, and B3 remain locked (`program-state.toml:341-380`, `program-state.toml:383-486`).
+
+The proposed transition is consistent: `program/architecture-lock` resolves exactly to base `0a1eee6dd`; acceptance remains conditional on this confirm and the maintainer, with candidate and accepted tree equal only upon acceptance (`landing-record.md:1238-1268`).
+
+## Q5
+
+Repository rules are satisfied.
+
+Stub Prevention is unaffected because neither boundary changes tests or implementation (`CLAUDE.md:562-578`). Program vocabulary occurs only inside the expressly exempt program-document tree; source is untouched. The final squashed commit must omit revision/block identifiers (`CLAUDE.md:615-630`).
+
+A single subject such as `docs(arch): record clarification act and resolutions` satisfies the conventional-commit rule. The current `wip:` subjects are acceptable only because they will be removed by the squash.
+
+Skipping the canonical gate is correct under the standing documentation/test-only delta rule (`landing-record.md:1202-1208`). I did not run it. Narrow verification produced:
+
+- `cargo fmt --all --check`: exit 0.
+- Portability module: 12 passed.
+- Machine-root guard: 1 passed.
+- Critical-rule registry guard: 1 passed.
+- Live and template ledger validators: 62 blocks each.
+- Final `git diff --check 0a1eee6dd..HEAD`: exit 0.
+
+## NEW FINDINGS
+
+none
+
+## PLANTS YOU AUTHORED
+
+none
+
+git status --porcelain:
+
+```text
+```
 ````
