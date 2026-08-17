@@ -11,14 +11,14 @@ export default function App($$anchor, $$props) {
   var node = $.sibling(button, 2);
   $.each(
     node,
-    25,
+    24,
     () => ($.get(flipped) ? ["b", "a"] : ["a", "b"]),
     (item) => item,
     ($$anchor, item) => {
       var p = root();
       var text = $.child(p, true);
       $.reset(p);
-      $.template_effect(() => $.set_text(text, $.get(item)));
+      $.template_effect(() => $.set_text(text, item));
       $.animation(p, () => $$props.fx, null);
       $.append($$anchor, p);
     },

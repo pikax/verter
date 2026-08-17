@@ -430,16 +430,22 @@ fn a_typed_svelte_props_surface_types_its_props_exports_and_bindings() {
     }
 }
 
-/// An untyped `$props()` destructure publishes no props, proven by an oracle
-/// that could have said otherwise.
+/// A TYPE ANNOTATION does not change which props a Svelte component publishes.
 ///
-/// The authored component accepts `label` and `disabled`; the published
-/// declaration's props parameter has NO members, and TypeScript raises no
-/// diagnostic about it. The same observation machinery reports the typed
-/// component's two props, so an empty result here is a measurement, not a
-/// degradation.
+/// Two components differing ONLY in whether the `$props()` destructure carries
+/// a type annotation must publish the SAME prop NAMES to TypeScript. This
+/// replaces the former characterization of the untyped surface as empty, and it
+/// is a permanent discriminator in both directions: it fails if the untyped
+/// surface regresses to empty, AND it fails if the untyped surface drifts away
+/// from the typed one in either direction — a prop appearing on one side only
+/// is a divergence whichever side gained it.
+///
+/// The typed control is what makes either failure decisive: it runs through the
+/// same machinery, the same observation domain and the same compiler options
+/// (all three asserted equal below), so a difference cannot be attributed to
+/// the harness.
 #[test]
-fn an_untyped_svelte_props_destructure_publishes_a_props_surface_typescript_sees_as_empty() {
+fn a_svelte_props_type_annotation_does_not_change_which_props_are_published() {
     let file_name = "/Api.svelte.d.ts";
     let untyped = publish_and_observe(
         "svelte/untyped/public",
@@ -457,16 +463,9 @@ fn an_untyped_svelte_props_destructure_publishes_a_props_surface_typescript_sees
     );
     let untyped_props =
         &default_export_type(&untyped, file_name)["callSignatures"][0]["parameters"][1];
-    assert_eq!(
-        member_names(untyped_props),
-        Vec::<String>::new(),
-        "the untyped `$props()` destructure now reaches the published props surface: \
-         {untyped_props}"
-    );
 
-    // The control that makes the empty result decisive: the SAME machinery, the
-    // SAME domain, a component differing only in its `$props()` type annotation
-    // — and TypeScript sees both props.
+    // The control: the SAME machinery, the SAME domain, a component differing
+    // only in its `$props()` type annotation.
     let typed = publish_and_observe(
         "svelte/typed/control",
         Domain::Svelte,
@@ -482,6 +481,14 @@ fn an_untyped_svelte_props_destructure_publishes_a_props_surface_typescript_sees
         vec!["disabled".to_string(), "label".to_string()],
         "the control's props are not visible either, so this observation cannot distinguish an \
          empty surface from an unobservable one"
+    );
+    // The claim itself: annotating the destructure changes nothing about WHICH
+    // props are published.
+    assert_eq!(
+        member_names(untyped_props),
+        member_names(typed_props),
+        "the untyped `$props()` destructure publishes a different prop set than the \
+         byte-equivalent typed component: untyped={untyped_props}, typed={typed_props}"
     );
     assert_eq!(
         untyped["observationDomain"], typed["observationDomain"],
@@ -501,7 +508,6 @@ fn an_untyped_svelte_props_destructure_publishes_a_props_surface_typescript_sees
 /// surface: TypeScript must see each authored prop, including the optionality
 /// established by a default value.
 #[test]
-#[ignore = "the Svelte public-API projector still publishes an empty props surface for an untyped destructure"]
 fn an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescript() {
     let file_name = "/Api.svelte.d.ts";
     let record = publish_and_observe(
@@ -536,11 +542,10 @@ fn an_untyped_svelte_props_destructure_publishes_its_authored_props_to_typescrip
     );
 }
 
-/// The committed `props-events.svelte` fixture — whose runtime surface Verter
-/// refuses — still publishes a public API, and its props surface is empty for
-/// the same untyped-`$props()` reason.
+/// The committed `props-events.svelte` fixture publishes every prop its untyped
+/// `$props()` destructure declares.
 #[test]
-fn the_committed_svelte_props_fixture_publishes_an_empty_typed_props_surface() {
+fn the_committed_svelte_props_fixture_publishes_its_untyped_destructure_props() {
     let file_name = "/PropsEvents.svelte.d.ts";
     let record = publish_and_observe(
         "svelte/props-events/public",
@@ -559,9 +564,28 @@ fn the_committed_svelte_props_fixture_publishes_an_empty_typed_props_surface() {
     let props = &default_export_type(&record, file_name)["callSignatures"][0]["parameters"][1];
     assert_eq!(
         member_names(props),
-        Vec::<String>::new(),
-        "the fixture's `label` / `disabled` / `ontoggle` props now reach the published surface: \
-         {props}"
+        vec![
+            "disabled".to_string(),
+            "label".to_string(),
+            "ontoggle".to_string()
+        ],
+        "the fixture's `label` / `disabled` / `ontoggle` props are not all on the published \
+         surface: {props}"
+    );
+    // The DEFAULTED member is the only optional one — the destructure default is
+    // what makes a key optional, so publishing all three as optional (or all
+    // three as required) would pass a names-only assertion and still be wrong.
+    assert_eq!(
+        props["members"]["disabled"]["optional"], true,
+        "the defaulted `disabled` prop is not optional"
+    );
+    assert_eq!(
+        props["members"]["label"]["optional"], false,
+        "the non-defaulted `label` prop is not required"
+    );
+    assert_eq!(
+        props["members"]["ontoggle"]["optional"], false,
+        "the non-defaulted `ontoggle` prop is not required"
     );
 }
 

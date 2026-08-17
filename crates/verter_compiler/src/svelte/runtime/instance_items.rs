@@ -33,6 +33,25 @@ pub(super) use super::instance_item_shapes::{
 // Instance-script item carriers
 // ---------------------------------------------------------------------------
 
+/// A declarator's binding identifier: the declared name paired with the authored
+/// name token's span, relative to the instance-script source. The two always
+/// travel together, so they are one argument rather than two.
+#[derive(Debug, Clone, Copy)]
+struct DeclaredName<'a> {
+    name: &'a str,
+    name_span: Span,
+}
+
+/// One legacy `export let` prop LOCAL: its name and the authored name token's
+/// span, relative to the instance-script source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExportLetPropLocal {
+    /// The declared local name.
+    pub(super) name: String,
+    /// The declared name TOKEN's span in the instance-script source.
+    pub(super) name_span: Span,
+}
+
 /// A typed top-level instance-script carrier. Dedicated variants preserve
 /// Svelte-specific semantics; [`Self::GeneralStatement`] points into the canonical
 /// parsed program so ordinary statements can combine TypeScript erasure and reactive
@@ -55,6 +74,9 @@ pub(super) enum SupportedInstanceScriptItem {
     StatePrimitive {
         /// The declared signal name.
         name: String,
+        /// The declared name TOKEN's span, relative to the instance-script
+        /// source — the authored provenance of the emitted declaration's name.
+        name_span: Span,
         /// The primitive-literal init source text (`'world'`, `0`, `-1`, `true`,
         /// `null`, …), or `None` for the no-arg `$state()` form.
         init: Option<String>,
@@ -240,8 +262,10 @@ pub(super) enum SupportedInstanceScriptItem {
     /// default algorithm). Minted ONLY under LEGACY mode: a runes-mode `export
     /// let` is the official `legacy_export_invalid` compile error.
     ExportLetProps {
-        /// The exported prop LOCAL names, in source order.
-        locals: Vec<String>,
+        /// The exported prop LOCAL names paired with their declared name TOKEN
+        /// spans (relative to the instance-script source), in source order —
+        /// the authored provenance of each emitted `$.prop` declaration's name.
+        locals: Vec<ExportLetPropLocal>,
     },
     /// A LEGACY top-level plain `let` PROMOTED to a `$.mutable_source` signal —
     /// the demand-driven legacy reactivity (the binding is WRITTEN: reassigned,
@@ -670,7 +694,10 @@ fn classify_export_statement(
                     }
                     match &d.id {
                         BindingPattern::BindingIdentifier(id) => {
-                            locals.push(id.name.to_string());
+                            locals.push(ExportLetPropLocal {
+                                name: id.name.to_string(),
+                                name_span: Span::new(id.span.start, id.span.end),
+                            });
                         }
                         // Official accepts a destructured `export let` as a
                         // lazy-default prop surface — OUT of the supported
@@ -1012,7 +1039,10 @@ fn classify_instance_variable_decl(
             }
             classify_identifier_declarator(
                 d,
-                name,
+                DeclaredName {
+                    name,
+                    name_span: Span::new(id.span.start, id.span.end),
+                },
                 decl,
                 instance_source,
                 bind_this_targets,
@@ -1046,13 +1076,14 @@ fn classify_instance_variable_decl(
 /// shape 4 (`let v = <literal init>;` DOM bind-target lvalue root), or fail closed.
 fn classify_identifier_declarator(
     d: &oxc_ast::ast::VariableDeclarator<'_>,
-    name: &str,
+    declared: DeclaredName<'_>,
     decl: &oxc_ast::ast::VariableDeclaration<'_>,
     instance_source: &str,
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
     legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
+    let DeclaredName { name, name_span } = declared;
     let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
         construct,
         span: Span::new(decl.span.start, decl.span.end),
@@ -1114,6 +1145,7 @@ fn classify_identifier_declarator(
                 let init = state_primitive_init_text(call, instance_source);
                 return Ok(SupportedInstanceScriptItem::StatePrimitive {
                     name: name.to_string(),
+                    name_span,
                     init,
                 });
             }

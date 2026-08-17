@@ -44,16 +44,21 @@ pub(super) fn classify_props_usage(
         return Ok(ClientPropsUsage { prop_locals });
     }
 
-    // (a) Instance-script prop REFERENCES — the supported prop read position is a
-    // template expression ONLY. ANY instance-script reference to a prop local
-    // outside its own `$props()` declaration (a read `cb()` / `console.log(a)`,
-    // a write `a += 1`, a mutating call) is the fail-closed non-interpolation
-    // prop-usage surface. Observed structurally by scanning every NON-declaration
-    // instance statement for a reference resolving to a prop binding. (A sibling
-    // reference INSIDE the `$props()` declaration — a default reading another
-    // prop — is part of the declaration and stays supported.)
+    // (a) Instance-script prop WRITES — a prop READ from the instance script is
+    // supported and lowers through the shared rewriter's prop-read vocabulary
+    // (a defaulted prop reads through its `$.prop` getter call, a no-default
+    // prop reads `$$props.<name>` directly), exactly as the official compiler
+    // emits it. What still fails closed is a WRITE: a reassignment (`a = …` /
+    // `a += 1` / `a++` / a destructuring-assignment target) or a member mutation
+    // (`o.x = …` / `o.x++`) of a prop local, which official lowers through the
+    // prop SETTER — a distinct surface this backend does not emit yet, and one
+    // that must never degrade into an unnotified plain write. Observed
+    // structurally by scanning every NON-declaration instance statement for a
+    // write whose target root resolves to a prop binding. (A sibling reference
+    // INSIDE the `$props()` declaration — a default reading another prop — is
+    // part of the declaration and stays supported.)
     if let Some(instance) = ir.analysis.scripts.instance_source {
-        if instance_script_references_a_prop(instance, ir) {
+        if instance_script_writes_a_prop(instance, ir) {
             return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$props() non-interpolation usage",
                 span: Span::new(0, 0),
@@ -107,21 +112,22 @@ fn resolves_to_prop(ir: &SvelteRuntimeIr, scope: super::expr::ScopeId, name: &st
     )
 }
 
-/// Whether the instance script REFERENCES (reads or writes) a `$props()` prop local
-/// anywhere outside its own `$props()` declaration. The supported prop usage
-/// positions are TEMPLATE expressions — plus, under LEGACY mode, a TOP-LEVEL `$:`
-/// reactive statement (its prop reads lower through the shared rewriter as getter
-/// calls, and its dependency thunk deep-reads the prop — the official legacy
-/// surface) — so any OTHER instance-script prop reference (a read `cb()` /
-/// `console.log(a)`, a write `a += 1`) fails the prop gate.
+/// Whether the instance script WRITES a `$props()` prop local anywhere outside
+/// its own `$props()` declaration.
 ///
-/// Reparses the instance program ONCE and walks it with a scope-aware visitor that
-/// SKIPS the `$props()` declarator subtrees (they BIND the prop, they do not read
-/// it) and — for a LEGACY component — the top-level `$:` labeled statements, and
-/// reports any identifier reference resolving to a prop binding. A reference to a
-/// shadowing local of the same name is not a prop reference (the walk reuses the
+/// A prop READ is a supported instance-script position and is not reported here:
+/// it lowers through the shared rewriter's prop-read vocabulary. A WRITE is not
+/// — official rewrites it through the prop accessor (`count(count() + 1)`, plus
+/// the `, true` notify for a bindable member), which this backend does not emit,
+/// so a write must fail closed rather than lower to a plain unnotified write.
+///
+/// Reparses the instance program ONCE and walks it with a scope-aware visitor
+/// that SKIPS the `$props()` declarator subtrees (they BIND the prop) and — for
+/// a LEGACY component — the top-level `$:` labeled statements, and reports any
+/// assignment / update whose target ROOT resolves to a prop binding. A write to
+/// a shadowing local of the same name is not a prop write (the walk reuses the
 /// shared `ShadowStack` lexical model).
-fn instance_script_references_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) -> bool {
+fn instance_script_writes_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) -> bool {
     let alloc = Allocator::default();
     let Some(program) = super::expr::reparse_module(&alloc, instance_source) else {
         return false;
@@ -139,7 +145,7 @@ fn instance_script_references_a_prop(instance_source: &str, ir: &SvelteRuntimeIr
         return false;
     }
     let legacy_mode = ir.component.mode == super::ir::SvelteMode::Legacy;
-    let mut scan = PropRefScan {
+    let mut scan = PropWriteScan {
         prop_locals: &prop_locals,
         scopes: super::expr::ShadowStack::default(),
         found: false,
@@ -170,20 +176,88 @@ fn instance_script_references_a_prop(instance_source: &str, ir: &SvelteRuntimeIr
     scan.found
 }
 
-/// A scope-aware scan for an instance-script reference to a `$props()` prop local
+/// A scope-aware scan for an instance-script WRITE to a `$props()` prop local
 /// outside its declaration. Tracks the shared `ShadowStack` lexical model (so a
-/// nested local shadowing a prop name is not a prop reference) and skips a
-/// `$props()` declarator's init/pattern (the destructure binds, it does not read).
-struct PropRefScan<'a> {
+/// write to a nested local shadowing a prop name is not a prop write) and skips a
+/// `$props()` declarator's init/pattern (the destructure binds the prop).
+struct PropWriteScan<'a> {
     prop_locals: &'a rustc_hash::FxHashSet<String>,
     scopes: super::expr::ShadowStack,
     found: bool,
 }
 
-impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
+impl PropWriteScan<'_> {
+    /// Record a write whose target root is `name`, when that name resolves to a
+    /// prop local rather than to a shadowing local.
+    fn mark_write(&mut self, name: &str) {
+        if self.prop_locals.contains(name) && !self.scopes.is_shadowed(name) {
+            self.found = true;
+        }
+    }
+
+    /// Record the write a `for (<left> of …)` / `for (<left> in …)` head
+    /// performs when its left-hand side is an assignment TARGET rather than a
+    /// declaration (`for (prop of xs)` reassigns `prop` each iteration).
+    fn mark_for_left_write(&mut self, left: &oxc_ast::ast::ForStatementLeft<'_>) {
+        use oxc_ast::ast::ForStatementLeft;
+        let target = match left {
+            ForStatementLeft::VariableDeclaration(_) => return,
+            ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                self.mark_write(id.name.as_str());
+                return;
+            }
+            other => other,
+        };
+        // Every remaining shape is an assignment target: a member root is a deep
+        // mutation, a destructuring target reassigns each collected name.
+        if let Some(target) = target.as_assignment_target() {
+            self.mark_assignment_target_write(target);
+        }
+    }
+
+    /// Record the write an assignment TARGET performs: a member-rooted target
+    /// deep-mutates its ROOT object, every other shape reassigns the names it
+    /// collects (bare identifier and destructuring targets alike).
+    ///
+    /// The member root is resolved through the shared chain walk, so a nested
+    /// (`o.x.y = 1`), computed (`o[k].y = 1`), private-field or TS-wrapped
+    /// chain still attributes its write to `o`. Reading only the immediate
+    /// object would attribute `o.x.y = 1` to `o.x` — not an identifier — and
+    /// silently let the write through.
+    fn mark_assignment_target_write(&mut self, target: &oxc_ast::ast::AssignmentTarget<'_>) {
+        use oxc_ast::ast::AssignmentTarget;
+        match target {
+            AssignmentTarget::StaticMemberExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            AssignmentTarget::ComputedMemberExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            AssignmentTarget::PrivateFieldExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            other => {
+                let mut names = rustc_hash::FxHashSet::default();
+                super::expr::collect_reassigned_target_names(other, &mut names);
+                for name in &names {
+                    self.mark_write(name);
+                }
+            }
+        }
+    }
+
+    /// Record the deep mutation of a member chain's ROOT identifier.
+    fn mark_member_root_write(&mut self, object: &oxc_ast::ast::Expression<'_>) {
+        if let Some(root) = super::bind_target::target_expr_root_ident(object) {
+            self.mark_write(&root);
+        }
+    }
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for PropWriteScan<'_> {
     // (The root program frame is pushed by the CALLER, which iterates the
     // top-level statements itself so a legacy `$:` statement can be skipped
-    // whole — see `instance_script_references_a_prop`.)
+    // whole — see `instance_script_writes_a_prop`.)
 
     fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
         // Skip a `$props()` declarator entirely (the destructure pattern + the
@@ -232,12 +306,77 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
         self.scopes.pop();
     }
 
-    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
-        let name = it.name.as_str();
-        if self.prop_locals.contains(name) && !self.scopes.is_shadowed(name) {
-            self.found = true;
+    fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+        self.mark_assignment_target_write(&it.left);
+        oxc_ast_visit::walk::walk_assignment_expression(self, it);
+    }
+
+    fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
+        use oxc_ast::ast::SimpleAssignmentTarget;
+        match &it.argument {
+            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+                self.mark_member_root_write(&member.object);
+            }
+            // A bare-identifier OR TS-wrapped identifier update (`a!++` /
+            // `(a as T)++`) reassigns the inner identifier.
+            other => {
+                if let Some(name) = super::expr::simple_target_wrapped_ident(other) {
+                    self.mark_write(name);
+                }
+            }
         }
-        oxc_ast_visit::walk::walk_identifier_reference(self, it);
+        oxc_ast_visit::walk::walk_update_expression(self, it);
+    }
+
+    fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'a>) {
+        self.mark_for_left_write(&it.left);
+        self.scopes.push(super::expr::for_left_names(&it.left));
+        oxc_ast_visit::walk::walk_for_in_statement(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'a>) {
+        self.mark_for_left_write(&it.left);
+        self.scopes.push(super::expr::for_left_names(&it.left));
+        oxc_ast_visit::walk::walk_for_of_statement(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_for_statement(&mut self, it: &oxc_ast::ast::ForStatement<'a>) {
+        // `for (let o = …; …)` declares `o` for the whole head and body, so a
+        // write to it is a write to the LOOP local, not to a same-named prop.
+        let mut frame = rustc_hash::FxHashSet::default();
+        if let Some(oxc_ast::ast::ForStatementInit::VariableDeclaration(decl)) = &it.init {
+            if !matches!(decl.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                for declarator in &decl.declarations {
+                    let mut names = Vec::new();
+                    super::expr::collect_pattern_names(&declarator.id, &mut names);
+                    frame.extend(names);
+                }
+            }
+        }
+        self.scopes.push(frame);
+        oxc_ast_visit::walk::walk_for_statement(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_catch_clause(&mut self, it: &oxc_ast::ast::CatchClause<'a>) {
+        // `catch (o)` binds `o` for the handler, shadowing a same-named prop.
+        let mut frame = rustc_hash::FxHashSet::default();
+        if let Some(param) = &it.param {
+            let mut names = Vec::new();
+            super::expr::collect_pattern_names(&param.pattern, &mut names);
+            frame.extend(names);
+        }
+        self.scopes.push(frame);
+        oxc_ast_visit::walk::walk_catch_clause(self, it);
+        self.scopes.pop();
     }
 }
 

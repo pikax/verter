@@ -16,12 +16,9 @@
           "runtime": "not-applicable",
           "structural": "ran"
         },
-        "divergences": [
-          "structural divergence at $.body[6].declaration.body.body[6].expression.arguments[1].value: 20 vs 21",
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-count-declaration: no segment maps to fixtures/svelte/basic-runes.svelte:1:6; anchor-span-coverage — anchor script-count-declaration: no segment falls within its authored span; anchor-missing — anchor template-count-condition: no segment maps to fixtures/svelte/basic-runes.svelte:6:7; anchor-span-coverage — anchor template-count-condition: no segment falls within its authored span"
-        ],
+        "divergences": [],
         "kind": "compared",
-        "verdict": "fail"
+        "verdict": "pass"
       },
       "products": [
         "virtual-node.main",
@@ -60,8 +57,7 @@
           "structural": "ran"
         },
         "divergences": [
-          "structural divergence at $.body: length 8 vs 7",
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-count-declaration: no segment maps to fixtures/svelte/basic-runes.svelte:1:6; anchor-span-coverage — anchor script-count-declaration: no segment falls within its authored span; anchor-missing — anchor template-count-condition: no segment maps to fixtures/svelte/basic-runes.svelte:6:7; anchor-span-coverage — anchor template-count-condition: no segment falls within its authored span"
+          "structural divergence at $.body: length 8 vs 7"
         ],
         "kind": "compared",
         "verdict": "fail"
@@ -170,11 +166,9 @@
           "runtime": "not-applicable",
           "structural": "ran"
         },
-        "divergences": [
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-title-declaration: no segment maps to fixtures/svelte/legacy-slots.svelte:1:13; anchor-span-coverage — anchor script-title-declaration: no segment falls within its authored span"
-        ],
+        "divergences": [],
         "kind": "compared",
-        "verdict": "fail"
+        "verdict": "pass"
       },
       "products": [
         "virtual-node.main",
@@ -213,8 +207,7 @@
           "structural": "ran"
         },
         "divergences": [
-          "structural divergence at $.body: length 6 vs 5",
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-title-declaration: no segment maps to fixtures/svelte/legacy-slots.svelte:1:13; anchor-span-coverage — anchor script-title-declaration: no segment falls within its authored span"
+          "structural divergence at $.body: length 6 vs 5"
         ],
         "kind": "compared",
         "verdict": "fail"
@@ -315,11 +308,19 @@
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
-        "comparatorRun": false,
-        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
-        "diagnosticCode": "svelte-runtime-unsupported-advanced-rune",
-        "kind": "refused",
-        "message": "Svelte client emission does not yet support the `$props() non-interpolation usage` rune form."
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-onclick-declaration: no segment maps to fixtures/svelte/props-events.svelte:3:11; anchor-span-coverage — anchor script-onclick-declaration: no segment falls within its authored span; anchor-missing — anchor template-disabled-shorthand-binding: no segment maps to fixtures/svelte/props-events.svelte:8:9; anchor-span-coverage — anchor template-disabled-shorthand-binding: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
       },
       "products": [
         "virtual-node.main",
@@ -349,11 +350,20 @@
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
-        "comparatorRun": false,
-        "comparatorSkipReason": "the shipped route published no candidate, so there is nothing to compare against the golden",
-        "diagnosticCode": "svelte-runtime-unsupported-advanced-rune",
-        "kind": "refused",
-        "message": "Svelte client emission does not yet support the `$props() non-interpolation usage` rune form."
+        "axes": {
+          "diagnostics": "ran",
+          "link": "ran",
+          "mapping": "ran",
+          "parse": "ran",
+          "runtime": "not-applicable",
+          "structural": "ran"
+        },
+        "divergences": [
+          "structural divergence at $.body: length 6 vs 5",
+          "candidate source map is not truthful about its own output: anchor-missing — anchor script-onclick-declaration: no segment maps to fixtures/svelte/props-events.svelte:3:11; anchor-span-coverage — anchor script-onclick-declaration: no segment falls within its authored span; anchor-missing — anchor template-disabled-shorthand-binding: no segment maps to fixtures/svelte/props-events.svelte:8:9; anchor-span-coverage — anchor template-disabled-shorthand-binding: no segment falls within its authored span"
+        ],
+        "kind": "compared",
+        "verdict": "fail"
       },
       "products": [
         "virtual-node.main",

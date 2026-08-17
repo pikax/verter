@@ -59,8 +59,10 @@ pub(super) struct PreparedIfCondition {
 /// `var <d> = $.derived(() => <thunk_body>);` then reads `$.get(<d>)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreparedDerivedRead {
-    /// The derived thunk BODY (the prepared test's memo/arrow form).
-    pub(super) thunk_body: String,
+    /// The derived thunk BODY (the prepared test's memo/arrow form), carried as
+    /// MAPPED code so the authored expression keeps its provenance through the
+    /// hoisted `$.derived(...)` the emitter writes.
+    pub(super) thunk_body: super::output::MappedCode,
 }
 
 /// A projected `{#each}` block.

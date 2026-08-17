@@ -72,6 +72,18 @@ pub enum BindingRuntimeKind {
     BindableProp,
     /// An `{#each}` item / index binding — a SIGNAL read.
     EachSignal,
+    /// An `{#each}` ITEM binding the official item-reactivity rule left
+    /// NON-reactive (`EACH_ITEM_REACTIVE` clear), so the render callback
+    /// receives the RAW value: reads are PLAIN, never `$.get`.
+    ///
+    /// Distinct from [`Self::PlainLocal`] on purpose. It reads like a plain
+    /// local but is still an each-item binding, and an each item is not an
+    /// assignment target — official redirects a written item through
+    /// `collection[index]` rather than assigning the callback parameter. Reusing
+    /// `PlainLocal` here would let the `bind:` gate accept it as a writable root
+    /// and emit a setter that writes the parameter and never reaches the
+    /// collection.
+    EachPlain,
     /// An `{#await … then x}` / `{:catch e}` binding — a SIGNAL read.
     AwaitSignal,
     /// A `{@const}` block-local derived binding.
@@ -1781,15 +1793,30 @@ pub fn collect_pattern_names(pattern: &BindingPattern<'_>, out: &mut Vec<String>
     }
 }
 
+/// The declared names of a binding-pattern fragment plus the syntactic SHAPE
+/// the parse observed, for the consumers that must tell a bare identifier
+/// context apart from a decomposition that happens to declare one name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedPattern {
+    /// The declared binding names, in source order.
+    pub(crate) names: Vec<String>,
+    /// Whether the fragment is EXACTLY one bare binding identifier.
+    ///
+    /// A single-name destructure (`{ a }` / `[a]`) declares one name yet is
+    /// `false`: the NODE KIND is the discriminator, never the name count.
+    pub(crate) bare_identifier: bool,
+}
+
 /// Parse a binding-pattern text fragment (an each item, a snippet param list, an
-/// await binding, a declaration-tag declarator) and collect its binding names.
+/// await binding, a declaration-tag declarator) and collect its binding names
+/// plus its observed shape.
 ///
 /// The fragment is wrapped in `const [<text>] = null as any;` so a bare
 /// identifier, a destructuring pattern, AND a comma-separated param list all
 /// parse as one declarator's binding pattern (mirroring the IDE store-scan
 /// pattern wrapper). A fragment that does not parse yields `Err(())` so the
 /// caller can surface a diagnostic rather than silently dropping the names.
-pub(crate) fn parse_pattern_names(pattern_text: &str) -> Result<Vec<String>, ()> {
+pub(crate) fn parse_pattern(pattern_text: &str) -> Result<ParsedPattern, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("const [{pattern_text}] = null as any;");
     let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
@@ -1797,14 +1824,34 @@ pub(crate) fn parse_pattern_names(pattern_text: &str) -> Result<Vec<String>, ()>
         return Err(());
     }
     let mut names = Vec::new();
+    // The wrapper makes the whole fragment ONE array-pattern element list, so a
+    // bare-identifier fragment is exactly one element that is a
+    // `BindingIdentifier`. A comma-separated param list yields several elements
+    // and a destructure yields a non-identifier element — both are `false`.
+    let mut elements = 0usize;
+    let mut identifier_elements = 0usize;
     for stmt in &parsed.program.body {
         if let Statement::VariableDeclaration(decl) = stmt {
             for d in &decl.declarations {
+                if let BindingPattern::ArrayPattern(array) = &d.id {
+                    for element in array.elements.iter().flatten() {
+                        elements += 1;
+                        if matches!(element, BindingPattern::BindingIdentifier(_)) {
+                            identifier_elements += 1;
+                        }
+                    }
+                    if array.rest.is_some() {
+                        elements += 1;
+                    }
+                }
                 collect_pattern_names(&d.id, &mut names);
             }
         }
     }
-    Ok(names)
+    Ok(ParsedPattern {
+        names,
+        bare_identifier: elements == 1 && identifier_elements == 1,
+    })
 }
 
 /// Parse a `let:`-directive alias value (`let:item={alias}`) and return the bare LOCAL name
@@ -2347,7 +2394,9 @@ impl<'a> Visit<'a> for ScriptUseCollector {
 /// reassignment of that identifier (the type wrapper strips away), so the write
 /// attribution must see through it — otherwise a `$state` written ONLY through a
 /// wrapper is misclassified as never-reassigned. A member target reduces to `None`.
-fn simple_target_wrapped_ident<'a>(target: &'a SimpleAssignmentTarget<'a>) -> Option<&'a str> {
+pub(crate) fn simple_target_wrapped_ident<'a>(
+    target: &'a SimpleAssignmentTarget<'a>,
+) -> Option<&'a str> {
     match target {
         SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
         SimpleAssignmentTarget::TSAsExpression(e) => expr_wrapped_ident(&e.expression),
@@ -2360,7 +2409,7 @@ fn simple_target_wrapped_ident<'a>(target: &'a SimpleAssignmentTarget<'a>) -> Op
 
 /// Peel TS-wrapper / parenthesis layers off an EXPRESSION and return the inner
 /// bare-identifier name, if it reduces to one.
-fn expr_wrapped_ident<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+pub(super) fn expr_wrapped_ident<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
     match expr {
         Expression::Identifier(id) => Some(id.name.as_str()),
         Expression::ParenthesizedExpression(p) => expr_wrapped_ident(&p.expression),
@@ -2368,6 +2417,7 @@ fn expr_wrapped_ident<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
         Expression::TSSatisfiesExpression(e) => expr_wrapped_ident(&e.expression),
         Expression::TSNonNullExpression(e) => expr_wrapped_ident(&e.expression),
         Expression::TSTypeAssertion(e) => expr_wrapped_ident(&e.expression),
+        Expression::TSInstantiationExpression(e) => expr_wrapped_ident(&e.expression),
         _ => None,
     }
 }

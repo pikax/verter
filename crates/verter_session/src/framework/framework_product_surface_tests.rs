@@ -179,9 +179,11 @@ const VUE_PROPS_EMIT: &str =
 const SVELTE_BASIC_RUNES: &str = include_str!(
     "../../../../packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte"
 );
-const SVELTE_PROPS_EVENTS: &str = include_str!(
-    "../../../../packages/framework-conformance-harness/fixtures/svelte/props-events.svelte"
-);
+/// A Svelte component whose runtime surface the client backend refuses: an
+/// instance-script prop WRITE, which official lowers through the prop SETTER
+/// and this backend does not emit. An instance-script prop READ is a SUPPORTED
+/// surface, so a read-only component is no longer a refusal witness.
+const SVELTE_ADVANCED_RUNE_REFUSAL: &str = "<script>\n  let { count = 0 } = $props();\n  function inc() { count += 1; }\n</script>\n\n<button onclick={inc}>{count}</button>\n";
 
 /// A Vue SFC carrying a scoped `<style>` — the CSS product's representative
 /// input. The committed Vue fixtures carry no style block.
@@ -665,7 +667,7 @@ fn refusal_cells() -> Vec<(
         (
             "advanced-rune",
             "/probe/PropsEvents.svelte",
-            SVELTE_PROPS_EVENTS,
+            SVELTE_ADVANCED_RUNE_REFUSAL,
             bundler_profile(true),
             UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "sample",
@@ -803,7 +805,7 @@ fn the_node_list_names_main_for_a_component_whose_runtime_surface_is_refused() {
     let canonical = "/probe/PropsEvents.svelte";
     let host = host_with(
         canonical,
-        SVELTE_PROPS_EVENTS,
+        SVELTE_ADVANCED_RUNE_REFUSAL,
         verter_language::FileLanguage::svelte(),
     );
     assert!(
@@ -1688,7 +1690,7 @@ fn ensure_compiled_answers_the_same_cold_and_warm_for_one_identity() {
         (
             "refused/combined",
             "/probe/EnsureRefused.svelte",
-            SVELTE_PROPS_EVENTS,
+            SVELTE_ADVANCED_RUNE_REFUSAL,
             verter_language::FileLanguage::svelte(),
             CompileProfile {
                 target: CompileTarget::BUNDLER | CompileTarget::IDE,

@@ -623,18 +623,24 @@ impl<'a> ClientEmitter<'a> {
         // `IfBlock.js` statement order); the test then reads `$.get(d)`. This
         // emitter only SERIALIZES the prepared condition — it never inspects
         // legacy mode or reconstructs a wrap.
-        let mut test_texts: Vec<Option<String>> = Vec::with_capacity(branches.len());
+        // The test is carried as MAPPED code so an inline condition keeps the
+        // authored provenance of the expression it was written as; the hoisted
+        // `$.get(d)` read is generated-only scaffolding and carries none.
+        let mut test_texts: Vec<Option<super::output::MappedCode>> =
+            Vec::with_capacity(branches.len());
         for branch in branches {
             test_texts.push(branch.test.as_ref().map(|cond| match &cond.call_derived {
                 Some(derived) => {
                     let d = self.alloc_name("d");
-                    out.push_str(&format!(
-                        "var {d} = $.derived(() => {});",
-                        derived.thunk_body
-                    ));
-                    format!("$.get({d})")
+                    // The hoisted derived carries the authored test's own
+                    // provenance; only the `$.get(d)` READ that replaces it in
+                    // the selector is generated-only scaffolding.
+                    out.push_str(&format!("var {d} = $.derived(() => "));
+                    out.push_mapped(&derived.thunk_body);
+                    out.push_str(");");
+                    super::output::MappedCode::unmapped(format!("$.get({d})"))
                 }
-                None => cond.value.inline_expression(),
+                None => cond.value.inline_mapped_expression(),
             }));
         }
         // (3) The `$.if` render selector. The first branch carries no ordinal; each later
@@ -643,10 +649,16 @@ impl<'a> ClientEmitter<'a> {
         for (index, test) in test_texts.iter().enumerate() {
             let name = &names[index];
             if index == 0 {
-                let test = test.as_deref().unwrap_or("true");
-                out.push_str(&format!("if ({test}) $$render({name});"));
+                out.push_str("if (");
+                match test {
+                    Some(test) => out.push_mapped(test),
+                    None => out.push_str("true"),
+                }
+                out.push_str(&format!(") $$render({name});"));
             } else if let Some(test) = test {
-                out.push_str(&format!(" else if ({test}) $$render({name}, {index});"));
+                out.push_str(" else if (");
+                out.push_mapped(test);
+                out.push_str(&format!(") $$render({name}, {index});"));
             } else {
                 out.push_str(&format!(" else $$render({name}, -1);"));
             }
