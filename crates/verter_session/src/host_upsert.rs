@@ -340,8 +340,8 @@ impl VerterHost {
         //
         // This is a `pub(crate)` caller-contract invariant, not a runtime
         // input class: every caller already guarantees uniqueness
-        // (`compile_many`'s Stage B keys `canonical_to_upsert` by canonical
-        // so it carries one entry per file; the single-file
+        // (`compile_many`'s Stage B builds `upsert_requests` one entry per
+        // canonical group, so it carries one entry per file; the single-file
         // `upsert_with_priority` submits a 1-element batch that is trivially
         // unique). A breach is a programming bug in the caller, so it is a
         // `assert!` (active in release, unlike the inputs it guards) that

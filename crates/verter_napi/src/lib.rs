@@ -2345,10 +2345,15 @@ impl NapiVerterHost {
 
     /// host-backed batch compile.
     ///
-    /// Compiles a batch of Vue SFC inputs through the production host
+    /// Compiles a batch of carrier inputs through the production host
     /// path (scheduler + dispatch + compile_cache). Returns one
     /// [`NapiCompileBatchEntry`] per input, in the original input
     /// order.
+    ///
+    /// Each input's source language is derived from its `canonicalId`,
+    /// so the id must carry the carrier's extension: `App.vue` compiles
+    /// as Vue and `App.svelte` as Svelte, each through its own carrier.
+    /// An id that names no carrier is not compiled into a module.
     ///
     /// Per-input panic isolation: if codegen panics for one input,
     /// only that input's entry receives a `compiler panic: ...`

@@ -899,3 +899,78 @@ fn host_cpu_threads_some_explicit_constructs_pool() {
         entries[0].errors()
     );
 }
+
+/// The batch derives each input's source language from its canonical id, and
+/// derives it PER INPUT.
+///
+/// This asserts the derivation directly, on the one function that performs it,
+/// rather than only through compiled output: the batch's upsert request has no
+/// language parameter, so the only way a fixed carrier can come back is inside
+/// this function, and that is exactly what is read here.
+///
+/// Three rows, chosen so no single constant answer satisfies them: a Vue
+/// carrier, a Svelte carrier, and a plain module that is neither.
+#[test]
+fn the_batch_derives_each_inputs_language_from_its_canonical_id() {
+    let host = new_host();
+
+    let rows = [
+        ("/derive/Comp.vue", Some("vue")),
+        ("/derive/Comp.svelte", Some("svelte")),
+        ("/derive/plain.ts", None),
+    ];
+
+    let mut observed = Vec::new();
+    for (canonical, expected_adapter) in rows {
+        let request = host.batch_upsert_request(&CompileBatchInput {
+            canonical_id: canonical.to_string(),
+            source: Arc::from(""),
+            requested_mode: None,
+            component_id: None,
+        });
+        assert_eq!(
+            request.canonical_id.as_deref(),
+            Some(canonical),
+            "the batch upsert request named a different canonical"
+        );
+        let adapter = request
+            .file_language
+            .adapter_id()
+            .map(|id| id.as_str().to_string());
+        assert_eq!(
+            adapter.as_deref(),
+            expected_adapter,
+            "`{canonical}` was registered under {adapter:?}, not {expected_adapter:?}"
+        );
+        observed.push(request.file_language);
+    }
+
+    // The rows must actually differ. Without this, a derivation that collapsed
+    // every path onto one language could still satisfy an expectation table
+    // that had been collapsed with it.
+    assert_ne!(
+        observed[0], observed[1],
+        "a Vue path and a Svelte path derived the SAME language, so the batch is not deriving \
+         per input"
+    );
+    assert_ne!(
+        observed[1], observed[2],
+        "a Svelte path and a plain module derived the SAME language"
+    );
+
+    // And the derivation agrees with the host's own classifier — the single
+    // authority every other session consumer reads.
+    for (canonical, _) in rows {
+        assert_eq!(
+            host.batch_upsert_request(&CompileBatchInput {
+                canonical_id: canonical.to_string(),
+                source: Arc::from(""),
+                requested_mode: None,
+                component_id: None,
+            })
+            .file_language,
+            host.language_classifier().classify(canonical),
+            "`{canonical}`: the batch's language is not the classifier's"
+        );
+    }
+}
