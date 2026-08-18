@@ -295,7 +295,7 @@
       ],
       "successForRepresentativeInput": {
         "vue": "yes",
-        "svelte": "yes — driven in svelte_batch_route_tests (in-process, both lanes) and through the native transport in transport_route_equivalence_tests; the batch compiles .svelte inputs as Vue, recorded there"
+        "svelte": "yes — driven in svelte_batch_route_tests (in-process, both lanes) and through the native transport in transport_route_equivalence_tests; the batch derives each input language from its canonical id, so a .svelte input is compiled by the Svelte carrier and its runtime refusals surface there"
       }
     },
     {

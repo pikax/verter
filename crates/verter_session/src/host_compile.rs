@@ -12,8 +12,11 @@
 //! 2. **Stage B — group + selective upsert.** Group by `canonical_id`.
 //!    Reject groups with conflicting source (every entry for that id
 //!    receives a duplicate-conflict error). For non-conflicting unique
-//!    groups, skip the upsert when the scheduler already holds
-//!    byte-identical source (preserves warm `compile_slot` cache).
+//!    groups, build the registration — the source plus the language
+//!    derived from the canonical id — and skip the upsert only when the
+//!    scheduler already holds that same registration (preserves the warm
+//!    `compile_slot` cache; a byte-identical relabel is still a change,
+//!    because the language row re-routes parse dispatch).
 //!    Submit the deduped per-canonical source updates as ONE atomic
 //!    batch through the shared upsert engine
 //!    [`VerterHost::upsert_many_with_priority`] (one
@@ -440,6 +443,31 @@ fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
 }
 
 impl VerterHost {
+    /// The batch's ONE source-registration request for a canonical.
+    ///
+    /// A batch input carries a canonical id and its bytes and NOTHING about
+    /// its language, because the language is not the caller's to state: it is
+    /// derived from the path, and the host's classifier — static registry ×
+    /// project capability snapshot — is its only authority. Registering a
+    /// `.svelte` source under the Vue carrier is what made the batch route
+    /// publish Vue-assembled bytes and swallow the Svelte runtime refusals,
+    /// because the carrier registry dispatches its compiler by the language
+    /// row recorded here.
+    ///
+    /// This function takes no language argument, so a batch call site has
+    /// nothing to get wrong. Re-introducing a fixed carrier means editing the
+    /// one function whose entire purpose is that derivation, not slipping a
+    /// literal into a request built somewhere else.
+    pub(crate) fn batch_upsert_request(&self, input: &CompileBatchInput) -> UpsertRequest {
+        UpsertRequest {
+            canonical_id: Some(input.canonical_id.clone()),
+            input_id: input.canonical_id.clone(),
+            source: Arc::clone(&input.source),
+            file_language: self.language_classifier().classify(&input.canonical_id),
+            aliases: Vec::new(),
+        }
+    }
+
     /// Host-backed parallel SFC batch compile.
     ///
     /// See module-level docs for the four-stage algorithm. Returns
@@ -524,7 +552,7 @@ impl VerterHost {
         // canonical's source, not of the requested mode, so this map is
         // keyed per-canonical and applies to every mode of that canonical.
         let mut group_errors: HashMap<String, String> = HashMap::new();
-        let mut canonical_to_upsert: Vec<&CompileBatchInput> = Vec::new();
+        let mut upsert_requests: Vec<UpsertRequest> = Vec::new();
         // Compile dedup is keyed by the full compile IDENTITY: `(canonical,
         // effective requested_mode, effective component_id)`. The requested
         // mode is part of the identity (a different mode is a genuinely
@@ -562,9 +590,17 @@ impl VerterHost {
                 );
                 continue;
             }
-            // One upsert per canonical (source is mode-independent).
-            if self.scheduler_source_differs_from(canonical_id, &first.source) {
-                canonical_to_upsert.push(first);
+            // One upsert per canonical (its registration is mode-independent).
+            // The request is BUILT first and the skip decision reads the built
+            // request, so the decision cannot consider fewer fields of the
+            // registration than the registration carries: a canonical already
+            // holding these bytes under a DIFFERENT language is still re-upserted,
+            // because the language row re-routes parse dispatch and the batch
+            // would otherwise inherit whatever carrier a previous registration
+            // left behind.
+            let request = self.batch_upsert_request(first);
+            if self.scheduler_registration_differs_from(&request) {
+                upsert_requests.push(request);
             }
             // One compile per distinct `(canonical, effective mode, effective
             // component_id)`.
@@ -583,7 +619,7 @@ impl VerterHost {
         // ── Stage-B upsert: ONE atomic batch ──
         // Every per-canonical source update is admitted as a SINGLE
         // `Scheduler::submit_batch_atomic` + one `wait_batch` driven by the
-        // shared upsert engine. `canonical_to_upsert` is already deduped to
+        // shared upsert engine. `upsert_requests` is already deduped to
         // one entry per canonical (conflicting-source duplicates were
         // diverted to `group_errors` above), so it is the exact index space
         // for the engine — which captures the calling thread's request
@@ -592,16 +628,6 @@ impl VerterHost {
         // post-commit on this thread after the single wait. Upsert errors
         // fold into `group_errors`, surfaced to every original input
         // position for that canonical in Stage D.
-        let upsert_requests: Vec<UpsertRequest> = canonical_to_upsert
-            .iter()
-            .map(|input| UpsertRequest {
-                canonical_id: Some(input.canonical_id.clone()),
-                input_id: input.canonical_id.clone(),
-                source: Arc::clone(&input.source),
-                file_language: verter_language::FileLanguage::vue(),
-                aliases: Vec::new(),
-            })
-            .collect();
         for outcome in self.upsert_many_with_priority(upsert_requests, priority) {
             if let Err(e) = outcome.result {
                 group_errors
@@ -717,11 +743,21 @@ impl VerterHost {
             .collect()
     }
 
-    /// True iff the scheduler holds source for `canonical_id` whose
-    /// `whole_hash` matches `hash_16(source.as_bytes())`. Inverted by
-    /// the caller to decide whether an upsert is needed.
-    fn scheduler_source_differs_from(&self, canonical_id: &str, source: &Arc<str>) -> bool {
+    /// True iff registering `request` would change what the scheduler already
+    /// holds for its canonical — either the source bytes or the language row.
+    ///
+    /// It takes the whole request rather than the bytes alone because the
+    /// registration is BOTH: the language row re-routes parse dispatch, so a
+    /// byte-identical relabel is a real change (`compute_upsert_changes_from_parse`
+    /// folds it into `changes.changed` for exactly that reason). Comparing only
+    /// the bytes would let a canonical already registered under another carrier
+    /// keep that carrier for the whole batch.
+    fn scheduler_registration_differs_from(&self, request: &UpsertRequest) -> bool {
         use crate::host_executor::HostSourceData;
+        let canonical_id = request
+            .canonical_id
+            .as_deref()
+            .unwrap_or(request.input_id.as_str());
         let snap = match self.scheduler.try_get_source(canonical_id) {
             Some(s) => s,
             None => return true,
@@ -730,7 +766,8 @@ impl VerterHost {
             Some(h) => h,
             None => return true,
         };
-        hash_16(source.as_bytes()) != hd.parse.whole_hash
+        hash_16(request.source.as_bytes()) != hd.parse.whole_hash
+            || request.file_language != hd.file_language
     }
 
     /// Per-input compile worker. The `precomputed_error` slot is

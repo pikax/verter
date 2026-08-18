@@ -898,17 +898,17 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             );
             assert_eq!(
                 entry["code"].as_str(),
-                Some(host_entry.code.as_ref()),
+                Some(host_entry.code().as_ref()),
                 "napi/{label}[{index}]: the transport's module bytes differ from the host's"
             );
             assert_eq!(
                 entry["hasMap"],
-                host_entry.source_map.is_some(),
+                host_entry.source_map().is_some(),
                 "napi/{label}[{index}]: map presence differs from the host's"
             );
             assert_eq!(
                 entry["lang"].as_str(),
-                host_entry.lang.as_deref(),
+                host_entry.lang().as_deref(),
                 "napi/{label}[{index}]: the reported module language differs from the host's"
             );
             let errors: Vec<&str> = entry["errors"]
@@ -918,16 +918,50 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
                 .filter_map(Value::as_str)
                 .collect();
             assert_eq!(
-                errors, host_entry.errors,
+                errors,
+                host_entry.errors(),
                 "napi/{label}[{index}]: the transport's errors differ from the host's"
             );
+        }
+
+        let first = observed[0]["code"].as_str().unwrap_or_default();
+        let third = observed[2]["code"].as_str().unwrap_or_default();
+        if label == "batchServerProfile" {
+            // The SERVER lane refuses the Svelte carrier outright: the client
+            // backend does not emit a server module, so every entry in this
+            // batch is a typed refusal and NONE of them publishes a product.
+            // Asserting the two supported inputs' declarations here would be
+            // asserting bytes that correctly do not exist.
+            for (index, entry) in observed.iter().enumerate() {
+                let errors: Vec<&str> = entry["errors"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("napi/{label}[{index}]: `errors` is not an array"))
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                assert!(
+                    errors
+                        .iter()
+                        .any(|error| error.contains("svelte-runtime-unsupported-server-generate")),
+                    "napi/{label}[{index}]: the server lane did not surface the typed Svelte \
+                     server refusal: {errors:?}"
+                );
+                assert_eq!(
+                    entry["code"].as_str(),
+                    Some(""),
+                    "napi/{label}[{index}]: a product travelled beside the refusal"
+                );
+                assert_eq!(
+                    entry["hasMap"], false,
+                    "napi/{label}[{index}]: a source map travelled beside the refusal"
+                );
+            }
+            continue;
         }
 
         // NON-CONTAMINATION, observed at the transport: the two distinct
         // supported inputs declare `count` and `total`, and neither entry
         // carries the other's declarations.
-        let first = observed[0]["code"].as_str().unwrap_or_default();
-        let third = observed[2]["code"].as_str().unwrap_or_default();
         assert!(
             first.contains("count") && !first.contains("total"),
             "napi/{label}: the first entry carries another input's declarations:\n{first}"
@@ -950,7 +984,31 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
     let without_map = record["cases"]["batchRuntimeRenderNoMap"]
         .as_array()
         .expect("array");
+    let mut published_entries = 0;
     for (index, (mapped, unmapped)) in with_map.iter().zip(without_map).enumerate() {
+        // A REFUSED entry publishes nothing on either variant, so the axis says
+        // nothing about it — but it must stay refused on both, or the axis
+        // would be deciding whether the refusal fires.
+        let refused = !mapped["errors"].as_array().is_none_or(|e| e.is_empty());
+        if refused {
+            assert!(
+                !unmapped["errors"].as_array().is_none_or(|e| e.is_empty()),
+                "napi/batch[{index}]: the source-map axis decided whether this entry was refused"
+            );
+            for (variant, entry) in [("with map", mapped), ("without map", unmapped)] {
+                assert_eq!(
+                    entry["hasMap"], false,
+                    "napi/batch[{index}] ({variant}): a map travelled beside a refusal"
+                );
+                assert_eq!(
+                    entry["code"].as_str(),
+                    Some(""),
+                    "napi/batch[{index}] ({variant}): a product travelled beside a refusal"
+                );
+            }
+            continue;
+        }
+        published_entries += 1;
         assert_eq!(
             mapped["hasMap"], true,
             "napi/batch[{index}]: a requested map did not cross the transport boundary"
@@ -964,6 +1022,10 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             "napi/batch[{index}]: the source-map axis changed the emitted module bytes"
         );
     }
+    assert!(
+        published_entries > 0,
+        "napi/batch: every entry was refused, so the source-map axis was never exercised"
+    );
 }
 
 /// Every spelling the BUILT NAPI artifact exports is either executed by the
@@ -2552,14 +2614,14 @@ fn the_bundler_virtual_script_loads_publish_requested_source_maps() {
         &vue["loadedScriptMap"],
         PROBE_VUE_ID,
     );
-    // The SVELTE product is held to the envelope only, and deliberately: its
-    // map is a single unmapped segment today. That is a recorded observation
-    // with an owner, pinned green by
-    // `the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output`,
-    // so the stricter oracle is not applied here — the acceptance for this
-    // product is the host PARITY comparison below, which is stronger than
-    // either oracle and does not depend on the map being non-empty.
-    assert_source_map_artifact(
+    // The SVELTE product is held to the same MAPPED oracle as the Vue one. It
+    // was once envelope-only, because its map was a single segment naming no
+    // authored position; the map builder was corrected and the coverage it now
+    // has is pinned as a floor by
+    // [`both_published_virtual_script_maps_cover_their_output`]. The acceptance
+    // for this product remains the host PARITY comparison below, which is
+    // stronger than either oracle.
+    assert_mapped_source_map_artifact(
         "VerterSvelte.vite: the mapped virtual-script product",
         &svelte["loadedScriptMap"],
     );
@@ -2600,32 +2662,25 @@ fn the_bundler_virtual_script_loads_publish_requested_source_maps() {
     let _ = vue;
 }
 
-/// CHARACTERIZATION — the published Svelte virtual-script map is structurally
-/// valid and semantically empty, where the Vue one maps most of its output.
+/// Both published virtual-script maps navigate somewhere, measured at the
+/// STRUCTURE level rather than through a presence flag.
 ///
 /// The green acceptance target above
 /// ([`the_bundler_virtual_script_loads_publish_requested_source_maps`]) asks
-/// whether a v3 map with a non-empty `mappings` string was published. Both
-/// carriers answer yes — but the Svelte answer is the single segment `"A"`: one
-/// generated column, no authored position, nothing a consumer can navigate to.
-/// The Vue answer is 16 segments across 18 generated lines, 12 of them naming
-/// an authored position.
+/// only whether a v3 map with a non-empty `mappings` string was published, and
+/// the single segment `"A"` — one generated column, no authored position,
+/// nothing a consumer can navigate to — satisfies that. This measures what the
+/// maps actually cover.
 ///
-/// So this pins the DIVERGENCE the acceptance target cannot see, at the
-/// structure level rather than through a presence flag:
-///
-/// * Svelte is pinned EXACTLY (one segment, none of them mapped). A correction
-///   to the Svelte map builder is EXPECTED to flip this test, and that flip is
-///   the signal to re-measure and update it — not a regression to revert. The
-///   Svelte map-provenance class already has an owner and an acceptance target
-///   elsewhere; this test only records what is true today.
-/// * Vue is pinned as a FLOOR at its measured values, so an improvement to the
-///   Vue map keeps it green while a loss of coverage fails it.
-///
-/// The Vue ROLLUP entry publishes no map at all; that is the separately owned
-/// ignored acceptance target below, not part of this measurement.
+/// Each carrier is pinned as a FLOOR at its measured values, so an improvement
+/// keeps this green while a loss of coverage fails it. The Svelte floor was
+/// once the empty single segment; the Svelte map builder was corrected and the
+/// floor is re-measured here to what it now covers, on BOTH public Svelte
+/// routes — the Vite virtual-script load and the Rollup one — which carry the
+/// same map, so this is the map builder output rather than one bundler
+/// adapter handling of it.
 #[test]
-fn the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_most_of_its_output() {
+fn both_published_virtual_script_maps_cover_their_output() {
     let record = probe(
         "bundler",
         "packages/unplugin/scripts/probe-bundler-route.mjs",
@@ -2642,33 +2697,26 @@ fn the_public_svelte_virtual_script_map_currently_maps_nothing_where_vue_maps_mo
          (18 generated lines, 16 segments, 12 of them naming an authored position): {vue:?}"
     );
 
-    // Both public Svelte routes — the Vite virtual-script load and the Rollup
-    // one — carry the SAME empty map, so this is the Svelte map builder's
-    // output rather than one bundler adapter's handling of it.
     for label in ["sveltePublicEntry", "svelteRollupEntry"] {
         let svelte = mappings_shape(
             &format!("bundler/{label}: the virtual-script map"),
             &record["cases"][label]["loadedScriptMap"],
         );
-        assert_eq!(
-            svelte,
-            MappingsShape {
-                lines: 1,
-                segments: 1,
-                mapped_segments: 0,
-            },
-            "bundler/{label}: the Svelte virtual-script map's structure moved. If the Svelte map \
-             builder was corrected this is the expected signal — re-measure and update this \
-             characterization rather than reverting."
+        assert!(
+            svelte.lines >= 7 && svelte.segments >= 3 && svelte.mapped_segments >= 1,
+            "bundler/{label}: the Svelte virtual-script map covers less than the recorded \
+             measurement (7 generated lines, 3 segments, 1 of them naming an authored \
+             position): {svelte:?}"
         );
     }
 
-    // The divergence itself, stated as the comparison: the acceptance target
-    // treats these two products identically, and they are not.
+    // The floors above are counts, and a count can be met by a map that names
+    // no authored position at all if the floor were ever lowered to zero. Both
+    // carriers are therefore also required to map SOMETHING, stated separately
+    // so a future re-measurement cannot quietly drop it.
     assert!(
-        vue.mapped_segments > 0,
-        "VerterVue.vite: the Vue product now maps nothing either, so this test no longer \
-         characterizes a divergence: {vue:?}"
+        vue.mapped_segments > 0 && vue.segments > 0,
+        "VerterVue.vite: the published map names no authored position: {vue:?}"
     );
 }
 
@@ -3236,13 +3284,13 @@ fn the_bundler_inline_transform_publishes_the_hosts_runtime_render_batch_product
     );
     let entry = &entries[0];
     assert!(
-        entry.errors.is_empty(),
+        entry.errors().is_empty(),
         "the render-only batch lane failed for this input: {:?}",
-        entry.errors
+        entry.errors()
     );
     assert_eq!(
         published,
-        entry.code.as_ref(),
+        entry.code(),
         "VerterVue.rollup: the published inline product is not the host's render-only batch \
          product for the same canonical and profile"
     );
@@ -3262,7 +3310,7 @@ fn the_bundler_inline_transform_publishes_the_hosts_runtime_render_batch_product
     };
     assert_eq!(
         main_code.as_str(),
-        entry.code.as_ref(),
+        entry.code(),
         "the render-only batch lane and the host-backed `Main` route no longer publish the same \
          bytes for this profile. That identity is exactly what stops the comparison above from \
          telling the two host lanes apart — if they have diverged, re-measure this test, which can \

@@ -6,15 +6,14 @@
 //! inputs through the batch boundary and compares each item against the
 //! single-file route for the same typed request.
 //!
-//! Executing it establishes that the two routes are NOT equivalent for Svelte.
-//! [`CompileBatchInput`] carries no source-language field, and the batch upserts
-//! every input as a Vue carrier
-//! (`crates/verter_session/src/host_compile.rs:475` hardcodes
-//! `file_language: verter_language::FileLanguage::vue()`), so a `.svelte` input
-//! is parsed and compiled by the Vue carrier and never reaches the Svelte one.
-//! The characterizations below pin that outcome; the `#[ignore]`d conformance
-//! target states the equivalence the route must reach. This module owns no
-//! correction.
+//! Executing it establishes that the two routes ARE equivalent for Svelte.
+//! [`CompileBatchInput`] carries no source-language field because the language
+//! is not the caller to state: the batch derives it from each input canonical
+//! id, so a `.svelte` input reaches the Svelte carrier and a `.vue` input in
+//! the same batch reaches the Vue one. The batch used to register every input
+//! as a Vue carrier, which is why it published Vue-assembled bytes for a Svelte
+//! source and why the Svelte runtime refusals could not fire on this route at
+//! all.
 //!
 //! What the batch boundary DOES honour today is asserted green: input ordering,
 //! per-item independence, and the optional-product (source-map) axis.
@@ -86,6 +85,12 @@ const SUPPORTED_TWO: &str =
 /// and this backend does not emit. An instance-script prop READ is a SUPPORTED
 /// surface, so a read-only component is no longer a refusal witness.
 const ADVANCED_RUNE_REFUSAL: &str = "<script>\n  let { count = 0 } = $props();\n  function inc() { count += 1; }\n</script>\n\n<button onclick={inc}>{count}</button>\n";
+
+/// A Vue carrier, for the batches that need a NON-Svelte input beside a Svelte
+/// one: a route that derives each input's language per path passes, while one
+/// that simply swapped a fixed Vue carrier for a fixed Svelte carrier does not.
+const VUE_SOURCE: &str =
+    "<script setup>\nconst label = 'hi'\n</script>\n\n<template><button>{{ label }}</button></template>\n";
 
 fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -179,10 +184,11 @@ fn run_batch(inputs: &[CompileBatchInput], target: CompileManyTarget) -> Vec<Com
 /// The bytes the SINGLE-FILE route produces for the same source registered
 /// under the adapter the batch actually used.
 ///
-/// This is the positive half of every characterization below: it pins what the
-/// batch currently emits to an independently-produced reference rather than
-/// merely asserting that something is absent, so arbitrarily different output
-/// fails.
+/// It pins what the batch emits to an independently-produced reference rather
+/// than merely asserting that something is absent, so arbitrarily different
+/// output fails. The language is passed explicitly here BECAUSE the reference
+/// must be able to name a carrier the batch would not derive — that is what
+/// makes it a control.
 fn single_file_reference_under(
     canonical: &str,
     source: &str,
@@ -228,24 +234,28 @@ fn registered_adapter_id(host: &VerterHost, canonical: &str) -> Option<String> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Characterization — the batch route's actual Svelte behaviour
+// The batch route's carrier selection
 // ══════════════════════════════════════════════════════════════════════════
 
-/// CHARACTERIZATION — a `.svelte` batch input is currently compiled by the VUE
-/// carrier, so the batch route is not equivalent to the single-file route.
+/// A `.svelte` batch input is registered under the SVELTE carrier, and a `.vue`
+/// input in the same batch under the Vue one.
 ///
-/// `CompileBatchInput` carries no source-language field and the batch's own
-/// upsert hardcodes `FileLanguage::vue()`
-/// (`crates/verter_session/src/host_compile.rs:475`), so the carrier registry
-/// dispatches the Vue compiler for a Svelte source. The single-file route,
-/// given the same bytes under `FileLanguage::svelte()`, publishes a Svelte
-/// client module.
+/// `CompileBatchInput` carries no source-language field: the language is
+/// derived from the canonical id, so the carrier registry dispatches the right
+/// compiler per input. The batch used to register every input as Vue, which is
+/// why it published Vue-assembled bytes for a Svelte source.
 ///
-/// Discriminating in BOTH directions: it fails if the batch starts producing
-/// Svelte output AND if the single-file route stops.
+/// Discriminating in BOTH directions: it fails if the batch reverts to a fixed
+/// Vue carrier, if it substitutes a fixed SVELTE carrier (the `.vue` input in
+/// the same batch), and if the single-file route stops agreeing with it.
 #[test]
-fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
-    let inputs = vec![batch_input("/batch/One.svelte", SUPPORTED)];
+fn a_svelte_batch_input_is_registered_under_the_svelte_carrier() {
+    let inputs = vec![
+        batch_input("/batch/One.svelte", SUPPORTED),
+        // A Vue carrier in the SAME batch. Without it, a batch that had simply
+        // swapped one fixed carrier for another would pass everything below.
+        batch_input("/batch/One.vue", VUE_SOURCE),
+    ];
     let batch_host = host();
     let entries = batch_host.compile_many(
         inputs.clone(),
@@ -254,22 +264,30 @@ fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
             profile: render_profile(false, true),
         },
     );
-    let batched = &entries[0];
-    assert!(
-        batched.errors().is_empty(),
-        "the batch reported errors for a component the single-file route publishes: {:?}",
-        batched.errors()
-    );
+    for entry in &entries {
+        assert!(
+            entry.errors().is_empty(),
+            "{}: the batch reported errors for a component the single-file route publishes: {:?}",
+            entry.canonical_id,
+            entry.errors()
+        );
+    }
+
     // TYPED route evidence, not a look at the bytes: the batch host's own
-    // registered adapter for this canonical is the VUE one.
+    // registered adapter per canonical. Each input got ITS OWN carrier, so the
+    // language is derived per path rather than fixed for the batch.
     assert_eq!(
         registered_adapter_id(&batch_host, "/batch/One.svelte").as_deref(),
+        Some("svelte"),
+        "the batch did not register `/batch/One.svelte` under the Svelte adapter"
+    );
+    assert_eq!(
+        registered_adapter_id(&batch_host, "/batch/One.vue").as_deref(),
         Some("vue"),
-        "the batch registered `/batch/One.svelte` under a different adapter than Vue; if it now \
-         registers Svelte, un-ignore `a_svelte_batch_matches_the_single_file_route_item_for_item`"
+        "the batch stopped registering a `.vue` input under the Vue adapter"
     );
 
-    // The single-file route, same bytes, same axes — a genuine Svelte module.
+    // The single-file route, same bytes, same axes.
     let single = host();
     upsert_svelte(&single, "/batch/One.svelte", SUPPORTED);
     let SingleFileOutcome::Published { code, .. } = single_file(
@@ -279,46 +297,47 @@ fn a_svelte_batch_input_is_currently_compiled_by_the_vue_carrier() {
     ) else {
         panic!("the single-file route stopped publishing this component");
     };
-    // The same typed evidence on the single-file host names the SVELTE adapter,
-    // so the two routes registered the same bytes under different adapters.
     assert_eq!(
         registered_adapter_id(&single, "/batch/One.svelte").as_deref(),
         Some("svelte"),
         "the single-file route no longer registers this component under the Svelte adapter"
     );
-    assert_ne!(
-        batched.code(),
+    assert_eq!(
+        entries[0].code(),
         code.as_str(),
-        "the two routes now agree, so the characterized divergence is gone"
+        "the batch and single-file routes publish different bytes for the same Svelte source"
     );
 
-    // The POSITIVE half: the batch's bytes are exactly what the single-file
-    // route produces for the same source registered under the adapter the batch
-    // actually used. Arbitrarily different batch output fails here, so this
-    // characterization is discriminating in the worsening direction too.
-    assert_eq!(
-        single_file_reference_under(
-            "/batch/One.svelte",
-            SUPPORTED,
-            verter_language::FileLanguage::vue(),
-            &single_file_profile(false, true),
-        ),
+    // The NEGATIVE half, kept explicit: the batch's bytes are no longer what a
+    // Vue-registered single-file route produces for the same source. Without
+    // this, a batch that reverted to the fixed Vue carrier while the reference
+    // above also drifted could still read as agreement.
+    let vue_registered = single_file_reference_under(
+        "/batch/One.svelte",
+        SUPPORTED,
+        verter_language::FileLanguage::vue(),
+        &single_file_profile(false, true),
+    );
+    assert_ne!(
+        vue_registered,
         SingleFileOutcome::Published {
-            code: batched.code().to_string(),
-            has_map: batched.source_map().is_some(),
+            code: entries[0].code().to_string(),
+            has_map: entries[0].source_map().is_some(),
         },
-        "the batch's output is no longer what the Vue-registered single-file route produces for \
-         the same source"
+        "the batch is publishing what the VUE-registered single-file route produces for a \
+         `.svelte` source"
     );
 }
 
-/// CHARACTERIZATION — the Svelte runtime refusals never fire on the batch
-/// route, because the Svelte carrier is never reached.
+/// The Svelte runtime refusals fire on the batch route, carrying the SAME
+/// typed code the single-file route reports and NO product beside them.
 ///
 /// Both refusal cases are covered: the advanced-rune refusal (a per-component
 /// property) and the `generate: "server"` refusal (a batch-level profile axis).
+/// They were unreachable on this route while every input was registered under
+/// the Vue carrier.
 #[test]
-fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
+fn the_svelte_runtime_refusals_fire_on_the_batch_route() {
     // (a) the advanced-rune refusal.
     let advanced = run_batch(
         &[batch_input("/batch/Refused.svelte", ADVANCED_RUNE_REFUSAL)],
@@ -327,32 +346,18 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
         },
     );
     assert!(
-        !advanced[0]
+        advanced[0]
             .errors()
             .iter()
             .any(|error| error.contains("svelte-runtime-unsupported-advanced-rune")),
-        "the batch now surfaces the advanced-rune refusal: {:?}",
+        "the batch did not surface the advanced-rune refusal: {:?}",
         advanced[0].errors()
     );
-    // POSITIVE: the batch published exactly the Vue-registered single-file
-    // route's bytes for these source bytes. Without this the assertion above
-    // would stay green for arbitrarily worse output.
-    assert_eq!(
-        single_file_reference_under(
-            "/batch/Refused.svelte",
-            ADVANCED_RUNE_REFUSAL,
-            verter_language::FileLanguage::vue(),
-            &single_file_profile(false, true),
-        ),
-        SingleFileOutcome::Published {
-            code: advanced[0].code().to_string(),
-            has_map: advanced[0].source_map().is_some(),
-        },
-        "the batch's output for the refusal-shaped input is no longer what the Vue-registered \
-         single-file route produces"
-    );
-    // The single-file route DOES refuse the same bytes — the comparison that
-    // makes the absence above a divergence rather than a property of the input.
+    // The refusal is atomic: no product travels beside it.
+    assert_publishes_no_product("advanced-rune refusal", &advanced[0]);
+    // The single-file route refuses the same bytes with the same typed code —
+    // the comparison that makes this equivalence rather than a property of the
+    // batch's own error text.
     let single = host();
     upsert_svelte(&single, "/batch/Refused.svelte", ADVANCED_RUNE_REFUSAL);
     assert_eq!(
@@ -375,28 +380,14 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
         },
     );
     assert!(
-        !server[0]
+        server[0]
             .errors()
             .iter()
             .any(|error| error.contains("svelte-runtime-unsupported-server-generate")),
-        "the batch now surfaces the server-generate refusal: {:?}",
+        "the batch did not surface the server-generate refusal: {:?}",
         server[0].errors()
     );
-    // POSITIVE, same reasoning, on the server-profile lane.
-    assert_eq!(
-        single_file_reference_under(
-            "/batch/Server.svelte",
-            SUPPORTED,
-            verter_language::FileLanguage::vue(),
-            &single_file_profile(true, true),
-        ),
-        SingleFileOutcome::Published {
-            code: server[0].code().to_string(),
-            has_map: server[0].source_map().is_some(),
-        },
-        "the batch's server-lane output is no longer what the Vue-registered single-file route \
-         produces"
-    );
+    assert_publishes_no_product("server-generate refusal", &server[0]);
     let single_server = host();
     upsert_svelte(&single_server, "/batch/Server.svelte", SUPPORTED);
     assert_eq!(
@@ -410,52 +401,88 @@ fn the_svelte_runtime_refusals_do_not_fire_on_the_batch_route() {
         },
         "the single-file server route stopped refusing"
     );
+
+    // The NEGATIVE control on the same axis: the server profile refuses the
+    // SVELTE carrier, not every carrier. A Vue input under the identical
+    // profile still publishes, so the refusals above are carrier-derived rather
+    // than a batch that fails whenever `ssr` is set.
+    let vue_server = run_batch(
+        &[batch_input("/batch/ServerVue.vue", VUE_SOURCE)],
+        CompileManyTarget::RuntimeRender {
+            profile: render_profile(true, true),
+        },
+    );
+    assert!(
+        vue_server[0].errors().is_empty(),
+        "the server profile now refuses a Vue carrier too, so the Svelte refusals above are not \
+         carrier-derived: {:?}",
+        vue_server[0].errors()
+    );
+    assert!(
+        !vue_server[0].code().is_empty(),
+        "the server profile published no module for a Vue carrier"
+    );
 }
 
-/// The same divergence on the HOST-BACKED lane — the one IDE / analysis / TSC
-/// consumers use — so the finding is not confined to the render lane.
+/// The same equivalence on the HOST-BACKED lane — the one IDE / analysis / TSC
+/// consumers use — so the correction is not confined to the render lane.
 #[test]
-fn the_host_backed_batch_lane_shows_the_same_svelte_language_divergence() {
+fn the_host_backed_batch_lane_derives_the_svelte_language_too() {
     let batch_host = host();
     let entries = batch_host.compile_many(
         vec![
             batch_input("/batch/HostOne.svelte", SUPPORTED),
             batch_input("/batch/HostRefused.svelte", ADVANCED_RUNE_REFUSAL),
+            batch_input("/batch/HostVue.vue", VUE_SOURCE),
         ],
         CompileBatchOptions::default(),
         CompileManyTarget::HostBacked,
     );
-    assert_eq!(entries.len(), 2, "one entry per input");
+    assert_eq!(entries.len(), 3, "one entry per input");
     assert_eq!(
         registered_adapter_id(&batch_host, "/batch/HostOne.svelte").as_deref(),
+        Some("svelte"),
+        "the host-backed lane did not register this canonical under the Svelte adapter"
+    );
+    assert_eq!(
+        registered_adapter_id(&batch_host, "/batch/HostVue.vue").as_deref(),
         Some("vue"),
-        "the host-backed lane registered this canonical under a different adapter than Vue"
+        "the host-backed lane stopped registering a `.vue` input under the Vue adapter"
     );
     assert!(
-        entries[1].errors().is_empty(),
-        "the host-backed lane now reports an error for the refused component: {:?}",
+        entries[1]
+            .errors()
+            .iter()
+            .any(|error| error.contains("svelte-runtime-unsupported-advanced-rune")),
+        "the host-backed lane did not report the refusal for the refused component: {:?}",
         entries[1].errors()
     );
-    // POSITIVE: both entries carry exactly the Vue-registered single-file
-    // route's bytes under the host-backed lane's own bundler preset.
+    assert_publishes_no_product("host-backed advanced-rune refusal", &entries[1]);
+
+    // The published entries carry exactly the single-file route's bytes for the
+    // same source registered under ITS OWN language, under the host-backed
+    // lane's bundler preset.
     let bundler = crate::host_compile::compile_profile_for_bundler();
-    for (entry, source) in [
-        (&entries[0], SUPPORTED),
-        (&entries[1], ADVANCED_RUNE_REFUSAL),
+    for (entry, source, language) in [
+        (
+            &entries[0],
+            SUPPORTED,
+            verter_language::FileLanguage::svelte(),
+        ),
+        (
+            &entries[2],
+            VUE_SOURCE,
+            verter_language::FileLanguage::vue(),
+        ),
     ] {
         assert_eq!(
-            single_file_reference_under(
-                &entry.canonical_id,
-                source,
-                verter_language::FileLanguage::vue(),
-                &bundler,
-            ),
+            single_file_reference_under(&entry.canonical_id, source, language, &bundler),
             SingleFileOutcome::Published {
                 code: entry.code().to_string(),
                 has_map: entry.source_map().is_some(),
             },
-            "{}: the host-backed lane's output is no longer what the Vue-registered single-file \
-             route produces",
+            "{}: the host-backed lane's output is not what the single-file route produces for \
+             the same source under its own language",
             entry.canonical_id
         );
     }
@@ -580,24 +607,20 @@ fn the_batch_source_map_axis_publishes_only_what_was_requested() {
 // Conformance target — the equivalence the batch route must reach
 // ══════════════════════════════════════════════════════════════════════════
 
-/// CONFORMANCE TARGET — currently FAILS, deliberately `#[ignore]`d.
+/// ROUTE EQUIVALENCE — for each item, the batch result equals the single-file
+/// route's result for the same typed request: the same module bytes and map
+/// presence for a published item, and the same typed refusal code with NO
+/// partial product for a refused one.
 ///
-/// **What is wrong:** `CompileBatchInput` carries no source-language field and
-/// the batch's own upsert hardcodes `FileLanguage::vue()`
-/// (`crates/verter_session/src/host_compile.rs:465-478`), so every `.svelte`
-/// input in a batch is parsed and compiled by the Vue carrier. The batch route
-/// therefore publishes Vue-assembled bytes where the single-file route
-/// publishes a Svelte client module, and neither Svelte runtime refusal fires.
+/// The batch used to register every input under the Vue carrier regardless of
+/// the path, so it published Vue-assembled bytes for a `.svelte` source and
+/// neither Svelte runtime refusal could fire. The language is now derived from
+/// the canonical id by the host's classifier, which is what makes a refusal
+/// reachable on this route at all.
 ///
-/// **Behaviour this demands:** for each item, the batch result equals the
-/// single-file route's result for the same typed request — the same module
-/// bytes and map presence for a published item, and the same typed refusal code
-/// with NO partial product for a refused one.
-///
-/// **Acceptance:** un-ignoring this test is the acceptance gate for that
-/// correction. This module owns no correction.
+/// The refusal item is in the MIDDLE, so a shifted or fanned-out result is
+/// visible in both directions.
 #[test]
-#[ignore = "conformance target: the batch route compiles .svelte inputs as Vue, so it is not equivalent to the single-file route"]
 fn a_svelte_batch_matches_the_single_file_route_item_for_item() {
     let inputs = vec![
         batch_input("/batch/EqOne.svelte", SUPPORTED),
@@ -674,8 +697,9 @@ fn a_svelte_batch_matches_the_single_file_route_item_for_item() {
 
 /// A Vue-carrier source whose TEMPLATE genuinely fails to parse.
 ///
-/// The batch upserts every input as a Vue carrier, so a genuinely failing
-/// entry is necessarily a Vue-carrier failure. Malformed SCRIPT is not one:
+/// The rows below drive their failing classes through `.vue` inputs, so a
+/// genuinely failing entry here is a Vue-carrier failure. Malformed SCRIPT is
+/// not one:
 /// the carrier's error recovery still publishes a module for it (a
 /// `<script setup>` body of `const a = (((` emits `const _sfc_main = { … }`
 /// with the broken text passed through, no error at all). An unterminated
@@ -1037,11 +1061,12 @@ const ATOMICITY_ROWS: &[(FailingClass, Lane, usize)] = &[
 ///   completion-state seam that bypasses the batch entirely. Both
 ///   constructions the class would reach hardcode an empty code, map and
 ///   language, exactly like the conflict row above.
-/// - **A typed Svelte runtime refusal.** It cannot reach the batch at all:
-///   `crates/verter_session/src/host_compile.rs:469-478` hardcodes
-///   `file_language: FileLanguage::vue()` for every batch input, and the
-///   render lane never reads the runtime-surface-refused flag. That carrier
-///   defect is characterized separately in this module.
+/// - **A typed Svelte runtime refusal.** No longer unreachable, and no longer
+///   listed here: the batch derives each input language from its canonical id,
+///   so a `.svelte` input reaches the Svelte carrier and its refusals surface
+///   as ordinary failing entries. They are driven directly by
+///   [`the_svelte_runtime_refusals_fire_on_the_batch_route`], which holds them
+///   to the same no-partial-product rule as every row in this table.
 /// - **`OtherHostError` on the HOST-BACKED lane.** The class itself IS
 ///   driven, on the render lane. The grammar axis — the one caller-settable
 ///   route into `Err(other)` — rides on the compile profile, and the
@@ -1633,4 +1658,156 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
             "{lane:?}: the recovered request served different bytes than the first successful one"
         );
     }
+}
+
+/// A canonical already registered under ANOTHER carrier does not keep that
+/// carrier through a batch.
+///
+/// The batch skips its upsert when the registration it would make is the one
+/// the scheduler already holds. While that comparison read the source bytes
+/// ALONE, a host that had registered these exact bytes as Vue never re-ran the
+/// derivation and compiled the whole batch with the stale carrier. Deriving the
+/// language is not enough on its own: the skip decision has to see it too.
+///
+/// The reference is a FRESH host given the same batch, so this asserts the two
+/// agree rather than pinning bytes this test computed itself.
+#[test]
+fn a_batch_re_registers_a_canonical_that_was_left_under_another_carrier() {
+    let canonical = "/batch/Poisoned.svelte";
+
+    // Pre-register the exact batch bytes under the WRONG carrier.
+    let poisoned = host();
+    let _ = poisoned
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(SUPPORTED),
+            file_language: verter_language::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap_or_else(|error| panic!("upsert {canonical}: {error:?}"));
+    assert_eq!(
+        registered_adapter_id(&poisoned, canonical).as_deref(),
+        Some("vue"),
+        "the pre-registration did not take, so this test is not exercising the stale-carrier path"
+    );
+
+    let inputs = vec![batch_input(canonical, SUPPORTED)];
+    let target = CompileManyTarget::RuntimeRender {
+        profile: render_profile(false, true),
+    };
+    let poisoned_entries = poisoned.compile_many(
+        inputs.clone(),
+        CompileBatchOptions::default(),
+        match &target {
+            CompileManyTarget::RuntimeRender { profile } => CompileManyTarget::RuntimeRender {
+                profile: profile.clone(),
+            },
+            CompileManyTarget::HostBacked => CompileManyTarget::HostBacked,
+        },
+    );
+
+    // The batch re-registered it under the carrier its path implies.
+    assert_eq!(
+        registered_adapter_id(&poisoned, canonical).as_deref(),
+        Some("svelte"),
+        "the batch kept the carrier a previous registration left behind"
+    );
+
+    // And it published what a host that never saw the stale registration
+    // publishes for the same batch.
+    let fresh_entries = run_batch(&inputs, target);
+    assert_eq!(
+        poisoned_entries[0].code(),
+        fresh_entries[0].code(),
+        "a canonical pre-registered under another carrier produced different bytes from a fresh \
+         host given the same batch"
+    );
+    assert_eq!(
+        poisoned_entries[0].errors(),
+        fresh_entries[0].errors(),
+        "a canonical pre-registered under another carrier produced different errors from a fresh \
+         host given the same batch"
+    );
+    // Non-vacuity: the comparison above is only meaningful because the fresh
+    // host publishes something.
+    assert!(
+        !fresh_entries[0].code().is_empty() && fresh_entries[0].errors().is_empty(),
+        "the fresh host published nothing for this input, so the comparison decides nothing: {:?}",
+        fresh_entries[0].errors()
+    );
+}
+
+/// The batch classifies each input by its canonical id, so an id that names no
+/// carrier does not produce a component module.
+///
+/// This is the deliberate edge of deriving the carrier from the path: the batch
+/// used to register everything as Vue, so it would assemble a Vue module for
+/// ANY id — including a `.ts` path or one with no extension at all. It no
+/// longer does. A caller that wants a carrier compiled must name the file as
+/// that carrier.
+///
+/// The `.vue` row is the control: without it, a batch that had stopped
+/// compiling everything would satisfy the negative rows.
+#[test]
+fn the_batch_classifies_by_canonical_id_so_a_non_carrier_id_yields_no_module() {
+    let vue_source =
+        "<script setup>\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>\n";
+
+    for (canonical, compiles) in [
+        ("/edge/Carrier.vue", true),
+        ("/edge/Carrier.svelte", false), // Vue bytes are not a Svelte component
+        ("/edge/Module.ts", false),
+        ("/edge/NoExtension", false),
+    ] {
+        let entries = run_batch(
+            &[batch_input(canonical, vue_source)],
+            CompileManyTarget::HostBacked,
+        );
+        assert_eq!(entries.len(), 1, "{canonical}: one entry per input");
+        let entry = &entries[0];
+        if compiles {
+            assert!(
+                entry.errors().is_empty() && !entry.code().is_empty(),
+                "{canonical}: an id naming the carrier its bytes are did not compile: {:?}",
+                entry.errors()
+            );
+        } else {
+            assert!(
+                entry.code().is_empty(),
+                "{canonical}: a module was published for an id that does not name this carrier"
+            );
+            assert!(
+                !entry.errors().is_empty(),
+                "{canonical}: the batch reported neither a module nor a reason"
+            );
+        }
+    }
+}
+
+/// CHARACTERIZED, NOT FIXED — an id whose source IS registered but names no
+/// carrier is reported as a MISSING SOURCE.
+///
+/// The batch registers the bytes successfully (the id classifies as a plain
+/// script module), and the compile then asks for a `Main` node that a
+/// non-carrier file has none of. The route answers `HostError::MissingSource`,
+/// which tells the caller its source is absent when the real answer is that the
+/// file is not a component. The batch could only reach this state once inputs
+/// were classified by path, but the taxonomy is the virtual-file route's:
+/// `effective_file_state_from_snapshot` returning `None` is mapped to
+/// `MissingSource` in `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`,
+/// and correcting it means changing that route's error taxonomy for every
+/// consumer, not the batch's use of it.
+#[test]
+#[ignore = "the virtual-file route reports a registered non-carrier file as a missing source"]
+fn a_non_carrier_batch_id_is_not_reported_as_a_missing_source() {
+    let entries = run_batch(
+        &[batch_input("/edge/Module.ts", "export const a = 1;\n")],
+        CompileManyTarget::HostBacked,
+    );
+    let errors = entries[0].errors().join("; ");
+    assert!(
+        !errors.contains("missing source"),
+        "a file whose source is registered was reported as a missing source: {errors}"
+    );
 }
