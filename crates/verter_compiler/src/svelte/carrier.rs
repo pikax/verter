@@ -111,17 +111,27 @@ pub(crate) fn svelte_script_source_type(script: Option<&SvelteScript>) -> Script
 /// code-string classification or raw-source inference is involved. Every
 /// entry carries a real retained span.
 ///
-/// STRICT-parse facts (`ParsedSvelte::strict_parse_errors`) are deliberately
-/// NOT mapped here, even though — like every other recovery point — they no
-/// longer refuse carrier publication (see `parse`'s doc). A mapped diagnostic
-/// on this channel marks the carrier's own `DiagnosticsSnapshot` as
-/// `has_errors`, and host-side IDE serving currently fails closed on that
-/// flag even for an IDE-only request — so surfacing a strict fact here would
-/// silently break hover/completion for the exact mid-typing states (an empty
-/// `{}` interpolation, an unclosed `<script>`) this carrier is supposed to
-/// stay usable for. The CLIENT-runtime "Verter emits a `Main` ⇔ official
-/// ACCEPTS" contract still sees every strict fact, at `official_reject_gate`
-/// (compile time) — this channel just isn't where that contract is enforced.
+/// STRICT-parse facts (`ParsedSvelte::strict_parse_errors`) ARE mapped here,
+/// exactly like every other parser-owned recovery point on this channel
+/// (close-tag violations, parse-reject facts, deferred script/CSS/custom-
+/// element defects): the recovery itself keeps the carrier usable — `parse`
+/// never refuses publication for these (see `parse`'s doc) — but a recovery
+/// point official REJECTS still needs its own diagnostic, matching official
+/// Svelte's parser, which also recovers a usable tree after most syntax
+/// errors while still recording the diagnostic. UNLIKE every other rail on
+/// this channel, a strict fact carries `blocks_compile: false`
+/// ([`verter_language::LanguageDiagnostic::blocks_compile`]): it is
+/// IDE-visible at full `Error` severity (hover/completion keep working off
+/// the recovered tree; a real editor squiggle appears, exactly as accurate
+/// as official's own), but it must NOT make `compile_entry`'s "does this
+/// file have an error" gate refuse IDE/runtime output for the WHOLE file
+/// over one small recoverable defect — that fail-closed shape is exactly
+/// what `9865c27ff` already fixed once, one layer down at carrier publish.
+/// The CLIENT-runtime "Verter emits a `Main` ⇔ official ACCEPTS" contract
+/// still sees every strict fact, at `official_reject_gate` (compile time) —
+/// that is where a strict fact turns into a full (but typed, non-fatal)
+/// runtime-surface refusal, never an `Err` that blocks the rest of the
+/// file's IDE surface too.
 fn svelte_parse_diagnostics(
     source: &str,
     parsed: &ParsedSvelte,
@@ -136,6 +146,7 @@ fn svelte_parse_diagnostics(
             code: diagnostic.official_code.unwrap_or(diagnostic.code),
             arguments: Vec::new(),
             message: diagnostic.message.clone(),
+            blocks_compile: true,
         })
         .collect::<Vec<_>>();
     diagnostics.extend(parsed.close_tag_violations.iter().map(|violation| {
@@ -144,13 +155,30 @@ fn svelte_parse_diagnostics(
             CloseTagViolationKind::InvalidClosingTag => "element_invalid_closing_tag",
             CloseTagViolationKind::VoidElementInvalidContent => "void_element_invalid_content",
         };
-        recovered_svelte_diagnostic(violation.span, code)
+        recovered_svelte_diagnostic(violation.span, code, true)
     }));
+    // STRICT-parse facts alone are `blocks_compile: false`: the recovery
+    // itself already proved the carrier has a faithful, usable tree (see
+    // this function's doc), so a strict fact is IDE-visible at full `Error`
+    // severity WITHOUT gating `compile_entry`'s "does this file have an
+    // error" check — that gate refusing the WHOLE file's IDE/runtime output
+    // over one small recoverable defect anywhere in it is exactly the
+    // fail-closed regression `9865c27ff` fixed once already, one layer down
+    // at carrier publish. Every OTHER rail on this channel (close-tag
+    // violations, parse-reject facts, deferred defects) keeps its
+    // pre-existing `blocks_compile: true` — unchanged, out of this fix's
+    // scope.
+    diagnostics.extend(
+        parsed
+            .strict_parse_errors
+            .iter()
+            .map(|fact| recovered_svelte_diagnostic(fact.span, fact.official_code, false)),
+    );
     diagnostics.extend(
         parsed
             .parse_reject_facts
             .iter()
-            .map(|fact| recovered_svelte_diagnostic(fact.span, fact.official_code)),
+            .map(|fact| recovered_svelte_diagnostic(fact.span, fact.official_code, true)),
     );
     // Non-CSS deferred parse-phase defects only (script-body parse faults,
     // `<svelte:options customElement>` resolution faults). CSS style-body
@@ -161,19 +189,26 @@ fn svelte_parse_diagnostics(
     diagnostics.extend(
         super::runtime::deferred_parse_defects_excluding_css(source, parsed)
             .into_iter()
-            .map(|defect| recovered_svelte_diagnostic(defect.span, defect.rejection.official_code)),
+            .map(|defect| {
+                recovered_svelte_diagnostic(defect.span, defect.rejection.official_code, true)
+            }),
     );
     sort_language_diagnostics(parse_key, &mut diagnostics);
     diagnostics
 }
 
-fn recovered_svelte_diagnostic(span: Span, code: &'static str) -> LanguageDiagnostic {
+fn recovered_svelte_diagnostic(
+    span: Span,
+    code: &'static str,
+    blocks_compile: bool,
+) -> LanguageDiagnostic {
     LanguageDiagnostic {
         span,
         severity: LanguageDiagnosticSeverity::Error,
         code,
         arguments: Vec::new(),
         message: format!("Svelte recovered from `{code}`"),
+        blocks_compile,
     }
 }
 
@@ -789,10 +824,12 @@ mod tests {
         // An unterminated `<style>` block is a parser-recoverable STRICT
         // defect: the carrier still publishes (the IDE keeps a usable
         // structure while the user is mid-edit) rather than refusing the
-        // whole artifact. Strict facts stay off the carrier's own mapped-
-        // diagnostic channel (see `svelte_parse_diagnostics`'s doc) — the
-        // official-reject-parity diagnostic for this defect surfaces later,
-        // at compile time.
+        // whole artifact — but the strict-parse fact IS still recorded on
+        // the carrier's own mapped-diagnostic channel (see
+        // `svelte_parse_diagnostics`'s doc), exactly like every other
+        // recovered defect on this channel; the CLIENT-runtime full-reject
+        // contract is still enforced separately, at compile time
+        // (`official_reject_gate`).
         let source = "<style>div{color:red}";
         let artifact = SvelteCarrierCompiler
             .parse(source, &ParseOptions::default())
@@ -801,6 +838,105 @@ mod tests {
             .diagnostics
             .iter()
             .all(|d| d.span.end as usize <= source.len()));
+        assert!(
+            artifact
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "expected_token"),
+            "the strict-parse fact for the unterminated <style> must still \
+             surface as a mapped diagnostic, got: {:?}",
+            artifact.diagnostics
+        );
+    }
+
+    /// A representative sample of official Svelte `compiler-errors`/`validator`
+    /// STRICT-parse defects (pinned `svelte@5.56.8` oracle,
+    /// `sveltejs/svelte@44a7813730579b94004e182e5a67aab27aa9d2a6`): the carrier
+    /// parser is intentionally forgiving/recovery-based, so `parse()` must
+    /// still publish (never a hard reject — an editor mid-typing needs the
+    /// recovered tree), but the strict-parse fact must still surface on the
+    /// carrier's own mapped-diagnostic channel with the EXACT official code —
+    /// the class of gap `svelte_parse_diagnostics` previously dropped by
+    /// excluding `ParsedSvelte::strict_parse_errors` from this channel.
+    #[test]
+    fn strict_parse_defects_publish_and_surface_the_official_code() {
+        let cases: &[(&str, &str, &str)] = &[
+            // compiler-errors/samples/attribute-empty
+            ("<div class= ></div>", "expected_attribute_value", "attribute-empty"),
+            // compiler-errors/samples/script-unclosed
+            (
+                "<script>\n\n<h1>Hello {name}!</h1>",
+                "element_unclosed",
+                "script-unclosed",
+            ),
+            // compiler-errors/samples/comment-unclosed
+            (
+                "<!-- an unclosed comment",
+                "expected_token",
+                "comment-unclosed",
+            ),
+            // compiler-errors/samples/unexpected-end-of-input-b
+            ("<d", "unexpected_eof", "unexpected-end-of-input-b"),
+            // compiler-errors/samples/component-invalid-name
+            (
+                "<!-- ok -->\n<Component />\n<Wunderschön />\n<Cæжαकン中 />\n\n<!-- error -->\n<Components[1] />\n",
+                "tag_invalid_name",
+                "component-invalid-name",
+            ),
+            // validator/samples/declaration-tag-invalid-type
+            (
+                "{#if true}\n\t{var foo = 1}\n{/if}\n",
+                "declaration_tag_invalid_type",
+                "declaration-tag-invalid-type",
+            ),
+            // validator/samples/logic-block-in-attribute
+            (
+                "<div style=\"{#if condition}a{/if}\"></div>\n",
+                "block_invalid_placement",
+                "logic-block-in-attribute",
+            ),
+            // compiler-errors/samples/illegal-expression
+            ("{42 = nope}\n", "js_parse_error", "illegal-expression"),
+            // A top-level <style> left unterminated — the fifth recovery
+            // point that used to double-report (an informal
+            // "unterminated-style" diag alongside the strict fact). The
+            // content itself is a complete, well-formed rule (a closing
+            // `}` boundary), so official defers to the missing `</style`
+            // and reports `expected_token`, not a CSS-domain code —
+            // verified directly against the pinned oracle compiler.
+            ("<style>div{color:red}", "expected_token", "style-unclosed"),
+        ];
+        for (source, expected_code, name) in cases {
+            let artifact = SvelteCarrierCompiler
+                .parse(source, &ParseOptions::default())
+                .unwrap_or_else(|reject| {
+                    panic!(
+                        "{name} ({source:?}): a recoverable strict-parse defect must \
+                         still publish, got a hard reject: {reject:?}"
+                    )
+                });
+            assert!(
+                artifact
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == *expected_code),
+                "{name} ({source:?}) must surface `{expected_code}`, got: {:?}",
+                artifact.diagnostics
+            );
+            // No two diagnostics on this channel may share the identical
+            // span — official reports exactly one diagnostic per defect;
+            // a duplicate span means the SAME recovery point pushed both an
+            // informal `parsed.diagnostics` entry AND its strict fact (the
+            // `unterminated-script`/`unterminated-style`/`unterminated-comment`/
+            // `unterminated-tag` class of bug this loop now guards).
+            let mut spans: Vec<_> = artifact.diagnostics.iter().map(|d| d.span).collect();
+            spans.sort_by_key(|s| (s.start, s.end));
+            assert!(
+                spans.windows(2).all(|pair| pair[0] != pair[1]),
+                "{name} ({source:?}) has two diagnostics sharing an identical span, got: {:?}",
+                artifact.diagnostics
+            );
+        }
     }
 
     #[test]

@@ -163,6 +163,12 @@ fn vue_parse_diagnostics(
             code: diagnostic.code.code_str(),
             arguments: diagnostic.arguments.clone(),
             message: diagnostic.message.clone(),
+            // Every Vue parse-time diagnostic (`MissingSfcEntryBlock`,
+            // `TemplateFunctionalUnsupported`, …) describes a defect the
+            // compiler cannot safely produce output around — unlike
+            // Svelte's recoverable strict-parse facts, there is no
+            // "faithful tree, still compilable" middle ground here.
+            blocks_compile: true,
         })
         .collect();
     verter_language::sort_language_diagnostics(parse_key, &mut mapped);

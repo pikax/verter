@@ -916,10 +916,8 @@ fn build_svelte_snapshot_from_eval_source(
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     if !artifact.diagnostics().is_empty() {
-        let mapped = artifact
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| HostDiagnostic {
+        let to_host_diagnostic =
+            |diagnostic: &verter_language::LanguageDiagnostic| HostDiagnostic {
                 severity: match diagnostic.severity {
                     verter_language::LanguageDiagnosticSeverity::Error => HostSeverity::Error,
                     verter_language::LanguageDiagnosticSeverity::Warning => HostSeverity::Warning,
@@ -929,11 +927,23 @@ fn build_svelte_snapshot_from_eval_source(
                 message: diagnostic.message.clone(),
                 arguments: diagnostic.arguments.clone(),
                 span: diagnostic.span,
-            })
-            .collect();
+            };
+        // Partition on `blocks_compile` — a Svelte strict-parse fact
+        // (`blocks_compile: false`) is IDE-visible at full severity but
+        // must not flip `has_errors` for the whole file (see
+        // `svelte_parse_diagnostics`'s doc in the carrier). Every other
+        // diagnostic on this channel keeps blocking `compile_entry` exactly
+        // as before.
+        let (blocking, advisory): (Vec<_>, Vec<_>) = artifact
+            .diagnostics()
+            .iter()
+            .partition(|diagnostic| diagnostic.blocks_compile);
         snapshot.parse_diagnostics = snapshot
             .parse_diagnostics
-            .merge(DiagnosticsSnapshot::from_vec(mapped));
+            .merge(DiagnosticsSnapshot::from_vec(
+                blocking.iter().map(|d| to_host_diagnostic(d)).collect(),
+            ))
+            .append_advisory(advisory.iter().map(|d| to_host_diagnostic(d)).collect());
     }
     snapshot
 }

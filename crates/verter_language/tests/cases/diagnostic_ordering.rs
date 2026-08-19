@@ -27,6 +27,7 @@ fn diagnostic(message: &str, argument: &str) -> LanguageDiagnostic {
         code: "same-code",
         arguments: vec![DiagnosticArg::Text(argument.to_owned())],
         message: message.to_owned(),
+        blocks_compile: true,
     }
 }
 

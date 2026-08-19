@@ -156,9 +156,18 @@ pub(crate) fn parse_sfc(
     // (`empty_sfc_compiles_to_empty_component_shell`) for a freshly created
     // blank file. Any other block-less content (styles, custom blocks,
     // malformed comments, arbitrary top-level text) is still diagnosed.
+    //
+    // A `<script>`/`<script setup>` block only counts as a real entry block
+    // when official Vue would keep it: `parse.ts`'s `ignoreEmpty` branch
+    // (lines 159-169) drops a script/scriptSetup node from the descriptor
+    // when `isEmpty()` (lines 421-429 — every child is whitespace-only text,
+    // or there are no children at all) holds AND the block has no `src`
+    // attribute. `<script/>`, `<script></script>`, and whitespace-only
+    // script content are therefore NOT entry blocks, matching
+    // `parse.spec.ts`'s "should ignore other nodes with no content" case.
     if parsed.template_ast.is_none()
-        && parsed.script_node.is_none()
-        && parsed.script_setup_node.is_none()
+        && !script_node_counts_as_entry_block(parsed.script_node.as_ref(), input)
+        && !script_node_counts_as_entry_block(parsed.script_setup_node.as_ref(), input)
         && (!parsed.style_nodes.is_empty()
             || !parsed.unknown_nodes.is_empty()
             || !is_empty_sfc_trivia(input))
@@ -187,6 +196,45 @@ pub(crate) fn parse_sfc(
         .iter()
         .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
     parsed
+}
+
+/// Whether a parsed `<script>`/`<script setup>` node counts as a real entry
+/// block for `MissingSfcEntryBlock`, matching official Vue's `isEmpty()` +
+/// `ignoreEmpty` combination (`compiler-sfc/src/parse.ts` lines 159-169 and
+/// 421-429): a `src`-attributed block always counts (line 165's
+/// `!hasAttr(node, 'src')` guard — `hasAttr` tests ATTRIBUTE PRESENCE, line
+/// 413-415, never the attribute's value), otherwise it counts only when its
+/// content has at least one non-whitespace byte — a self-closing tag (no
+/// content span at all) or whitespace-only content does not.
+///
+/// `RootNodeScript::src` only carries the `src` attribute's VALUE span (`None`
+/// for a valueless `src`, e.g. `<script src/>` / `<script src></script>`), so
+/// testing it directly would wrongly treat a present-but-valueless `src` as
+/// absent. Test presence on the full attribute list instead.
+///
+/// The name match is CASE-SENSITIVE, matching `hasAttr`'s `p.name === name`
+/// (`parse.ts:413-415`): Vue's own attribute-name parsing preserves the
+/// authored spelling verbatim (`onattribname`'s `name: getSlice(start, end)`
+/// in `compiler-core/src/parser.ts` — no `toLowerCase()`), so `<script SRC>`
+/// / `<script Src>` do NOT count as `src`-attributed there, and Verter's own
+/// parser likewise never case-folds attribute name spans.
+fn script_node_counts_as_entry_block(node: Option<&RootNodeScript>, input: &str) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    let has_src_attr = node
+        .attributes
+        .iter()
+        .any(|attribute| &input[attribute.start as usize..attribute.name_end as usize] == "src");
+    if has_src_attr {
+        return true;
+    }
+    match node.content {
+        Some(span) => !input[span.start as usize..span.end as usize]
+            .trim()
+            .is_empty(),
+        None => false,
+    }
 }
 
 /// Verter deliberately admits a block-less, trivia-only carrier as an empty

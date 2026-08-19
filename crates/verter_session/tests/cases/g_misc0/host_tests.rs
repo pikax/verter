@@ -1423,11 +1423,55 @@ fn multiple_custom_blocks_same_type() {
     );
 }
 
-/// @ai-generated - <script setup></script> (empty) compiles without panic
+/// A truly-empty `<script setup></script>` (no content, no `src`) has no
+/// real entry block and must fail closed with `MissingSfcEntryBlock`, not
+/// compile successfully. Official Vue's SFC parser (`compiler-sfc/src/
+/// parse.ts`) uses ONE AST tag, `'script'`, for both `<script>` and
+/// `<script setup>` — the `setup`/`vapor` attribute only distinguishes them
+/// at assignment time (~line 197) — so the `ignoreEmpty` prune (~line
+/// 155-168: `node.tag !== 'template' && isEmpty(node) && !hasAttr(node,
+/// 'src')`) drops an empty `<script setup>` exactly like an empty
+/// `<script>`. With `descriptor.template`/`.script`/`.scriptSetup` all
+/// unset, the "At least one <template> or <script> is required" error
+/// fires (~line 227-233) — verified directly against the pinned oracle
+/// checkout.
 #[test]
-fn empty_script_setup_block() {
+fn empty_script_setup_block_has_no_entry_block() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup></script>";
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    let error = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .expect_err("a truly-empty <script setup> has no entry block and must fail closed");
+    let HostError::CompileError(failure) = &error else {
+        panic!("expected a CompileError, got: {error:?}");
+    };
+    let missing_entry_block_count = failure
+        .diagnostics
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "MissingSfcEntryBlock")
+        .count();
+    assert_eq!(
+        missing_entry_block_count, 1,
+        "MissingSfcEntryBlock must be recorded exactly once, got: {:?}",
+        failure.diagnostics
+    );
+}
+
+/// Negative control for the fix above: a `<script setup>` with real content
+/// still counts as a real entry block and compiles successfully — only a
+/// TRULY-empty, src-less block fails closed.
+#[test]
+fn non_empty_script_setup_block_still_compiles() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let src = "<script setup>const x = 1</script>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
     let result = host
@@ -1437,8 +1481,11 @@ fn empty_script_setup_block() {
             node_kind: None,
             compile_profile: profile_dev(),
         })
-        .unwrap();
-    assert!(!result.code.is_empty());
+        .unwrap_or_else(|error| panic!("{src:?} must still compile, got: {error:?}"));
+    assert!(
+        !result.code.is_empty(),
+        "{src:?} must produce non-empty output"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════

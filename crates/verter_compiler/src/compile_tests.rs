@@ -2945,6 +2945,129 @@ fn missing_sfc_entry_block_for_non_trivia_block_less_carriers() {
     }
 }
 
+/// Official Vue's SFC parser treats an EMPTY `<script>`/`<script setup>`
+/// block as if it were never present — `parse.ts`'s `isEmpty()` helper
+/// (lines 421-429) returns true when every child is whitespace-only text (or
+/// there are no children at all, e.g. a self-closing tag), and the
+/// `ignoreEmpty` forEach branch (lines 159-169) then skips storing that node
+/// as `descriptor.script`/`descriptor.scriptSetup` entirely — UNLESS the
+/// block carries a `src` attribute (line 165, `!hasAttr(node, 'src')`; also
+/// exercised directly by the `handle empty nodes with src attribute` test at
+/// `parse.spec.ts:230-235`). A carrier whose only would-be entry block is an
+/// empty `<script>` therefore has no real template/script content, and
+/// `parse.ts:232-238` fires `MissingSfcEntryBlock` for it — see also
+/// `parse.spec.ts:220-228` ("should ignore other nodes with no content":
+/// `parse('<script/>').descriptor.script` is `null`, likewise for
+/// `<script> \n\t  </script>`).
+#[test]
+fn missing_sfc_entry_block_for_empty_script_only_carriers() {
+    for src in [
+        "<script/>",
+        "<script></script>",
+        "<script> \n\t  </script>",
+        "<script setup/>",
+        "<script setup> \n\t  </script>",
+    ] {
+        let result = compile_sfc(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == "MissingSfcEntryBlock"),
+            "{src:?} must diagnose MissingSfcEntryBlock (oracle: empty script \
+             is dropped by isEmpty(), parse.ts:421-429 + :159-169), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// A `src`-attributed script never counts as empty — `parse.ts:165`'s
+/// `!hasAttr(node, 'src')` guard exempts it from the `isEmpty` skip even
+/// with zero children, matching `parse.spec.ts:230-235` ("handle empty nodes
+/// with src attribute": `descriptor.script` is truthy for `<script
+/// src="com"/>`). Such a carrier has a real entry block and must NOT
+/// diagnose `MissingSfcEntryBlock`.
+#[test]
+fn script_with_src_attr_counts_as_entry_block_even_when_empty() {
+    let result = compile_sfc(r#"<script src="./foo.js"/>"#);
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| e.code == "MissingSfcEntryBlock"),
+        "<script src=.../> must NOT diagnose MissingSfcEntryBlock \
+         (oracle: parse.ts:165 exempts src-attributed blocks from isEmpty), \
+         got: {:?}",
+        result.errors
+    );
+}
+
+/// Official Vue's `hasAttr` (`parse.ts:413-415`) tests attribute PRESENCE —
+/// `node.props.some(p => p.type === NodeTypes.ATTRIBUTE && p.name === name)`
+/// — never the attribute's VALUE. A `src` attribute with no value
+/// (`<script src/>` self-closing, or `<script src></script>`) is still
+/// PRESENT, so it must exempt the block from `isEmpty` exactly like a
+/// valued `src`. `RootNodeScript::src` only stores the value span (`None`
+/// for a valueless attribute), so the production check must not rely on it
+/// alone.
+#[test]
+fn script_with_valueless_src_attr_counts_as_entry_block() {
+    for src in ["<script src/>", "<script src></script>"] {
+        let result = compile_sfc(src);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.code == "MissingSfcEntryBlock"),
+            "{src:?} must NOT diagnose MissingSfcEntryBlock (oracle: \
+             parse.ts:413-415 `hasAttr` tests attribute presence, not \
+             value), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// `hasAttr`'s `p.name === name` (`parse.ts:413-415`) is CASE-SENSITIVE: Vue's
+/// own attribute-name parsing preserves authored casing verbatim
+/// (`onattribname`'s `name: getSlice(start, end)` in
+/// `compiler-core/src/parser.ts` — no `toLowerCase()`), so an uppercase or
+/// mixed-case spelling of `src` is a DIFFERENT attribute name to official Vue
+/// and must NOT exempt an otherwise-empty script from `MissingSfcEntryBlock`.
+#[test]
+fn script_with_uppercase_src_spelling_does_not_count_as_entry_block() {
+    for src in ["<script SRC/>", "<script Src></script>"] {
+        let result = compile_sfc(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == "MissingSfcEntryBlock"),
+            "{src:?} must still diagnose MissingSfcEntryBlock (oracle: \
+             hasAttr is case-sensitive, so `SRC`/`Src` is not the `src` \
+             attribute), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// A script block with real, non-whitespace content (even just an import)
+/// is never "empty" under `isEmpty()` (`parse.ts:421-429` only inspects
+/// whitespace-trimmed text children) and always counts as a real entry
+/// block — no `MissingSfcEntryBlock` diagnostic.
+#[test]
+fn script_with_import_only_content_counts_as_entry_block() {
+    let result = compile_sfc("<script>import { ref } from 'vue'</script>");
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| e.code == "MissingSfcEntryBlock"),
+        "<script>import ...</script> must NOT diagnose MissingSfcEntryBlock, \
+         got: {:?}",
+        result.errors
+    );
+}
+
 /// `<template functional>` is no longer supported in Vue 3 — see
 /// `compiler-sfc/__tests__/parse.spec.ts` ("should throw error if template
 /// functional is given").
@@ -21612,6 +21735,28 @@ fn a_for_of_destructured_target_resolves_in_every_position() {
         assert!(
             !code.contains("] of xs)"),
             "[{backend}] must not re-emit the iterated expression:\n{code}"
+        );
+    }
+}
+
+#[test]
+fn missing_sfc_entry_block_for_empty_style_or_custom_block_only_carriers() {
+    for src in [
+        "<style/>",
+        "<style> \n\t </style>",
+        "<i18n/>",
+        "<i18n> \n\t </i18n>",
+    ] {
+        let result = compile_sfc(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == "MissingSfcEntryBlock"),
+            "{src:?} must diagnose MissingSfcEntryBlock (oracle: parse.ts \
+             tracks the block-less carrier regardless of the pruned block's \
+             own emptiness), got: {:?}",
+            result.errors
         );
     }
 }

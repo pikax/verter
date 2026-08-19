@@ -148,6 +148,20 @@ pub struct LanguageDiagnostic {
     pub arguments: Vec<DiagnosticArg>,
     /// Human-readable message.
     pub message: String,
+    /// Whether an `Error`-severity instance of this diagnostic should gate
+    /// downstream compilation (refuse to produce IDE/runtime output for the
+    /// whole file) — `true` for almost every diagnostic on this channel,
+    /// including every genuinely fatal parse-time defect (a carrier with no
+    /// real template/script entry, an unsupported construct the compiler
+    /// cannot safely lower). `false` marks a diagnostic that is accurate and
+    /// IDE-visible (the editor still shows it at full severity) but
+    /// describes a RECOVERABLE parser defect the carrier already produced a
+    /// faithful, usable tree for — the compiler can and should still emit
+    /// output for the rest of the file. Consumers that gate compilation on
+    /// "does this file have an error" must consult this flag rather than
+    /// severity alone; consumers that only DISPLAY diagnostics (hover,
+    /// `textDocument/publishDiagnostics`) read severity as before.
+    pub blocks_compile: bool,
 }
 
 /// Source-local fields in the normative diagnostic ordering key.

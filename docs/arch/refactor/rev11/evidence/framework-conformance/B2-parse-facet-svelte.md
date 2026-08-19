@@ -9,9 +9,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/attribute-empty/`
-- verdict_hash: `8b8f450c56d5bafb`
+- verdict_hash: `3b874245da379b2d`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_attribute_value` mapped_error=`true` invalid_reject=`false` source_sha256=`b8a4a5769dadd8f9702c1145002ba796e98678f81b2c148a1027fef2b587c7ca`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_attribute_value` mapped_error=`true` invalid_reject=`false` source_sha256=`b8a4a5769dadd8f9702c1145002ba796e98678f81b2c148a1027fef2b587c7ca`
     diagnostics: error:expected_attribute_value@5-11
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -116,9 +116,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/comment-unclosed/`
-- verdict_hash: `8aae7cbeef058a2b`
+- verdict_hash: `57dbc12761814216`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`a954580e751391662ffb446480af0cfc722a188398e100a3f3774def1001e8b6`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`a954580e751391662ffb446480af0cfc722a188398e100a3f3774def1001e8b6`
     diagnostics: error:expected_token@0-24
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -126,9 +126,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/component-invalid-name/`
-- verdict_hash: `aff9f66251c76f04`
+- verdict_hash: `7efd6bbb885db2a6`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`tag_invalid_name` mapped_error=`true` invalid_reject=`false` source_sha256=`d93f98a0543717a7d99ac64494df27b57333a10318c9fcf4161678726497ad4c`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`tag_invalid_name` mapped_error=`true` invalid_reject=`false` source_sha256=`d93f98a0543717a7d99ac64494df27b57333a10318c9fcf4161678726497ad4c`
     diagnostics: error:tag_invalid_name@91-92
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -362,9 +362,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/declaration-tag-trailing-slash/`
-- verdict_hash: `6b680e389165219f`
+- verdict_hash: `c6a6e3721865de66`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`fcec7b02ee88a66ce9458a2bb39a2450d36b86653b69d66e48bfc7c71891de4a`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`fcec7b02ee88a66ce9458a2bb39a2450d36b86653b69d66e48bfc7c71891de4a`
     diagnostics: error:unexpected_eof@12-12
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -453,10 +453,10 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/element-invalid-name/`
-- verdict_hash: `4ddc069c865e49e0`
+- verdict_hash: `fda6990a0ebe4c2b`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`tag_invalid_name` mapped_error=`true` invalid_reject=`false` source_sha256=`e250e5df11dffd5eadc191c9f688621eef73ecf65b5ef928983a0371ea6dec1b`
-    diagnostics: error:tag_invalid_name@4-5
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`tag_invalid_name` mapped_error=`true` invalid_reject=`false` source_sha256=`e250e5df11dffd5eadc191c9f688621eef73ecf65b5ef928983a0371ea6dec1b`
+    diagnostics: error:tag_invalid_name@4-5, error:expected_token@9-19
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-32E82A0C8801ECD0987F
@@ -473,19 +473,19 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/else-before-closing-3/`
-- verdict_hash: `ef733e4b5cf15a51`
+- verdict_hash: `4317d5df413746b9`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`b7e54b48f0d643bb0af28907682a1db64009e06b599986f6444f3069483031bd`
-    diagnostics: error:block_invalid_continuation_placement@5-5
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`b7e54b48f0d643bb0af28907682a1db64009e06b599986f6444f3069483031bd`
+    diagnostics: error:block_invalid_continuation_placement@5-5, error:block_invalid_continuation_placement@5-12
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-E7D1C58671360251B641
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/else-before-closing/`
-- verdict_hash: `475b9ba995fd6cdf`
+- verdict_hash: `cff7e5e2af75f829`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`f2e81f2f5c453c1bbb6d178ca41efb20b526aee8c40a292d4a8f16acde9d73e9`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`f2e81f2f5c453c1bbb6d178ca41efb20b526aee8c40a292d4a8f16acde9d73e9`
     diagnostics: error:block_invalid_continuation_placement@17-17
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -493,9 +493,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/else-if-before-closing-2/`
-- verdict_hash: `8d1165151ac1123d`
+- verdict_hash: `18f96a88cd0e4eb0`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`b2e0de825b4beaa30d7826d1b61661585324302a8b7173b17b32f34db2be5a14`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`b2e0de825b4beaa30d7826d1b61661585324302a8b7173b17b32f34db2be5a14`
     diagnostics: error:block_invalid_continuation_placement@16-16
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -622,9 +622,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/illegal-expression/`
-- verdict_hash: `90dbd43a076553fa`
+- verdict_hash: `a78dd9bb3a8f6f3d`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`d6037a14a613075446747c71b16c39cb19785d0bd7df4824545da0ec69e8f456`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`d6037a14a613075446747c71b16c39cb19785d0bd7df4824545da0ec69e8f456`
     diagnostics: error:js_parse_error@1-10
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -695,20 +695,20 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/malformed-snippet-2/`
-- verdict_hash: `f362acf677ba3866`
+- verdict_hash: `26d04ff8d2768db0`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`4b3afcfbeea8e4586b47b151cd68b387f227633b63f2c83dc7183bdda38b4f3a`
-    diagnostics: error:expected_token@0-32
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`4b3afcfbeea8e4586b47b151cd68b387f227633b63f2c83dc7183bdda38b4f3a`
+    diagnostics: error:expected_token@0-32, error:block_unclosed@32-32
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-CC81503E9B8D0E3963E0
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/malformed-snippet/`
-- verdict_hash: `7a2ca1ed5b0cbc09`
+- verdict_hash: `01ca422ddb9439f2`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`a674af7564e5648958dd9d4beef03aaa75d45ada559ea03031af2698ba030797`
-    diagnostics: error:expected_token@0-33
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`a674af7564e5648958dd9d4beef03aaa75d45ada559ea03031af2698ba030797`
+    diagnostics: error:expected_token@0-33, error:block_unclosed@33-33
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-6786664E643FC85C300C
@@ -1015,9 +1015,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/script-unclosed-eof/`
-- verdict_hash: `d9ed96a6f8222eae`
+- verdict_hash: `d99eeded8468ba5c`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`ea7e94d3629d27530a633473a919ba7fc6c8f20408ee03ab1e03539c1168cbc8`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`ea7e94d3629d27530a633473a919ba7fc6c8f20408ee03ab1e03539c1168cbc8`
     diagnostics: error:unexpected_eof@24-32
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1025,10 +1025,10 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/script-unclosed/`
-- verdict_hash: `e0c4efac5a5254a4`
+- verdict_hash: `14313680136e0e88`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`element_unclosed` mapped_error=`true` invalid_reject=`false` source_sha256=`5a5b1a420d50a9dec9fe79cd4ed2c9970156e9a955daabca603a4a7ee9bb8dc1`
-    diagnostics: error:element_unclosed@0-8
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`element_unclosed` mapped_error=`true` invalid_reject=`false` source_sha256=`5a5b1a420d50a9dec9fe79cd4ed2c9970156e9a955daabca603a4a7ee9bb8dc1`
+    diagnostics: error:element_unclosed@0-8, error:js_parse_error@8-32
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-BD8122FB75401BE65390
@@ -1188,9 +1188,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/then-before-closing/`
-- verdict_hash: `48669eb54d760062`
+- verdict_hash: `8859a14de5d7660d`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`1561babd057a3c5f21217f4ac0c3913d4d635bb6dd789a987ead87bb369d54f8`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_continuation_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`1561babd057a3c5f21217f4ac0c3913d4d635bb6dd789a987ead87bb369d54f8`
     diagnostics: error:block_invalid_continuation_placement@20-20
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1226,9 +1226,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/unclosed-attribute-self-close-tag/`
-- verdict_hash: `6ed69d9731467dc5`
+- verdict_hash: `3e4f5c08a9179db5`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`89ae85c4612c5724ab6d76ce5ed1d84263ba1ec2d1893d0be3b200d6b46e7b58`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`89ae85c4612c5724ab6d76ce5ed1d84263ba1ec2d1893d0be3b200d6b46e7b58`
     diagnostics: error:expected_token@16-20
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1236,9 +1236,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/unexpected-end-of-input-b/`
-- verdict_hash: `fe306f58d68e7894`
+- verdict_hash: `323ad976a878e7b5`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`8a501a8341f10f116796d587564af295a205fc3941e4529a2e48906c6ebc7760`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`8a501a8341f10f116796d587564af295a205fc3941e4529a2e48906c6ebc7760`
     diagnostics: error:unexpected_eof@0-2
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1246,9 +1246,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/unexpected-end-of-input-c/`
-- verdict_hash: `881386803dfdbb88`
+- verdict_hash: `f75e13afec7e4252`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`dabd3aff769f07eb2965401eb029974ebba3407afd02b26ddb564ea5f8efae72`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_eof` mapped_error=`true` invalid_reject=`false` source_sha256=`dabd3aff769f07eb2965401eb029974ebba3407afd02b26ddb564ea5f8efae72`
     diagnostics: error:unexpected_eof@0-1
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1276,9 +1276,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/unmatched-closing-tag-autoclose-2/`
-- verdict_hash: `064fee3d3c9c5d0b`
+- verdict_hash: `6b662c35920fc56e`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`element_invalid_closing_tag` mapped_error=`true` invalid_reject=`false` source_sha256=`89335d5a143105029f47e5fdd6c6257020cf8582e55e7ee5b28af6808d93f5a9`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`element_invalid_closing_tag` mapped_error=`true` invalid_reject=`false` source_sha256=`89335d5a143105029f47e5fdd6c6257020cf8582e55e7ee5b28af6808d93f5a9`
     diagnostics: error:element_invalid_closing_tag@38-42
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -1296,9 +1296,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/compiler-errors/samples/unmatched-closing-tag/`
-- verdict_hash: `6b1d0d29762e9b29`
+- verdict_hash: `d0ae3ae45d82d02b`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`element_invalid_closing_tag` mapped_error=`true` invalid_reject=`false` source_sha256=`aac32651b10f567c461b9b4f255d6fb1fa6859b5368d8bd9a51af920ab21cf23`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`element_invalid_closing_tag` mapped_error=`true` invalid_reject=`false` source_sha256=`aac32651b10f567c461b9b4f255d6fb1fa6859b5368d8bd9a51af920ab21cf23`
     diagnostics: error:element_invalid_closing_tag@0-6
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -2967,9 +2967,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/attribute-expected-equals/`
-- verdict_hash: `01c916185072752a`
+- verdict_hash: `cbfd63c2ad1d53fa`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`e4f9c049fba18d57006b4489990023af84da3c68bd6c6b5b9f82b11d253a2faa`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`expected_token` mapped_error=`true` invalid_reject=`false` source_sha256=`e4f9c049fba18d57006b4489990023af84da3c68bd6c6b5b9f82b11d253a2faa`
     diagnostics: error:expected_token@50-50
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -3814,9 +3814,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/declaration-tag-invalid-type-2/`
-- verdict_hash: `3f9e6c6a450d54d2`
+- verdict_hash: `f823d3aacf8d1e3f`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`declaration_tag_invalid_type` mapped_error=`true` invalid_reject=`false` source_sha256=`a45d2fee2a92873f117ab7e748c214eacaafa55c701ae415c8bdbacb658ca391`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`declaration_tag_invalid_type` mapped_error=`true` invalid_reject=`false` source_sha256=`a45d2fee2a92873f117ab7e748c214eacaafa55c701ae415c8bdbacb658ca391`
     diagnostics: error:declaration_tag_invalid_type@486-504
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -3824,9 +3824,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/declaration-tag-invalid-type/`
-- verdict_hash: `13f0dce2387f18e3`
+- verdict_hash: `49a12f914f0baaa8`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`declaration_tag_invalid_type` mapped_error=`true` invalid_reject=`false` source_sha256=`86414341927f927e6962f2e8abe7531a0f9c6cd1d343f7786c94a373a7ec9f86`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`declaration_tag_invalid_type` mapped_error=`true` invalid_reject=`false` source_sha256=`86414341927f927e6962f2e8abe7531a0f9c6cd1d343f7786c94a373a7ec9f86`
     diagnostics: error:declaration_tag_invalid_type@13-24
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -3978,9 +3978,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/dynamic-element-this/`
-- verdict_hash: `c76618771e83891a`
+- verdict_hash: `18a8703370fa891e`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_reserved_word` mapped_error=`true` invalid_reject=`false` source_sha256=`8e946b8659a4a9f9b54959590b815203cd660a51f75b9570eed146011061bfbb`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_reserved_word` mapped_error=`true` invalid_reject=`false` source_sha256=`8e946b8659a4a9f9b54959590b815203cd660a51f75b9570eed146011061bfbb`
     diagnostics: error:unexpected_reserved_word@24-28
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -3988,9 +3988,9 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/each-block-destructured-object-rest-comma-after/`
-- verdict_hash: `ec5919baf344e03b`
+- verdict_hash: `47a25af61e6d83f0`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`cc17268098afb5b7952854e17f6af72c552204949253fb4c15df3b1097c6b87d`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`cc17268098afb5b7952854e17f6af72c552204949253fb4c15df3b1097c6b87d`
     diagnostics: error:js_parse_error@71-110
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
@@ -3998,30 +3998,30 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/each-block-invalid-context-destructured-object/`
-- verdict_hash: `1f279fc50f13f742`
+- verdict_hash: `e848e14bca8b0815`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`e38725af5bab892ba78e23a41ec8a428dd216ac20861ae2135684af2f1100991`
-    diagnostics: error:js_parse_error@16-24
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`e38725af5bab892ba78e23a41ec8a428dd216ac20861ae2135684af2f1100991`
+    diagnostics: error:js_parse_error@16-24, error:js_parse_error@28-38
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-400B778FE4407589639D
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/each-block-invalid-context-destructured/`
-- verdict_hash: `3f3ab815c18f2e58`
+- verdict_hash: `62478595ced7cdda`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`3e617245f2626cce6c347fe89514ee3efd6fa07c10622529550848a8efd6c29a`
-    diagnostics: error:js_parse_error@16-22
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`js_parse_error` mapped_error=`true` invalid_reject=`false` source_sha256=`3e617245f2626cce6c347fe89514ee3efd6fa07c10622529550848a8efd6c29a`
+    diagnostics: error:js_parse_error@16-22, error:js_parse_error@26-36
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-1E41065247CC97A4E4D9
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/each-block-invalid-context/`
-- verdict_hash: `263477f906a43fac`
+- verdict_hash: `db35509676841ae1`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`unexpected_reserved_word` mapped_error=`true` invalid_reject=`false` source_sha256=`7c8bf24a8718356137ba4fdf6f1f00b7dab0640e3d815dcbeb93967cedff8496`
-    diagnostics: error:unexpected_reserved_word@16-20
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`unexpected_reserved_word` mapped_error=`true` invalid_reject=`false` source_sha256=`7c8bf24a8718356137ba4fdf6f1f00b7dab0640e3d815dcbeb93967cedff8496`
+    diagnostics: error:unexpected_reserved_word@16-20, error:js_parse_error@24-34
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-BA8392A7FB7F61CAAA36
@@ -4154,10 +4154,10 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/if-block-whitespace-runes/`
-- verdict_hash: `e320c303dec82bbc`
+- verdict_hash: `0eff8579314f35f6`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_unexpected_character` mapped_error=`true` invalid_reject=`false` source_sha256=`60d403f33e96b849cda080836f019607cd9af88a8766e43ca8d25f2af26f6477`
-    diagnostics: error:block_unexpected_character@160-163
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_unexpected_character` mapped_error=`true` invalid_reject=`false` source_sha256=`60d403f33e96b849cda080836f019607cd9af88a8766e43ca8d25f2af26f6477`
+    diagnostics: error:block_unexpected_character@160-163, error:js_parse_error@161-170, error:unexpected-block-close@185-190, error:element_invalid_closing_tag@191-197
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-67DC37DB690ECDC6C5D1
@@ -4452,19 +4452,19 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/logic-block-in-attribute/`
-- verdict_hash: `fb490c9e79c5a2e9`
+- verdict_hash: `3731c6cbefe410be`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`ceca754c9e522a19b7afbf436ed8006ee8c8483b4a5bc9d957e17ca60cf0cddd`
-    diagnostics: error:block_invalid_placement@12-12
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`ceca754c9e522a19b7afbf436ed8006ee8c8483b4a5bc9d957e17ca60cf0cddd`
+    diagnostics: error:unexpected_eof@11-42, error:block_invalid_placement@12-12
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### SVELTE-A09F599D687DEF86822F
 
 - classification: `pass`
 - source_locator: `packages/svelte/tests/validator/samples/logic-block-in-textarea/`
-- verdict_hash: `90cf4eaab8cf45ac`
+- verdict_hash: `33025304f46f0fb1`
 - invocations:
-  - expected=`error` outcome=`reject` reject_variant=`rejected_syntax` matches=`true` required_code=`block_invalid_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`d3dab4477b213408b0b7dc75e66b2c2eb2a25912913eac6b751a5d4143654901`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`block_invalid_placement` mapped_error=`true` invalid_reject=`false` source_sha256=`d3dab4477b213408b0b7dc75e66b2c2eb2a25912913eac6b751a5d4143654901`
     diagnostics: error:block_invalid_placement@12-12
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
