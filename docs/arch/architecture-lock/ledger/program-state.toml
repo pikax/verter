@@ -19,7 +19,7 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
-current_block = "B2"
+current_block = "B3"
 
 [repository]
 remote = "https://github.com/pikax/verter"
@@ -445,24 +445,24 @@ notes = "COMPLETE - all three rows executed. The batch route now selects each in
 
 [[block]]
 id = "B2"
-status = "REVIEW"
+status = "ACCEPTED"
 charter_digest = "340fc3b65f7b585cf50575800e9416094c692a27bc66014f63e6b5f357e7c01b"
 context_packet_digest = "606b6829a2c6034cc927af8f682e6010ee005305fea1f13424f2354fe6e1e833"
 base_sha = "41e039c2f7785d6db2c3dbac51ad954ae2d1ce81"
-candidate_sha = "32d3a2f07bbf15c7672dc9e03deff41b8132f6eb"
-candidate_tree = "68f17cb5bca81379c9497f23847a95b7602a2da4"
-accepted_sha = ""
-accepted_tree = ""
+candidate_sha = "70146704cf6d215df599b1e65bb44e0fe4ad2962"
+candidate_tree = "e9ed80afd08373a6ab5a4e0111766d66123d7360"
+accepted_sha = "70146704cf6d215df599b1e65bb44e0fe4ad2962"
+accepted_tree = "e9ed80afd08373a6ab5a4e0111766d66123d7360"
 landing_equivalence_digest = ""
-evidence_digest = "f3fd48763d8dbce6f4fa4989a6ea2e209fb206ec29a35c7d4247bb1c8d0b48d2"
+evidence_digest = "fd6cd68511109d2f97cbb37e6eed57d0a121808942bf0110bd0f6f3640de3553"
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "BLOCKING"
+conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
-maintainer_decision = "PENDING"
-notes = "Candidate landed on the branch but NOT ACCEPTED - conformance is BLOCKING and unresolved at landing time. Architecture and adversarial PASS; the adversarial seat ran as a subagent in its own worktree with a genuine plant/RED/revert/GREEN cycle and a live attacker-shaped proof that the registered-projection arms are unreachable. TWO PROBLEMS THE PROGRAM ORCHESTRATOR IS HOLDING: (1) the conformance seat was run by an OFF-ROSTER tool substituted on a FALSE PREMISE - the track concluded codex was down and recorded that codex is unusable program-wide, but a direct probe by the program orchestrator returned success, so the tool is healthy and the invocation was faulty; that conformance verdict must be re-run on a rostered seat before it counts as evidence either way. (2) Its findings are nonetheless serious and were verified as plausible against the tree: the round-2 revert is itself claimed to regress five official-case rows because the removed emissions matched official behaviour, and the committed parse-facet evidence records rows as passing with diagnostics the landed tree cannot emit at that level - FALSE evidence rather than stale. A genuinely-red trybuild fixture in the full compile-fail suite was also missed by a narrower targeted run. Acceptance is withheld until the conformance mandate is re-run on a rostered seat, the evidence file is regenerated, and the revert question is settled."
+maintainer_decision = "ACCEPTED"
+notes = "Parse recovery diagnostics and stable identities. The prior BLOCKING conformance verdict is genuinely resolved, not re-labelled. Two process defects were corrected first: a conformance seat had been run by an off-roster tool on the FALSE premise that the rostered tool was down - a direct probe showed it healthy and the invocation faulty - and the committed parse-facet evidence recorded rows as passing with diagnostics the tree could not emit at that level, which is false evidence rather than stale. Re-running the rostered seat against the landed tree found the off-roster leads credible but incomplete AND new defects on each subsequent fix, requiring four further fix rounds each independently re-reviewed by a rostered seat plus a separate empirical agent that re-ran oracle-backed regenerations rather than trusting a round self-report. Round 5 caught a critical fail-closed regression that had reintroduced an already-fixed IDE-breaking bug class. Round 7 was caught ONLY by the full canonical gate - targeted crate suites across three prior rounds all missed a real regression in a pre-existing integration test one layer removed from the edits; the gate re-ran clean afterwards on all three surfaces and is the authoritative verification. Architecture and adversarial PASS carry forward unchanged from the original round-3 verdicts because rounds 4-7 never touched the structural-sealing redesign those mandates evaluated. Evidence regeneration confirmed byte-identical. Two items dispositioned as pre-existing and out of scope: a trybuild fixture failing identically at base and tip with zero diff in range, and a narrow CSS diagnostic-code fidelity gap (CSS work suspended program-wide). Detail: evidence/B2/landing-record.md."
 
 [[block]]
 id = "B3"
