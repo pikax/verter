@@ -27,6 +27,11 @@ function activeToolNames() {
   return (process.env[ACTIVE_ENV_VAR] ?? "").split(",").filter(Boolean);
 }
 
+/** Whether a launcher for `toolName` is already active in this process tree. */
+function isLauncherActive(toolName) {
+  return activeToolNames().includes(toolName);
+}
+
 /** `process.env` for the child, with this tool name added to the active list. */
 function envWithToolMarked(toolName) {
   const names = activeToolNames();
@@ -137,6 +142,11 @@ function nativeBinaryMissingDiagnostic(launcher) {
  * catch a resolution that landed on the launcher's own script even outside
  * `PATH`; it is optional because the node-script check alone already covers
  * the fork-bomb mechanism.
+ *
+ * Exported so a host that resolves a binary through `launcher.resolveBinary()`
+ * / `binaryCandidates()` directly (rather than going through `runLauncherCli`,
+ * e.g. because it needs piped stdio instead of inherited) can apply the same
+ * guard before spawning — one guard, not a second implementation of it.
  */
 function assertNotSelfSpawn({ resolved, launcher, selfPath }) {
   const actualPath = resolved.source === "path" ? resolveOnPath(resolved.path) : resolved.path;
@@ -192,7 +202,7 @@ function runLauncherCli({
   stderr = process.stderr,
   stdout = process.stdout,
 }) {
-  if (activeToolNames().includes(launcher.toolName)) {
+  if (isLauncherActive(launcher.toolName)) {
     stderr.write(`${reentrancyDiagnostic(launcher)}\n`);
     return 3;
   }
@@ -235,4 +245,12 @@ function runLauncherCli({
   return result.status ?? 1;
 }
 
-module.exports = { PRINT_PATH_FLAG, ensureExecutable, runLauncherCli };
+module.exports = {
+  PRINT_PATH_FLAG,
+  ACTIVE_ENV_VAR,
+  ensureExecutable,
+  runLauncherCli,
+  isLauncherActive,
+  envWithToolMarked,
+  assertNotSelfSpawn,
+};

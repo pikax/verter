@@ -14,6 +14,13 @@
  * extension's own `bin/` for VSIX packaging — slots in ahead of the PATH
  * fallback here.
  *
+ * The PATH fallback is a bare tool name: under an unbuilt dev workspace it can
+ * resolve to the launcher's own `node_modules/.bin` shim, which would spawn
+ * this same resolution again without bound. `mcpSpawnRefusalReason` applies
+ * the shared `@verter/binary-launcher` self-spawn and re-entrancy guards
+ * (the same ones `verter-mcp`'s own CLI shim enforces) before every spawn
+ * here, so there is one guarded resolution path, not a second one.
+ *
  * This module is deliberately `vscode`-free so its logic runs under plain
  * vitest; the extension wires it up in `extension.ts`.
  */
@@ -23,7 +30,8 @@ import { existsSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { createInterface } from "node:readline";
 
-import { serverBinaryCandidates } from "verter-mcp";
+import { assertNotSelfSpawn, envWithToolMarked, isLauncherActive } from "@verter/binary-launcher/cli";
+import { launcher, serverBinaryCandidates } from "verter-mcp";
 
 /** The stdout record's single top-level key (pinned against the Rust encoder). */
 export const MCP_HTTP_READY_RECORD_KEY = "verterMcpHttpReady";
@@ -148,8 +156,36 @@ export function resolveMcpServerBinary(extensionPath: string): McpBinaryCandidat
   for (const candidate of candidates) {
     // The bare PATH name cannot be stat'ed — hand it to spawn, which reports
     // ENOENT through the handle's `ready` rejection if nothing serves it.
+    // `mcpSpawnRefusalReason` vets it at spawn time before it is ever run.
     if (candidate.source === "path") return candidate;
     if (existsSync(candidate.path)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Refusal reason for spawning `binary`, or `undefined` when it is safe.
+ *
+ * Applies the same guards `verter-mcp`'s own CLI shim enforces on its `PATH`
+ * fallback (`@verter/binary-launcher/cli`): a launcher already active
+ * anywhere in this process tree, and a `path`-source candidate that resolves
+ * to a node script (the launcher's own `node_modules/.bin` shim) rather than
+ * a native binary. Non-`path` candidates were already verified on disk by
+ * {@link resolveMcpServerBinary} and need no further check here.
+ */
+export function mcpSpawnRefusalReason(binary: McpBinaryCandidate): string | undefined {
+  if (isLauncherActive(launcher.toolName)) {
+    return (
+      `${launcher.toolName}: refusing to spawn — this launcher is already active in this ` +
+      "process tree. Starting it again would recurse."
+    );
+  }
+  if (binary.source === "path") {
+    try {
+      assertNotSelfSpawn({ resolved: { path: binary.path, source: "path" }, launcher });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
   return undefined;
 }
@@ -233,6 +269,10 @@ export function startMcpServerProcess(options: McpServerSpawnOptions): McpServer
 
   const child: ChildProcess = spawn(options.command, [...options.args], {
     stdio: ["ignore", "pipe", "pipe"],
+    // Marks the launcher active for the child, so a resolution that somehow
+    // spawns it again (however that happens) fails closed instead of
+    // recursing — see `mcpSpawnRefusalReason`.
+    env: envWithToolMarked(launcher.toolName),
   });
   running = true;
 
@@ -405,6 +445,11 @@ export function createMcpServerLifecycle(options: McpServerLifecycleOptions): Mc
         "Standalone verter-mcp binary not found; MCP tools are unavailable. " +
           "Build it with `cargo build -p verter_mcp` or disable `verter.mcp.enabled`.",
       );
+      return;
+    }
+    const refusal = mcpSpawnRefusalReason(binary);
+    if (refusal) {
+      log.warn(refusal);
       return;
     }
     log.info(`MCP server binary: ${binary.path} (${binary.source})`);
