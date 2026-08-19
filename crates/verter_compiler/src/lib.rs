@@ -42,6 +42,8 @@ pub mod strip_types;
 
 pub mod compile;
 
+pub mod compile_request;
+
 pub mod framework_common;
 
 pub mod svelte;

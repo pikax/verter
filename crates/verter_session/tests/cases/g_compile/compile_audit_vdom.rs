@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use verter_audit::payloads::tags::CompileTargetTag;
-use verter_compiler::compile::CompileTarget;
+use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag};
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -70,8 +70,20 @@ fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
     );
     assert_eq!(record.canonical_id, "/v.vue");
     match &record.kind {
-        verter_audit::RequestKind::Compile { target } => {
-            assert_eq!(*target, CompileTargetTag::Vdom, "BUNDLER target ⇒ Vdom tag");
+        verter_audit::RequestKind::Compile { products, backend } => {
+            assert_eq!(
+                *products,
+                CompileProductSetTag {
+                    runtime_client: true,
+                    ..Default::default()
+                },
+                "BUNDLER target ⇒ runtime_client product",
+            );
+            assert_eq!(
+                *backend,
+                CompileBackendTag::Vdom,
+                "no <template vapor> marker ⇒ resolved backend is Vdom",
+            );
         }
         other => panic!("expected RequestKind::Compile, got {other:?}"),
     }
@@ -90,7 +102,14 @@ fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
          a regression that drops producer-side `record_event(CompileCodeTransformOp)` \
          would leave this at 0. payload = {payload:?}",
     );
-    assert_eq!(payload.target, CompileTargetTag::Vdom);
+    assert_eq!(
+        payload.products,
+        CompileProductSetTag {
+            runtime_client: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(payload.backend, CompileBackendTag::Vdom);
     // Output_bytes is the sum of each block's code length. Non-zero
     // for our simple fixture.
     assert!(

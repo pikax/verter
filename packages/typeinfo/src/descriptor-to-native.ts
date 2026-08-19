@@ -21,6 +21,18 @@ import type {
   NativeTypeExpr,
 } from "./native-type-expr.js";
 
+/**
+ * `@verter/type-ir`'s `ObjectProperty.name` is always a flat string, so
+ * the reverse (TS -> native) direction always produces the `string`
+ * variant of the wire `key: AuthoredPropertyKey` shape
+ * (`crates/verter_type_expr/src/type_expr_json.rs::authored_property_key_from_json`
+ * requires `key`, not a flat `name` field, to decode a `property`/
+ * `method` member).
+ */
+function stringPropertyKey(name: string): { kind: "string"; value: string } {
+  return { kind: "string", value: name };
+}
+
 /** Lower a descriptor to the native wire shape. */
 export function descriptorToNative(d: TypeDescriptor): NativeTypeExpr {
   switch (d.kind) {
@@ -128,7 +140,7 @@ function lowerObjectMembers(d: Extract<TypeDescriptor, { kind: "object" }>): Nat
   for (const prop of d.properties) {
     members.push({
       memberKind: "property",
-      name: prop.name,
+      key: stringPropertyKey(prop.name),
       ty: descriptorToNative(prop.type),
       optional: prop.optional,
       readonly: false,

@@ -6036,9 +6036,6 @@ pub(crate) mod foundations_guards {
         // fallback-const NAV-PROBE locator — the compiler-owned emission-
         // contract reader backing global-component tag go-to-definition)
         "pub use verter_compiler::{global_component_nav_probe_offset, VERTER_TYPES_STANDALONE_DTS}",
-        // verter_lsp::workspace_scanner, verter_lsp::server_utils,
-        // verter_lsp::documents, verter_type_runtime::tsgo::ipc
-        "pub use verter_compiler::compile::CompileTarget",
         // verter_lsp::lib (public-API projection subject on the
         // profile-aware projection entry) — the dependency-neutral
         // failure/subject carrier re-exported so adapters do not

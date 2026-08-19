@@ -5,18 +5,48 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Compile target — mirror of `verter_compiler::CompileTarget`.
+/// Which compile products a `CompileRequest` carried — mirror of the
+/// product-kind axis on `verter_compiler::compile_request::CompileProduct`.
+/// Each field is independently settable, matching `CompileRequest`'s own
+/// non-exclusive product set (a request may carry more than one product —
+/// e.g. `RuntimeClient` + `IdeCompanion` — and this tag must not collapse
+/// that combination onto a single "primary" value the way the old
+/// `CompileTargetTag` mirror did).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
-pub enum CompileTargetTag {
+pub struct CompileProductSetTag {
+    /// `CompileProduct::RuntimeClient` requested.
+    pub runtime_client: bool,
+    /// `CompileProduct::RuntimeServer` requested.
+    pub runtime_server: bool,
+    /// `CompileProduct::IdeCompanion` requested.
+    pub ide_companion: bool,
+    /// `CompileProduct::PublicApi` requested.
+    pub public_api: bool,
+    /// `CompileProduct::Declarations` requested.
+    pub declarations: bool,
+    /// `CompileProduct::Analysis` requested.
+    pub analysis: bool,
+}
+
+/// Resolved Vue backend axis — mirror of
+/// `verter_compiler::compile_request::ResolvedVueBackend`, plus the
+/// pre-resolution `Inferred` state for a producer that has not yet parsed
+/// the source (no `<template vapor>` marker decision available). Not
+/// meaningful for a non-Vue framework request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum CompileBackendTag {
+    /// Backend not yet resolved against the source's own `<template
+    /// vapor>` marker (no parsed artifact available at tag-construction
+    /// time), or not applicable (non-Vue framework / no runtime product
+    /// requested).
+    #[default]
+    Inferred,
     /// VDOM render-function backend.
     Vdom,
     /// Vapor renderer backend.
     Vapor,
-    /// IDE backend (valid TSX/JSX for type checking). Default —
-    /// matches the LSP / tsgo path that drives most audited compiles.
-    #[default]
-    Ide,
 }
 
 /// Projection mode — mirror of

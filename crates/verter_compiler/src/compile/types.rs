@@ -13,8 +13,19 @@ bitflags::bitflags! {
     /// - [`BUNDLER`](Self::BUNDLER) — style + script + template codegen (runtime output)
     /// - [`IDE`](Self::IDE) — TSX only (LSP type checking)
     /// - [`ANALYSIS`](Self::ANALYSIS) — script + template data (MCP static analysis)
+    ///
+    /// `pub(crate)`: the only production construction points are internal
+    /// (`derive_legacy_vue_options`'s `CodegenOptions.target`, the
+    /// `#[cfg(test)]`-only legacy compatibility shim). Every production
+    /// entry point this crate owns (`StandaloneCompiler`,
+    /// `compile()`/`compile_with_parsed()`/`compile_from_parsed()`,
+    /// `compile_registered_vue_artifact`) takes `CompileRequest`
+    /// exclusively and cannot construct a `CompileTarget` value at all.
+    /// `verter_session::CompileTarget` is a SEPARATE, session-owned type
+    /// with an identical bit/preset shape — the session's own cache-key
+    /// discriminant, never passed across this crate boundary.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct CompileTarget: u8 {
+    pub(crate) struct CompileTarget: u8 {
         /// Run style codegen (v-bind scan, scoped CSS, CSS modules).
         const STYLE         = 0b0000_0001;
         /// Run script codegen (macros, bindings, imports, CodeTransform).
@@ -68,70 +79,6 @@ impl CompileTarget {
     /// it must not rediscover those names from authored type syntax.
     pub fn needs_runtime_macro_semantics(self) -> bool {
         self.needs_script() || self.needs_tsx()
-    }
-
-    /// Whether the emitted output actually carries the Vue runtime `props` /
-    /// `model` option objects, and therefore needs each member's broad runtime
-    /// constructor (`{ type: Boolean }`).
-    ///
-    /// This is deliberately NARROWER than [`Self::needs_script`]. Script
-    /// codegen is switched on by `TEMPLATE_DATA` as well, because template
-    /// data extraction consumes script BINDINGS — not the rendered runtime
-    /// props object. Only a target that asks for runtime script or template
-    /// output (`SCRIPT` / `TEMPLATE`) has a consumer for the constructors.
-    ///
-    /// This matters because classifying one member's constructor resolves that
-    /// member's whole type through Verter's own semantic engine. The LSP's
-    /// interactive profile is `IDE | TEMPLATE_DATA`, and the TSX it produces is
-    /// type-checked by the EXTERNAL TypeScript engine; the only thing IDE
-    /// codegen takes from the runtime macro bundle is the public binding NAMES
-    /// (`ide::script::setup`, the single `visit_runtime_macro_binding_names`
-    /// call). Classification there is work no TypeScript result depends on, and
-    /// it ran synchronously inside `did_change` on the LSP serve thread.
-    ///
-    /// This is the LIGHTER form of IDE compilation. The full fix — every IDE
-    /// extra produced asynchronously instead of being required before the
-    /// request path continues — is assessed in
-    /// `docs/arch/future/ide-compile-synchronous-extras.md`. Do not widen this
-    /// back to `needs_script()` without reading that document first.
-    pub fn needs_runtime_prop_constructors(self) -> bool {
-        // Same condition as [`Self::publishes_runtime_module`], stated once:
-        // the constructors exist only for output that carries the runtime
-        // module. The two are named separately because they are separate
-        // questions — if one ever needs to move, it can, without silently
-        // dragging the other with it.
-        self.publishes_runtime_module()
-    }
-
-    /// Whether the request asks for the ASSEMBLED runtime module — the `Main`
-    /// virtual node and the custom-block side-files it imports.
-    ///
-    /// NARROWER than [`Self::needs_runtime_module`], which also includes
-    /// `STYLE`. A `STYLE`-only request asks for the component's CSS: that
-    /// genuinely requires the runtime compile (a carrier's scoped CSS is
-    /// produced by it, and it can genuinely be refused), but it does NOT ask
-    /// for the executable module, so no `Main` is published for it.
-    pub fn publishes_runtime_module(self) -> bool {
-        self.intersects(Self::SCRIPT | Self::TEMPLATE)
-    }
-
-    /// Whether the request asks for RUNTIME output products — the executable
-    /// main module and its script / template / style side-files.
-    ///
-    /// This is the RUNTIME half of the requested-product set, the companion of
-    /// [`Self::needs_tsx`] (the IDE half) and [`Self::needs_template_data`].
-    /// A carrier attempts its runtime compile — and can therefore refuse a
-    /// runtime surface — only when this is true.
-    ///
-    /// Deliberately NOT [`Self::needs_script`]: that predicate is also switched
-    /// on by `TEMPLATE_DATA`, because template-data extraction consumes script
-    /// BINDINGS. Template data is not a runtime product, and the LSP's
-    /// interactive profile is `IDE | TEMPLATE_DATA` — reading `needs_script`
-    /// here would make every LSP request ask for runtime output it never
-    /// consumes, and tie its IDE surface to a runtime outcome it did not
-    /// request.
-    pub fn needs_runtime_module(self) -> bool {
-        self.intersects(Self::STYLE | Self::SCRIPT | Self::TEMPLATE)
     }
 
     /// Whether VDOM/Vapor/SSR template codegen should run.
@@ -209,7 +156,7 @@ pub enum WhitespaceStrategy {
 /// custom elements, etc.) and are passed through to both script and template codegen.
 /// Use the `resolve_*` methods to apply defaults.
 #[derive(Debug, Clone, Default)]
-pub struct CodegenOptions {
+pub(crate) struct CodegenOptions {
     /// The filename for source map generation and component name extraction.
     pub filename: Option<String>,
     /// Production mode — affects component ID generation and optimizations.
@@ -223,9 +170,6 @@ pub struct CodegenOptions {
     /// Controls which compilation steps run.
     /// See [`CompileTarget`] for available flags and presets.
     pub target: CompileTarget,
-    /// When true, skip source map generation and base64 encoding.
-    /// Returns empty strings for `source_map` and `code_with_source_map`.
-    pub skip_source_map: bool,
     /// Emit typed IDE chunk boundaries for multi-source composition. Internal
     /// carrier adapters enable this only while compiling isolated units.
     pub ide_chunk_boundaries: bool,
@@ -246,19 +190,9 @@ pub struct CodegenOptions {
     /// Hoist static VNodes/props to constants outside the render function.
     /// `None` = `true`.
     pub hoist_static: Option<bool>,
-    /// Whitespace handling strategy. `None` = `Condense`.
-    pub whitespace: Option<WhitespaceStrategy>,
-    /// Cache event handler expressions. `None` = `false`.
-    pub cache_handlers: Option<bool>,
     /// Inline the render function inside `setup()`.
     /// `None` = `is_production`.
     pub inline: Option<bool>,
-    /// Indicates the SFC uses `:slotted()` in styles.
-    /// `None` = `true`.
-    pub slotted: Option<bool>,
-    /// Add `_ctx.`/`$setup.` prefix to template identifiers.
-    /// `None` = `true`.
-    pub prefix_identifiers: Option<bool>,
     /// Embed `declare module "@verter/types"` in TSX output so that
     /// `import ... from "@verter/types"` resolves without the real package.
     /// When `false` (default), the ambient module block is omitted, relying
@@ -272,66 +206,29 @@ pub struct CodegenOptions {
 }
 
 impl CodegenOptions {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
-        self.filename = Some(filename.into());
-        self
-    }
-
-    pub fn with_production(mut self, is_production: bool) -> Self {
-        self.is_production = is_production;
-        self
-    }
-
-    /// Select Vue's custom-element runtime-prop policy explicitly.
-    pub fn with_custom_element(mut self, custom_element: bool) -> Self {
-        self.custom_element = custom_element;
-        self
-    }
-
     // -- Resolved accessors (apply defaults) --
-
-    /// Whether to preserve HTML comments in output.
-    pub fn resolve_comments(&self) -> bool {
-        self.comments.unwrap_or(!self.is_production)
-    }
+    //
+    // `whitespace`/`cache_handlers`/`slotted`/`prefix_identifiers`/
+    // `skip_source_map` and their `resolve_*`/builder counterparts were
+    // removed from this internal derived type: a workspace-wide read-site
+    // audit found nothing in `compile_inner`'s codegen pipeline consumes
+    // them (a pre-existing gap, not introduced by this change — the
+    // options were already unreachable dead weight). The canonical
+    // `whitespace`/`cache_handlers` VALUES still live on
+    // `crate::compile_request::VueCompileRequest` (the official "supported
+    // canonical" classification requires them to be REPRESENTABLE on the
+    // request, not that codegen already consumes them) — wiring them into
+    // `TemplateCodeGenOptions` is compiler-codegen scope, not this
+    // request-authority conversion's.
 
     /// Whether to hoist static VNodes/props.
     pub fn resolve_hoist_static(&self) -> bool {
         self.hoist_static.unwrap_or(true)
     }
 
-    /// Whitespace handling strategy.
-    pub fn resolve_whitespace(&self) -> WhitespaceStrategy {
-        self.whitespace.unwrap_or(WhitespaceStrategy::Condense)
-    }
-
-    /// Whether to cache event handlers.
-    pub fn resolve_cache_handlers(&self) -> bool {
-        self.cache_handlers.unwrap_or(false)
-    }
-
     /// Whether to inline the render function.
     pub fn resolve_inline(&self) -> bool {
         self.inline.unwrap_or(self.is_production)
-    }
-
-    /// Whether the SFC uses `:slotted()`.
-    pub fn resolve_slotted(&self) -> bool {
-        self.slotted.unwrap_or(true)
-    }
-
-    /// Whether to prefix template identifiers.
-    pub fn resolve_prefix_identifiers(&self) -> bool {
-        self.prefix_identifiers.unwrap_or(true)
-    }
-
-    /// Runtime module name for helper imports.
-    pub fn resolve_runtime_module_name(&self) -> &str {
-        self.runtime_module_name.as_deref().unwrap_or("vue")
     }
 }
 
@@ -367,20 +264,35 @@ pub struct CustomBlock {
     pub attrs: Vec<(String, String)>,
 }
 
-/// Verter-specific compilation options, layered on top of [`CodegenOptions`].
+/// Internal, derived-only compilation flags — the replacement for the
+/// former public `VerterCompileOptions`. Constructed EXCLUSIVELY from a
+/// canonical [`crate::compile_request::CompileRequest`] (plus
+/// [`VueExecutionInputs`] for the ephemeral fields below) by
+/// `crate::standalone`'s derivation function; not constructible by any
+/// caller outside this crate, so it cannot become a second option
+/// authority — see the "Shared Optimized Codebase" / typed-request rule.
 ///
-/// Controls compilation policy only. Semantic macro inputs are supplied
-/// independently to `compile`/`compile_from_parsed`.
+/// The `extract_template_data` legacy escape hatch (ORing
+/// `CompileTarget::TEMPLATE_DATA` into an already-built target after the
+/// fact) is gone: `CompileRequest`'s `Analysis` product carries
+/// `want_template_data` directly, so the derivation sets the bit once, at
+/// the source, with no post-hoc merge step.
 #[derive(Default)]
-pub struct VerterCompileOptions {
-    /// When true, force Vapor mode output regardless of template attributes,
-    /// and implicitly treat script as `<script setup>`.
+pub(crate) struct ResolvedVueCompileOptions {
+    /// Resolved backend selection — `true` when the active backend is
+    /// Vapor (already fail-closed against `ssr`/deferred against `inline`
+    /// by `CompileRequest::resolve_vue_backend`).
     pub force_vapor: bool,
     /// When true, strip remaining TypeScript syntax (type annotations, generics)
     /// from script output to produce valid JavaScript.
     pub force_js: bool,
-    /// When true, generate a source map for the template output.
+    /// When true, generate a source map for the runtime script/template
+    /// output. Independent of [`Self::ide_source_map`] — the map-coupling
+    /// fix: requesting an IDE product no longer silently turns this on.
     pub source_map: bool,
+    /// When true, generate a source map for the TSX/IDE output.
+    /// Independent of [`Self::source_map`].
+    pub ide_source_map: bool,
     /// When true, compile for server-side rendering.
     /// Emits string-concatenation code (`_push()`, `_ssrRenderAttrs()`, etc.)
     /// instead of VDOM render functions, and attaches the render function as
@@ -388,10 +300,6 @@ pub struct VerterCompileOptions {
     /// the instance proxy (`_ctx.*`); it does not set `__ssrInlineRender`
     /// (that flag is only for setup-returned render functions).
     pub ssr: bool,
-    /// Deprecated: use `CodegenOptions::target` with `CompileTarget::TEMPLATE_DATA`.
-    /// Kept for backward-compatibility with direct `compile()` callers.
-    /// When true, ORs `CompileTarget::TEMPLATE_DATA` into the active target.
-    pub extract_template_data: bool,
     /// Props known to be const across all call sites (from cross-file analysis).
     /// These are treated as `Static` for reactivity purposes while keeping
     /// `$props.`/`__props.` prefix for correct runtime access.
@@ -414,6 +322,35 @@ pub struct VerterCompileOptions {
     /// Emit an inline-script shell with a typed generated-template hole.
     pub runtime_template_hole: bool,
     /// Lower a standalone template as the setup-returned inline chunk.
+    pub runtime_inline_template_chunk: bool,
+}
+
+/// Ephemeral, non-identity execution inputs for a Vue compile — resolved
+/// framework facts and internal assembly-shape flags threaded alongside a
+/// canonical [`crate::compile_request::CompileRequest`] but EXCLUDED from
+/// its identity: the canonical request carries only a typed prerequisite
+/// demand for these; the host/session resolves them and supplies them
+/// here. NOT a second option
+/// authority — none of these fields are caller-CHOSEN semantics: they are
+/// either session-computed analysis RESULTS
+/// (`prop_constness_overrides`/`style_v_bind_vars`/
+/// `style_v_bind_usage_complete`/`template_binding_metadata`/
+/// `template_used_vars`) or internal Verter assembly-composition flags used
+/// only by the IDE-reentry / block-content composition path
+/// (`runtime_template_hole`/`runtime_inline_template_chunk`).
+#[derive(Debug, Clone, Default)]
+pub struct VueExecutionInputs {
+    /// Authoritative runtime macro projection, produced once by the
+    /// session. Replaces the former opaque `framework_extras` downcast
+    /// (`VueRuntimeCompileExtras.macro_runtime`) — the SAME fact, now a
+    /// typed field on a typed carrier instead of an `Arc<dyn Any>` payload.
+    pub macro_runtime: Option<std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>>,
+    pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
+    pub style_v_bind_vars: Vec<String>,
+    pub style_v_bind_usage_complete: Option<bool>,
+    pub template_binding_metadata: Option<TemplateBindingMetadata>,
+    pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+    pub runtime_template_hole: bool,
     pub runtime_inline_template_chunk: bool,
 }
 

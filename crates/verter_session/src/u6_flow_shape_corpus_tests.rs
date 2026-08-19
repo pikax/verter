@@ -152,8 +152,8 @@ use crate::semantic_query::{
     QueryError, SemanticNodeData, SemanticQueryKey,
 };
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
+use crate::CompileTarget;
 use crate::{FileLanguage, VerterHost};
-use verter_compiler::compile::CompileTarget;
 
 // The strengthening layer: recursive expectations, the public cold/warm
 // boundary companion, negative controls, and the crossed capture-write

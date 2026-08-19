@@ -171,7 +171,9 @@ pub(crate) fn kind_label(kind: &RequestKind) -> String {
         RequestKind::ComponentMeta => "ComponentMeta".to_string(),
         RequestKind::TypeResolution => "TypeResolution".to_string(),
         RequestKind::SemanticAnalysis => "SemanticAnalysis".to_string(),
-        RequestKind::Compile { target } => format!("Compile({target:?})"),
+        RequestKind::Compile { products, backend } => {
+            format!("Compile({products:?}, {backend:?})")
+        }
         RequestKind::Workspace { op } => format!("Workspace({op:?})"),
         RequestKind::Lsp { method } => format!("Lsp({method:?})"),
         RequestKind::Mcp { tool } => format!("Mcp({tool})"),

@@ -3,7 +3,7 @@
 //! 1. **Cheap FilteredNoop.** A consumer-filtered compile (the
 //!    `AuditConsumerFilter` rejects `RequestKind::Compile`) must return
 //!    the cheap default-filled record marked `FilteredNoop` — the
-//!    zero-valued `CompilePayload` (only the `target` tag set), NOT a
+//!    zero-valued `CompilePayload` (only the product/backend tags set), NOT a
 //!    fully-assembled payload that was built and then discarded. The
 //!    compile RESULT still computes (consumers asked for it).
 //!
@@ -13,7 +13,7 @@
 //!
 //! Discrimination:
 //! - The FilteredNoop test asserts `capture_state == FilteredNoop` AND
-//!   that the payload is the zero default (only the `target` tag set, no
+//!   that the payload is the zero default (only the product/backend tags set, no
 //!   producer counters). A regression that built and discarded the full
 //!   payload on the filtered path would carry non-zero producer counters
 //!   here and FAIL the zero-payload assertion — so the test discriminates
@@ -27,10 +27,10 @@
 
 use std::sync::Arc;
 
-use verter_audit::payloads::tags::CompileTargetTag;
+use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag};
 use verter_audit::{AuditCaptureState, AuditConfig, AuditConsumerFilter, CompilePayload};
-use verter_compiler::compile::CompileTarget;
 use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
@@ -88,7 +88,7 @@ fn filtered_compile_returns_cheap_filtered_noop_with_zero_payload() {
         "a consumer-filtered compile must return the cheap FilteredNoop record"
     );
 
-    // The payload is the zero-valued default carrying only the target
+    // The payload is the zero-valued default carrying only the product/backend
     // tag — no producer counters were assembled on the filtered path.
     // (`CompilePayload` does not derive `PartialEq`, so assert the
     // discriminating zero-valued fields directly.)
@@ -96,7 +96,14 @@ fn filtered_compile_returns_cheap_filtered_noop_with_zero_payload() {
         .compile_payload()
         .expect("Compile kind ⇒ kind_payload carries CompilePayload");
     let default = CompilePayload::default();
-    assert_eq!(payload.target, CompileTargetTag::Ide);
+    assert_eq!(
+        payload.products,
+        CompileProductSetTag {
+            ide_companion: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(payload.backend, CompileBackendTag::Vdom);
     assert_eq!(
         payload.output_bytes, default.output_bytes,
         "filtered path must NOT assemble output_bytes; got {payload:?}"

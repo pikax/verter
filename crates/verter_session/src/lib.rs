@@ -429,9 +429,9 @@ pub use resolver_store::{
 // per-host on `VerterHost::provenance().session_overlay_cows` (own-host gate metric).
 
 // Downstream re-exports (LSP/MCP/FFI): the standalone @verter/types .d.ts
-// content, CompileTarget, the public-API projection subject, and the
-// GlobalComponents fallback-const NAV-PROBE locator (compiler-owned).
-pub use verter_compiler::compile::CompileTarget;
+// content, the public-API projection subject, and the GlobalComponents
+// fallback-const NAV-PROBE locator (compiler-owned). `CompileTarget` is
+// session-owned (see `types.rs`) and reaches consumers via `pub use types::*`.
 pub use verter_compiler::{global_component_nav_probe_offset, VERTER_TYPES_STANDALONE_DTS};
 pub use verter_protocol::types::PublicApiProjectionSubject;
 

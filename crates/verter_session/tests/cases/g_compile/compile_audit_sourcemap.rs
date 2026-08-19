@@ -10,7 +10,8 @@
 
 use std::sync::Arc;
 
-use verter_compiler::compile::{CompileTarget, VerterCompileOptions};
+use verter_session::host_compile_audit::CompileAuditOverrides;
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -87,9 +88,9 @@ fn compile_with_audit_populates_sourcemap_ms_and_bytes_when_source_map_enabled()
 fn compile_with_audit_options_leaves_sourcemap_ms_none_when_source_map_disabled() {
     let host = host_for();
     // Explicit `source_map: false` short-circuits the producer emit.
-    let opts = VerterCompileOptions {
+    let opts = CompileAuditOverrides {
         source_map: false,
-        ..VerterCompileOptions::default()
+        ..CompileAuditOverrides::default()
     };
     let (result, record) = host
         .compile_with_audit_options("/sm.vue", CompileTarget::BUNDLER, opts)

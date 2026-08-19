@@ -82,7 +82,7 @@ fn observe_in_workspace_domain(label: &str, artifacts: &[(&str, &str)]) -> Value
 /// bit, which is what drives `want_ide` through the carrier.
 fn ide_profile() -> CompileProfile {
     CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         source_map: true,
         ..CompileProfile::default()
     }

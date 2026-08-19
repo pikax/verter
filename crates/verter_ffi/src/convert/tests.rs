@@ -499,6 +499,66 @@ fn invalid_delimiters_count() {
     assert!(matches!(err, FfiConversionError::InvalidDelimiters(1)));
 }
 
+/// `deny_unknown_fields` — the decode-boundary half of "no silently
+/// ignored option": an unrecognized JSON key on the compile profile must
+/// refuse AT DESERIALIZATION, before `ffi_profile_to_host` ever runs.
+/// This is exactly WASM's decode path (`serde_wasm_bindgen` deserializes
+/// `FfiCompileProfile` straight from the JS object); NAPI's typed
+/// `NapiCompileProfile -> FfiCompileProfile` `From` impl can never
+/// construct an unrecognized field in the first place, so this test
+/// exercises the JSON path directly rather than through either
+/// transport's own binding.
+#[test]
+fn ffi_compile_profile_refuses_an_unrecognized_json_field() {
+    let json = serde_json::json!({
+        "filename": "Comp.vue",
+        "compatConfig": true,
+    });
+    let err = match serde_json::from_value::<FfiCompileProfile>(json) {
+        Ok(_) => panic!("an unrecognized field must refuse deserialization, not construct"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("compatConfig"),
+        "expected the unknown-field error to name the field, got: {err}"
+    );
+}
+
+/// Negative control: every genuinely recognized field, all set at once,
+/// must still deserialize cleanly — `deny_unknown_fields` must not have
+/// collateral-refused a real field along with the fix.
+#[test]
+fn ffi_compile_profile_accepts_every_recognized_field_together() {
+    let json = serde_json::json!({
+        "filename": "Comp.vue",
+        "isProduction": true,
+        "customElement": false,
+        "ssr": false,
+        "ssrModuleId": "assets/Comp.vue",
+        "hmrStrategy": "vite",
+        "componentId": "comp-id",
+        "delimiters": ["[[", "]]"],
+        "customElements": ["my-"],
+        "comments": true,
+        "runtimeModuleName": "vue",
+        "typesModuleName": "$verter/types",
+        "forceVapor": false,
+        "forceJs": false,
+        "sourceMap": true,
+        "target": "bundler",
+        "inline": true,
+        "strictSlots": true,
+        "requestedMode": "session",
+    });
+    let profile: FfiCompileProfile =
+        serde_json::from_value(json).expect("every recognized field must deserialize");
+    let host_profile =
+        ffi_profile_to_host(Some(profile)).expect("every recognized value must convert");
+    assert_eq!(host_profile.filename.as_deref(), Some("Comp.vue"));
+    assert!(host_profile.is_production);
+    assert_eq!(host_profile.component_id.as_deref(), Some("comp-id"));
+}
+
 #[test]
 fn invalid_file_kind() {
     let err = ffi_file_language_to_host(Some("binary"), Some("/a.vue")).unwrap_err();
@@ -1186,6 +1246,7 @@ fn profile_all_fields() {
         is_production: Some(true),
         custom_element: Some(true),
         ssr: Some(true),
+        ssr_module_id: Some("assets/Comp.vue".to_string()),
         hmr_strategy: Some("vite".to_string()),
         component_id: Some("abc123".to_string()),
         delimiters: Some(vec!["<%".to_string(), "%>".to_string()]),
@@ -1206,6 +1267,7 @@ fn profile_all_fields() {
     assert!(result.is_production);
     assert!(result.custom_element);
     assert!(result.ssr);
+    assert_eq!(result.ssr_module_id, Some("assets/Comp.vue".to_string()));
     assert!(result.target.needs_tsx());
     assert!(result.strict_slots);
     assert_eq!(result.inline, Some(true));

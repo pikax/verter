@@ -518,12 +518,12 @@ fn collect_template_compile_diagnostics(parsed: &ParsedSfc, diagnostics: &mut Ve
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn compile(
     input: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
     macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
-) -> VerterCompileResult {
-    compile_with_parsed(input, options, verter_options, macro_semantics, allocator).1
+) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
+    Ok(compile_with_parsed(input, request, execution_inputs, macro_semantics, allocator)?.1)
 }
 
 /// Compile a Vue SFC and retain the exact parse used by code generation.
@@ -532,34 +532,48 @@ pub(crate) fn compile(
 /// block maps without reparsing the carrier.
 pub(crate) fn compile_with_parsed(
     input: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
     macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
-) -> (ParsedSfc, VerterCompileResult) {
+) -> Result<(ParsedSfc, VerterCompileResult), crate::compile_request::CompileRequestError> {
+    let Some(vue) = request.vue() else {
+        return Err(
+            crate::compile_request::CompileRequestError::FrameworkMismatch {
+                expected: "Vue",
+                actual: "Svelte",
+            },
+        );
+    };
     let parse_start = Instant::now();
     let parsed = parse_sfc(
         input,
-        options
-            .delimiters
+        vue.delimiters
             .as_ref()
             .map(|(o, c)| (o.as_str(), c.as_str())),
-        options.custom_elements.as_deref(),
+        Some(vue.is_custom_element.as_slice()),
     );
     let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
     if let Some(observer) = verter_audit::current_observer() {
         observer.record_phase_timing("compile.parse", parse_duration_ms);
     }
+    // Resolve the backend NOW — the earliest point the implicit `<template
+    // vapor>` marker is knowable — before any codegen decision reads it.
+    // Fails closed on `SSR x Vapor` / `inline x Vapor` here, the exact two
+    // cases `CompileRequest::new` could not see at construction time.
+    let resolved_backend = request.resolve_vue_backend(parsed.is_vapor())?;
+    let (options, verter_options) =
+        derive_legacy_vue_options(request, resolved_backend, execution_inputs);
     let result = compile_inner(
         input,
         &parsed,
-        options,
-        verter_options,
+        &options,
+        &verter_options,
         macro_semantics,
         allocator,
         parse_duration_ms,
-    );
-    (parsed, result)
+    )?;
+    Ok((parsed, result))
 }
 
 /// Compile a pre-parsed SFC. Skips tokenization and parsing.
@@ -571,11 +585,54 @@ pub(crate) fn compile_with_parsed(
 pub(crate) fn compile_from_parsed(
     input: &str,
     parsed: &ParsedSfc,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
     macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
-) -> VerterCompileResult {
+) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
+    let resolved_backend = request.resolve_vue_backend(parsed.is_vapor())?;
+    let (options, verter_options) =
+        derive_legacy_vue_options(request, resolved_backend, execution_inputs);
+    compile_inner(
+        input,
+        parsed,
+        &options,
+        &verter_options,
+        macro_semantics,
+        allocator,
+        0.0,
+    )
+}
+
+/// Crate-internal escape hatch: drives [`compile_inner`] directly from
+/// already-legacy-shaped options, bypassing `CompileRequest` derivation.
+///
+/// Used ONLY by `framework_common::vue_bridge`'s block-content composition
+/// sub-calls, which decompose ONE top-level `RuntimeCompileOptions`-shaped
+/// request into 2-3 fine-grained sub-compiles over SELECTED SFC fragments
+/// (a projected script unit, a selected template block) that do not
+/// themselves correspond to an independent top-level product request — they
+/// are internal plumbing for one external `CarrierCompiler::compile_bundle`
+/// call, not a second production request-construction point. `compile_bundle`
+/// itself (fed by `RuntimeCompileOptions`, the actual external boundary) is
+/// converted to build a canonical `CompileRequest` separately. NOT reachable
+/// outside this crate.
+///
+/// Infallible in practice: it bypasses `CompileRequest::resolve_vue_backend`
+/// entirely (there is no top-level `CompileRequest` at this decomposition
+/// layer to resolve), so `verter_options.ssr`/`.force_vapor` are values the
+/// CALLER's own top-level request already validated before ever building
+/// this sub-compile's `RuntimeCompileOptions` — `compile_inner` itself never
+/// returns `Err` (both typed refusals are raised only by
+/// `resolve_vue_backend`), so unwrapping here cannot mask a real refusal.
+pub(crate) fn compile_from_parsed_legacy(
+    input: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &Allocator,
+) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
     compile_inner(
         input,
         parsed,
@@ -587,29 +644,122 @@ pub(crate) fn compile_from_parsed(
     )
 }
 
+/// Derives the internal, pre-validated `(CodegenOptions,
+/// ResolvedVueCompileOptions)` pair from a canonical `CompileRequest` — the
+/// SOLE production path that constructs either type. Every construction-time
+/// fail-closed rule already ran in `CompileRequest::new`; `resolved_backend`
+/// already ran the post-parse half (`resolve_vue_backend`) — this function
+/// only translates, never re-decides, semantics.
+fn derive_legacy_vue_options(
+    request: &crate::compile_request::CompileRequest,
+    resolved_backend: crate::compile_request::ResolvedVueBackend,
+    execution_inputs: &VueExecutionInputs,
+) -> (CodegenOptions, ResolvedVueCompileOptions) {
+    use crate::compile_request::{CompileProduct, ResolvedVueBackend};
+
+    let vue = request
+        .vue()
+        .expect("derive_legacy_vue_options is Vue-only");
+    let use_vapor = matches!(resolved_backend, ResolvedVueBackend::Vapor);
+    let ssr = request
+        .products()
+        .iter()
+        .any(|p| matches!(p, CompileProduct::RuntimeServer(_)));
+
+    // Reconstruct the exact legacy bit membership — see
+    // `CompileRequest`'s zero-work predicate doc comments for the verified
+    // 1:1 mapping from product membership to each raw bit.
+    let mut target = CompileTarget::empty();
+    if request.wants_style_codegen() {
+        target |= CompileTarget::STYLE;
+    }
+    if request.has_runtime_product() || request.analysis_wants_script_bindings() {
+        target |= CompileTarget::SCRIPT;
+    }
+    if request.wants_template_codegen() {
+        target |= CompileTarget::TEMPLATE;
+    }
+    if request.wants_tsx() {
+        target |= CompileTarget::TSX;
+    }
+    if request.wants_tsc() {
+        target |= CompileTarget::TSC;
+    }
+    if request.analysis_wants_template_data() {
+        target |= CompileTarget::TEMPLATE_DATA;
+    }
+
+    let ide = request.products().iter().find_map(|p| match p {
+        CompileProduct::IdeCompanion(i) => Some(i),
+        _ => None,
+    });
+    let runtime = request.products().iter().find_map(|p| match p {
+        CompileProduct::RuntimeClient(r) | CompileProduct::RuntimeServer(r) => Some(r),
+        _ => None,
+    });
+
+    let codegen_options = CodegenOptions {
+        filename: request.filename().map(str::to_string),
+        is_production: request.is_production(),
+        custom_element: vue.script_custom_element.unwrap_or(false),
+        component_id: request.component_id().map(str::to_string),
+        target,
+        ide_chunk_boundaries: ide.is_some_and(|i| i.ide_chunk_boundaries),
+        delimiters: vue.delimiters.clone(),
+        custom_elements: if vue.is_custom_element.is_empty() {
+            None
+        } else {
+            Some(vue.is_custom_element.clone())
+        },
+        comments: vue.comments,
+        runtime_module_name: vue.runtime_module_name.clone(),
+        types_module_name: ide.and_then(|i| i.types_module_name.clone()),
+        hoist_static: vue.hoist_static,
+        inline: runtime.and_then(|r| r.inline),
+        embed_ambient_types: ide.is_some_and(|i| i.embed_ambient_types),
+        conditional_root_narrowing: ide.is_some_and(|i| i.conditional_root_narrowing),
+        strict_slots: ide.is_some_and(|i| i.strict_slots),
+    };
+
+    let resolved_flags = ResolvedVueCompileOptions {
+        force_vapor: use_vapor,
+        force_js: request.force_js(),
+        source_map: runtime.is_some_and(|r| r.runtime_source_map),
+        ide_source_map: ide.is_some_and(|i| i.want_source_map),
+        ssr,
+        prop_constness_overrides: execution_inputs.prop_constness_overrides.clone(),
+        style_v_bind_vars: execution_inputs.style_v_bind_vars.clone(),
+        style_v_bind_usage_complete: execution_inputs.style_v_bind_usage_complete,
+        template_binding_metadata: execution_inputs.template_binding_metadata.clone(),
+        template_used_vars: execution_inputs.template_used_vars.clone(),
+        runtime_template_hole: execution_inputs.runtime_template_hole,
+        runtime_inline_template_chunk: execution_inputs.runtime_inline_template_chunk,
+    };
+
+    (codegen_options, resolved_flags)
+}
+
 /// Internal compilation driver. Borrows a pre-parsed [`ParsedSfc`] — no cloning
 /// of template AST, script nodes, or style nodes.
+///
+/// Returns a typed refusal exactly for the two `SSR x Vapor` / `inline x
+/// Vapor` cases `CompileRequest::new` could not see at construction time
+/// (backend resolution needs the parsed source) — every other fail-closed
+/// rule (unsupported options, `SSR x Vapor` explicit backend, `inline x
+/// SSR`) is already enforced upstream by the canonical request, so
+/// `verter_options`/`options` here are already-validated derived values,
+/// never a second place those rules are re-decided.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn compile_inner(
     input: &str,
     parsed: &ParsedSfc,
     options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    verter_options: &ResolvedVueCompileOptions,
     macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
     parse_duration_ms: f64,
-) -> VerterCompileResult {
+) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
     let total_start = Instant::now();
-
-    // Merge legacy `extract_template_data` flag into the compile target.
-    let options = if verter_options.extract_template_data && !options.target.needs_template_data() {
-        let mut opts = options.clone();
-        opts.target |= CompileTarget::TEMPLATE_DATA;
-        std::borrow::Cow::Owned(opts)
-    } else {
-        std::borrow::Cow::Borrowed(options)
-    };
-    let options = &*options;
 
     // Prepare the setup + companion script blocks once. This single parse backs
     // script codegen syntax ownership, bindings, and force-js type stripping.
@@ -656,6 +806,15 @@ fn compile_inner(
     let scope_id_str = std::str::from_utf8(&scope_id_bytes).unwrap_or("00000000");
     let scope_id_full = format!("data-v-{}", scope_id_str);
 
+    // `verter_options.force_vapor` is already the RESOLVED backend
+    // (`CompileRequest::resolve_vue_backend`, called by the derivation
+    // function before this pipeline ever runs) — `verter_options.ssr &&
+    // use_vapor` is therefore unreachable here: a request that would
+    // produce that combination is refused with a typed
+    // `SsrVaporBackendUnsupported` before `compile()` is invoked at all,
+    // both for an explicit `force_vapor` and for an implicit `<template
+    // vapor>` marker. Recomputing `parsed.is_vapor()` here is redundant
+    // with that resolution but not wrong (same source, same answer).
     let use_vapor = verter_options.force_vapor || parsed.is_vapor();
     let has_scoped_style = parsed.has_style_scope();
 
@@ -869,8 +1028,15 @@ fn compile_inner(
     // emitted INSIDE `setup()` as a returned closure that references setup
     // bindings directly. Official defaults to inline in production builds
     // (`resolve_inline`); it only applies to client VDOM with both a
-    // `<script setup>` and a template — Vapor inline and inline SSR are
-    // deferred, and template-only / script-only SFCs stay non-inline.
+    // `<script setup>` and a template. `inline x ssr` and `inline x vapor`
+    // are NOT silently demoted to non-inline here: `CompileRequest::new`
+    // already refuses `inline x ssr` at construction, and the derivation
+    // function already refused `inline x vapor` (explicit or implicit) via
+    // `resolve_vue_backend` before this pipeline ever ran — so
+    // `resolve_inline() && (use_vapor || verter_options.ssr)` is
+    // unreachable here; the two conjuncts below are defense-in-depth, not
+    // the enforcement point. Template-only / script-only SFCs still stay
+    // non-inline (no `<script setup>` or no template to merge).
     let inline_active = options.resolve_inline()
         && !use_vapor
         && !verter_options.ssr
@@ -1840,7 +2006,7 @@ fn compile_inner(
         // Build output and source map from the single unified CT
         let tsx_code = tsx_ct.build_string();
         let tsx_sourcemap_start = Instant::now();
-        let tsx_sm = if verter_options.source_map {
+        let tsx_sm = if verter_options.ide_source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
                 file: options.filename.as_deref(),
@@ -1858,7 +2024,7 @@ fn compile_inner(
         if let Some(observer) = verter_audit::current_observer() {
             let codegen_only_ms = (tsx_dur - tsx_sourcemap_ms).max(0.0);
             observer.record_phase_timing("compile.codegen", codegen_only_ms);
-            if verter_options.source_map {
+            if verter_options.ide_source_map {
                 observer.record_phase_timing("compile.sourcemap", tsx_sourcemap_ms);
             }
         }
@@ -1960,7 +2126,7 @@ fn compile_inner(
 
     let total_duration_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-    VerterCompileResult {
+    Ok(VerterCompileResult {
         script: script_block,
         template: template_block,
         styles: style_blocks,
@@ -1993,6 +2159,262 @@ fn compile_inner(
         actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
         downgrade_reason: None,
         template_binding_metadata,
+    })
+}
+
+/// Test-only compatibility shim reproducing the legacy
+/// `CodegenOptions`/`VerterCompileOptions`/`compile()` shape, so the
+/// crate's large pre-existing codegen test suite (tens of thousands of
+/// lines across ~11 files, each exercising specific option COMBINATIONS
+/// via hand-built `CompileTarget` bitsets) does not need a line-by-line
+/// rewrite into `CompileRequest`-shaped construction. NEVER compiled into
+/// production (`#[cfg(test)]`) — it is not a second production option
+/// authority; it is scaffolding over the SAME canonical `CompileRequest`
+/// constructor every production route now uses. Test files shadow the
+/// production `CodegenOptions`/`VerterCompileOptions`/`compile` names
+/// with these via an explicit `use ... as` import (Rust's ordinary
+/// glob-shadowing rule), so individual test bodies need no changes.
+#[cfg(test)]
+#[allow(dead_code)] // compatibility-shape fields/methods not every test file exercises
+pub(crate) mod legacy_test_support {
+    use super::*;
+    use crate::compile_request::{
+        AnalysisProductRequest, CompileProduct, CompileRequest, DeclarationProductRequest,
+        FrameworkCompileRequest, IdeProductRequest, RuntimeProductRequest, VueBackendRequest,
+        VueCompileRequest,
+    };
+
+    /// Exact field-for-field mirror of the deleted public `CodegenOptions`.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct CodegenOptions {
+        pub filename: Option<String>,
+        pub is_production: bool,
+        pub custom_element: bool,
+        pub component_id: Option<String>,
+        pub target: CompileTarget,
+        pub skip_source_map: bool,
+        pub ide_chunk_boundaries: bool,
+        pub delimiters: Option<(String, String)>,
+        pub custom_elements: Option<Vec<String>>,
+        pub comments: Option<bool>,
+        pub runtime_module_name: Option<String>,
+        pub types_module_name: Option<String>,
+        pub hoist_static: Option<bool>,
+        pub whitespace: Option<WhitespaceStrategy>,
+        pub cache_handlers: Option<bool>,
+        pub inline: Option<bool>,
+        pub slotted: Option<bool>,
+        pub prefix_identifiers: Option<bool>,
+        pub embed_ambient_types: bool,
+        pub conditional_root_narrowing: bool,
+        pub strict_slots: bool,
+    }
+
+    impl CodegenOptions {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+            self.filename = Some(filename.into());
+            self
+        }
+        pub fn with_production(mut self, is_production: bool) -> Self {
+            self.is_production = is_production;
+            self
+        }
+        pub fn with_custom_element(mut self, custom_element: bool) -> Self {
+            self.custom_element = custom_element;
+            self
+        }
+    }
+
+    /// Exact field-for-field mirror of the deleted public `VerterCompileOptions`.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct VerterCompileOptions {
+        pub force_vapor: bool,
+        pub force_js: bool,
+        pub source_map: bool,
+        pub ssr: bool,
+        pub extract_template_data: bool,
+        pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
+        pub style_v_bind_vars: Vec<String>,
+        pub style_v_bind_usage_complete: Option<bool>,
+        pub template_binding_metadata: Option<TemplateBindingMetadata>,
+        pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+        pub runtime_template_hole: bool,
+        pub runtime_inline_template_chunk: bool,
+    }
+
+    /// Rebuilds a canonical `CompileRequest` from the legacy bit/flag shape
+    /// — the reverse of `derive_legacy_vue_options`. Not bit-perfect for
+    /// every theoretical `CompileTarget` value (no production caller ever
+    /// constructs one directly anymore); faithful for every combination the
+    /// test suite actually exercises: `BUNDLER` (`TEMPLATE` bit present),
+    /// `IDE`/`TSX`, `TSC`, `ANALYSIS`/`META`-shaped (`SCRIPT` without
+    /// `TEMPLATE`), `TEMPLATE_DATA` alone, and any OR-combination of these.
+    fn request_from_legacy(
+        options: &CodegenOptions,
+        verter_options: &VerterCompileOptions,
+    ) -> CompileRequest {
+        let target = options.target;
+        let mut products = Vec::new();
+        if target.contains(CompileTarget::TEMPLATE) {
+            let rp = RuntimeProductRequest {
+                inline: options.inline,
+                runtime_source_map: verter_options.source_map,
+                ..Default::default()
+            };
+            products.push(if verter_options.ssr {
+                CompileProduct::RuntimeServer(rp)
+            } else {
+                CompileProduct::RuntimeClient(rp)
+            });
+        }
+        if target.contains(CompileTarget::TSX) {
+            products.push(CompileProduct::IdeCompanion(IdeProductRequest {
+                want_source_map: verter_options.source_map,
+                embed_ambient_types: options.embed_ambient_types,
+                conditional_root_narrowing: options.conditional_root_narrowing,
+                strict_slots: options.strict_slots,
+                types_module_name: options.types_module_name.clone(),
+                ide_chunk_boundaries: options.ide_chunk_boundaries,
+                ..Default::default()
+            }));
+        }
+        if target.contains(CompileTarget::TSC) {
+            products.push(CompileProduct::Declarations(
+                DeclarationProductRequest::default(),
+            ));
+        }
+        let want_script_bindings_only =
+            target.contains(CompileTarget::SCRIPT) && !target.contains(CompileTarget::TEMPLATE);
+        let want_template_data =
+            target.contains(CompileTarget::TEMPLATE_DATA) || verter_options.extract_template_data;
+        if want_script_bindings_only || want_template_data {
+            products.push(CompileProduct::Analysis(AnalysisProductRequest {
+                want_script_bindings: want_script_bindings_only,
+                want_template_data,
+            }));
+        }
+        if products.is_empty() {
+            // A target with no recognized bit still needs SOME product for
+            // `CompileRequest::new` to accept it; fall back to a runtime
+            // client so an all-default `CodegenOptions` (target: BUNDLER
+            // via `Default`) behaves as the tests expect.
+            products.push(CompileProduct::RuntimeClient(RuntimeProductRequest {
+                inline: options.inline,
+                runtime_source_map: verter_options.source_map,
+                ..Default::default()
+            }));
+        }
+
+        let vue = VueCompileRequest {
+            backend: if verter_options.force_vapor {
+                VueBackendRequest::Vapor
+            } else {
+                VueBackendRequest::Inferred
+            },
+            ssr: verter_options.ssr,
+            is_custom_element: options.custom_elements.clone().unwrap_or_default(),
+            delimiters: options.delimiters.clone(),
+            comments: options.comments,
+            hoist_static: options.hoist_static,
+            runtime_module_name: options.runtime_module_name.clone(),
+            script_custom_element: Some(options.custom_element),
+            ..Default::default()
+        };
+
+        CompileRequest::new(
+            products,
+            FrameworkCompileRequest::Vue(vue),
+            None,
+            options.filename.clone(),
+            options.component_id.clone(),
+            options.is_production,
+            verter_options.force_js,
+        )
+        .expect("legacy-shaped test options always translate to a constructible request")
+    }
+
+    fn execution_inputs_from_legacy(verter_options: &VerterCompileOptions) -> VueExecutionInputs {
+        VueExecutionInputs {
+            // The legacy shape threads macro semantics through the separate
+            // `macro_semantics: &VueMacroSemanticInput` parameter, unchanged
+            // from before this carrier existed — not through this field.
+            macro_runtime: None,
+            prop_constness_overrides: verter_options.prop_constness_overrides.clone(),
+            style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
+            style_v_bind_usage_complete: verter_options.style_v_bind_usage_complete,
+            template_binding_metadata: verter_options.template_binding_metadata.clone(),
+            template_used_vars: verter_options.template_used_vars.clone(),
+            runtime_template_hole: verter_options.runtime_template_hole,
+            runtime_inline_template_chunk: verter_options.runtime_inline_template_chunk,
+        }
+    }
+
+    pub(crate) fn compile(
+        input: &str,
+        options: &CodegenOptions,
+        verter_options: &VerterCompileOptions,
+        macro_semantics: &VueMacroSemanticInput,
+        allocator: &Allocator,
+    ) -> VerterCompileResult {
+        let request = request_from_legacy(options, verter_options);
+        let execution_inputs = execution_inputs_from_legacy(verter_options);
+        super::compile(
+            input,
+            &request,
+            &execution_inputs,
+            macro_semantics,
+            allocator,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "legacy test compile() call refused by the canonical request layer: {err:?} \
+                 (a test exercising the NEW fail-closed behavior should call \
+                 crate::compile_request::CompileRequest::new / compile directly, not this shim)"
+            )
+        })
+    }
+
+    pub(crate) fn compile_with_parsed(
+        input: &str,
+        options: &CodegenOptions,
+        verter_options: &VerterCompileOptions,
+        macro_semantics: &VueMacroSemanticInput,
+        allocator: &Allocator,
+    ) -> (ParsedSfc, VerterCompileResult) {
+        let request = request_from_legacy(options, verter_options);
+        let execution_inputs = execution_inputs_from_legacy(verter_options);
+        super::compile_with_parsed(
+            input,
+            &request,
+            &execution_inputs,
+            macro_semantics,
+            allocator,
+        )
+        .unwrap_or_else(|err| panic!("legacy test compile_with_parsed() call refused: {err:?}"))
+    }
+
+    pub(crate) fn compile_from_parsed(
+        input: &str,
+        parsed: &ParsedSfc,
+        options: &CodegenOptions,
+        verter_options: &VerterCompileOptions,
+        macro_semantics: &VueMacroSemanticInput,
+        allocator: &Allocator,
+    ) -> VerterCompileResult {
+        let request = request_from_legacy(options, verter_options);
+        let execution_inputs = execution_inputs_from_legacy(verter_options);
+        super::compile_from_parsed(
+            input,
+            parsed,
+            &request,
+            &execution_inputs,
+            macro_semantics,
+            allocator,
+        )
+        .unwrap_or_else(|err| panic!("legacy test compile_from_parsed() call refused: {err:?}"))
     }
 }
 

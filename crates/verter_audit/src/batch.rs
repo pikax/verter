@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use crate::payloads::compile::CompilePayload;
     use crate::payloads::component_meta::ComponentMetaPayload;
-    use crate::payloads::tags::CompileTargetTag;
+    use crate::payloads::tags::{CompileBackendTag, CompileProductSetTag};
     use crate::record::RequestKindPayload;
 
     /// Trivial in-memory source for unit-level tests inside
@@ -335,7 +335,11 @@ mod tests {
                     record(
                         4,
                         RequestKind::Compile {
-                            target: CompileTargetTag::Ide,
+                            products: CompileProductSetTag {
+                                ide_companion: true,
+                                ..Default::default()
+                            },
+                            backend: CompileBackendTag::Inferred,
                         },
                         1.0,
                         false,

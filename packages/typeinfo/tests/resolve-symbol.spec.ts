@@ -23,6 +23,10 @@ export type Foo = { msg: string };
 export type GenericCarrier<T> = { value: T };
 `;
 
+const METHOD_FIXTURE = `
+export type WithMethod = { greet(name: string): void };
+`;
+
 describe("TypeInfoSession.resolveSymbol", () => {
   it("Expanded mode resolves a non-generic alias body to an Object descriptor", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
@@ -80,6 +84,42 @@ describe("TypeInfoSession.resolveSymbol", () => {
     session.host.close();
   });
 
+  it("instantiates a generic carrier with an object typeArg, round-tripping the property through the reverse (descriptorToNative) direction", () => {
+    // REGRESSION: `descriptorToNative`'s `lowerObjectMembers` is the
+    // MIRROR direction of the fix above (native -> descriptor) — it
+    // must ALSO emit the wire's `key: AuthoredPropertyKey` shape, not
+    // a flat `name` field, or an object-typed typeArg's properties
+    // fail to decode on the Rust side entirely.
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    session.host.upsert({
+      inputId: "/fixtures/types.ts",
+      source: FIXTURE,
+    });
+    const result = session.resolveSymbol("/fixtures/types.ts", "GenericCarrier", {
+      mode: "expanded",
+      typeArgs: [
+        {
+          kind: "object",
+          properties: [
+            { name: "msg", type: { kind: "primitive", name: "string" }, optional: false },
+          ],
+        },
+      ],
+    });
+    expect(result.type).toBeDefined();
+    expect(result.type?.kind).toBe("object");
+    if (result.type?.kind === "object") {
+      const value = result.type.properties.find((p) => p.name === "value");
+      expect(value).toBeDefined();
+      expect(value?.type.kind).toBe("object");
+      if (value?.type.kind === "object") {
+        const msg = value.type.properties.find((p) => p.name === "msg");
+        expect(msg).toBeDefined();
+      }
+    }
+    session.host.close();
+  });
+
   it("default mode for generic carrier (no explicit mode) selects Navigate, preserving carrier shape", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
     session.host.upsert({
@@ -89,6 +129,33 @@ describe("TypeInfoSession.resolveSymbol", () => {
     const result = session.resolveSymbol("/fixtures/types.ts", "GenericCarrier");
     // Should resolve to *something* — neither undefined nor null.
     expect(result.type).toBeDefined();
+    session.host.close();
+  });
+
+  it("Expanded mode resolves a method-signature member's name (same key-extraction path as property)", () => {
+    // REGRESSION: `ObjectMember::Method` wire-encodes its name through
+    // the SAME `key: AuthoredPropertyKey` shape as `ObjectMember::Property`
+    // (`crates/verter_type_expr/src/type_expr_json.rs`) — not a flat
+    // `name` string. A decoder that only fixed the `property` case would
+    // leave this one silently dropping method members.
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    session.host.upsert({
+      inputId: "/fixtures/method.ts",
+      source: METHOD_FIXTURE,
+    });
+
+    const result = session.resolveSymbol("/fixtures/method.ts", "WithMethod", {
+      mode: "expanded",
+    });
+
+    expect(result.type).toBeDefined();
+    expect(result.type?.kind).toBe("object");
+    if (result.type?.kind === "object") {
+      const greet = result.type.properties.find((p) => p.name === "greet");
+      expect(greet).toBeDefined();
+      expect(greet?.type.kind).toBe("function");
+    }
+
     session.host.close();
   });
 

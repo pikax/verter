@@ -1,7 +1,7 @@
 /**
  * Lowering from the native `TypeExpr` wire shape (Rust serialisation
- * of `verter_semantic::analysis::type_expr::TypeExpr`) to the public
- * `TypeDescriptor` IR exported by `@verter/type-ir`.
+ * of `verter_type_expr::TypeExpr`) to the public `TypeDescriptor` IR
+ * exported by `@verter/type-ir`.
  *
  * The mapping is structural and lossless for the descriptors that
  * `@verter/type-ir` represents. `indexedAccess` lowers to the dedicated
@@ -40,6 +40,7 @@ import type {
   NativeFunctionParam,
   NativeObjectMember,
   NativePrimitiveName,
+  NativePropertyKey,
   NativeTypeExpr,
 } from "./native-type-expr.js";
 
@@ -174,24 +175,47 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
   }
 }
 
+/**
+ * Project a wire `NativePropertyKey` to the flat display name
+ * `TypeDescriptor`'s `ObjectProperty.name` requires. The ordinary
+ * `string` case is lossless; `number` stringifies (a numeric literal
+ * property name IS its own display form); `uniqueSymbol` / `computed`
+ * have no string identity to begin with, so they get a synthetic,
+ * readable label rather than being silently dropped — the exact
+ * "property silently missing" failure mode this whole mapping exists
+ * to avoid.
+ */
+function nativePropertyKeyToName(key: NativePropertyKey): string {
+  switch (key.kind) {
+    case "string":
+      return key.value;
+    case "number":
+      return String(key.value);
+    case "uniqueSymbol":
+      return "[Symbol]";
+    case "computed":
+      return `[${describeBrief(key.expression)}]`;
+  }
+}
+
 function lowerObject(members: NativeObjectMember[]): TypeDescriptor {
   const properties: ObjectProperty[] = [];
   const indexSignatures: ObjectIndexSignature[] = [];
   for (const member of members) {
     switch (member.memberKind) {
       case "property":
-        if (member.name && member.ty) {
+        if (member.key && member.ty) {
           properties.push({
-            name: member.name,
+            name: nativePropertyKeyToName(member.key),
             type: nativeToDescriptor(member.ty),
             optional: member.optional ?? false,
           });
         }
         break;
       case "method":
-        if (member.name && member.function) {
+        if (member.key && member.function) {
           properties.push({
-            name: member.name,
+            name: nativePropertyKeyToName(member.key),
             type: lowerFunction(member.function),
             optional: member.optional ?? false,
           });
@@ -212,8 +236,14 @@ function lowerObject(members: NativeObjectMember[]): TypeDescriptor {
       // raise pipeline doesn't surface them yet. A consumer that
       // needs call/construct signatures should re-evaluate with the
       // function shape.
+      //
+      // spread: an object-literal spread entry (`{ ...operand }`) — no
+      // `TypeDescriptor` representation exists for an unexpanded spread;
+      // a consumer that needs the spread source's own members should
+      // re-evaluate that source directly.
       case "callSignature":
       case "constructSignature":
+      case "spread":
         break;
     }
   }

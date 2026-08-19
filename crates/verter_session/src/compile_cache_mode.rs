@@ -182,7 +182,7 @@ pub(crate) fn has_css_hash_override(profile: &CompileProfile) -> bool {
 /// the consumer is the LSP / TypeProvider and not the bundler).
 #[inline]
 pub(crate) fn has_ide_only_analysis(profile: &CompileProfile) -> bool {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
     profile.target.contains(CompileTarget::TSX) && !profile.target.contains(CompileTarget::TEMPLATE)
 }
 

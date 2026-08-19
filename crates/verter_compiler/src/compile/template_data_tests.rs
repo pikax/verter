@@ -4,15 +4,15 @@ use oxc_allocator::Allocator;
 /// Compile an SFC with `extract_template_data: true` and return the raw data.
 fn extract(source: &str) -> RawTemplateData {
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Test.vue".to_string()),
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions {
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions {
         extract_template_data: true,
         ..Default::default()
     };
-    let result = crate::compile::compile(
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,

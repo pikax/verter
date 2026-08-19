@@ -20,6 +20,9 @@
 //!   repeated wildcard re-export scans are expensive.
 //!
 //! Module layout:
+//! - [`compile_request_build`] — the canonical `CompileRequest`
+//!   construction/derivation pair `compile_entry` /
+//!   `compile_entry_runtime_render` route every compile through.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`dependency_resolution`] — import-route + dependency canonical
 //!   resolution.
@@ -31,6 +34,7 @@
 //! - [`vue_script_extract`] — free helpers for SFC `<script>` extraction
 //!   and template-converter input shaping.
 
+mod compile_request_build;
 mod dependency_resolution;
 mod external_type_resolution;
 pub(crate) mod fallthrough_props;

@@ -205,7 +205,7 @@ fn strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file() {
         .expect("a recoverable strict-parse defect must still admit the document");
 
     let profile = crate::CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         ..crate::CompileProfile::default()
     };
     let ensured = host.ensure_ide_compiled("/StrictCompile.svelte", &profile);
@@ -505,7 +505,7 @@ fn scheduled_semantic_host_ingests_the_identical_registered_artifact_arc() {
 
 #[test]
 fn equal_compile_grammar_reuses_registered_artifact_and_mismatch_is_typed() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     let workspace: Arc<dyn WorkspaceAccess> =
@@ -562,7 +562,7 @@ fn equal_compile_grammar_reuses_registered_artifact_and_mismatch_is_typed() {
 
 #[test]
 fn external_src_compile_is_typed_and_fail_closed() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     let workspace: Arc<dyn WorkspaceAccess> =
@@ -998,7 +998,7 @@ fn preexisting_parse_reject_fact_still_fails_close_ide_compile() {
         aliases: Vec::new(),
     });
     let profile = crate::CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         ..crate::CompileProfile::default()
     };
     assert!(
@@ -1038,7 +1038,7 @@ fn vue_parse_time_error_diagnostic_still_fails_close_ide_compile() {
         aliases: Vec::new(),
     });
     let profile = crate::CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         ..crate::CompileProfile::default()
     };
     assert!(

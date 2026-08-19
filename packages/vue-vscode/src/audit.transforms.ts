@@ -27,7 +27,7 @@ export interface AuditRecordSummary {
   /**
    * Either a bare variant name (`"ComponentMeta"`, `"TypeResolution"`,
    * `"SemanticAnalysis"`) or a single-key object whose key is the
-   * variant name (`{ Compile: { target: "Vdom" } }`).
+   * variant name (`{ Compile: { products: {...}, backend: "Vdom" } }`).
    */
   kind: unknown;
   /** Other fields are passed through verbatim to the JSON viewer. */
@@ -70,6 +70,23 @@ export function formatRecordTagFromKind(kind: unknown): string {
 }
 
 /**
+ * Comma-joined list of the truthy product-set fields (`runtime_client`,
+ * `ide_companion`, …) — a `CompileRequest` may carry more than one product
+ * at once, so this must not collapse to a single "primary" value the way
+ * the old `CompileTargetTag` mirror did. `"none"` when the field is
+ * absent/malformed or every product is false.
+ */
+function formatCompileProducts(products: unknown): string {
+  if (!products || typeof products !== "object") {
+    return "none";
+  }
+  const set = Object.entries(products as Record<string, unknown>)
+    .filter(([, v]) => v === true)
+    .map(([k]) => k);
+  return set.length > 0 ? set.join(",") : "none";
+}
+
+/**
  * Pick a short data tag for the `description` field — the secondary
  * text shown to the right of the QuickPick label. Matches the
  * `RequestKind::matches_filter` parameter set so the user can correlate
@@ -81,7 +98,9 @@ function formatRecordDescription(kind: unknown): string | undefined {
   }
   const obj = kind as Record<string, Record<string, unknown> | undefined>;
   if (obj.Compile && typeof obj.Compile === "object") {
-    return `target=${String(obj.Compile.target ?? "?")}`;
+    return `products=${formatCompileProducts(obj.Compile.products)} backend=${String(
+      obj.Compile.backend ?? "?",
+    )}`;
   }
   if (obj.Workspace && typeof obj.Workspace === "object") {
     return `op=${String(obj.Workspace.op ?? "?")}`;

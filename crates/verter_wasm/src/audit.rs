@@ -8,7 +8,7 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use verter_audit::{payloads::tags::BundlerKindTag, RequestAuditRecord, RequestKind, WorkspaceOp};
-use verter_compiler::compile::CompileTarget;
+use verter_session::CompileTarget;
 
 /// Workspace op argument decoded from a JSON string. Mirrors the
 /// NAPI variant. The payload tag is `type`; the WASM transport is a

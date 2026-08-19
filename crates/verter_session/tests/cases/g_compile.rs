@@ -12,6 +12,8 @@ mod compile_audit_ide;
 mod compile_audit_no_hot_loop_instrumentation;
 #[path = "g_compile/compile_audit_sourcemap.rs"]
 mod compile_audit_sourcemap;
+#[path = "g_compile/compile_audit_unsanctioned_target_refuses.rs"]
+mod compile_audit_unsanctioned_target_refuses;
 #[path = "g_compile/compile_audit_vdom.rs"]
 mod compile_audit_vdom;
 #[path = "g_compile/compile_audit_vue_only_guard.rs"]

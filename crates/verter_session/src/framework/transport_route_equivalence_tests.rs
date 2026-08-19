@@ -531,7 +531,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         verter_language::FileLanguage::svelte(),
     );
     let ide_profile = CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         source_map: true,
         hmr_strategy: crate::types::HmrStrategy::None,
         ..CompileProfile::default()

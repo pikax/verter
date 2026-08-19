@@ -6,7 +6,11 @@ use verter_compiler::style_planner::{
     PlainCssInput, StyleRewriteFailureClass, StyleRewriteOutcome,
 };
 use verter_compiler::{
-    compile::{CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput},
+    compile::{types::VueExecutionInputs, VueMacroSemanticInput},
+    compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+        VueCompileRequest,
+    },
     standalone::{StandaloneCompiler, StandaloneSourceBytes},
 };
 use verter_css_syntax::CssDialect;
@@ -52,16 +56,26 @@ fn compile_style(source: &str) -> verter_compiler::compile::VerterCompileResult 
     // rewrite behavior these fixtures exercise.
     let carrier = format!("<template></template>{source}");
     let source = StandaloneSourceBytes::copied_from(&carrier);
-    StandaloneCompiler.compile_source(
-        &source,
-        &CodegenOptions {
-            target: CompileTarget::STYLE,
-            component_id: Some("sc1".to_string()),
-            ..CodegenOptions::default()
-        },
-        &VerterCompileOptions::default(),
-        &VueMacroSemanticInput::Unavailable,
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        Some("sc1".to_string()),
+        false,
+        false,
     )
+    .expect("a lone RuntimeClient product must construct");
+    StandaloneCompiler
+        .compile_source(
+            &source,
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
 }
 
 // @ai-generated - R2-2 follows the official Vue compiler's whole-selector global replacement.
@@ -526,15 +540,26 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
     let source = StandaloneSourceBytes::copied_from(
         "<template/><style>.bad { color: v-bind(tone; }</style>",
     );
-    let result = StandaloneCompiler.compile_source(
-        &source,
-        &CodegenOptions {
-            target: CompileTarget::STYLE,
-            ..CodegenOptions::default()
-        },
-        &VerterCompileOptions::default(),
-        &VueMacroSemanticInput::Unavailable,
-    );
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let result = StandaloneCompiler
+        .compile_source(
+            &source,
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+        )
+        .expect("a plain RuntimeClient compile must not be refused");
 
     assert!(
         result

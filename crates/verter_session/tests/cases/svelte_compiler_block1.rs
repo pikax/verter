@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use verter_compiler::compile::CompileTarget;
+use verter_session::CompileTarget;
 use verter_session::{
     CompileProfile, FileLanguage, HostConfig, HostError, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
@@ -350,6 +350,343 @@ fn svelte_runes_component_emits_a_runtime_main() {
     assert!(
         !main.contains("_sfc_main"),
         "the Svelte Main must not be Vue-shaped:\n{main}"
+    );
+}
+
+/// Session-level Svelte option wiring: setting `svelte_disclose_version` on a
+/// REAL `CompileProfile` and driving it through the actual production
+/// session route (`get_virtual_file` -> `compile_entry` ->
+/// `host_resolve::compile_request_build::build_compile_request` /
+/// `derive_runtime_compile_options`) must reach the compiled output.
+/// Discriminating from the carrier-level tests already covering this
+/// option (`svelte/carrier.rs`, `svelte/runtime` tests), which construct
+/// `RuntimeCompileOptions` by hand and never exercise the session's real
+/// `CompileProfile` -> `CompileRequest` -> `RuntimeCompileOptions`
+/// construct-then-derive path at all.
+#[test]
+fn session_profile_svelte_disclose_version_reaches_the_compiled_main() {
+    let host = host();
+    let src = "<script>\n\tlet count = $state(0);\n</script>\n\n<button onclick={() => count += 1}>{count}</button>\n";
+    upsert(&host, "/src/Counter.svelte", src, FileLanguage::svelte());
+
+    let without = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_disclose_version: Some(false),
+        ..CompileProfile::default()
+    };
+    let main_without = main_code(&host, "/src/Counter.svelte", &without)
+        .expect("a runes Svelte component must produce a runtime Main node");
+    assert!(
+        !main_without.contains("svelte/internal/disclose-version"),
+        "svelte_disclose_version=false must NOT emit the disclose-version import:\n{main_without}"
+    );
+
+    // A DISTINCT profile (source_map flips) so the compile slot is a cache
+    // MISS, not a warm hit reusing `without`'s cached compile.
+    let with = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_disclose_version: Some(true),
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let main_with = main_code(&host, "/src/Counter.svelte", &with)
+        .expect("a runes Svelte component must produce a runtime Main node");
+    assert!(
+        main_with.contains("import 'svelte/internal/disclose-version';"),
+        "svelte_disclose_version=true set on the session CompileProfile must reach \
+         the compiled Main through the real production route:\n{main_with}"
+    );
+}
+
+/// `svelte_runes` set on a real session `CompileProfile` must reach the
+/// compiled output through the real production route, exactly like
+/// `svelte_disclose_version` above — `derive_runtime_compile_options`
+/// must not discard the caller's `svelte_runes` choice.
+///
+/// `$state(...)` is a rune ONLY under runes mode; forced legacy mode
+/// (`runes: false`) parses `$state` as a `$`-prefixed STORE subscription
+/// instead (official semantics) — a genuinely different compile outcome,
+/// not a cosmetic one, so this test discriminates by outcome KIND
+/// (Ok vs Err / differing bytes), not a specific error shape.
+#[test]
+fn session_profile_svelte_runes_reaches_the_compiled_main() {
+    let host = host();
+    let src = "<script>\n\tlet count = $state(0);\n</script>\n\n<button onclick={() => count += 1}>{count}</button>\n";
+    upsert(
+        &host,
+        "/src/RunesForced.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+
+    let inferred = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        ..CompileProfile::default()
+    };
+    let main_inferred = main_code(&host, "/src/RunesForced.svelte", &inferred)
+        .expect("$state auto-detects runes mode and compiles under the default profile");
+
+    // A DISTINCT profile (source_map flips, avoiding a warm-cache reuse of
+    // `inferred`'s compile) forcing svelte_runes=false.
+    let forced_legacy = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_runes: Some(false),
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let main_forced_legacy = main_code(&host, "/src/RunesForced.svelte", &forced_legacy);
+
+    assert_ne!(
+        Some(main_inferred),
+        main_forced_legacy,
+        "svelte_runes=false set on the session CompileProfile must reach the carrier \
+         and observably change compiled behavior relative to the default-inferred \
+         runes compile (or refuse) — identical output means the option never reached \
+         the carrier at all"
+    );
+}
+
+/// Spot-check: `svelte_namespace` reaches the carrier through the real
+/// session route. `"html"` (the only backend this carrier emits) must
+/// compile; `"svg"` must reach the existing `NamespaceUnsupported` typed
+/// refusal — proving the STRING actually arrives at the carrier's
+/// namespace resolution rather than being silently ignored (which would
+/// make "svg" compile as if it were "html").
+#[test]
+fn session_profile_svelte_namespace_reaches_the_carrier() {
+    let host = host();
+    let src = "<div>hi</div>\n";
+    upsert(
+        &host,
+        "/src/NamespaceHtml.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+    upsert(
+        &host,
+        "/src/NamespaceSvg.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+
+    let html_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_namespace: Some("html".to_string()),
+        ..CompileProfile::default()
+    };
+    assert!(
+        main_code(&host, "/src/NamespaceHtml.svelte", &html_profile).is_some(),
+        "svelte_namespace=\"html\" must compile normally through the session route"
+    );
+
+    let svg_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_namespace: Some("svg".to_string()),
+        ..CompileProfile::default()
+    };
+    assert!(
+        main_code(&host, "/src/NamespaceSvg.svelte", &svg_profile).is_none(),
+        "svelte_namespace=\"svg\" set on the session CompileProfile must reach the \
+         carrier's NamespaceUnsupported refusal, not silently compile as html"
+    );
+}
+
+/// Spot-check: `svelte_fragments` reaches the carrier through the real
+/// session route — `"tree"` selects the `$.from_tree` root-hoist strategy
+/// instead of the default `$.from_html`, mirroring the carrier-level
+/// characterization in `svelte_carrier_runtime_compile_options_channel.rs`
+/// but through `CompileProfile` -> `get_virtual_file`, not a hand-built
+/// `RuntimeCompileOptions`.
+#[test]
+fn session_profile_svelte_fragments_reaches_the_carrier() {
+    let host = host();
+    // A two-root template: `fragments: 'tree'` only changes emission when
+    // the root hoist actually clones a template.
+    let src = "<div>a</div><div>b</div>\n";
+    upsert(
+        &host,
+        "/src/FragmentsDefault.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+    upsert(
+        &host,
+        "/src/FragmentsTree.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+
+    let default_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        ..CompileProfile::default()
+    };
+    let default_main = main_code(&host, "/src/FragmentsDefault.svelte", &default_profile)
+        .expect("two-root static template compiles under the default profile");
+    assert!(
+        !default_main.contains("$.from_tree"),
+        "the default profile (svelte_fragments unset) must NOT select from_tree:\n{default_main}"
+    );
+
+    let tree_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_fragments: Some("tree".to_string()),
+        ..CompileProfile::default()
+    };
+    let tree_main = main_code(&host, "/src/FragmentsTree.svelte", &tree_profile)
+        .expect("two-root static template compiles under the tree-fragments profile");
+    assert!(
+        tree_main.contains("$.from_tree"),
+        "svelte_fragments=\"tree\" set on the session CompileProfile must reach the \
+         carrier and select the from_tree root-hoist strategy:\n{tree_main}"
+    );
+}
+
+/// Spot-check: `svelte_preserve_whitespace` reaches the carrier through
+/// the real session route.
+#[test]
+fn session_profile_svelte_preserve_whitespace_reaches_the_carrier() {
+    let host = host();
+    const SOURCE_WITH_WHITESPACE: &str = "<div>a</div>\n    <div>b</div>\n";
+    upsert(
+        &host,
+        "/src/WhitespaceDefault.svelte",
+        SOURCE_WITH_WHITESPACE,
+        FileLanguage::svelte(),
+    );
+    upsert(
+        &host,
+        "/src/WhitespacePreserved.svelte",
+        SOURCE_WITH_WHITESPACE,
+        FileLanguage::svelte(),
+    );
+
+    let default_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        ..CompileProfile::default()
+    };
+    let default_main = main_code(&host, "/src/WhitespaceDefault.svelte", &default_profile)
+        .expect("compiles under the default profile");
+
+    let preserved_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_preserve_whitespace: Some(true),
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let preserved_main = main_code(&host, "/src/WhitespacePreserved.svelte", &preserved_profile)
+        .expect("compiles under the preserve-whitespace profile");
+
+    assert_ne!(
+        default_main, preserved_main,
+        "svelte_preserve_whitespace=true set on the session CompileProfile must \
+         reach the carrier and observably change the emitted static skeleton"
+    );
+}
+
+/// Spot-check: `svelte_preserve_comments` reaches the carrier through the
+/// real session route, mirroring the carrier-level characterization in
+/// `svelte_carrier_runtime_compile_options_channel.rs`.
+#[test]
+fn session_profile_svelte_preserve_comments_reaches_the_carrier() {
+    let host = host();
+    const SOURCE_WITH_COMMENT: &str = "<!-- kept --><div>x</div>\n";
+    upsert(
+        &host,
+        "/src/CommentsDefault.svelte",
+        SOURCE_WITH_COMMENT,
+        FileLanguage::svelte(),
+    );
+    upsert(
+        &host,
+        "/src/CommentsPreserved.svelte",
+        SOURCE_WITH_COMMENT,
+        FileLanguage::svelte(),
+    );
+
+    let default_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        ..CompileProfile::default()
+    };
+    let default_main = main_code(&host, "/src/CommentsDefault.svelte", &default_profile)
+        .expect("compiles under the default profile");
+    assert!(
+        !default_main.contains("kept"),
+        "the default profile must drop the HTML comment:\n{default_main}"
+    );
+
+    let preserved_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_preserve_comments: Some(true),
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let preserved_main = main_code(&host, "/src/CommentsPreserved.svelte", &preserved_profile)
+        .expect("compiles under the preserve-comments profile");
+    assert!(
+        preserved_main.contains("kept"),
+        "svelte_preserve_comments=true set on the session CompileProfile must reach \
+         the carrier and retain the comment text:\n{preserved_main}"
+    );
+}
+
+/// Spot-check: `svelte_dev` reaches the carrier through the real session
+/// route — `true` must reach the existing dev-mode-codegen typed refusal
+/// (dev-mode codegen output liveness is a separate, tracked gap; this
+/// test only proves the OPTION reaches that refusal, not that dev-mode
+/// codegen produces real output).
+#[test]
+fn session_profile_svelte_dev_reaches_the_carrier() {
+    let host = host();
+    let src = "<div>hi</div>\n";
+    upsert(&host, "/src/DevOff.svelte", src, FileLanguage::svelte());
+    upsert(&host, "/src/DevOn.svelte", src, FileLanguage::svelte());
+
+    let off_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        ..CompileProfile::default()
+    };
+    assert!(
+        main_code(&host, "/src/DevOff.svelte", &off_profile).is_some(),
+        "the default profile (svelte_dev unset) must compile normally"
+    );
+
+    let on_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_dev: Some(true),
+        ..CompileProfile::default()
+    };
+    assert!(
+        main_code(&host, "/src/DevOn.svelte", &on_profile).is_none(),
+        "svelte_dev=true set on the session CompileProfile must reach the carrier's \
+         existing dev-mode-codegen typed refusal, not silently compile as production"
+    );
+}
+
+/// Spot-check: `svelte_compatibility` reaches `build_compile_request`
+/// without refusing (the ONLY thing currently testable for this option —
+/// `SvelteCompatibilityRequest` is presence-only with no live sub-field
+/// once `componentApi` is excluded as unsupported, so there is no
+/// codegen-observable effect to assert on yet).
+#[test]
+fn session_profile_svelte_compatibility_constructs_without_refusing() {
+    let host = host();
+    let src = "<div>hi</div>\n";
+    upsert(
+        &host,
+        "/src/Compatibility.svelte",
+        src,
+        FileLanguage::svelte(),
+    );
+
+    let profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_compatibility: Some(true),
+        ..CompileProfile::default()
+    };
+    assert!(
+        main_code(&host, "/src/Compatibility.svelte", &profile).is_some(),
+        "svelte_compatibility=true must construct and compile normally through the \
+         session route (presence-only, no live sub-field to observe yet)"
     );
 }
 

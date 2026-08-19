@@ -3,24 +3,42 @@ use oxc_allocator::Allocator;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_compiler::compile::{
-    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile::{VerterCompileResult, VueMacroSemanticInput};
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+    VueCompileRequest,
 };
 use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
 fn compile(
     source: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    filename: &str,
+    source_map: bool,
     macro_semantics: &VueMacroSemanticInput,
     _allocator: &Allocator,
 ) -> VerterCompileResult {
-    StandaloneCompiler.compile_source(
-        &StandaloneSourceBytes::copied_from(source),
-        options,
-        verter_options,
-        macro_semantics,
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            runtime_source_map: source_map,
+            ..Default::default()
+        })],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        Some(filename.to_string()),
+        None,
+        false,
+        false,
     )
+    .expect("a lone RuntimeClient product must construct");
+    StandaloneCompiler
+        .compile_source(
+            &StandaloneSourceBytes::copied_from(source),
+            &request,
+            &VueExecutionInputs::default(),
+            macro_semantics,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
 }
 
 /// A loaded Vue file ready for benchmarking.
@@ -100,15 +118,10 @@ fn compile_bench(files: &[VueFile], source_map: bool) -> usize {
     let mut error_count = 0;
     for file in files {
         let allocator = Allocator::new();
-        let options = CodegenOptions::new().with_filename(&file.filename);
-        let compiler_options = VerterCompileOptions {
-            source_map,
-            ..Default::default()
-        };
         let result = compile(
             &file.content,
-            &options,
-            &compiler_options,
+            &file.filename,
+            source_map,
             &VueMacroSemanticInput::Unavailable,
             &allocator,
         );
@@ -197,15 +210,10 @@ fn aggregate_no_sourcemap(c: &mut Criterion) {
             let mut errors = 0;
             for file in &owned_files {
                 let allocator = Allocator::new();
-                let options = CodegenOptions::new().with_filename(&file.filename);
-                let compiler_options = VerterCompileOptions {
-                    source_map: false,
-                    ..Default::default()
-                };
                 let result = compile(
                     &file.content,
-                    &options,
-                    &compiler_options,
+                    &file.filename,
+                    false,
                     &VueMacroSemanticInput::Unavailable,
                     &allocator,
                 );
@@ -276,15 +284,10 @@ fn aggregate_with_sourcemap(c: &mut Criterion) {
             let mut errors = 0;
             for file in &all_files {
                 let allocator = Allocator::new();
-                let options = CodegenOptions::new().with_filename(&file.filename);
-                let compiler_options = VerterCompileOptions {
-                    source_map: true,
-                    ..Default::default()
-                };
                 let result = compile(
                     &file.content,
-                    &options,
-                    &compiler_options,
+                    &file.filename,
+                    true,
                     &VueMacroSemanticInput::Unavailable,
                     &allocator,
                 );

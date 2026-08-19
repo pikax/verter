@@ -4,15 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::payloads::tags::CompileTargetTag;
+use crate::payloads::tags::{CompileBackendTag, CompileProductSetTag};
 use crate::record::u64_as_decimal_string;
 
 /// Compile request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub struct CompilePayload {
-    /// Which codegen target ran (VDOM / Vapor / IDE).
-    pub target: CompileTargetTag,
+    /// Which products the request carried.
+    pub products: CompileProductSetTag,
+    /// The resolved (or, pre-parse, inferred) Vue backend.
+    pub backend: CompileBackendTag,
     /// Parse-phase wall-clock (ms) — `None` until producers
     /// instrument it.
     pub parse_ms: Option<f64>,

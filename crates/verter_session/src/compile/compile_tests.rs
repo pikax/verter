@@ -756,25 +756,35 @@ fn assemble_returns_code_and_map_together_when_maps_are_requested() {
 /// @ai-generated - Multi-root template must use Fragment wrapping
 #[test]
 fn compile_multi_root_template_uses_fragment() {
-    use verter_compiler::compile::CodegenOptions;
-    use verter_compiler::compile::VerterCompileOptions;
+    use verter_compiler::compile::types::VueExecutionInputs;
+    use verter_compiler::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+        VueCompileRequest,
+    };
     use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
     let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
-    let opts = CodegenOptions {
-        inline: Some(false),
-        ..CodegenOptions::default()
-    };
-    let vopts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = StandaloneCompiler.compile_source(
-        &StandaloneSourceBytes::copied_from(source),
-        &opts,
-        &vopts,
-        &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
-    );
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            inline: Some(false),
+            ..Default::default()
+        })],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        None,
+        false,
+        true,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let result = StandaloneCompiler
+        .compile_source(
+            &StandaloneSourceBytes::copied_from(source),
+            &request,
+            &VueExecutionInputs::default(),
+            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+        )
+        .expect("a plain RuntimeClient compile must not be refused");
 
     let tpl = result.template.expect("should have template block");
 

@@ -30,7 +30,12 @@ use std::sync::OnceLock;
 
 use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
-use verter_compiler::compile::{CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions};
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile::CompileDiagnosticSeverity;
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+    VueBackendRequest, VueCompileRequest,
+};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
 use verter_vue_conformance::{
@@ -143,38 +148,57 @@ struct VerterCell {
 
 fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> VerterCell {
     let sfc = case_sfc_source(case_id);
-    let options = CodegenOptions {
-        filename: Some(format!("cases/{case_id}.vue")),
-        // Inline cells compile Verter in the inline topology (the render is
-        // merged into `setup()`); non-inline cells keep the default.
-        inline: match topology {
-            Topology::NonInline => None,
-            Topology::Inline => Some(true),
-        },
-        ..Default::default()
-    };
-    let verter_options = VerterCompileOptions {
-        force_js: true,
-        force_vapor: backend == Backend::Vapor,
-        ..Default::default()
-    };
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            // Inline cells compile Verter in the inline topology (the render is
+            // merged into `setup()`); non-inline cells keep the default.
+            inline: match topology {
+                Topology::NonInline => None,
+                Topology::Inline => Some(true),
+            },
+            ..Default::default()
+        })],
+        FrameworkCompileRequest::Vue(VueCompileRequest {
+            // `Backend::Vapor` forces the Vapor backend explicitly; every
+            // other backend leaves detection to the source's own
+            // `<template vapor>` marker (matching the legacy
+            // `force_vapor: backend == Backend::Vapor` — never a forced
+            // VDOM that would refuse an implicit marker).
+            backend: if backend == Backend::Vapor {
+                VueBackendRequest::Vapor
+            } else {
+                VueBackendRequest::Inferred
+            },
+            ..Default::default()
+        }),
+        None,
+        Some(format!("cases/{case_id}.vue")),
+        None,
+        false,
+        true,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let execution_inputs = VueExecutionInputs::default();
     // The authoritative macro semantic bundle for this case, produced by the
     // shared corpus host (the shipped `vue_macro_semantic_input` handoff).
     let canonical_id = corpus_file(&corpus_root(), &format!("cases/{case_id}.vue"))
         .to_string_lossy()
         .replace('\\', "/");
-    let macro_semantics = corpus_host().vue_macro_semantic_input(&canonical_id, options.target);
+    let macro_semantics = corpus_host()
+        .vue_macro_semantic_input(&canonical_id, verter_session::CompileTarget::BUNDLER);
     // A Verter compile panic is itself a divergence signal, not a harness
     // crash — keep the suite able to report every cell. (`AssertUnwindSafe`:
     // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons
     // nothing we reuse — the allocator is dropped right after.)
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        StandaloneCompiler.compile_source_with_parsed(
-            &StandaloneSourceBytes::copied_from(&sfc),
-            &options,
-            &verter_options,
-            &macro_semantics,
-        )
+        StandaloneCompiler
+            .compile_source_with_parsed(
+                &StandaloneSourceBytes::copied_from(&sfc),
+                &request,
+                &execution_inputs,
+                &macro_semantics,
+            )
+            .expect("a plain RuntimeClient compile must not be refused")
     }));
     let compiled = match result {
         Ok(compiled) => compiled,

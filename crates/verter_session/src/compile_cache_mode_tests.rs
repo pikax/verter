@@ -37,8 +37,8 @@
 
 use std::sync::Arc;
 
+use crate::CompileTarget;
 use smallvec::smallvec;
-use verter_compiler::compile::CompileTarget;
 use verter_semantic::analysis::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacroKind, MacroTypeDep,
 };

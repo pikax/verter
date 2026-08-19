@@ -25,10 +25,23 @@
  * `deferred` section); the gate does NOT gate a fabricated bucket.
  */
 
+/** Which compile products the request carried (`CompileProductSetTag` mirror). */
+export interface CompileAuditProductSet {
+  runtime_client: boolean;
+  runtime_server: boolean;
+  ide_companion: boolean;
+  public_api: boolean;
+  declarations: boolean;
+  analysis: boolean;
+}
+
 /** The compile audit payload (`kind_payload` when `kind === "Compile"`). */
 export interface CompileAuditPayload {
   kind: "Compile";
-  target: "Vdom" | "Vapor" | "Ide";
+  /** Which products the request carried — a request may carry more than one. */
+  products: CompileAuditProductSet;
+  /** The resolved (or, pre-parse, inferred) Vue backend. */
+  backend: "Inferred" | "Vdom" | "Vapor";
   parse_ms: number | null;
   transform_ms: number | null;
   codegen_ms: number | null;

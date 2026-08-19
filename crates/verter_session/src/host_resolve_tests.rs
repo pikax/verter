@@ -5,12 +5,12 @@ use verter_workspace::WorkspaceRead;
 
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
+use crate::CompileTarget;
 use crate::{
     BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy,
     CompileProfile, FileLanguage, HostConfig, HostDiagnostic, HostError, HostSeverity,
     PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
-use verter_compiler::compile::CompileTarget;
 use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
 use verter_macro_dto::{
     MacroAnchor, MacroTscBundle, MacroTscOutcome, MacroTscProjection, TscPublicPropsProjection,

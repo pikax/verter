@@ -12,7 +12,7 @@
 //!   - v-once is not yet implemented (directive is ignored)
 //!   - Production inline arrow function for script setup not yet implemented
 
-use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
 use oxc_allocator::Allocator;
 
 // =========================================================================

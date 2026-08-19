@@ -32,7 +32,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use verter_audit::payloads::tags::{CompileTargetTag, LspMethodTag};
+use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag, LspMethodTag};
 use verter_audit::payloads::workspace::WorkspaceOp;
 use verter_audit::record::{
     RequestAuditRecord, RequestKind, RequestKindPayload, RequestTargetIdentity,
@@ -187,7 +187,11 @@ fn known_corpus() -> Vec<RequestAuditRecord> {
         make_record(
             4,
             RequestKind::Compile {
-                target: CompileTargetTag::Ide,
+                products: CompileProductSetTag {
+                    ide_companion: true,
+                    ..Default::default()
+                },
+                backend: CompileBackendTag::Inferred,
             },
             40.0,
             false,

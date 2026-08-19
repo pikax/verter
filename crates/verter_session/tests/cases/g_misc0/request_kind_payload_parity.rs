@@ -7,9 +7,9 @@
 
 use verter_audit::payloads::TypeInfoGraphPayload;
 use verter_audit::{
-    BundlerBatchPayload, BundlerKindTag, CompilePayload, CompileTargetTag, ComponentMetaPayload,
-    LspMethodTag, LspRequestPayload, McpToolPayload, RequestAuditRecord, RequestKind,
-    RequestKindPayload, SemanticAnalysisPayload, TypeResolutionPayload, WorkspaceOp,
+    BundlerBatchPayload, BundlerKindTag, CompileBackendTag, CompilePayload, CompileProductSetTag,
+    ComponentMetaPayload, LspMethodTag, LspRequestPayload, McpToolPayload, RequestAuditRecord,
+    RequestKind, RequestKindPayload, SemanticAnalysisPayload, TypeResolutionPayload, WorkspaceOp,
     WorkspacePayload,
 };
 
@@ -53,7 +53,11 @@ fn every_request_kind_variant_constructs_a_record_with_matching_payload_variant(
         ),
         (
             RequestKind::Compile {
-                target: CompileTargetTag::Ide,
+                products: CompileProductSetTag {
+                    ide_companion: true,
+                    ..Default::default()
+                },
+                backend: CompileBackendTag::Inferred,
             },
             RequestKindPayload::Compile(CompilePayload::default()),
         ),

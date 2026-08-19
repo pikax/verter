@@ -528,6 +528,15 @@ cap: number, } } | { "Cycle": {
 at_edge: EdgeId, } } | "NotFound";
 
 /**
+ * Resolved Vue backend axis — mirror of
+ * `verter_compiler::compile_request::ResolvedVueBackend`, plus the
+ * pre-resolution `Inferred` state for a producer that has not yet parsed
+ * the source (no `<template vapor>` marker decision available). Not
+ * meaningful for a non-Vue framework request.
+ */
+export type CompileBackendTag = "Inferred" | "Vdom" | "Vapor";
+
+/**
  * Caller-requested compile cache mode — mirror of
  * `verter_session::types::CompileCacheMode`.
  *
@@ -544,9 +553,13 @@ export type CompileCacheModeTag = "Stateless" | "Content" | "Session";
  */
 export type CompilePayload = {
 /**
- * Which codegen target ran (VDOM / Vapor / IDE).
+ * Which products the request carried.
  */
-target: CompileTargetTag,
+products: CompileProductSetTag,
+/**
+ * The resolved (or, pre-parse, inferred) Vue backend.
+ */
+backend: CompileBackendTag,
 /**
  * Parse-phase wall-clock (ms) — `None` until producers
  * instrument it.
@@ -598,9 +611,39 @@ num_script_blocks: number,
 code_transform_ops: number, };
 
 /**
- * Compile target — mirror of `verter_compiler::CompileTarget`.
+ * Which compile products a `CompileRequest` carried — mirror of the
+ * product-kind axis on `verter_compiler::compile_request::CompileProduct`.
+ * Each field is independently settable, matching `CompileRequest`'s own
+ * non-exclusive product set (a request may carry more than one product —
+ * e.g. `RuntimeClient` + `IdeCompanion` — and this tag must not collapse
+ * that combination onto a single "primary" value the way the old
+ * `CompileTargetTag` mirror did).
  */
-export type CompileTargetTag = "Vdom" | "Vapor" | "Ide";
+export type CompileProductSetTag = {
+/**
+ * `CompileProduct::RuntimeClient` requested.
+ */
+runtime_client: boolean,
+/**
+ * `CompileProduct::RuntimeServer` requested.
+ */
+runtime_server: boolean,
+/**
+ * `CompileProduct::IdeCompanion` requested.
+ */
+ide_companion: boolean,
+/**
+ * `CompileProduct::PublicApi` requested.
+ */
+public_api: boolean,
+/**
+ * `CompileProduct::Declarations` requested.
+ */
+declarations: boolean,
+/**
+ * `CompileProduct::Analysis` requested.
+ */
+analysis: boolean, };
 
 /**
  * Component-meta request payload.
@@ -1783,9 +1826,13 @@ truncation_counters: TruncationCounters, };
  */
 export type RequestKind = "ComponentMeta" | "TypeResolution" | "SemanticAnalysis" | { "Compile": {
 /**
- * Which codegen target ran.
+ * Which products the request carried.
  */
-target: CompileTargetTag, } } | { "Workspace": {
+products: CompileProductSetTag,
+/**
+ * The resolved (or, pre-parse, inferred) Vue backend.
+ */
+backend: CompileBackendTag, } } | { "Workspace": {
 /**
  * Which workspace operation ran.
  */
