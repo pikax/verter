@@ -115,11 +115,12 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
     let store = CarrierPublicationStore::new(source, grammar);
 
     let outcome = store.publish_or_get(&accepted, request(1, &accepted));
-    // The strict-parse fact (the unterminated `<!--`) does NOT reach the
-    // carrier's own mapped-diagnostic channel — marking the artifact
-    // `has_errors` here would break IDE serving for exactly the mid-typing
-    // states this seam must stay usable for (see `svelte_parse_diagnostics`'s
-    // doc). This test proves the STRUCTURAL claim instead: the artifact
+    // The strict-parse fact (the unterminated `<!--`) DOES reach the
+    // carrier's own mapped-diagnostic channel at full `Error` severity —
+    // but carries `blocks_compile: false`, so it never marks the file's
+    // `compile_entry` gate `has_errors` (see `svelte_parse_diagnostics`'s
+    // doc and `strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file`
+    // below). This test proves the STRUCTURAL publish claim: the artifact
     // still PUBLISHES, real downstream product and all.
     match outcome.clone().into_envelope() {
         Some(_) => {}
@@ -155,19 +156,69 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
         })
         .expect("a recoverable strict-parse defect must still admit the document");
     // The upsert's OWN parse-phase diagnostics (populated from the published
-    // carrier, never from a refused publication) surface the parser's plain
-    // inline diagnostic for the unterminated comment — proving the document
-    // was actually admitted and parsed, not silently swallowed. (The
-    // strict-parse fact itself stays off the carrier's mapped-diagnostic
-    // channel — see `svelte_parse_diagnostics`'s doc.)
+    // carrier, never from a refused publication) surface the strict-parse
+    // fact for the unterminated comment (official `unexpected_eof` — an
+    // EMPTY `<!--` lead, nothing after it before EOF) — proving the document
+    // was actually admitted and parsed, not silently swallowed. It is the
+    // SOLE diagnostic for this defect (no companion informal duplicate —
+    // see `svelte_parse_diagnostics`'s doc), and `has_errors` stays whatever
+    // it already was: `blocks_compile: false` keeps it off the
+    // `compile_entry` gate while still IDE-visible here.
     assert!(
         update
             .diagnostics
             .diagnostics
             .iter()
-            .any(|d| d.code == "unterminated-comment"),
+            .any(|d| d.code == "unexpected_eof"),
         "the admitted document's own diagnostics must carry the parse defect: {:?}",
         update.diagnostics
+    );
+}
+
+/// A single recoverable strict-parse defect (here, a missing attribute
+/// value — official `expected_attribute_value`) must NOT fail-close the
+/// COMPILE stage for the whole file, one layer above carrier publish. The
+/// carrier still publishes the artifact (proven above); the strict fact's
+/// diagnostic now ALSO reaches the carrier's mapped-diagnostic channel with
+/// `Error` severity (matching official Svelte, which records the
+/// diagnostic while still recovering a usable tree) — but that severity
+/// must not make `compile_entry`'s `has_errors` gate refuse to produce IDE
+/// output for a file that is otherwise perfectly compilable. This is the
+/// SAME regression class `strict_syntax_defect_still_publishes_a_recoverable_product_family`
+/// already guards at the carrier-publish layer, one layer further up.
+#[test]
+fn strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    let source = "<script>let count = 1;</script>\n<div class= ></div>\n<p>{count}</p>\n";
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some("/StrictCompile.svelte".into()),
+            input_id: "/StrictCompile.svelte".into(),
+            source: Arc::from(source),
+            file_language: verter_language::FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("a recoverable strict-parse defect must still admit the document");
+
+    let profile = crate::CompileProfile {
+        target: verter_compiler::compile::CompileTarget::IDE,
+        ..crate::CompileProfile::default()
+    };
+    let ensured = host.ensure_ide_compiled("/StrictCompile.svelte", &profile);
+    assert!(
+        ensured.is_ok(),
+        "a single recoverable strict-parse defect ({:?}) must not fail-close IDE \
+         compilation for the whole file, got: {ensured:?}",
+        "expected_attribute_value",
+    );
+    assert!(
+        host.get_ide("/StrictCompile.svelte", &profile).is_some(),
+        "the IDE product must still be published for a file with only a \
+         recoverable strict-parse defect"
     );
 }
 
@@ -921,5 +972,78 @@ fn registered_structure_seals_local_refs_and_public_token_domains() {
         .len(),
         5,
         "token domains must not alias even when local ids are all zero"
+    );
+}
+
+/// Scope-boundary negative control for the fix above: a Svelte
+/// `parse_reject_facts` defect (here, a duplicate attribute — pre-existing,
+/// `blocks_compile: true`, untouched by this fix) still fails `compile_entry`
+/// closed. Only `strict_parse_errors` moved to `blocks_compile: false`; every
+/// other rail keeps blocking exactly as before this fix — proving the fix
+/// did not silently widen into a general "advisory-only Svelte errors" policy.
+#[test]
+fn preexisting_parse_reject_fact_still_fails_close_ide_compile() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    let source =
+        "<script>let count = 1;</script>\n<div class=\"a\" class=\"b\"></div>\n<p>{count}</p>\n";
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let _ = host.upsert(crate::UpsertRequest {
+        canonical_id: Some("/ProbeDup.svelte".into()),
+        input_id: "/ProbeDup.svelte".into(),
+        source: Arc::from(source),
+        file_language: verter_language::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    });
+    let profile = crate::CompileProfile {
+        target: verter_compiler::compile::CompileTarget::IDE,
+        ..crate::CompileProfile::default()
+    };
+    assert!(
+        host.ensure_ide_compiled("/ProbeDup.svelte", &profile)
+            .is_err(),
+        "a duplicate-attribute parse_reject_fact must still fail-close IDE compile \
+         (unchanged pre-existing behavior, out of this fix's scope)"
+    );
+}
+
+/// Scope-boundary negative control: Vue's own parse-time `Error` diagnostics
+/// (`TemplateFunctionalUnsupported`) still fail `compile_entry` closed.
+///
+/// This is NOT discriminating for `blocks_compile` specifically — Vue's
+/// snapshot-building path (`build_vue_snapshot_from_parsed`, `parse.rs`)
+/// never reads `LanguageDiagnostic::blocks_compile` at all; it always calls
+/// `DiagnosticsSnapshot::from_vec` directly, so `has_errors` there is
+/// computed purely from severity regardless of what `blocks_compile` says.
+/// What this test actually proves: this fix's `blocks_compile` plumbing is
+/// wired ONLY into the Svelte snapshot builder
+/// (`build_svelte_snapshot_from_eval_source`) — Vue's diagnostic-gating
+/// path is untouched, by construction, because it doesn't consume the new
+/// field at all.
+#[test]
+fn vue_parse_time_error_diagnostic_still_fails_close_ide_compile() {
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
+    );
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let source =
+        "<template functional><div>{{ x }}</div></template>\n<script setup>const x = 1</script>\n";
+    let _ = host.upsert(crate::UpsertRequest {
+        canonical_id: Some("/ProbeVue.vue".into()),
+        input_id: "/ProbeVue.vue".into(),
+        source: Arc::from(source),
+        file_language: verter_language::FileLanguage::vue(),
+        aliases: Vec::new(),
+    });
+    let profile = crate::CompileProfile {
+        target: verter_compiler::compile::CompileTarget::IDE,
+        ..crate::CompileProfile::default()
+    };
+    assert!(
+        host.ensure_ide_compiled("/ProbeVue.vue", &profile).is_err(),
+        "TemplateFunctionalUnsupported must still fail-close IDE compile \
+         (unchanged pre-existing Vue behavior, out of this fix's scope)"
     );
 }

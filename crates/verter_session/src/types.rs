@@ -2320,7 +2320,7 @@ pub enum HostSeverity {
 }
 
 /// A single diagnostic (error, warning, or info) produced during parsing or compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HostDiagnostic {
     pub severity: HostSeverity,
     /// Machine-readable error code (e.g. `"HOST_MISSING_EXTERNAL_SOURCE"`).
@@ -2337,11 +2337,24 @@ pub struct HostDiagnostic {
 }
 
 /// Collection of diagnostics with a precomputed `has_errors` flag.
+///
+/// `has_errors` does NOT mean "at least one diagnostic in `diagnostics` has
+/// `Error` severity" — a diagnostic can be `Error`-severity (fully
+/// IDE-visible, shown to the user as an error) without contributing to
+/// `has_errors`. `from_vec` computes `has_errors` from severity, matching
+/// that description; `append_advisory` adds diagnostics to the list WITHOUT
+/// updating `has_errors`, for a diagnostic that must display at its own
+/// severity but must not gate `compile_entry`'s "does this file have an
+/// error" check (see `append_advisory`'s doc and
+/// `verter_language::LanguageDiagnostic::blocks_compile`, the field
+/// upstream producers use to route a diagnostic to one path or the other).
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
     /// All diagnostics (errors + warnings + info).
     pub diagnostics: Vec<HostDiagnostic>,
-    /// `true` if at least one diagnostic has [`HostSeverity::Error`].
+    /// `true` if at least one diagnostic was admitted as compile-BLOCKING —
+    /// via `from_vec`/`merge` with `Error` severity. An `Error`-severity
+    /// diagnostic added through `append_advisory` does NOT set this.
     pub has_errors: bool,
 }
 
@@ -2361,6 +2374,46 @@ impl DiagnosticsSnapshot {
         self.diagnostics.append(&mut other.diagnostics);
         sort_host_diagnostics(&mut self.diagnostics);
         self.has_errors = self.has_errors || other.has_errors;
+        self
+    }
+
+    /// Merge in diagnostics FROM A DIFFERENT REPORTING CHANNEL that can
+    /// legitimately carry the exact same underlying defect this snapshot
+    /// already has: `compile_entry` merges the framework-neutral compile
+    /// RESULT's diagnostics (`compiled.diagnostics`, one call site per
+    /// framework) into the snapshot already built from the carrier's own
+    /// parse-time diagnostics (`snapshot.parse_diagnostics`). For Vue those
+    /// two channels are NOT independent — `compile_bundle` reuses the
+    /// already-parsed `ParsedSfc` and its compile result clones that same
+    /// `ParsedSfc`'s diagnostics wholesale (`clone_diagnostics`) into what it
+    /// returns, so a parse-time diagnostic (`MissingSfcEntryBlock`) that is
+    /// ALREADY in this snapshot would otherwise be counted, sorted, and
+    /// reported a second time. An entry from `incoming` byte-identical to one
+    /// already present (same severity, code, message, span, arguments) is
+    /// dropped rather than duplicated; a genuinely distinct diagnostic from
+    /// EITHER side (a real Svelte IDE-projector diagnostic, a real compile
+    /// error co-located with a parse error) still merges normally.
+    pub(crate) fn merge_deduplicated(mut self, mut incoming: DiagnosticsSnapshot) -> Self {
+        incoming
+            .diagnostics
+            .retain(|candidate| !self.diagnostics.contains(candidate));
+        self.diagnostics.append(&mut incoming.diagnostics);
+        sort_host_diagnostics(&mut self.diagnostics);
+        self.has_errors = self.has_errors || incoming.has_errors;
+        self
+    }
+
+    /// Append diagnostics that are IDE-visible at their own (possibly
+    /// `Error`) severity but must NOT flip `has_errors` — a recoverable
+    /// parser-recovery defect the carrier already produced usable output
+    /// around (Svelte's `strict_parse_errors`, threaded here from
+    /// [`verter_language::LanguageDiagnostic::blocks_compile`]). `has_errors`
+    /// stays whatever this snapshot already carried: an advisory entry is
+    /// never the reason `compile_entry`'s gate refuses the file, but it
+    /// never CLEARS a real error already present either.
+    pub(crate) fn append_advisory(mut self, mut advisory: Vec<HostDiagnostic>) -> Self {
+        self.diagnostics.append(&mut advisory);
+        sort_host_diagnostics(&mut self.diagnostics);
         self
     }
 }

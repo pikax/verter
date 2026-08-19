@@ -4007,9 +4007,10 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/compiler-sfc/__tests__/parse.spec.ts:220:3`
-- verdict_hash: `50a80b15a5fd7540`
+- verdict_hash: `f748aec80dab630a`
 - invocations:
-  - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`15064537830244e4a6de1a510ba7ce4f5c45d9a479b396aa2071a537556cd14e`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`15064537830244e4a6de1a510ba7ce4f5c45d9a479b396aa2071a537556cd14e`
+    diagnostics: error:MissingSfcEntryBlock@0-22
     validation: spans_mapped=`true` diagnostics_sorted=`true`
   - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`a3e3a0efdcfbb0a09e588837f71843b9b96985932a2db1e4d52b5327978be8c7`
     diagnostics: error:MissingSfcEntryBlock@0-21
@@ -4017,7 +4018,8 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
   - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`260971808bb99806a904e677a3a0410204e3d95ad63bcfe3e4a8f2a80b310c03`
     diagnostics: error:MissingSfcEntryBlock@0-19
     validation: spans_mapped=`true` diagnostics_sorted=`true`
-  - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`0818ae6083c93291deebf465921a4b0270f52b57fd7a83878d8c4b0ce89ec922`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`0818ae6083c93291deebf465921a4b0270f52b57fd7a83878d8c4b0ce89ec922`
+    diagnostics: error:MissingSfcEntryBlock@0-9
     validation: spans_mapped=`true` diagnostics_sorted=`true`
   - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`caf27febaa65c602258927a9ac50fcccd2e9b79943628ca42bc7552a17236025`
     diagnostics: error:MissingSfcEntryBlock@0-9
@@ -4046,12 +4048,13 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 ### VUE-CE50E1B7E4AECD36827C
 
-- classification: `pass`
+- classification: `unverifiable`
 - source_locator: `packages/compiler-sfc/__tests__/parse.spec.ts:243:3`
-- verdict_hash: `acd361e9208bec73`
+- verdict_hash: `2632ecf248fc4cd1`
+- reason_code: `unrepresentable_syntax_profile`
+- co_owner: `official-runner`
+- note: `ignoreEmpty` has no production equivalent
 - invocations:
-  - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`012f7823ec1a24a06f16f4aa28d0e91f3069571e30f20501870c6b71e4aa5b80`
-    validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### VUE-0B5E1870856AC01C39E5
 
@@ -4158,9 +4161,10 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
 
 - classification: `pass`
 - source_locator: `packages/compiler-sfc/__tests__/parse.spec.ts:385:5`
-- verdict_hash: `19fd90bd4f235711`
+- verdict_hash: `42f5a8b08fb3bf0d`
 - invocations:
-  - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`dcc8defba8e4fce5acdf4875d0656cd1b8f627b85f988df6740129e3a04ed179`
+  - expected=`error` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`true` invalid_reject=`false` source_sha256=`dcc8defba8e4fce5acdf4875d0656cd1b8f627b85f988df6740129e3a04ed179`
+    diagnostics: error:MissingSfcEntryBlock@0-23
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
 ### VUE-CE8980C207A8D9E251A1

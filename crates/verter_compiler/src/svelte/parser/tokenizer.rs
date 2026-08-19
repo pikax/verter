@@ -73,6 +73,36 @@ fn valid_binding_pattern(source: &str, grammar: ScriptBodyGrammar) -> bool {
     !parsed.panicked && parsed.errors.is_empty()
 }
 
+/// Whether an unclosed top-level `<style>` block's raw CSS content ends at a
+/// "boundary" position rather than mid-construct.
+///
+/// Official's CSS reader stops gracefully — deferring to the outer required
+/// `parser.eat('</style', true)` (`expected_token`) — whenever its own
+/// between-construct loop guards see EOF: `read_body`'s top-level
+/// `index >= length` check (between complete rules) and `read_block`'s
+/// `index < length` check (between complete declarations inside a rule,
+/// right after `{`). Both of those checks land exactly when the trimmed
+/// content is empty or ends in `}` (a rule/block just closed), `{` (a block
+/// just opened, nothing read yet), or `;` (a declaration just closed). Any
+/// OTHER trailing shape means official was mid-identifier or mid-value —
+/// content those loop guards never reach — and its own required reads
+/// (`read_value`, `read_identifier`) fail with a CSS-domain code instead
+/// (`css_expected_identifier` / `unexpected_eof`), which Verter already
+/// mirrors as its fallback classification for that case.
+///
+/// A bounded LEXICAL scan of the trimmed tail — mirroring the shape of
+/// official's own boundary checks — not CSS semantic parsing; it does not
+/// track brace depth or distinguish declarations from selectors, so it does
+/// not (and is not claimed to) reproduce every official CSS-reader
+/// diagnostic code, only the empty/`}`/`{`/`;`-boundary vs mid-construct
+/// split this recovery point needs.
+fn unclosed_style_content_ends_at_boundary(content: &str) -> bool {
+    matches!(
+        content.trim_end().chars().next_back(),
+        None | Some('}' | '{' | ';')
+    )
+}
+
 /// The well-formedness classification of a close tag's boundary (the bytes after `</`),
 /// produced by [`SvelteParser::classify_close_boundary`]. The malformed variants each map
 /// to a distinct official parse-phase code so every close-tag boundary fails closed with
@@ -1051,11 +1081,13 @@ impl<'a> SvelteParser<'a> {
                 })
             }
             None => {
-                self.diag(
-                    "unterminated-script",
-                    "unterminated <script> block",
-                    tag_open,
-                );
+                // The strict fact below (`record_strict_parse_error`) is this
+                // recovery point's SOLE diagnostic — it already carries the
+                // exact official code and the carrier's mapped-diagnostic
+                // channel maps it (`svelte_parse_diagnostics`); a companion
+                // informal `self.diag(...)` here would double-report the
+                // identical span as two diagnostics.
+                //
                 // A raw script that simply reaches EOF is `unexpected_eof`; a malformed
                 // close token was present but not recognisable as a close tag, so it is
                 // `element_unclosed`.
@@ -1123,12 +1155,26 @@ impl<'a> SvelteParser<'a> {
                 })
             }
             None => {
-                self.diag("unterminated-style", "unterminated <style> block", tag_open);
-                // No recognised `</style>` close before EOF. Unlike `<script>` (whose
-                // raw-block close-recognition failure is `element_unclosed`), official's
-                // CSS reader reaches EOF inside the unterminated rule and errors
-                // `css_expected_identifier`.
-                self.record_css_expected_identifier(tag_open);
+                // The strict fact below is this recovery point's SOLE
+                // diagnostic (see the parallel note in `parse_script_block`)
+                // — no companion informal diag, or the span would double-
+                // report on the carrier's mapped-diagnostic channel.
+                //
+                // No recognised `</style>` close before EOF. Official's CSS reader
+                // (`read_body`'s own `index >= length` loop guard, checked BETWEEN
+                // complete top-level constructs) stops gracefully at a "boundary"
+                // position and defers to the outer required `parser.eat('</style',
+                // true)`, which is `expected_token` — e.g. `<style>div{color:red}`
+                // (a fully closed, complete rule) is `expected_token`, verified
+                // against the pinned oracle, NOT a CSS-domain error. Only content
+                // that ends MID-construct (an unterminated identifier/value/string)
+                // reaches official's CSS-domain `css_expected_identifier`.
+                let kind = if unclosed_style_content_ends_at_boundary(&self.text[content_start..]) {
+                    SvelteStrictParseErrorKind::ExpectedToken
+                } else {
+                    SvelteStrictParseErrorKind::CssExpectedIdentifier
+                };
+                self.record_strict_parse_error(kind, tag_open);
                 self.pos = self.len();
                 Some(SvelteStyle {
                     tag_open,
@@ -1247,11 +1293,10 @@ impl<'a> SvelteParser<'a> {
             }
             self.pos += 1;
         }
-        self.diag(
-            "unterminated-comment",
-            "unterminated comment",
-            Span::new(start as u32, self.len() as u32),
-        );
+        // The strict fact below is this recovery point's SOLE diagnostic —
+        // no companion informal diag (see the parallel note in
+        // `parse_script_block`).
+        //
         // Reached EOF without the closing `-->`: an EMPTY `<!--` is `unexpected_eof`; a
         // started-but-unterminated comment is `expected_token`. Recorded UNCONDITIONALLY
         // (the kind is selected first), so the strict fact DOMINATES the EOF recovery exit.
@@ -1361,12 +1406,10 @@ impl<'a> SvelteParser<'a> {
             // reaches end of input mid-construct (`<div`, `<div id`) ⇒ official
             // `unexpected_eof` — UNLESS the attribute parse already recorded an earlier,
             // equally-specific EOF fact (an `id=` value at EOF, an unterminated quoted
-            // value), which is the authoritative first-in-document-order one.
-            self.diag(
-                "unterminated-tag",
-                "unterminated element open tag",
-                Span::new(start as u32, self.len() as u32),
-            );
+            // value), which is the authoritative first-in-document-order one. No
+            // companion informal diag here (see the parallel note in
+            // `parse_script_block`): the strict fact — whichever one wins — is this
+            // recovery point's SOLE diagnostic.
             if self.strict_parse_errors.len() == facts_before_open {
                 self.record_unexpected_eof(Span::new(start as u32, self.len() as u32));
             }
@@ -1769,11 +1812,10 @@ impl<'a> SvelteParser<'a> {
         match self.parse_open_tag_attributes(from, true) {
             Some(result) => Some(result),
             None => {
-                self.diag(
-                    "unterminated-tag",
-                    "unterminated special-block open tag",
-                    Span::new(open_start as u32, self.len() as u32),
-                );
+                // No companion informal diag (see the parallel note in
+                // `parse_script_block`): the strict fact — whichever one wins — is
+                // this recovery point's SOLE diagnostic.
+                //
                 // Only mint the truncated-open-tag `unexpected_eof` when the attribute parse
                 // did not already record an earlier, more specific fact.
                 if self.strict_parse_errors.len() == facts_before {

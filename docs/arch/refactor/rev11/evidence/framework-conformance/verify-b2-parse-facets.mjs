@@ -358,6 +358,20 @@ function customElementSet(node, bindings) {
 
 function vueParseOptions(call, bindings) {
   const root = call.arguments[1];
+  // `ignoreEmpty` (any value) selects a non-default `SFCParseOptions` toggle
+  // Verter's carrier compiler has no equivalent for (Verter always applies
+  // the `ignoreEmpty: true` isEmpty()-pruning rule — see `parse.ts` lines
+  // 159-169/421-429 and the Rust-side `script_node_counts_as_entry_block`).
+  // A call that sets it is testing a capability outside the production
+  // option surface, exactly like an unrepresentable delimiter/custom-element
+  // profile below — flag it the same way rather than silently verifying
+  // against default-option semantics.
+  if (objectPropertyValue(root, "ignoreEmpty", bindings) !== null) {
+    return {
+      status: "unverifiable",
+      reason: "`ignoreEmpty` has no production equivalent",
+    };
+  }
   const template = objectPropertyValue(root, "templateParseOptions", bindings) ?? root;
   const delimitersNode =
     objectPropertyValue(template, "delimiters", bindings) ??
@@ -617,6 +631,78 @@ function containsVueFrontendInvocation(node, bindings) {
     }
   });
   return found;
+}
+
+// Whether an SFC `parse()` invocation source has at least one real entry
+// block under official Vue's default `ignoreEmpty: true` rule (`parse.ts`
+// lines 155-238): a `<template>` tag ALWAYS counts (even empty/self-closing
+// — the `node.tag !== 'template'` guard exempts it from the isEmpty prune);
+// a `<script>`/`<script setup>` tag counts only when it carries a `src`
+// attribute OR has at least one non-whitespace content byte (`isEmpty()`,
+// lines 421-429). A source with no counted entry block is exactly the
+// input official's `parse.ts:232-238` rejects with `MissingSfcEntryBlock`
+// — used to derive the expected outcome for a `parse()` call the enclosing
+// test does not itself assert an error for (e.g. "should ignore other
+// nodes with no content", `parse.spec.ts:220`, which checks only
+// `descriptor.script`/`.styles`/`.customBlocks`, never `.errors`, for six
+// separate block-less-or-empty-only sources — the official parser still
+// pushes the diagnostic for each, silently).
+//
+// The `src` check is ATTRIBUTE PRESENCE, not value presence — official's
+// `hasAttr` (`parse.ts:413-415`) is `node.props.some(p => p.name === name)`,
+// true for a valueless `src` (`<script src/>` / `<script src></script>`)
+// exactly as for a valued one. It is also CASE-SENSITIVE: Vue's own
+// attribute-name parsing preserves authored casing verbatim (`onattribname`'s
+// `name: getSlice(start, end)` in `compiler-core/src/parser.ts` — no
+// `toLowerCase()`), so `SRC`/`Src` is a DIFFERENT attribute name to official,
+// not a case-insensitive spelling of `src`.
+//
+// Parses actual attribute NAME tokens out of the raw tag-attrs string rather
+// than regex-scanning the whole string — a bare substring/regex match over
+// `attrs` can false-positive inside a QUOTED VALUE (`data-foo=" x src "`
+// contains the substring ` src ` with word-boundary-shaped whitespace on
+// both sides, which a naive `\bsrc\b`-style regex would wrongly match as the
+// `src` attribute name).
+function scriptTagHasSrcAttribute(attrs) {
+  let i = 0;
+  const n = attrs.length;
+  while (i < n) {
+    while (i < n && (/\s/.test(attrs[i]) || attrs[i] === "/")) i++;
+    if (i >= n) break;
+    const nameStart = i;
+    while (i < n && !/[\s=/]/.test(attrs[i])) i++;
+    if (attrs.slice(nameStart, i) === "src") return true;
+    while (i < n && /\s/.test(attrs[i])) i++;
+    if (attrs[i] === "=") {
+      i++;
+      while (i < n && /\s/.test(attrs[i])) i++;
+      const quote = attrs[i];
+      if (quote === '"' || quote === "'") {
+        const closeIndex = attrs.indexOf(quote, i + 1);
+        i = closeIndex === -1 ? n : closeIndex + 1;
+      } else {
+        while (i < n && !/\s/.test(attrs[i])) i++;
+      }
+    }
+  }
+  return false;
+}
+function vueSourceHasEntryBlock(source) {
+  if (/<template[\s/>]/i.test(source)) return true;
+  const scriptTagRe = /<script\b([^>]*)>/gi;
+  let match;
+  while ((match = scriptTagRe.exec(source))) {
+    const attrs = match[1] ?? "";
+    if (scriptTagHasSrcAttribute(attrs)) return true;
+    if (/\/\s*$/.test(attrs)) continue; // self-closing, no src: empty
+    const closeIndex = source.indexOf("</script>", scriptTagRe.lastIndex);
+    const content =
+      closeIndex === -1
+        ? source.slice(scriptTagRe.lastIndex)
+        : source.slice(scriptTagRe.lastIndex, closeIndex);
+    if (content.trim() !== "") return true;
+  }
+  return false;
 }
 
 function vueExpectedOutcome(verification) {
@@ -903,11 +989,7 @@ async function verifyParseFacet(vueRows, svelteRows, probe) {
     invocations.forEach((invocation, index) => {
       if (invocation.status === "unverifiable") return;
       let invocationExpected = expected;
-      if (
-        invocation.name === "parse" &&
-        !/<(?:template|script)(?:\s|\/?>)/i.test(invocation.source) &&
-        !invocation.source.trimStart().startsWith("<template>\n")
-      ) {
+      if (invocation.name === "parse" && !vueSourceHasEntryBlock(invocation.source)) {
         invocationExpected = {
           outcome: "error",
           authority: "SFC parse without a template or script entry",

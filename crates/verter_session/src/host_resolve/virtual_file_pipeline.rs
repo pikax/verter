@@ -3289,10 +3289,16 @@ impl VerterHost {
 
         // Lift the bundle's framework-neutral diagnostics into the host
         // `DiagnosticsSnapshot` (a Svelte projector diagnostic reaches the
-        // snapshot through THIS path).
+        // snapshot through THIS path). DEDUPLICATED against `diagnostics`
+        // (the carrier's own parse-time channel, already in `compile_diags`):
+        // Vue's `compile_bundle` reuses the already-parsed artifact and its
+        // compile result clones that SAME `ParsedSfc`'s diagnostics wholesale
+        // (`clone_diagnostics`), so a parse-time diagnostic
+        // (`MissingSfcEntryBlock`) is otherwise double-counted — see
+        // `DiagnosticsSnapshot::merge_deduplicated`'s doc.
         let mut compile_diags = diagnostics.clone();
         if !compiled.diagnostics.is_empty() {
-            compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(
+            compile_diags = compile_diags.merge_deduplicated(DiagnosticsSnapshot::from_vec(
                 compiled
                     .diagnostics
                     .iter()
@@ -3777,7 +3783,9 @@ impl VerterHost {
 
         // Lift the bundle's framework-neutral diagnostics into the host
         // snapshot. Semantic producer failures fail closed on every compile
-        // lane; there is no render-only degradation policy.
+        // lane; there is no render-only degradation policy. DEDUPLICATED
+        // against `diagnostics` for the same reason as `compile_entry` — see
+        // `DiagnosticsSnapshot::merge_deduplicated`'s doc.
         let mut compile_diags = diagnostics.clone();
         let mut compiled_diags: Vec<HostDiagnostic> = Vec::new();
         for d in &compiled.diagnostics {
@@ -3795,7 +3803,8 @@ impl VerterHost {
             });
         }
         if !compiled_diags.is_empty() {
-            compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(compiled_diags));
+            compile_diags =
+                compile_diags.merge_deduplicated(DiagnosticsSnapshot::from_vec(compiled_diags));
         }
 
         // Site 6 (`compile_diags.has_errors`: syntax, CodeTransform failures,

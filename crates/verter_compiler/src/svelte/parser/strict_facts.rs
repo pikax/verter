@@ -68,12 +68,6 @@ impl SvelteParser<'_> {
         self.record_strict_parse_error(SvelteStrictParseErrorKind::UnexpectedEof, span);
     }
 
-    /// Strict fact: a top-level `<style>` left unterminated (the CSS reader reaches EOF
-    /// inside a rule) — official `css_expected_identifier`.
-    pub(super) fn record_css_expected_identifier(&mut self, span: Span) {
-        self.record_strict_parse_error(SvelteStrictParseErrorKind::CssExpectedIdentifier, span);
-    }
-
     pub(super) fn record_block_invalid_continuation(&mut self, span: Span) {
         self.record_strict_parse_error(
             SvelteStrictParseErrorKind::BlockInvalidContinuationPlacement,

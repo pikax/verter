@@ -36,18 +36,27 @@ fn carrier_parse_publishes_a_real_strict_svelte_defect() {
     // An unterminated comment is a strict Svelte syntax defect official
     // rejects for the CLIENT runtime — but the carrier PARSE/PUBLISH seam
     // stays recoverable (the tokenizer is intentionally infallible, which is
-    // correct for the IDE projection). Strict facts stay off the carrier's
-    // own mapped-diagnostic channel (see `svelte_parse_diagnostics`'s doc:
-    // surfacing them there would mark the artifact `has_errors` and break
-    // IDE serving for exactly the mid-typing states this seam must stay
-    // usable for) — the official-reject-parity diagnostic for this defect
-    // surfaces later, at compile time.
+    // correct for the IDE projection): `parse()` still publishes. The strict
+    // fact ALSO still surfaces on the carrier's own mapped-diagnostic
+    // channel (see `svelte_parse_diagnostics`'s doc), matching official
+    // Svelte's own parser, which likewise recovers a usable tree after most
+    // syntax errors while still recording the diagnostic — the
+    // official-reject-PARITY verdict (does this source get a `Main` at all)
+    // is a separate, later concern, decided at compile time.
     let compiler = SvelteCarrierCompiler;
     let artifact = compiler
         .parse("<!--", &ParseOptions::default())
         .expect("an unterminated comment is a recoverable strict-parse defect");
     assert_ne!(artifact.parse_key.digest().as_bytes(), &[0; 32]);
     assert_ne!(artifact.syntax_profile.digest().as_bytes(), &[0; 32]);
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "unexpected_eof"),
+        "the strict-parse fact must still surface as a mapped diagnostic, got: {:?}",
+        artifact.diagnostics
+    );
 }
 
 #[test]
@@ -87,12 +96,11 @@ fn recoverable_deferred_parse_checks_publish_exact_diagnostics() {
 fn a_later_strict_defect_does_not_stop_an_earlier_recoverable_defect_from_publishing() {
     // A trailing strict defect (the unterminated `<!--`) does not mask, or
     // get masked by, the earlier recoverable `attribute_duplicate` defect at
-    // the carrier PARSE/PUBLISH seam: the carrier publishes once, with the
-    // earlier parse-reject fact still mapped. The reject-parity ordering
-    // (which single defect wins as THE official reject) is
-    // `official_reject_gate`'s concern at compile time — strict facts
-    // themselves never reach this mapped-diagnostic channel at all (see
-    // `svelte_parse_diagnostics`'s doc).
+    // the carrier PARSE/PUBLISH seam: the carrier publishes once, with BOTH
+    // defects mapped (the strict fact surfaces on this channel too — see
+    // `svelte_parse_diagnostics`'s doc). The reject-parity ordering (which
+    // single defect wins as THE official reject) is `official_reject_gate`'s
+    // separate concern at compile time.
     let source = "<div class=\"a\" class=\"b\"><!--";
     let compiler = SvelteCarrierCompiler;
     let artifact = compiler
@@ -102,6 +110,14 @@ fn a_later_strict_defect_does_not_stop_an_earlier_recoverable_defect_from_publis
         .diagnostics
         .iter()
         .any(|d| d.code == "attribute_duplicate"));
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "unexpected_eof"),
+        "the trailing strict-parse defect must also surface, got: {:?}",
+        artifact.diagnostics
+    );
 }
 
 #[test]
