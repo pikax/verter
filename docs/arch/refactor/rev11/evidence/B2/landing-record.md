@@ -160,3 +160,91 @@ compile-level `collect_template_compile_diagnostics` copy exactly as B4's
 predecessor commit had placed it. No type-correctness work opened. Every DEFER
 from round 1 was either closed for real or rejected as illegitimate by round 3 —
 no open DEFER remains on this block.
+
+## Post-landing conformance re-review (rounds 4-7)
+
+The initial landing above (candidate `32d3a2f07`) was recorded as landed-but-not-accepted:
+its conformance mandate had been run by an off-roster tool substituted on a false
+premise that the rostered seat was unavailable. A direct probe confirmed the
+rostered seat was healthy, so the conformance mandate was re-run on it against the
+landed tree, and the re-run surfaced real, previously-undetected defects. Closing
+them took four further fix rounds, each independently re-reviewed (rostered
+conformance seat plus an independent empirical re-verification agent that ran real
+oracle-backed regenerations and test suites — no round's own self-report was taken
+on trust):
+
+- **Round 4** — `MissingSfcEntryBlock` (Vue) did not cover empty/self-closing
+  `<script>`/`<script setup>` blocks with no `src`, which official `compiler-sfc`
+  rejects; Svelte's strict-parse diagnostics (a missing attribute value, an
+  unclosed tag, and similar recoverable syntax errors) were being silently
+  dropped from the carrier's diagnostic channel instead of surfaced. Fixed both;
+  regenerated both frameworks' parse-facet evidence for real against the pinned
+  oracles (previously-false Svelte evidence — 27 rows recorded `pass` with
+  diagnostics the tree could not actually produce — became genuinely accurate).
+- **Round 5** — the round 4 fix itself had three defects: the Vue `src`-attribute
+  check tested value-presence instead of attribute-presence; a Svelte tokenizer
+  recovery point double-emitted one defect under two diagnostic channels; and,
+  most seriously, mapping Svelte's strict-parse facts onto the diagnostic channel
+  at `Error` severity reintroduced — one layer up, at `compile_entry` rather than
+  at carrier publish — the exact fail-closed-over-a-recoverable-defect regression
+  an earlier fix (mid-cycle in the original landing) had already resolved once.
+  Added a `blocks_compile` distinction on the framework-neutral diagnostic type so
+  a diagnostic can be fully IDE-visible without gating whether compilation
+  produces output; proved the fix with a test that fails against round 4's code
+  and passes against round 5's.
+- **Round 6** — the `src` check was case-insensitive where official Vue's
+  attribute-presence check is case-sensitive, and the JS verification harness had
+  a matching bug plus a quoted-attribute-value false-positive; a round-5 test
+  asserted the wrong diagnostic code for one unclosed-`<style>` shape, which
+  investigation traced to a genuine (pre-existing) production misclassification,
+  fixed narrowly (boundary-shape vs mid-construct, not full CSS-reader parity).
+- **Round 7** — the FULL canonical gate (run for the first time on this fix
+  chain, not just targeted crate suites) found a pre-existing integration test
+  asserting `<script setup></script>` compiles successfully; verified against the
+  pinned oracle that official Vue's `ignoreEmpty` default drops an empty
+  script-setup exactly like an empty script, so the fix chain's behavior was
+  correct and the pre-existing test encoded an unchecked assumption — corrected
+  it. Also found and fixed a genuine duplicate-diagnostic bug on the Vue side
+  (parse-time diagnostics double-counted when a compiled bundle's diagnostics
+  merge on top of an already-parsed carrier's snapshot).
+
+Two items were investigated and explicitly dispositioned as NOT requiring a fix
+in this block:
+
+- A trybuild fixture (`deferred_callable_is_sealed_to_its_two_consumers`) whose
+  `.stderr` baseline references a `compose` associated function that no longer
+  exists in `crates/verter_session/src/semantic_query/deferred_callable.rs` —
+  confirmed, by running it standalone against both the landed tip and the base
+  commit `41e039c2f` in separate worktrees, to fail identically at both (zero diff
+  across the block's full commit range on the fixture, its baseline, or the
+  source file it targets). Pre-existing, unrelated to this block; worth a small
+  dedicated follow-up to re-bless the baseline.
+- The `<style>` boundary-shape classifier (round 6) does not reproduce official
+  Svelte's exact diagnostic code for every mid-construct unclosed-style shape
+  (only the empty/`}`/`{`/`;`-boundary split its one recovery point needs,
+  disclosed in its own doc comment) — confirmed the specific gap is byte-identical
+  before and after round 6 (pre-existing, not newly introduced or falsely claimed
+  fixed) and out of scope: achieving full CSS-reader diagnostic-code fidelity is
+  CSS-classification work, which is suspended program-wide pending a later program
+  stage.
+
+Final gate (round 7 tip `efa167801`): `node scripts/gate.mjs --test-threads 8
+--memory-limit 18GiB` — **VERDICT: PASS**, all three surfaces green
+(`24470/24470`, 3/3 trybuild suites, `8649/8649`) on a second run (the first run
+on this tip had found the round-7-fixed regression and one pre-existing flake/
+one pre-existing load-dependent timeout, neither of which reproduced on the clean
+re-run). `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D
+warnings`, and `cargo check --workspace --release` all clean. `pnpm test`:
+`packages/typeinfo` (3 tests, matching the original landing's already-disclosed
+pre-existing failures) and `packages/framework-conformance-harness` (package-
+install/closure-integrity tests, unrelated to Vue/Svelte parsing) failed; both
+packages have zero diff across this block's entire commit range against base
+`41e039c2f`, and the widespread `Unsupported engine: wanted >=22, current
+v20.20.2` warnings across the whole install indicate a local Node-version
+mismatch, not a code regression. Every other package passed.
+
+Conformance mandate, re-run on the rostered seat against the final tip: **PASS**.
+Architecture and adversarial mandates were not re-run — none of rounds 4-7
+touched the item-2 structural-sealing redesign or introduced new architectural
+surface those mandates evaluate; their original round-3 `PASS` verdicts stand.
