@@ -14,10 +14,15 @@
 //             2 = the built plugin is missing, stale, or unloadable.
 
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  allocateRecompileFixture,
+  collectErroredCaseLabels,
+  probeExitCode,
+} from "./probe-bundler-route-isolation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.join(here, "..");
@@ -585,8 +590,7 @@ results.nativeEntry = nativeRequire.resolve("@verter/native").split(path.sep).jo
     let fixtureRoot = null;
     let plugin;
     try {
-      await mkdir(FIXTURE_PARENT, { recursive: true });
-      fixtureRoot = await mkdtemp(path.join(FIXTURE_PARENT, "recompile-"));
+      fixtureRoot = await allocateRecompileFixture(FIXTURE_PARENT);
       const parentId = path.join(fixtureRoot, "Parent.vue").split(path.sep).join("/");
       const childId = path.join(fixtureRoot, "Child.vue").split(path.sep).join("/");
       await writeFile(path.join(fixtureRoot, "Child.vue"), RECOMPILE_CHILD_VUE);
@@ -838,13 +842,7 @@ for (const exportName of results.exports) {
 // the same hooks, and its driver has its own `outcome: "error"` arm. Scanning
 // only `cases` would leave that whole family able to error while the process
 // still exited 0 — the exact shape this field exists to make impossible.
-results.erroredCases = [
-  ...Object.entries(results.cases),
-  ...Object.entries(results.exportCases).map(([label, value]) => [`exportCase.${label}`, value]),
-]
-  .filter(([, value]) => value?.outcome === "error")
-  .map(([label]) => label)
-  .sort();
+results.erroredCases = collectErroredCaseLabels(results.cases, results.exportCases);
 
 process.stdout.write(JSON.stringify(results));
-if (results.erroredCases.length > 0) process.exitCode = 1;
+process.exitCode = probeExitCode(results.erroredCases);

@@ -24,9 +24,9 @@
 // small purpose-written reader restricted to the shapes the program files
 // actually use; anything it cannot parse is a LOUD failure, never a silent skip.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
 
 // ---------------------------------------------------------------------------
@@ -157,6 +157,40 @@ function parseToml(text, label) {
     fail(lineNo, `unrecognized line: ${JSON.stringify(line)}`);
   }
   return root;
+}
+
+function resolveExistingDir(raw, statePath) {
+  const candidates = [];
+  if (isAbsolute(raw)) {
+    candidates.push(raw);
+  } else {
+    candidates.push(resolvePath(raw));
+    candidates.push(resolvePath(dirname(statePath), raw));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // missing or not a directory
+    }
+  }
+  return null;
+}
+
+function resolveEvidenceArtifact(root, id) {
+  const candidates = [
+    join(root, id, "landing-record.md"),
+    join(root, id, `${id}-exact-candidate-record.md`),
+  ];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // skip
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +881,43 @@ function main() {
       }
     };
     scanShapes(state, "");
+
+    // Evidence-digest content binding. Shape-checking a digest proves only
+    // that a binding was recorded, not that it binds the right bytes — a
+    // well-formed but WRONG evidence_digest previously printed OK. When the
+    // ledger claims an evidence_root, that root must be a real directory and
+    // every resolved evidence_digest must match an artifact under it.
+    const evidenceRootRaw =
+      state.orchestration && typeof state.orchestration === "object"
+        ? state.orchestration.evidence_root
+        : undefined;
+    if (typeof evidenceRootRaw === "string" && evidenceRootRaw !== "") {
+      const resolvedRoot = resolveExistingDir(evidenceRootRaw, opts.state);
+      if (resolvedRoot === null) {
+        v(
+          `live state orchestration.evidence_root ${JSON.stringify(evidenceRootRaw)} is not a resolvable directory — evidence_digest bindings cannot be verified`,
+        );
+      } else {
+        for (const [id, b] of stateById) {
+          if (!(typeof b.evidence_digest === "string" && DIGEST_RE.test(b.evidence_digest))) {
+            continue;
+          }
+          const artifact = resolveEvidenceArtifact(resolvedRoot, id);
+          if (artifact === null) {
+            v(
+              `state block ${id} has evidence_digest ${b.evidence_digest} but no evidence artifact under ${resolvedRoot}`,
+            );
+            continue;
+          }
+          const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+          if (actual !== b.evidence_digest) {
+            v(
+              `state block ${id} evidence_digest ${b.evidence_digest} does not match the SHA-256 of ${artifact} (${actual})`,
+            );
+          }
+        }
+      }
+    }
   }
 
   // -- Non-vacuous work -----------------------------------------------------

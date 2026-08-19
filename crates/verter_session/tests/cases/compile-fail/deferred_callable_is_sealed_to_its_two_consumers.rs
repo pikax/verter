@@ -5,7 +5,8 @@
 //! outside the crate:
 //!
 //! 1. The carrier's composed parts are private fields — no field read.
-//! 2. `DeferredCallable::compose` is `pub(crate)` — no forged carrier.
+//! 2. There is no public constructor (`compose` is absent, not merely
+//!    private) — a forged carrier is unrepresentable.
 //! 3. `DeferredCallableConsumer` has a PRIVATE sealed supertrait, so no new
 //!    consumer kind can be added; the consumer set is closed at its
 //!    defining module.
@@ -38,7 +39,7 @@ fn read_parts(callable: &DeferredCallable) {
 }
 
 fn forge() {
-    // (2) The composer is `pub(crate)`.
+    // (2) No constructor is nameable from outside the crate.
     let _ = DeferredCallable::compose;
 }
 
