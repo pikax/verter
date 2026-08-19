@@ -768,7 +768,7 @@ fn a_runtime_refusal_is_scoped_to_its_identity_and_leaves_the_other_identities_p
         // The IDE-only identity: same knobs, but asking for the IDE product
         // alone — so no runtime surface is requested and none can be refused.
         let ide_profile = CompileProfile {
-            target: verter_compiler::compile::CompileTarget::IDE,
+            target: crate::CompileTarget::IDE,
             ..profile.clone()
         };
         let ensured = host
@@ -998,7 +998,8 @@ fn a_vue_carrier_keeps_publishing_its_non_runtime_products() {
 /// would produce the same map both ways and fail here.
 #[test]
 fn the_options_taking_audited_compile_entry_honours_its_explicit_source_map_axis() {
-    use verter_compiler::compile::{CompileTarget, VerterCompileOptions};
+    use crate::host_compile_audit::CompileAuditOverrides;
+    use crate::CompileTarget;
 
     for (canonical, source) in [
         ("/probe/AuditOpts.vue", VUE_PROPS_EMIT),
@@ -1010,9 +1011,9 @@ fn the_options_taking_audited_compile_entry_honours_its_explicit_source_map_axis
             let audited = host.compile_with_audit_options(
                 canonical,
                 CompileTarget::BUNDLER,
-                VerterCompileOptions {
+                CompileAuditOverrides {
                     source_map,
-                    ..VerterCompileOptions::default()
+                    ..CompileAuditOverrides::default()
                 },
             );
             assert_eq!(
@@ -1055,7 +1056,8 @@ fn the_options_taking_audited_compile_entry_honours_its_explicit_source_map_axis
 /// map included.
 #[test]
 fn the_audited_wrapper_equals_the_options_entry_at_the_axis_the_wrapper_fixes() {
-    use verter_compiler::compile::{CompileTarget, VerterCompileOptions};
+    use crate::host_compile_audit::CompileAuditOverrides;
+    use crate::CompileTarget;
 
     for (canonical, source, language) in [
         (
@@ -1074,9 +1076,9 @@ fn the_audited_wrapper_equals_the_options_entry_at_the_axis_the_wrapper_fixes() 
         let explicit = host.compile_with_audit_options(
             canonical,
             CompileTarget::BUNDLER,
-            VerterCompileOptions {
+            CompileAuditOverrides {
                 source_map: true,
-                ..VerterCompileOptions::default()
+                ..CompileAuditOverrides::default()
             },
         );
         assert_eq!(
@@ -1136,8 +1138,7 @@ fn the_audited_compile_entry_publishes_these_exact_blocks_for_both_frameworks() 
         ),
     ] {
         let host = host_with(canonical, source, language);
-        let audited =
-            host.compile_with_audit(canonical, verter_compiler::compile::CompileTarget::BUNDLER);
+        let audited = host.compile_with_audit(canonical, crate::CompileTarget::BUNDLER);
         assert_eq!(
             audited.audit().canonical_id.as_str(),
             canonical,
@@ -1329,7 +1330,7 @@ fn the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_t
 /// gates it — a target without TSC must produce none.
 #[test]
 fn the_tsc_product_is_published_only_when_its_target_bit_is_requested() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     for (canonical, source, language, expect_tsc) in [
         (
@@ -1459,7 +1460,7 @@ fn the_diagnostics_route_answers_from_the_compile_slot_it_names() {
 ///   runtime module and a non-empty IDE product.
 #[test]
 fn a_refused_combined_request_publishes_no_product_at_all() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     /// The combined identity: the runtime product set (`BUNDLER` — style,
     /// script, template) AND the IDE product (`TSX`), asked for by ONE request.
@@ -1676,7 +1677,7 @@ fn ensure_compiled_answer(host: &VerterHost, canonical: &str, profile: &CompileP
 ///   told a `Main` it never asked for is missing, on either path.
 #[test]
 fn ensure_compiled_answers_the_same_cold_and_warm_for_one_identity() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     // A refusing Svelte source under an identity that DOES ask for the runtime
     // product, and a supported source under an IDE-only identity.
@@ -1779,7 +1780,7 @@ fn ensure_compiled_answers_the_same_cold_and_warm_for_one_identity() {
 /// committing an artifact at all.
 #[test]
 fn a_refused_transaction_commits_no_scheduler_artifact() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     for (label, canonical, source, base_profile, _) in refusal_cells() {
         let combined = CompileProfile {
@@ -1849,8 +1850,8 @@ fn a_refused_transaction_commits_no_scheduler_artifact() {
 /// product.
 #[test]
 fn each_request_publishes_exactly_the_node_kinds_its_target_requested() {
+    use crate::CompileTarget;
     use std::collections::BTreeSet;
-    use verter_compiler::compile::CompileTarget;
 
     /// The node kinds actually published for `(canonical, profile)`, as a
     /// comparable set. A refusal is a separate outcome and fails the sweep.
@@ -2070,7 +2071,7 @@ fn each_request_publishes_exactly_the_node_kinds_its_target_requested() {
 #[ignore = "pre-existing: Content-mode ensure_ide_compiled reports Ok(true) while get_ide reads the session slot and answers None"]
 fn ensure_ide_compiled_and_get_ide_agree_under_content_cache_mode() {
     use crate::types::CompileCacheMode;
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     let canonical = "/probe/ContentModeIde.vue";
     let host = host_with(
@@ -2105,7 +2106,7 @@ fn ensure_ide_compiled_and_get_ide_agree_under_content_cache_mode() {
 #[test]
 fn ensure_ide_compiled_and_get_ide_agree_under_session_cache_mode() {
     use crate::types::CompileCacheMode;
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     for (label, canonical, source, language) in [
         (
@@ -2156,7 +2157,7 @@ fn ensure_ide_compiled_and_get_ide_agree_under_session_cache_mode() {
 /// happened, so the outcome alone proves nothing.
 #[test]
 fn reading_a_target_excluded_node_under_a_warm_identity_does_not_recompile() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     for (label, canonical, source, language) in [
         (

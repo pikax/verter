@@ -1113,7 +1113,7 @@ fn cancelled_winner_does_not_abort_live_sibling() {
 /// with `runtime_classifier_calls` = 3 (one per public prop).
 #[test]
 fn ide_only_target_takes_binding_names_without_broad_runtime_classification() {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_ts(

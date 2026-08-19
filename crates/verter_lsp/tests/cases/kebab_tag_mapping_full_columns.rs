@@ -13,8 +13,11 @@
 //! Discriminating: against the whole-name-overwrite emission, the last-column
 //! probes below return `None` and this test FAILS.
 
-use verter_compiler::compile::{
-    CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile::VueMacroSemanticInput;
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+    RuntimeProductRequest, VueCompileRequest,
 };
 use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_lsp::documents::position_map::PositionMapper;
@@ -23,21 +26,30 @@ use verter_span::LspPosition;
 /// Compile one SFC through the production IDE/TSX lane and return
 /// `(tsx_code, PositionMapper)`.
 fn compile_to_mapper(source: &str) -> (String, PositionMapper) {
-    let options = CodegenOptions {
-        filename: Some("App.vue".to_string()),
-        target: CompileTarget::BUNDLER | CompileTarget::TSX,
-        ..Default::default()
-    };
-    let verter_opts = VerterCompileOptions {
-        source_map: true,
-        ..Default::default()
-    };
-    let result = StandaloneCompiler.compile_source(
-        &StandaloneSourceBytes::copied_from(source),
-        &options,
-        &verter_opts,
-        &VueMacroSemanticInput::Unavailable,
-    );
+    let request = CompileRequest::new(
+        vec![
+            CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+            CompileProduct::IdeCompanion(IdeProductRequest {
+                want_source_map: true,
+                ..Default::default()
+            }),
+        ],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        Some("App.vue".to_string()),
+        None,
+        false,
+        false,
+    )
+    .expect("RuntimeClient + IdeCompanion together must construct");
+    let result = StandaloneCompiler
+        .compile_source(
+            &StandaloneSourceBytes::copied_from(source),
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+        )
+        .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let mapper = PositionMapper::from_json(&tsx.source_map).expect("valid TSX source map");

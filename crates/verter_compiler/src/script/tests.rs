@@ -2385,7 +2385,7 @@ fn define_emits_named_tuple_property_form_still_produces_emits() {
 /// makes rollup look for a non-existent `ElFixedSizeList` export (element-plus).
 #[test]
 fn force_js_preserves_named_import_alias() {
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
     use oxc_allocator::Allocator;
 
     let input = r#"
@@ -2428,7 +2428,7 @@ const List = ElFixedSizeList
 /// focus-trap.vue under rollup).
 #[test]
 fn force_js_options_api_strips_import_type() {
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
     use oxc_allocator::Allocator;
 
     let input = r#"
@@ -2476,7 +2476,7 @@ export default defineComponent({
 /// `radioEmits, … } from './radio'` mid-setup).
 #[test]
 fn force_js_mixed_type_value_import_has_no_ghost_body_fragment() {
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
     use oxc_allocator::Allocator;
 
     let input = r#"

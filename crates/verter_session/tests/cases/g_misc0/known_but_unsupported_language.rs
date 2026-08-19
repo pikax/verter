@@ -84,7 +84,7 @@ fn vue_importer_of_svelte_file_resolves_both() {
     );
 
     let profile = CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: verter_session::CompileTarget::IDE,
         ..CompileProfile::default()
     };
     host.ensure_compiled("/src/App.vue", &profile)

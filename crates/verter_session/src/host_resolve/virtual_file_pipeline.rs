@@ -14,16 +14,20 @@ use rustc_hash::FxHashMap;
 #[cfg(feature = "session_metrics")]
 use crate::instant::Instant;
 
+use super::compile_request_build::{
+    build_compile_request, derive_runtime_compile_options, request_construction_refused_diagnostics,
+};
 use super::vue_script_extract::template_converter_inputs;
 use crate::compile::{assemble_vue_main_module, AssembleMapFailure};
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
+use crate::CompileTarget;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
-use verter_compiler::compile::{format_import_specifier, CompileTarget};
+use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{
-    CarrierCompileOutcome, CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
+    CarrierCompileOutcome, CompileUnsupported, RuntimeDiagnosticSeverity,
 };
 
 /// Surface a fail-closed assembled-map outcome as a compile error.
@@ -2321,7 +2325,7 @@ impl VerterHost {
     /// choices.
     fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
         let mut normalized = profile.clone();
-        normalized.target |= verter_compiler::compile::CompileTarget::TSX;
+        normalized.target |= crate::CompileTarget::TSX;
         normalized
     }
 
@@ -3065,11 +3069,12 @@ impl VerterHost {
             .unwrap_or(
                 crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
             );
-        let macro_output = self
+        let is_vue = self
             .language_classifier()
             .classify(&snapshot.canonical_id)
-            .is_vue()
-            .then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
+            .is_vue();
+        let macro_output =
+            is_vue.then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
         let macro_dependency_diagnostics = macro_output
             .as_ref()
             .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
@@ -3090,63 +3095,68 @@ impl VerterHost {
 
         let scope = self.config.effective_scope();
 
-        // The host-resolved Vue cross-file inputs ride opaquely on the neutral
-        // options' `framework_extras` slot, keeping Vue's typed macro DTO out
-        // of the cross-framework carrier contract. A non-Vue carrier ignores
-        // the extras; Vue downcasts them.
-        let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
-            verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
-                macro_runtime: macro_output.and_then(|output| output.runtime),
-                prop_constness_overrides: None, // populated by the cross-file optimizer
-                style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-                style_v_bind_usage_complete: snapshot.style_v_bind_usage_complete,
-            },
-        );
-
-        // The neutral runtime-compile options the carrier consults. The host
-        // owns the IDE/template-data demand (from the request scope + target
-        // bits) and the source-map / production / SSR profile knobs; the
-        // framework-private resolved inputs ride on `framework_extras`. The
-        // carrier reads only what it supports.
-        let runtime_opts = RuntimeCompileOptions {
-            filename: profile
-                .filename
-                .clone()
-                .or_else(|| Some(snapshot.canonical_id.clone())),
-            is_production: profile.is_production,
-            custom_element: profile.custom_element,
-            source_map: profile.source_map,
-            ssr: profile.ssr,
-            runtime_module_name: profile.runtime_module_name.clone(),
-            component_id: profile.component_id.clone(),
-            // The RESOLVED Svelte cssHash override (byte-exact) — a Svelte carrier
-            // scope-class input; Vue ignores it. Already in the profile identity.
-            svelte_css_hash_override: profile.svelte_css_hash_override.clone(),
-            force_js: profile.force_js,
-            force_vapor: profile.force_vapor,
-            inline: profile.inline,
-            comments: profile.comments,
-            delimiters: profile.delimiters.clone(),
-            custom_elements: profile.custom_elements.clone(),
-            // The RUNTIME products are requested when the profile target
-            // carries a runtime output bit. The target bits already participate
-            // in `profile_hash`, so the publication identity carries the
-            // requested-product set — no cache is re-keyed for this.
-            want_runtime: profile.target.needs_runtime_module(),
-            // IDE TSX is requested when the profile target carries the TSX bit.
-            want_ide: profile.target.needs_tsx(),
-            // Template facts are requested by the active analysis scope OR an
-            // explicit TEMPLATE_DATA target bit. (The Vue runtime path always
-            // requests `extract_template_data = scope.needs_template_analysis()`.)
-            want_template_data: scope.needs_template_analysis()
-                || profile.target.needs_template_data(),
-            types_module_name: profile.types_module_name.clone(),
-            embed_ambient_types: profile.embed_ambient_types,
-            conditional_root_narrowing: profile.conditional_root_narrowing,
-            strict_slots: profile.strict_slots,
-            block_content: snapshot.block_content_inputs.clone(),
-            framework_extras: Some(vue_extras),
+        // The host-resolved Vue cross-file inputs ride on the typed,
+        // ephemeral `VueExecutionInputs` carrier — excluded from
+        // `CompileRequest` identity, but no longer erased through an
+        // `Arc<dyn Any>` downcast. A non-Vue carrier ignores it; Vue reads
+        // it directly.
+        let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
+            macro_runtime: macro_output.and_then(|output| output.runtime),
+            prop_constness_overrides: None, // populated by the cross-file optimizer
+            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+            style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
+            template_binding_metadata: None,
+            template_used_vars: None,
+            runtime_template_hole: false,
+            runtime_inline_template_chunk: false,
         };
+
+        // The RUNTIME products are requested when the profile target
+        // carries a runtime output bit. The target bits already participate
+        // in `profile_hash`, so the publication identity carries the
+        // requested-product set — no cache is re-keyed for this.
+        let want_runtime = profile.target.needs_runtime_module();
+        // IDE TSX is requested when the profile target carries the TSX bit.
+        let want_ide = profile.target.needs_tsx();
+        // Template facts are requested by the active analysis scope OR an
+        // explicit TEMPLATE_DATA target bit. (The Vue runtime path always
+        // requests `extract_template_data = scope.needs_template_analysis()`.)
+        let want_template_data =
+            scope.needs_template_analysis() || profile.target.needs_template_data();
+
+        // The canonical, admission-checked request. This is the session's
+        // per-file/virtual-product request-construction authority: an
+        // unsupported option, a malformed Svelte namespace/fragments token,
+        // or an SSR x Vapor / inline x SSR combination refuses HERE, before
+        // any codegen input is built — see `build_compile_request`.
+        let request = match build_compile_request(
+            profile,
+            &snapshot.canonical_id,
+            is_vue,
+            want_runtime,
+            want_ide,
+            want_template_data,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return Err(diagnostics.merge(request_construction_refused_diagnostics(
+                    &snapshot.canonical_id,
+                    snapshot.source.len() as u32,
+                    &error,
+                )));
+            }
+        };
+
+        // The neutral runtime-compile options the carrier consults, read
+        // back off the validated request — never re-derived from `profile`
+        // directly. The framework-private resolved inputs ride on
+        // `vue_facts`; the carrier reads only what it supports.
+        let runtime_opts = derive_runtime_compile_options(
+            &request,
+            profile,
+            snapshot.block_content_inputs.clone(),
+            Some(vue_facts),
+        );
 
         // Route the runtime compile through the carrier registry, selected
         // by the file's framework-neutral parse artifact. The artifact is
@@ -3217,13 +3227,16 @@ impl VerterHost {
             Ok(outcome) => outcome,
             Err(unsupported) => {
                 let code = match unsupported {
-                    CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
+                    CompileUnsupported::TargetMissingIde => "HOST_COMPILE_TARGET_MISSING_IDE",
                     CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
                     CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
                         "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
                     }
                     CompileUnsupported::BlockContentIdeUnavailable { .. } => {
                         "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
+                    }
+                    CompileUnsupported::RequestExecutionRefused(_) => {
+                        "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
                     }
                 };
                 return Err(diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
@@ -3607,58 +3620,62 @@ impl VerterHost {
 
         let scope = self.config.effective_scope();
 
-        let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
-            verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
-                macro_runtime: macro_output.runtime,
-                prop_constness_overrides: None,
-                style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-                style_v_bind_usage_complete: snapshot.style_v_bind_usage_complete,
-            },
-        );
-
-        // The compiler-visible runtime options — byte-identical to
-        // `compile_entry`'s. `want_ide` is `profile.target.needs_tsx()`
-        // (false on the bundler render profile: no TSX). `want_template_data`
-        // matches `compile_entry` exactly (same scope + target derivation) so
-        // template extraction — and therefore the assembled `Main` — cannot
-        // drift.
-        let runtime_opts = RuntimeCompileOptions {
-            filename: profile
-                .filename
-                .clone()
-                .or_else(|| Some(snapshot.canonical_id.clone())),
-            is_production: profile.is_production,
-            custom_element: profile.custom_element,
-            source_map: profile.source_map,
-            ssr: profile.ssr,
-            runtime_module_name: profile.runtime_module_name.clone(),
-            component_id: profile.component_id.clone(),
-            // Keep the neutral carrier option set byte-identical to
-            // `compile_entry`. The current render-only implementation is
-            // Vue-specific (and Vue ignores this Svelte field), but dropping a
-            // profile input here would make the shared contract silently drift.
-            svelte_css_hash_override: profile.svelte_css_hash_override.clone(),
-            force_js: profile.force_js,
-            force_vapor: profile.force_vapor,
-            inline: profile.inline,
-            comments: profile.comments,
-            delimiters: profile.delimiters.clone(),
-            custom_elements: profile.custom_elements.clone(),
-            // The render lane's whole subject is the runtime `Main` module, so
-            // it always asks for the runtime products regardless of the
-            // caller's target bits — mirroring the lane's own contract
-            // (`CompileManyTarget::RuntimeRender`), not the profile's.
-            want_runtime: true,
-            want_ide: profile.target.needs_tsx(),
-            want_template_data: scope.needs_template_analysis()
-                || profile.target.needs_template_data(),
-            types_module_name: profile.types_module_name.clone(),
-            embed_ambient_types: profile.embed_ambient_types,
-            conditional_root_narrowing: profile.conditional_root_narrowing,
-            strict_slots: profile.strict_slots,
-            block_content: snapshot.block_content_inputs.clone(),
-            framework_extras: Some(vue_extras),
+        let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
+            macro_runtime: macro_output.runtime,
+            prop_constness_overrides: None,
+            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+            style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
+            template_binding_metadata: None,
+            template_used_vars: None,
+            runtime_template_hole: false,
+            runtime_inline_template_chunk: false,
         };
+
+        // The render lane's whole subject is the runtime `Main` module, so
+        // it always asks for the runtime products regardless of the
+        // caller's target bits — mirroring the lane's own contract
+        // (`CompileManyTarget::RuntimeRender`), not the profile's.
+        let want_runtime = true;
+        let want_ide = profile.target.needs_tsx();
+        let want_template_data =
+            scope.needs_template_analysis() || profile.target.needs_template_data();
+
+        // The canonical, admission-checked request — same construction
+        // authority as `compile_entry` (this lane is Vue-only, matching its
+        // own module contract). A refusal here is FATAL, matching every
+        // other construction-time site this lane already treats as fatal.
+        let request = match build_compile_request(
+            profile,
+            &snapshot.canonical_id,
+            true,
+            want_runtime,
+            want_ide,
+            want_template_data,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return Err(HostError::CompileError(CompileFailure {
+                    diagnostics: diagnostics.merge(request_construction_refused_diagnostics(
+                        &snapshot.canonical_id,
+                        snapshot.source.len() as u32,
+                        &error,
+                    )),
+                    requested_mode: profile.requested_mode,
+                    actual_mode: profile.requested_mode,
+                    downgrade_reason: None,
+                }));
+            }
+        };
+
+        // The compiler-visible runtime options, read back off the
+        // validated request — byte-identical construction to
+        // `compile_entry`'s.
+        let runtime_opts = derive_runtime_compile_options(
+            &request,
+            profile,
+            snapshot.block_content_inputs.clone(),
+            Some(vue_facts),
+        );
 
         // Route through the carrier registry (the single dispatch authority)
         // — identical to `compile_entry`. Sites 3 (no artifact) and 4 (no
@@ -3751,13 +3768,16 @@ impl VerterHost {
             // Site 5 (`CompileUnsupported`) stays FATAL.
             Err(unsupported) => {
                 let code = match unsupported {
-                    CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
+                    CompileUnsupported::TargetMissingIde => "HOST_COMPILE_TARGET_MISSING_IDE",
                     CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
                     CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
                         "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
                     }
                     CompileUnsupported::BlockContentIdeUnavailable { .. } => {
                         "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
+                    }
+                    CompileUnsupported::RequestExecutionRefused(_) => {
+                        "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
                     }
                 };
                 return Err(HostError::CompileError(CompileFailure {

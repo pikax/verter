@@ -89,24 +89,34 @@ describe("typed audit entry-points expose all eight Wave-3 producer kinds", () =
     const record = decodeRecordBuffer(buf);
     expect(record).not.toBeNull();
     expect(record!.canonical_id).toBe("/widget.vue");
-    // RequestKind::Compile { target } serializes as { "Compile": { target: "Vdom" } }
+    // RequestKind::Compile { products, backend } serializes as
+    // { "Compile": { products: {...}, backend: "Vdom" } } — the
+    // CompileTargetTag `target` string this used to assert on was
+    // replaced by the product-set/backend audit fields.
     expect(typeof record!.kind).toBe("object");
     expect(record!.kind).toHaveProperty("Compile");
     expect(record!.kind_payload.kind).toBe("Compile");
     // CompilePayload fields are present.
-    expect(record!.kind_payload).toHaveProperty("target");
+    expect(record!.kind_payload).toHaveProperty("products");
+    expect(record!.kind_payload).toHaveProperty("backend");
     expect(record!.kind_payload).toHaveProperty("output_bytes");
     expect(record!.kind_payload).toHaveProperty("code_transform_ops");
     host.close();
   });
 
-  it("compileWithAudit IDE target tags the kind as Ide", () => {
+  it("compileWithAudit IDE target tags the kind's product set as ide_companion-only", () => {
     const host = buildAuditHost();
     const buf = host.compileWithAudit("/widget.vue", "IDE");
     const record = decodeRecordBuffer(buf);
     expect(record).not.toBeNull();
-    const kindObj = record!.kind as { Compile: { target: string } };
-    expect(kindObj.Compile.target).toBe("Ide");
+    const kindObj = record!.kind as {
+      Compile: { products: Record<string, boolean>; backend: string };
+    };
+    expect(kindObj.Compile.products.ide_companion).toBe(true);
+    expect(kindObj.Compile.products.runtime_client).toBe(false);
+    expect(kindObj.Compile.products.runtime_server).toBe(false);
+    expect(kindObj.Compile.products.declarations).toBe(false);
+    expect(kindObj.Compile.products.analysis).toBe(false);
     host.close();
   });
 

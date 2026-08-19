@@ -33,7 +33,9 @@ describe("formatRecordTagFromKind", () => {
   });
 
   it("extracts the variant key from object-shaped kinds", () => {
-    expect(formatRecordTagFromKind({ Compile: { target: "Vdom" } })).toBe("Compile");
+    expect(
+      formatRecordTagFromKind({ Compile: { products: { runtime_client: true }, backend: "Vdom" } }),
+    ).toBe("Compile");
     expect(formatRecordTagFromKind({ Workspace: { op: "Resolve" } })).toBe("Workspace");
     expect(formatRecordTagFromKind({ Lsp: { method: "Hover" } })).toBe("Lsp");
     expect(formatRecordTagFromKind({ Mcp: { tool: "search" } })).toBe("Mcp");
@@ -100,19 +102,37 @@ describe("recordsToQuickPickItems", () => {
     expect(items[0]!.requestId).toBe("42");
   });
 
-  it("renders Compile target / Workspace op / Lsp method / Mcp tool in description", () => {
+  it("renders Compile products+backend / Workspace op / Lsp method / Mcp tool in description", () => {
     const items = recordsToQuickPickItems([
-      rec({ request_id: "1", kind: { Compile: { target: "Vdom" } } }),
+      rec({
+        request_id: "1",
+        kind: {
+          Compile: {
+            products: { runtime_client: true, ide_companion: true, runtime_server: false },
+            backend: "Vdom",
+          },
+        },
+      }),
       rec({ request_id: "2", kind: { Workspace: { op: "Resolve" } } }),
       rec({ request_id: "3", kind: { Lsp: { method: "Hover" } } }),
       rec({ request_id: "4", kind: { Mcp: { tool: "search" } } }),
       rec({ request_id: "5", kind: "ComponentMeta" }),
     ]);
-    expect(items[0]!.description).toBe("target=Vdom");
+    expect(items[0]!.description).toBe("products=runtime_client,ide_companion backend=Vdom");
     expect(items[1]!.description).toBe("op=Resolve");
     expect(items[2]!.description).toBe("method=Hover");
     expect(items[3]!.description).toBe("tool=search");
     expect(items[4]!.description).toBeUndefined();
+  });
+
+  it("renders 'none' for a Compile record with no true product fields", () => {
+    const items = recordsToQuickPickItems([
+      rec({
+        request_id: "6",
+        kind: { Compile: { products: { runtime_client: false }, backend: "Inferred" } },
+      }),
+    ]);
+    expect(items[0]!.description).toBe("products=none backend=Inferred");
   });
 
   it("returns an empty array for an empty record list", () => {

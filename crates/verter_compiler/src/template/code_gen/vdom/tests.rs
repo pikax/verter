@@ -366,7 +366,7 @@ fn leave_template_multi_root_production_no_comment() {
 
 /// Helper: compile a Vue SFC source and return the template code (VDOM mode).
 fn gen_vdom_template(source: &str) -> String {
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -398,7 +398,7 @@ fn gen_vdom_template(source: &str) -> String {
 /// Helper: compile a Vue SFC source in PRODUCTION mode and return the
 /// template code (VDOM mode).
 fn gen_vdom_template_prod(source: &str) -> String {
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),

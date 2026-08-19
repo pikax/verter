@@ -1,10 +1,11 @@
 /**
  * Native `TypeExpr` mirror.
  *
- * Mirrors the Rust enum
- * `verter_semantic::analysis::type_expr::TypeExpr` serialised via
- * its custom `to_json_value` helper. Each variant has a `kind` field
- * (camelCase Rust variant name) plus per-variant payload fields.
+ * Mirrors the Rust enum `verter_type_expr::TypeExpr` serialised via
+ * its custom `to_json_value` helper
+ * (`crates/verter_type_expr/src/type_expr_json.rs`). Each variant has
+ * a `kind` field (camelCase Rust variant name) plus per-variant
+ * payload fields.
  *
  * Re-implementing the type here (rather than depending on
  * `@verter/component-meta`) keeps `@verter/typeinfo` independent of
@@ -108,9 +109,28 @@ export interface NativeTupleElement {
   rest: boolean;
 }
 
+/**
+ * `AuthoredPropertyKey` wire mirror
+ * (`crates/verter_type_expr/src/type_expr_json.rs::authored_property_key_to_json`).
+ * `property` and `method` members carry this instead of a flat `name`
+ * string — a computed/numeric/unique-symbol key retains its own typed
+ * payload rather than being coerced to display text.
+ */
+export type NativePropertyKey =
+  | { kind: "string"; value: string }
+  | { kind: "number"; value: number }
+  | { kind: "uniqueSymbol"; identity: unknown }
+  | { kind: "computed"; expression: NativeTypeExpr };
+
 export interface NativeObjectMember {
-  memberKind: "property" | "indexSignature" | "callSignature" | "constructSignature" | "method";
-  name?: string;
+  memberKind:
+    | "property"
+    | "indexSignature"
+    | "callSignature"
+    | "constructSignature"
+    | "method"
+    | "spread";
+  key?: NativePropertyKey;
   ty?: NativeTypeExpr;
   optional?: boolean;
   readonly?: boolean;

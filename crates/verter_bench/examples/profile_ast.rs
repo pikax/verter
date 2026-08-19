@@ -26,8 +26,11 @@ use std::path::PathBuf;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use verter_compiler::compile::{
-    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile::{VerterCompileResult, VueMacroSemanticInput};
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+    VueCompileRequest,
 };
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::Syntax as NewSyntax;
@@ -37,17 +40,29 @@ use verter_compiler::tokenizer::byte::tokenize;
 
 fn compile(
     source: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
     macro_semantics: &VueMacroSemanticInput,
     _allocator: &Allocator,
 ) -> VerterCompileResult {
-    StandaloneCompiler.compile_source(
-        &StandaloneSourceBytes::copied_from(source),
-        options,
-        verter_options,
-        macro_semantics,
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        None,
+        false,
+        false,
     )
+    .expect("a lone RuntimeClient product must construct");
+    StandaloneCompiler
+        .compile_source(
+            &StandaloneSourceBytes::copied_from(source),
+            &request,
+            &VueExecutionInputs::default(),
+            macro_semantics,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
 }
 
 struct VueFile {
@@ -137,15 +152,7 @@ fn run_pipeline(source: &str) {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn run_compile(source: &str) {
     let alloc = Allocator::default();
-    let options = CodegenOptions::default();
-    let verter_options = VerterCompileOptions::default();
-    let result = compile(
-        source,
-        &options,
-        &verter_options,
-        &VueMacroSemanticInput::Unavailable,
-        &alloc,
-    );
+    let result = compile(source, &VueMacroSemanticInput::Unavailable, &alloc);
     std::hint::black_box(result);
 }
 

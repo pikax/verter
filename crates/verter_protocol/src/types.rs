@@ -65,13 +65,22 @@ pub struct FfiHostConfig {
 }
 
 /// Per-compilation variant options.
+///
+/// `deny_unknown_fields`: an unrecognized JSON key must refuse at
+/// deserialization, not be silently dropped before `ffi_profile_to_host`
+/// ever sees it — the decode-boundary half of the same "no silently
+/// ignored option" contract `CompileRequest` construction enforces
+/// downstream.
 #[derive(Deserialize, Default, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FfiCompileProfile {
     pub filename: Option<String>,
     pub is_production: Option<bool>,
     pub custom_element: Option<bool>,
     pub ssr: Option<bool>,
+    /// SSR asset-collection module id registered on `ssrContext.modules`.
+    /// Absent falls back to the canonical id.
+    pub ssr_module_id: Option<String>,
     pub hmr_strategy: Option<String>,
     pub component_id: Option<String>,
     pub delimiters: Option<Vec<String>>,

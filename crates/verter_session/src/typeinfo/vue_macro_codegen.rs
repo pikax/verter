@@ -85,9 +85,7 @@ impl VueMacroCodegenDemand {
     /// The single target -> demand mapping every compile entry point uses.
     ///
     /// `None` means the target consumes no macro semantics at all.
-    pub(crate) fn for_compile_target(
-        target: verter_compiler::compile::CompileTarget,
-    ) -> Option<Self> {
+    pub(crate) fn for_compile_target(target: crate::CompileTarget) -> Option<Self> {
         match (
             target.needs_runtime_macro_semantics(),
             target.needs_runtime_prop_constructors(),
@@ -651,7 +649,7 @@ impl VerterHost {
     pub fn vue_macro_semantic_input(
         &self,
         canonical_id: &str,
-        target: verter_compiler::compile::CompileTarget,
+        target: crate::CompileTarget,
     ) -> verter_compiler::compile::VueMacroSemanticInput {
         VueMacroCodegenDemand::for_compile_target(target)
             .map(|demand| {

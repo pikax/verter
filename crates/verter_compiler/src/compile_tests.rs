@@ -1,3 +1,4 @@
+use super::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
 use super::*;
 
 /// Check if a string contains a `/*digits,digits*/` offset comment pattern.
@@ -19336,31 +19337,52 @@ fn inline_template_template_only_sfc_falls_back_to_non_inline() {
 }
 
 #[test]
-fn inline_template_vapor_never_inlines() {
-    // Vapor inline is deferred — forcing vapor + inline falls back to the
-    // separate template block.
+fn inline_template_vapor_fails_closed_not_silently_demoted() {
+    // Vapor inline is a DEFERRED capability, not a silent fallback: the
+    // canonical request CONSTRUCTS (the Vapor-client cell explicitly
+    // claims inline/separate), but execution refuses with a typed
+    // `VaporInlineNotYetImplemented` before any codegen runs — it must
+    // never silently emit the separate-template-block topology as if the
+    // caller had asked for that.
+    use crate::compile_request::{
+        CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
+        RuntimeProductRequest, VueBackendRequest, VueCompileRequest,
+    };
+
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            inline: Some(true),
+            ..Default::default()
+        })],
+        FrameworkCompileRequest::Vue(VueCompileRequest {
+            backend: VueBackendRequest::Vapor,
+            ..Default::default()
+        }),
+        None,
+        Some("App.vue".to_string()),
+        None,
+        false,
+        true,
+    )
+    .expect(
+        "inline + vapor must construct — the capability check is at execution, not construction",
+    );
+
     let alloc = Allocator::new();
-    let options = CodegenOptions {
-        filename: Some("App.vue".to_string()),
-        inline: Some(true),
-        ..Default::default()
-    };
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        force_vapor: true,
-        ..Default::default()
-    };
-    let result = compile(
+    let result = super::compile(
         "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
-        &options,
-        &verter_opts,
+        &request,
+        &VueExecutionInputs::default(),
         &VueMacroSemanticInput::Unavailable,
         &alloc,
     );
-    assert!(
-        result.template.is_some(),
-        "vapor must keep the separate template block (inline deferred)"
-    );
+    let err = match result {
+        Err(err) => err,
+        Ok(_) => panic!(
+            "inline + vapor must be refused at execution, not silently demoted to non-inline"
+        ),
+    };
+    assert_eq!(err, CompileRequestError::VaporInlineNotYetImplemented);
 }
 
 // =========================================================================

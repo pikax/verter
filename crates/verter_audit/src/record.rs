@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::files::FileAudit;
 use crate::footprint::RequestFootprintAudit;
 use crate::memory::RequestMemoryAudit;
-use crate::payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag};
+use crate::payloads::tags::{
+    BundlerKindTag, CompileBackendTag, CompileProductSetTag, LspMethodTag,
+};
 use crate::payloads::{
     BundlerBatchPayload, CompilePayload, ComponentMetaPayload, FlowReturnInferencePayload,
     LspRequestPayload, McpToolPayload, SemanticAnalysisPayload, TypeInfoGraphPayload,
@@ -415,8 +417,10 @@ pub enum RequestKind {
     SemanticAnalysis,
     /// Compile request — VDOM or IDE codegen.
     Compile {
-        /// Which codegen target ran.
-        target: CompileTargetTag,
+        /// Which products the request carried.
+        products: CompileProductSetTag,
+        /// The resolved (or, pre-parse, inferred) Vue backend.
+        backend: CompileBackendTag,
     },
     /// Workspace-side operation (resolve, dep-graph traverse,
     /// resolver walk).

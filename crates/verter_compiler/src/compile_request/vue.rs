@@ -1,0 +1,911 @@
+//! The canonical Vue portion of a [`crate::compile_request::CompileRequest`]
+//! — [`VueCompileRequest`] — plus the exhaustive, structural classification
+//! of every row of `vue-options.tsv` ([`VueOption`]/[`VueOptionClass`]),
+//! which is the compile-error-on-drift proof that every semantics-affecting
+//! Vue option maps exactly once onto a field, a derived computation, a
+//! host-resolved pass-through, or a typed unsupported refusal.
+
+use std::collections::BTreeMap;
+
+/// One row of `vue-options.tsv` (118 data rows). Variant names are
+/// `Surface_option`; a `compatConfig` deprecation key is
+/// `ParserOptions_CompatConfig<Key>` / `TransformOptions_CompatConfig`. A
+/// row that recurs across two surfaces with the *same* canonical treatment
+/// (`isCustomElement`, `hoistStatic`) gets one variant per surface — the
+/// exactly-once requirement is per TSV row, not per canonical field; two
+/// rows are free to fold onto the same canonical field (see
+/// `option-inventories.md`'s "listed once for the semantic key" note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VueOption {
+    // compiler-core:ParserOptions (27)
+    ParserOptionsOnWarn,
+    ParserOptionsOnError,
+    ParserOptionsCompatConfig,
+    ParserOptionsCompatConfigMode,
+    ParserOptionsCompatConfigCompilerIsOnElement,
+    ParserOptionsCompatConfigCompilerVBindSync,
+    ParserOptionsCompatConfigCompilerVIfVForPrecedence,
+    ParserOptionsCompatConfigCompilerVBindObjectOrder,
+    ParserOptionsCompatConfigCompilerVOnNative,
+    ParserOptionsCompatConfigCompilerNativeTemplate,
+    ParserOptionsCompatConfigCompilerInlineTemplate,
+    ParserOptionsCompatConfigCompilerFilters,
+    ParserOptionsParseMode,
+    ParserOptionsNs,
+    ParserOptionsIsNativeTag,
+    ParserOptionsIsVoidTag,
+    ParserOptionsIsPreTag,
+    ParserOptionsIsIgnoreNewlineTag,
+    ParserOptionsIsBuiltInComponent,
+    ParserOptionsIsCustomElement,
+    ParserOptionsGetNamespace,
+    ParserOptionsDelimiters,
+    ParserOptionsWhitespace,
+    ParserOptionsDecodeEntities,
+    ParserOptionsComments,
+    ParserOptionsPrefixIdentifiers,
+    ParserOptionsExpressionPlugins,
+
+    // compiler-core:TransformOptions (14)
+    TransformOptionsNodeTransforms,
+    TransformOptionsDirectiveTransforms,
+    TransformOptionsTransformHoist,
+    TransformOptionsOnWarn,
+    TransformOptionsOnError,
+    TransformOptionsCompatConfig,
+    TransformOptionsIsBuiltInComponent,
+    TransformOptionsIsCustomElement,
+    TransformOptionsHoistStatic,
+    TransformOptionsCacheHandlers,
+    TransformOptionsScopeId,
+    TransformOptionsSlotted,
+    TransformOptionsSsrCssVars,
+    TransformOptionsHmr,
+
+    // compiler-core:SharedTransformCodegenOptions (8)
+    SharedTransformCodegenOptionsPrefixIdentifiers,
+    SharedTransformCodegenOptionsExpressionPlugins,
+    SharedTransformCodegenOptionsSsr,
+    SharedTransformCodegenOptionsInSsr,
+    SharedTransformCodegenOptionsBindingMetadata,
+    SharedTransformCodegenOptionsInline,
+    SharedTransformCodegenOptionsIsTs,
+    SharedTransformCodegenOptionsFilename,
+
+    // compiler-core:CodegenOptions (7)
+    CodegenOptionsMode,
+    CodegenOptionsSourceMap,
+    CodegenOptionsScopeId,
+    CodegenOptionsOptimizeImports,
+    CodegenOptionsRuntimeModuleName,
+    CodegenOptionsSsrRuntimeModuleName,
+    CodegenOptionsRuntimeGlobalName,
+
+    // compiler-sfc:parse (7)
+    ParseFilename,
+    ParseSourceMap,
+    ParseSourceRoot,
+    ParsePad,
+    ParseIgnoreEmpty,
+    ParseCompiler,
+    ParseTemplateParseOptions,
+
+    // compiler-sfc:compileScript (13)
+    CompileScriptId,
+    CompileScriptIsProd,
+    CompileScriptSourceMap,
+    CompileScriptBabelParserPlugins,
+    CompileScriptGlobalTypeFiles,
+    CompileScriptInlineTemplate,
+    CompileScriptGenDefaultAs,
+    CompileScriptTemplateOptions,
+    CompileScriptHoistStatic,
+    CompileScriptPropsDestructure,
+    CompileScriptFs,
+    CompileScriptCustomElement,
+    CompileScriptVapor,
+
+    // compiler-sfc:compileTemplate (17)
+    CompileTemplateSource,
+    CompileTemplateAst,
+    CompileTemplateFilename,
+    CompileTemplateId,
+    CompileTemplateScoped,
+    CompileTemplateSlotted,
+    CompileTemplateIsProd,
+    CompileTemplateVapor,
+    CompileTemplateSsr,
+    CompileTemplateSsrCssVars,
+    CompileTemplateInMap,
+    CompileTemplateCompiler,
+    CompileTemplateCompilerOptions,
+    CompileTemplatePreprocessLang,
+    CompileTemplatePreprocessOptions,
+    CompileTemplatePreprocessCustomRequire,
+    CompileTemplateTransformAssetUrls,
+
+    // compiler-sfc:AssetURLOptions (3)
+    AssetUrlOptionsBase,
+    AssetUrlOptionsIncludeAbsolute,
+    AssetUrlOptionsTags,
+
+    // compiler-sfc:compileStyle (16)
+    CompileStyleSource,
+    CompileStyleFilename,
+    CompileStyleId,
+    CompileStyleScoped,
+    CompileStyleTrim,
+    CompileStyleIsProd,
+    CompileStyleInMap,
+    CompileStylePreprocessLang,
+    CompileStylePreprocessOptions,
+    CompileStylePreprocessCustomRequire,
+    CompileStylePostcssOptions,
+    CompileStylePostcssPlugins,
+    CompileStyleMap,
+    CompileStyleIsAsync,
+    CompileStyleModules,
+    CompileStyleModulesOptions,
+
+    // compiler-sfc:CSSModulesOptions (6)
+    CssModulesOptionsScopeBehaviour,
+    CssModulesOptionsGenerateScopedName,
+    CssModulesOptionsHashPrefix,
+    CssModulesOptionsLocalsConvention,
+    CssModulesOptionsExportGlobals,
+    CssModulesOptionsGlobalModulePaths,
+}
+
+/// Where a `VueOption` row's semantics land — the closed vocabulary
+/// `option-inventories.md:37-41` defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VueOptionClass {
+    /// Caller-settable; carried on [`VueCompileRequest`] (directly, via
+    /// [`VueOptionAttempt`], as-is on the specific canonical field named).
+    SupportedCanonical,
+    /// The canonical request computes this solely from other canonical
+    /// fields; never itself a caller-settable slot.
+    Derived,
+    /// The host provides immutable normalized data; the canonical request
+    /// validates compatibility but is not the option's source of truth.
+    HostResolved,
+    /// Passed only to a selected external preprocessor; never bundled into
+    /// compiler-core semantics.
+    External,
+    /// Official-oracle-only; a production request must reject it.
+    TestOnly,
+    /// Fails request construction — no field represents it; presence is
+    /// refused via [`VueOptionAttempt`].
+    UnsupportedFailClosed,
+    /// Meaningful only for an output mode/shape Verter does not publish;
+    /// cannot widen the public product set.
+    NotApplicable,
+}
+
+impl VueOption {
+    /// Exhaustive: a new `vue-options.tsv` row without an arm here is a
+    /// compile error, not a silent skip.
+    pub const fn class(self) -> VueOptionClass {
+        use VueOption::*;
+        use VueOptionClass::*;
+        match self {
+            ParserOptionsOnWarn => Derived,
+            ParserOptionsOnError => Derived,
+            ParserOptionsCompatConfig => UnsupportedFailClosed,
+            ParserOptionsCompatConfigMode => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerIsOnElement => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerVBindSync => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerVBindObjectOrder => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerVOnNative => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerNativeTemplate => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerInlineTemplate => UnsupportedFailClosed,
+            ParserOptionsCompatConfigCompilerFilters => UnsupportedFailClosed,
+            ParserOptionsParseMode => Derived,
+            ParserOptionsNs => Derived,
+            ParserOptionsIsNativeTag => Derived,
+            ParserOptionsIsVoidTag => Derived,
+            ParserOptionsIsPreTag => Derived,
+            ParserOptionsIsIgnoreNewlineTag => Derived,
+            ParserOptionsIsBuiltInComponent => Derived,
+            ParserOptionsIsCustomElement => SupportedCanonical,
+            ParserOptionsGetNamespace => Derived,
+            ParserOptionsDelimiters => SupportedCanonical,
+            ParserOptionsWhitespace => SupportedCanonical,
+            ParserOptionsDecodeEntities => HostResolved,
+            ParserOptionsComments => SupportedCanonical,
+            ParserOptionsPrefixIdentifiers => Derived,
+            ParserOptionsExpressionPlugins => HostResolved,
+
+            TransformOptionsNodeTransforms => TestOnly,
+            TransformOptionsDirectiveTransforms => TestOnly,
+            TransformOptionsTransformHoist => Derived,
+            TransformOptionsOnWarn => Derived,
+            TransformOptionsOnError => Derived,
+            TransformOptionsCompatConfig => UnsupportedFailClosed,
+            TransformOptionsIsBuiltInComponent => Derived,
+            TransformOptionsIsCustomElement => SupportedCanonical,
+            TransformOptionsHoistStatic => SupportedCanonical,
+            TransformOptionsCacheHandlers => SupportedCanonical,
+            TransformOptionsScopeId => Derived,
+            TransformOptionsSlotted => Derived,
+            TransformOptionsSsrCssVars => Derived,
+            TransformOptionsHmr => SupportedCanonical,
+
+            SharedTransformCodegenOptionsPrefixIdentifiers => Derived,
+            SharedTransformCodegenOptionsExpressionPlugins => HostResolved,
+            SharedTransformCodegenOptionsSsr => Derived,
+            SharedTransformCodegenOptionsInSsr => Derived,
+            SharedTransformCodegenOptionsBindingMetadata => Derived,
+            SharedTransformCodegenOptionsInline => Derived,
+            SharedTransformCodegenOptionsIsTs => Derived,
+            SharedTransformCodegenOptionsFilename => HostResolved,
+
+            CodegenOptionsMode => UnsupportedFailClosed,
+            CodegenOptionsSourceMap => Derived,
+            CodegenOptionsScopeId => Derived,
+            CodegenOptionsOptimizeImports => SupportedCanonical,
+            CodegenOptionsRuntimeModuleName => SupportedCanonical,
+            CodegenOptionsSsrRuntimeModuleName => SupportedCanonical,
+            CodegenOptionsRuntimeGlobalName => NotApplicable,
+
+            ParseFilename => HostResolved,
+            ParseSourceMap => Derived,
+            ParseSourceRoot => HostResolved,
+            ParsePad => SupportedCanonical,
+            ParseIgnoreEmpty => SupportedCanonical,
+            ParseCompiler => TestOnly,
+            ParseTemplateParseOptions => Derived,
+
+            CompileScriptId => Derived,
+            CompileScriptIsProd => Derived,
+            CompileScriptSourceMap => Derived,
+            CompileScriptBabelParserPlugins => SupportedCanonical,
+            CompileScriptGlobalTypeFiles => HostResolved,
+            CompileScriptInlineTemplate => Derived,
+            CompileScriptGenDefaultAs => SupportedCanonical,
+            CompileScriptTemplateOptions => Derived,
+            CompileScriptHoistStatic => SupportedCanonical,
+            CompileScriptPropsDestructure => SupportedCanonical,
+            CompileScriptFs => HostResolved,
+            CompileScriptCustomElement => SupportedCanonical,
+            CompileScriptVapor => Derived,
+
+            CompileTemplateSource => Derived,
+            CompileTemplateAst => Derived,
+            CompileTemplateFilename => HostResolved,
+            CompileTemplateId => Derived,
+            CompileTemplateScoped => Derived,
+            CompileTemplateSlotted => Derived,
+            CompileTemplateIsProd => Derived,
+            CompileTemplateVapor => Derived,
+            CompileTemplateSsr => Derived,
+            CompileTemplateSsrCssVars => Derived,
+            CompileTemplateInMap => Derived,
+            CompileTemplateCompiler => TestOnly,
+            CompileTemplateCompilerOptions => Derived,
+            CompileTemplatePreprocessLang => External,
+            CompileTemplatePreprocessOptions => External,
+            CompileTemplatePreprocessCustomRequire => External,
+            CompileTemplateTransformAssetUrls => SupportedCanonical,
+
+            AssetUrlOptionsBase => SupportedCanonical,
+            AssetUrlOptionsIncludeAbsolute => SupportedCanonical,
+            AssetUrlOptionsTags => SupportedCanonical,
+
+            CompileStyleSource => Derived,
+            CompileStyleFilename => HostResolved,
+            CompileStyleId => Derived,
+            CompileStyleScoped => Derived,
+            CompileStyleTrim => SupportedCanonical,
+            CompileStyleIsProd => Derived,
+            CompileStyleInMap => Derived,
+            CompileStylePreprocessLang => External,
+            CompileStylePreprocessOptions => External,
+            CompileStylePreprocessCustomRequire => External,
+            CompileStylePostcssOptions => External,
+            CompileStylePostcssPlugins => External,
+            CompileStyleMap => Derived,
+            CompileStyleIsAsync => Derived,
+            CompileStyleModules => SupportedCanonical,
+            CompileStyleModulesOptions => SupportedCanonical,
+
+            CssModulesOptionsScopeBehaviour => SupportedCanonical,
+            CssModulesOptionsGenerateScopedName => HostResolved,
+            CssModulesOptionsHashPrefix => SupportedCanonical,
+            CssModulesOptionsLocalsConvention => SupportedCanonical,
+            CssModulesOptionsExportGlobals => SupportedCanonical,
+            CssModulesOptionsGlobalModulePaths => HostResolved,
+        }
+    }
+}
+
+/// The 118 rows, for exhaustiveness/count tests. Kept as a `const` array
+/// rather than a `strum`-style derive (no such dependency here) — the
+/// exhaustiveness proof itself lives in [`VueOption::class`]'s match, not
+/// in this list; this list exists only so a test can iterate.
+pub const ALL_VUE_OPTIONS: [VueOption; 118] = {
+    use VueOption::*;
+    [
+        ParserOptionsOnWarn,
+        ParserOptionsOnError,
+        ParserOptionsCompatConfig,
+        ParserOptionsCompatConfigMode,
+        ParserOptionsCompatConfigCompilerIsOnElement,
+        ParserOptionsCompatConfigCompilerVBindSync,
+        ParserOptionsCompatConfigCompilerVIfVForPrecedence,
+        ParserOptionsCompatConfigCompilerVBindObjectOrder,
+        ParserOptionsCompatConfigCompilerVOnNative,
+        ParserOptionsCompatConfigCompilerNativeTemplate,
+        ParserOptionsCompatConfigCompilerInlineTemplate,
+        ParserOptionsCompatConfigCompilerFilters,
+        ParserOptionsParseMode,
+        ParserOptionsNs,
+        ParserOptionsIsNativeTag,
+        ParserOptionsIsVoidTag,
+        ParserOptionsIsPreTag,
+        ParserOptionsIsIgnoreNewlineTag,
+        ParserOptionsIsBuiltInComponent,
+        ParserOptionsIsCustomElement,
+        ParserOptionsGetNamespace,
+        ParserOptionsDelimiters,
+        ParserOptionsWhitespace,
+        ParserOptionsDecodeEntities,
+        ParserOptionsComments,
+        ParserOptionsPrefixIdentifiers,
+        ParserOptionsExpressionPlugins,
+        TransformOptionsNodeTransforms,
+        TransformOptionsDirectiveTransforms,
+        TransformOptionsTransformHoist,
+        TransformOptionsOnWarn,
+        TransformOptionsOnError,
+        TransformOptionsCompatConfig,
+        TransformOptionsIsBuiltInComponent,
+        TransformOptionsIsCustomElement,
+        TransformOptionsHoistStatic,
+        TransformOptionsCacheHandlers,
+        TransformOptionsScopeId,
+        TransformOptionsSlotted,
+        TransformOptionsSsrCssVars,
+        TransformOptionsHmr,
+        SharedTransformCodegenOptionsPrefixIdentifiers,
+        SharedTransformCodegenOptionsExpressionPlugins,
+        SharedTransformCodegenOptionsSsr,
+        SharedTransformCodegenOptionsInSsr,
+        SharedTransformCodegenOptionsBindingMetadata,
+        SharedTransformCodegenOptionsInline,
+        SharedTransformCodegenOptionsIsTs,
+        SharedTransformCodegenOptionsFilename,
+        CodegenOptionsMode,
+        CodegenOptionsSourceMap,
+        CodegenOptionsScopeId,
+        CodegenOptionsOptimizeImports,
+        CodegenOptionsRuntimeModuleName,
+        CodegenOptionsSsrRuntimeModuleName,
+        CodegenOptionsRuntimeGlobalName,
+        ParseFilename,
+        ParseSourceMap,
+        ParseSourceRoot,
+        ParsePad,
+        ParseIgnoreEmpty,
+        ParseCompiler,
+        ParseTemplateParseOptions,
+        CompileScriptId,
+        CompileScriptIsProd,
+        CompileScriptSourceMap,
+        CompileScriptBabelParserPlugins,
+        CompileScriptGlobalTypeFiles,
+        CompileScriptInlineTemplate,
+        CompileScriptGenDefaultAs,
+        CompileScriptTemplateOptions,
+        CompileScriptHoistStatic,
+        CompileScriptPropsDestructure,
+        CompileScriptFs,
+        CompileScriptCustomElement,
+        CompileScriptVapor,
+        CompileTemplateSource,
+        CompileTemplateAst,
+        CompileTemplateFilename,
+        CompileTemplateId,
+        CompileTemplateScoped,
+        CompileTemplateSlotted,
+        CompileTemplateIsProd,
+        CompileTemplateVapor,
+        CompileTemplateSsr,
+        CompileTemplateSsrCssVars,
+        CompileTemplateInMap,
+        CompileTemplateCompiler,
+        CompileTemplateCompilerOptions,
+        CompileTemplatePreprocessLang,
+        CompileTemplatePreprocessOptions,
+        CompileTemplatePreprocessCustomRequire,
+        CompileTemplateTransformAssetUrls,
+        AssetUrlOptionsBase,
+        AssetUrlOptionsIncludeAbsolute,
+        AssetUrlOptionsTags,
+        CompileStyleSource,
+        CompileStyleFilename,
+        CompileStyleId,
+        CompileStyleScoped,
+        CompileStyleTrim,
+        CompileStyleIsProd,
+        CompileStyleInMap,
+        CompileStylePreprocessLang,
+        CompileStylePreprocessOptions,
+        CompileStylePreprocessCustomRequire,
+        CompileStylePostcssOptions,
+        CompileStylePostcssPlugins,
+        CompileStyleMap,
+        CompileStyleIsAsync,
+        CompileStyleModules,
+        CompileStyleModulesOptions,
+        CssModulesOptionsScopeBehaviour,
+        CssModulesOptionsGenerateScopedName,
+        CssModulesOptionsHashPrefix,
+        CssModulesOptionsLocalsConvention,
+        CssModulesOptionsExportGlobals,
+        CssModulesOptionsGlobalModulePaths,
+    ]
+};
+
+// ───────────────────────────── canonical request ─────────────────────────
+
+/// Preserve whitespace vs condense it — mirrors the compiler's existing
+/// `WhitespaceStrategy` semantics (kept as its own type here so this module
+/// has no dependency on `crate::compile::types`, which it is replacing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VueWhitespaceStrategy {
+    Preserve,
+    Condense,
+}
+
+/// Which Vue client codegen backend a `RuntimeClient` product resolves to.
+/// `Inferred` defers to the parsed source's own `<template vapor>` marker —
+/// resolved by [`crate::compile_request::CompileRequest::resolve_vue_backend`]
+/// after parsing, since backend inference needs the parsed AST and request
+/// construction runs before parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VueBackendRequest {
+    #[default]
+    Inferred,
+    Vdom,
+    Vapor,
+}
+
+/// SFC padding strategy for lines before the first script/template block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VueParsePad {
+    Space,
+    Line,
+    Off,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VueAssetUrlOptions {
+    pub base: Option<String>,
+    pub include_absolute: Option<bool>,
+    pub tags: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VueAssetUrlTransform {
+    Disabled,
+    Enabled(VueAssetUrlOptions),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VueCssModuleScopeBehaviour {
+    Local,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VueCssModuleLocalsConvention {
+    CamelCase,
+    CamelCaseOnly,
+    Dashes,
+    DashesOnly,
+    AsIs,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VueCssModulesOptions {
+    pub scope_behaviour: Option<VueCssModuleScopeBehaviour>,
+    pub hash_prefix: Option<String>,
+    pub locals_convention: Option<VueCssModuleLocalsConvention>,
+    pub export_globals: Option<bool>,
+}
+
+/// The canonical, exhaustively-classified Vue portion of a compile request.
+/// Every field here corresponds to exactly one (or, for the two
+/// documented same-canonical-field pairs — `isCustomElement`,
+/// `hoistStatic` — exactly two) `supported canonical` row of
+/// `vue-options.tsv`. There is no field for any `unsupported fail-closed`
+/// row: those are structurally unrepresentable here — the type itself is
+/// the fail-closed-by-construction proof, and [`VueOptionAttempt`] is the
+/// typed refusal surface a transport-boundary decoder uses when a caller
+/// still supplies the legacy option shape.
+#[derive(Debug, Clone, Default)]
+pub struct VueCompileRequest {
+    pub backend: VueBackendRequest,
+    pub ssr: bool,
+    /// `ParserOptions.isCustomElement` / `TransformOptions.isCustomElement`
+    /// — the canonical template-tag matcher; distinct from
+    /// `script_custom_element` (trap: two different `customElement` axes).
+    pub is_custom_element: Vec<String>,
+    pub delimiters: Option<(String, String)>,
+    pub whitespace: Option<VueWhitespaceStrategy>,
+    pub comments: Option<bool>,
+    pub hoist_static: Option<bool>,
+    pub cache_handlers: Option<bool>,
+    pub hmr: Option<bool>,
+    pub optimize_imports: Option<bool>,
+    pub runtime_module_name: Option<String>,
+    pub ssr_runtime_module_name: Option<String>,
+    pub parse_pad: Option<VueParsePad>,
+    pub ignore_empty: Option<bool>,
+    pub babel_parser_plugins: Vec<String>,
+    pub gen_default_as: Option<String>,
+    pub props_destructure: Option<bool>,
+    /// `compileScript.customElement` — the script runtime-prop policy axis;
+    /// distinct from `is_custom_element` (template-tag matcher).
+    pub script_custom_element: Option<bool>,
+    pub transform_asset_urls: Option<VueAssetUrlTransform>,
+    pub style_trim: Option<bool>,
+    pub css_modules: Option<VueCssModulesOptions>,
+}
+
+impl VueBackendRequest {
+    pub const fn is_vapor(self) -> bool {
+        matches!(self, VueBackendRequest::Vapor)
+    }
+}
+
+/// Every field a legacy/transport-facing caller might still try to set for
+/// Vue — the 29 `supported canonical` rows (folded to 27 slots) plus the 12
+/// `unsupported fail-closed` rows. Exists ONLY as the typed refusal/decode
+/// surface a transport boundary (NAPI/FFI/session) builds from raw input
+/// before calling [`Self::into_request`] — never itself a second option
+/// authority read by any downstream compiler stage. `Some(_)` on an
+/// unsupported-shaped field means "the caller supplied this option",
+/// refused regardless of the inner value (including an explicit `false`).
+#[derive(Debug, Clone, Default)]
+pub struct VueOptionAttempt {
+    pub backend: VueBackendRequest,
+    pub ssr: bool,
+    pub is_custom_element: Vec<String>,
+    pub delimiters: Option<(String, String)>,
+    pub whitespace: Option<VueWhitespaceStrategy>,
+    pub comments: Option<bool>,
+    pub hoist_static: Option<bool>,
+    pub cache_handlers: Option<bool>,
+    pub hmr: Option<bool>,
+    pub optimize_imports: Option<bool>,
+    pub runtime_module_name: Option<String>,
+    pub ssr_runtime_module_name: Option<String>,
+    pub parse_pad: Option<VueParsePad>,
+    pub ignore_empty: Option<bool>,
+    pub babel_parser_plugins: Vec<String>,
+    pub gen_default_as: Option<String>,
+    pub props_destructure: Option<bool>,
+    pub script_custom_element: Option<bool>,
+    pub transform_asset_urls: Option<VueAssetUrlTransform>,
+    pub style_trim: Option<bool>,
+    pub css_modules: Option<VueCssModulesOptions>,
+
+    // The 12 unsupported-fail-closed slots. `Some(true)` OR `Some(false)`
+    // both mean "the caller supplied this option" — presence is what is
+    // refused, even an explicit `false`.
+    pub compat_config: Option<bool>,
+    pub compat_config_mode: Option<bool>,
+    pub compat_config_compiler_is_on_element: Option<bool>,
+    pub compat_config_compiler_v_bind_sync: Option<bool>,
+    pub compat_config_compiler_v_if_v_for_precedence: Option<bool>,
+    pub compat_config_compiler_v_bind_object_order: Option<bool>,
+    pub compat_config_compiler_v_on_native: Option<bool>,
+    pub compat_config_compiler_native_template: Option<bool>,
+    pub compat_config_compiler_inline_template: Option<bool>,
+    pub compat_config_compiler_filters: Option<bool>,
+    /// `TransformOptions.compatConfig` — inherits the SAME complete
+    /// refusal as `ParserOptions.compatConfig` (trap #3): a separate flag
+    /// so a caller who supplies it only on the transform surface is still
+    /// caught.
+    pub transform_compat_config: Option<bool>,
+    pub codegen_mode: Option<bool>,
+}
+
+impl VueOptionAttempt {
+    /// Every unsupported-fail-closed field, paired with the exact
+    /// `VueOption` row it refuses — iterated by
+    /// [`Self::into_request`] so a refusal always names the precise row.
+    fn unsupported_slots(&self) -> [(bool, VueOption); 12] {
+        [
+            (
+                self.compat_config.is_some(),
+                VueOption::ParserOptionsCompatConfig,
+            ),
+            (
+                self.compat_config_mode.is_some(),
+                VueOption::ParserOptionsCompatConfigMode,
+            ),
+            (
+                self.compat_config_compiler_is_on_element.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerIsOnElement,
+            ),
+            (
+                self.compat_config_compiler_v_bind_sync.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerVBindSync,
+            ),
+            (
+                self.compat_config_compiler_v_if_v_for_precedence.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerVIfVForPrecedence,
+            ),
+            (
+                self.compat_config_compiler_v_bind_object_order.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerVBindObjectOrder,
+            ),
+            (
+                self.compat_config_compiler_v_on_native.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerVOnNative,
+            ),
+            (
+                self.compat_config_compiler_native_template.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerNativeTemplate,
+            ),
+            (
+                self.compat_config_compiler_inline_template.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerInlineTemplate,
+            ),
+            (
+                self.compat_config_compiler_filters.is_some(),
+                VueOption::ParserOptionsCompatConfigCompilerFilters,
+            ),
+            (
+                self.transform_compat_config.is_some(),
+                VueOption::TransformOptionsCompatConfig,
+            ),
+            (self.codegen_mode.is_some(), VueOption::CodegenOptionsMode),
+        ]
+    }
+
+    /// Converts this attempt into the canonical [`VueCompileRequest`],
+    /// refusing on the first unsupported field present (deterministic
+    /// declaration order) via
+    /// [`crate::compile_request::CompileRequestError::UnsupportedOption`].
+    pub fn into_request(
+        self,
+    ) -> Result<VueCompileRequest, crate::compile_request::CompileRequestError> {
+        for (present, option) in self.unsupported_slots() {
+            if present {
+                return Err(
+                    crate::compile_request::CompileRequestError::UnsupportedOption {
+                        option: crate::compile_request::FrameworkOption::Vue(option),
+                        capability: None,
+                    },
+                );
+            }
+        }
+        Ok(VueCompileRequest {
+            backend: self.backend,
+            ssr: self.ssr,
+            is_custom_element: self.is_custom_element,
+            delimiters: self.delimiters,
+            whitespace: self.whitespace,
+            comments: self.comments,
+            hoist_static: self.hoist_static,
+            cache_handlers: self.cache_handlers,
+            hmr: self.hmr,
+            optimize_imports: self.optimize_imports,
+            runtime_module_name: self.runtime_module_name,
+            ssr_runtime_module_name: self.ssr_runtime_module_name,
+            parse_pad: self.parse_pad,
+            ignore_empty: self.ignore_empty,
+            babel_parser_plugins: self.babel_parser_plugins,
+            gen_default_as: self.gen_default_as,
+            props_destructure: self.props_destructure,
+            script_custom_element: self.script_custom_element,
+            transform_asset_urls: self.transform_asset_urls,
+            style_trim: self.style_trim,
+            css_modules: self.css_modules,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_vue_options_list_matches_the_118_row_count() {
+        assert_eq!(
+            ALL_VUE_OPTIONS.len(),
+            118,
+            "vue-options.tsv has 118 data rows"
+        );
+    }
+
+    #[test]
+    fn vue_option_classification_counts_match_the_committed_tsv() {
+        use VueOptionClass::*;
+        let count = |c: VueOptionClass| {
+            ALL_VUE_OPTIONS
+                .iter()
+                .filter(|o| std::mem::discriminant(&o.class()) == std::mem::discriminant(&c))
+                .count()
+        };
+        assert_eq!(count(Derived), 52, "vue-options.tsv: 52 `derived` rows");
+        assert_eq!(
+            count(SupportedCanonical),
+            29,
+            "vue-options.tsv: 29 `supported canonical` rows"
+        );
+        assert_eq!(
+            count(UnsupportedFailClosed),
+            12,
+            "vue-options.tsv: 12 `unsupported fail-closed` rows"
+        );
+        assert_eq!(
+            count(HostResolved),
+            12,
+            "vue-options.tsv: 12 `host-resolved` rows"
+        );
+        assert_eq!(count(External), 8, "vue-options.tsv: 8 `external` rows");
+        assert_eq!(count(TestOnly), 4, "vue-options.tsv: 4 `test-only` rows");
+        assert_eq!(
+            count(NotApplicable),
+            1,
+            "vue-options.tsv: 1 `not applicable` row"
+        );
+    }
+
+    #[test]
+    fn every_unsupported_fail_closed_row_is_unrepresentable_on_vue_compile_request() {
+        // Structural half: `VueCompileRequest` simply has no field for any
+        // of the 12 unsupported rows — enforced at compile time by the
+        // type declaration, not something a runtime test can additionally
+        // verify (Rust has no field-absence reflection).
+        //
+        // The discriminating half a runtime test CAN prove: every
+        // SUPPORTED field survives `VueOptionAttempt::into_request`
+        // end to end. Set every one of the 20 `Option`/`Vec`-shaped
+        // supported fields to a distinctive non-default value and assert
+        // each one reaches the exact same value on the resulting
+        // `VueCompileRequest` — a regression that silently dropped a field
+        // in `into_request`'s field-by-field construction (the exact class
+        // `attempt_with_no_unsupported_fields_constructs` only spot-checks
+        // two fields for) fails this test.
+        let attempt = VueOptionAttempt {
+            backend: VueBackendRequest::Vapor,
+            ssr: true,
+            is_custom_element: vec!["my-".to_string(), "ion-".to_string()],
+            delimiters: Some(("[[".to_string(), "]]".to_string())),
+            whitespace: Some(VueWhitespaceStrategy::Preserve),
+            comments: Some(true),
+            hoist_static: Some(false),
+            cache_handlers: Some(true),
+            hmr: Some(true),
+            optimize_imports: Some(true),
+            runtime_module_name: Some("custom-vue".to_string()),
+            ssr_runtime_module_name: Some("custom-vue-server".to_string()),
+            parse_pad: Some(VueParsePad::Line),
+            ignore_empty: Some(true),
+            babel_parser_plugins: vec!["jsx".to_string()],
+            gen_default_as: Some("__default__".to_string()),
+            props_destructure: Some(true),
+            script_custom_element: Some(true),
+            transform_asset_urls: Some(VueAssetUrlTransform::Disabled),
+            style_trim: Some(true),
+            css_modules: Some(VueCssModulesOptions {
+                scope_behaviour: Some(VueCssModuleScopeBehaviour::Local),
+                hash_prefix: Some("prefix".to_string()),
+                locals_convention: None,
+                export_globals: Some(true),
+            }),
+            ..Default::default()
+        };
+        let request = attempt.into_request().expect("no unsupported field set");
+
+        assert_eq!(request.backend, VueBackendRequest::Vapor);
+        assert!(request.ssr);
+        assert_eq!(
+            request.is_custom_element,
+            vec!["my-".to_string(), "ion-".to_string()]
+        );
+        assert_eq!(
+            request.delimiters,
+            Some(("[[".to_string(), "]]".to_string()))
+        );
+        assert_eq!(request.whitespace, Some(VueWhitespaceStrategy::Preserve));
+        assert_eq!(request.comments, Some(true));
+        assert_eq!(request.hoist_static, Some(false));
+        assert_eq!(request.cache_handlers, Some(true));
+        assert_eq!(request.hmr, Some(true));
+        assert_eq!(request.optimize_imports, Some(true));
+        assert_eq!(request.runtime_module_name, Some("custom-vue".to_string()));
+        assert_eq!(
+            request.ssr_runtime_module_name,
+            Some("custom-vue-server".to_string())
+        );
+        assert_eq!(request.parse_pad, Some(VueParsePad::Line));
+        assert_eq!(request.ignore_empty, Some(true));
+        assert_eq!(request.babel_parser_plugins, vec!["jsx".to_string()]);
+        assert_eq!(request.gen_default_as, Some("__default__".to_string()));
+        assert_eq!(request.props_destructure, Some(true));
+        assert_eq!(request.script_custom_element, Some(true));
+        assert_eq!(
+            request.transform_asset_urls,
+            Some(VueAssetUrlTransform::Disabled)
+        );
+        assert_eq!(request.style_trim, Some(true));
+        let css_modules = request.css_modules.expect("css_modules survives");
+        assert_eq!(
+            css_modules.scope_behaviour,
+            Some(VueCssModuleScopeBehaviour::Local)
+        );
+        assert_eq!(css_modules.hash_prefix, Some("prefix".to_string()));
+        assert_eq!(css_modules.export_globals, Some(true));
+    }
+
+    #[test]
+    fn attempt_refuses_unsupported_option_even_when_explicitly_false() {
+        let attempt = VueOptionAttempt {
+            compat_config: Some(false),
+            ..Default::default()
+        };
+        let err = attempt.into_request().unwrap_err();
+        match err {
+            crate::compile_request::CompileRequestError::UnsupportedOption { option, .. } => {
+                assert_eq!(
+                    option,
+                    crate::compile_request::FrameworkOption::Vue(
+                        VueOption::ParserOptionsCompatConfig
+                    )
+                );
+            }
+            other => panic!("expected UnsupportedOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_with_no_unsupported_fields_constructs() {
+        let attempt = VueOptionAttempt {
+            comments: Some(true),
+            hoist_static: Some(false),
+            ..Default::default()
+        };
+        let request = attempt.into_request().expect("no unsupported field set");
+        assert_eq!(request.comments, Some(true));
+        assert_eq!(request.hoist_static, Some(false));
+    }
+
+    #[test]
+    fn each_of_the_twelve_unsupported_slots_refuses_independently() {
+        let base = VueOptionAttempt::default();
+        let mut variants: Vec<VueOptionAttempt> = Vec::new();
+        for i in 0..12u8 {
+            let mut a = base.clone();
+            match i {
+                0 => a.compat_config = Some(true),
+                1 => a.compat_config_mode = Some(true),
+                2 => a.compat_config_compiler_is_on_element = Some(true),
+                3 => a.compat_config_compiler_v_bind_sync = Some(true),
+                4 => a.compat_config_compiler_v_if_v_for_precedence = Some(true),
+                5 => a.compat_config_compiler_v_bind_object_order = Some(true),
+                6 => a.compat_config_compiler_v_on_native = Some(true),
+                7 => a.compat_config_compiler_native_template = Some(true),
+                8 => a.compat_config_compiler_inline_template = Some(true),
+                9 => a.compat_config_compiler_filters = Some(true),
+                10 => a.transform_compat_config = Some(true),
+                11 => a.codegen_mode = Some(true),
+                _ => unreachable!(),
+            }
+            variants.push(a);
+        }
+        for (i, attempt) in variants.into_iter().enumerate() {
+            assert!(
+                attempt.into_request().is_err(),
+                "slot {i} must refuse construction"
+            );
+        }
+    }
+}

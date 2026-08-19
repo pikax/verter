@@ -36,7 +36,11 @@ fn every_request_kind() -> Vec<RequestKind> {
         RequestKind::TypeResolution,
         RequestKind::SemanticAnalysis,
         RequestKind::Compile {
-            target: verter_audit::payloads::tags::CompileTargetTag::Ide,
+            products: verter_audit::payloads::tags::CompileProductSetTag {
+                ide_companion: true,
+                ..Default::default()
+            },
+            backend: verter_audit::payloads::tags::CompileBackendTag::Inferred,
         },
         RequestKind::Workspace {
             op: verter_audit::payloads::WorkspaceOp::AuditResolve {

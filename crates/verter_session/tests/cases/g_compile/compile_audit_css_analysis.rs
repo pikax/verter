@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use verter_compiler::compile::CompileTarget;
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 

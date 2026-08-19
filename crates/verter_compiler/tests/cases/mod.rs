@@ -1,3 +1,4 @@
+mod capability_matrix_compile_request_coverage;
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;
 mod indexed_prop_lookup;
@@ -12,6 +13,7 @@ mod segmented_overwrite_compile_fail;
 mod style_planner;
 mod svelte_bind_contract_freshness;
 mod svelte_carrier_parse_rejection;
+mod svelte_carrier_runtime_compile_options_channel;
 mod svelte_client_authored_value_routing_guard;
 mod svelte_client_emit_topology;
 mod svelte_client_fail_matrix;

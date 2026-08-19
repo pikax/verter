@@ -525,6 +525,77 @@ fn runtime_render_syntax_error_is_fatal() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6b — SSR x Vapor stays a typed refusal on RuntimeRender, not wrong output
+// ---------------------------------------------------------------------------
+
+/// `compile_many`'s `RuntimeRender` lane — the shared substrate NAPI's
+/// `compileMany` and the unplugin's bundler render route both go through —
+/// must refuse an `ssr=true, force_vapor=true` batch render profile with a
+/// fatal typed error, not silently reach codegen. Regression coverage for
+/// the `compile_bundle` fail-closed gate: this lane calls
+/// `compiler.compile_bundle` directly (not `CompileRequest::new`), so
+/// without that gate this combination would have produced whatever the
+/// Vapor/SSR codegen paths happen to interact to on an unvalidated input,
+/// not a clean refusal.
+#[test]
+fn runtime_render_refuses_ssr_and_force_vapor() {
+    let src = "<template><div>{{ a }}</div></template>\n";
+    let host = new_host();
+    let mut profile = render_profile(false, true, false, crate::types::HmrStrategy::None);
+    profile.force_vapor = true;
+    let render = render_with_profile(&host, "/proj/SsrVaporRender.vue", src, profile, None);
+    let errors = render.errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("SsrVaporBackendUnsupported")),
+        "ssr=true + force_vapor=true must refuse with the exact typed \
+         SsrVaporBackendUnsupported variant (caught at CompileRequest \
+         construction, before compile_bundle even runs), got errors: {errors:?}"
+    );
+}
+
+/// The IMPLICIT half of the same rule, through the same real production
+/// route: no `force_vapor`, but the source's own `<template vapor>` marker
+/// resolves the backend to Vapor once parsed. `build_compile_request`
+/// cannot see this at construction time (parsing has not happened yet) —
+/// this is `compile_bundle`'s own post-parse guard, proven reachable
+/// through the FULL session route `compile_many` -> `render_only_main` ->
+/// `compile_entry_runtime_render` (the exact chain NAPI's `compileMany`,
+/// WASM, and the unplugin ingress all share), not just the compiler-crate
+/// unit test.
+#[test]
+fn runtime_render_refuses_implicit_vapor_marker_with_ssr() {
+    let src = "<template vapor><div>{{ a }}</div></template>\n";
+    let host = new_host();
+    let profile = render_profile(false, true, false, crate::types::HmrStrategy::None);
+    let render = render_with_profile(
+        &host,
+        "/proj/ImplicitVaporSsrRender.vue",
+        src,
+        profile,
+        None,
+    );
+    // `HostDiagnostic.message` for this specific refusal path is generic
+    // ("carrier 'vue' cannot produce a runtime bundle for ..."), not
+    // variant-named — the exact-variant proof for this refusal lives at
+    // the compiler-crate level
+    // (`compile_bundle_refuses_implicit_vapor_marker_with_ssr` in
+    // `vue_bridge.rs`). This test's job is narrower and different: prove
+    // the SAME refusal is REACHABLE through the real end-to-end session
+    // route (`compile_many` -> `render_only_main` ->
+    // `compile_entry_runtime_render`), the exact chain NAPI's
+    // `compileMany`, WASM, and the unplugin ingress all share — a fatal
+    // error is the observable this route exposes for a refusal.
+    assert!(
+        !render.errors().is_empty(),
+        "an implicit <template vapor> marker combined with ssr=true must be a fatal \
+         refusal reachable through the real production RuntimeRender route, got code: {:?}",
+        render.code()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 7 — RuntimeRender bypasses the Stage-C wrapper (perf guard)
 // ---------------------------------------------------------------------------
 

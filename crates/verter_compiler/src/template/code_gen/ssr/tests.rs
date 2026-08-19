@@ -5,9 +5,8 @@
 
 use oxc_allocator::Allocator;
 
-use crate::compile::{
-    compile, CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
-};
+use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::{VerterCompileResult, VueMacroSemanticInput};
 
 fn compile_sfc_ssr(source: &str) -> VerterCompileResult {
     compile_sfc_ssr_with_semantics(source, &VueMacroSemanticInput::Unavailable)

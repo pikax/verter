@@ -58,7 +58,7 @@ fn upsert(host: &VerterHost) {
 /// `CompileInput.style_v_bind_vars`.
 fn ide_profile() -> CompileProfile {
     CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: crate::CompileTarget::IDE,
         ..CompileProfile::default()
     }
 }

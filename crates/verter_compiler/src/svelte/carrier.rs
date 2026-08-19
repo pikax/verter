@@ -39,6 +39,32 @@ use crate::framework_common::FrameworkParseArtifact;
 
 use super::attribute_expressions::SvelteAttributeExpressions;
 use super::parser::{parse_svelte, CloseTagViolationKind, ParsedSvelte, SvelteScript};
+use super::runtime::{SvelteFragments, SvelteNamespace};
+
+/// Maps the canonical request's `svelte_namespace` string to the compiler's
+/// typed [`SvelteNamespace`]. Only the three official tokens are valid; an
+/// unrecognized token is a decode-boundary concern (transport validation),
+/// not something this carrier silently guesses at — it resolves to `None`
+/// (the request's own default), never fabricates a value.
+fn parse_svelte_namespace(token: &str) -> Option<SvelteNamespace> {
+    match token {
+        "html" => Some(SvelteNamespace::Html),
+        "svg" => Some(SvelteNamespace::Svg),
+        "mathml" => Some(SvelteNamespace::Mathml),
+        _ => None,
+    }
+}
+
+/// Maps the canonical request's `svelte_fragments` string to the compiler's
+/// typed [`SvelteFragments`]. See [`parse_svelte_namespace`] for the
+/// unrecognized-token rationale.
+fn parse_svelte_fragments(token: &str) -> Option<SvelteFragments> {
+    match token {
+        "html" => Some(SvelteFragments::Html),
+        "tree" => Some(SvelteFragments::Tree),
+        _ => None,
+    }
+}
 
 /// The concrete Svelte carrier: the parsed component behind the erasure seam,
 /// plus the typed lowering of its plain-attribute `{expr}` values.
@@ -510,6 +536,16 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         };
         let parsed = carrier.parsed();
 
+        // `inline` (Vue's `compileScript({ inlineTemplate })` production
+        // topology) is a Vue-only axis — mirrors `CompileRequest::new`'s
+        // non-Vue refusal so an explicit request this framework has no
+        // concept of fails closed instead of being silently ignored.
+        if opts.inline == Some(true) {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                crate::compile_request::CompileRequestError::InlineSsrUnsupported,
+            ));
+        }
+
         let mut bundle = RuntimeCompileOutput::default();
 
         // The Svelte native RUNTIME compiler (source `.svelte` → JS importing
@@ -526,15 +562,15 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         let runtime_opts = super::runtime::SvelteRuntimeOptions {
             filename: opts.filename.clone(),
             name: None,
-            runes: None,
+            runes: opts.svelte_runes,
             is_production: opts.is_production,
-            // The neutral `RuntimeCompileOptions` carries no dev-codegen request
-            // distinct from the §1.2 default (`is_production == false` is the
-            // canonical request shape, NOT a dev-codegen request), so the Svelte
-            // client backend always emits PRODUCTION output here. Dev-mode output is
-            // requested through a dedicated signal the neutral carrier does not carry,
-            // so `dev_codegen` stays false.
-            dev_codegen: false,
+            // `dev` (`ModuleCompileOptions.dev`) now threads through from the
+            // canonical request; an explicit `true` reaches the EXISTING
+            // `UnsupportedSvelteRuntimeSurface::DevMode` typed refusal
+            // downstream rather than being silently dropped to `false` —
+            // dev-mode codegen output liveness is a separate, tracked gap,
+            // not this carrier's to close.
+            dev_codegen: opts.svelte_dev.unwrap_or(false),
             // Explicit carrier profile axis. An in-source
             // `<svelte:options customElement>` value still wins over this
             // compile option, matching official precedence.
@@ -542,18 +578,24 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // The RESOLVED Svelte cssHash override (from the host/session boundary,
             // preserved byte-exact) threads verbatim into the style-plan scope class.
             css_hash_override: opts.svelte_css_hash_override.clone(),
-            // The essential compile options resolve on the compiler surface
-            // (`SvelteRuntimeOptions`) + the inline `<svelte:options>` element. The
-            // neutral `RuntimeCompileOptions` carries no host/session channel for
-            // `namespace` / `fragments` / `preserveWhitespace` / `preserveComments` /
-            // `discloseVersion`, and the unsupported feature options are not on the
-            // neutral carrier — so they default here (an in-source `<svelte:options
-            // namespace / preserveWhitespace>` still applies via the resolver).
-            namespace: None,
-            fragments: None,
-            preserve_whitespace: None,
-            preserve_comments: None,
-            disclose_version: None,
+            // The neutral `RuntimeCompileOptions` now carries a channel for
+            // each of these — an in-source `<svelte:options namespace /
+            // preserveWhitespace>` still wins via the resolver's INLINE-WINS
+            // fold, matching official precedence.
+            namespace: opts
+                .svelte_namespace
+                .as_deref()
+                .and_then(parse_svelte_namespace),
+            fragments: opts
+                .svelte_fragments
+                .as_deref()
+                .and_then(parse_svelte_fragments),
+            preserve_whitespace: opts.svelte_preserve_whitespace,
+            preserve_comments: opts.svelte_preserve_comments,
+            disclose_version: opts.svelte_disclose_version,
+            // Unsupported fail-closed rows (`accessors`, `immutable`, `hmr`,
+            // `compatibility.componentApi`) have no canonical-request field —
+            // structurally unrepresentable, per the compile-request module.
             accessors: None,
             immutable: None,
             hmr: None,
@@ -947,6 +989,37 @@ mod tests {
             artifact.diagnostics().is_empty(),
             "well-formed input must not surface false-positive parse diagnostics, got: {:?}",
             artifact.diagnostics()
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_explicit_inline_request() {
+        // `inline` (Vue's `compileScript({ inlineTemplate })` production
+        // topology) is a Vue-only axis; Svelte has no such concept. An
+        // explicit request must fail closed with a typed refusal rather
+        // than being silently ignored — mirrors `CompileRequest::new`'s
+        // non-Vue `InlineSsrUnsupported` refusal.
+        let compiler = SvelteCarrierCompiler;
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                inline: Some(true),
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    crate::compile_request::CompileRequestError::InlineSsrUnsupported
+                ))
+            ),
+            "expected a typed InlineSsrUnsupported refusal, got {result:?}"
         );
     }
 

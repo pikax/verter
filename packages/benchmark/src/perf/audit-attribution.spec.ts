@@ -13,7 +13,15 @@ function recordBuf(over: {
 }): Buffer {
   const payload = {
     kind: "Compile",
-    target: "Ide",
+    products: {
+      runtime_client: false,
+      runtime_server: false,
+      ide_companion: true,
+      public_api: false,
+      declarations: false,
+      analysis: false,
+    },
+    backend: "Inferred",
     parse_ms: 1,
     transform_ms: 2,
     codegen_ms: 3,

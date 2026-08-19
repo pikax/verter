@@ -25,8 +25,8 @@ use std::sync::Arc;
 use std::convert::Infallible;
 
 use verter_audit::{AuditCaptureState, RequestKind, RequestKindPayload, RequestTargetIdentity};
-use verter_compiler::compile::CompileTarget;
 use verter_session::host_mcp_audit::McpToolSuccess;
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 

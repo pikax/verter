@@ -45,7 +45,7 @@ use napi_derive::napi;
 use verter_audit::{
     payloads::tags::BundlerKindTag, AuditCaptureState, RequestAuditRecord, RequestKind, WorkspaceOp,
 };
-use verter_compiler::compile::CompileTarget;
+use verter_session::CompileTarget;
 
 /// Encode a record only when it represents real stored capture
 /// ([`AuditCaptureState::ActiveStored`]); a filtered or disabled record

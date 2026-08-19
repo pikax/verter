@@ -4,6 +4,7 @@
 //! from parser → compile result. Organized by error category with both positive
 //! (error IS reported) and negative (valid input produces NO error) assertions.
 
+use super::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
 use super::*;
 
 // ── Helpers ────────────────────────────────────────────────────────

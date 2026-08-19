@@ -85,7 +85,7 @@ fn vue_and_ts_routing_snapshot() {
     upsert(&host, "/src/util.ts", TS_FIXTURE, FileLanguage::script_ts());
 
     let profile = CompileProfile {
-        target: verter_compiler::compile::CompileTarget::IDE,
+        target: verter_session::CompileTarget::IDE,
         ..CompileProfile::default()
     };
     host.ensure_compiled("/src/App.vue", &profile)

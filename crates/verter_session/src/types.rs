@@ -1313,6 +1313,111 @@ impl HostConfig {
 /// the consumer/FFI surface.
 pub use crate::semantic_query::ProjectionMode;
 
+bitflags::bitflags! {
+    /// Controls which compilation steps [`CompileProfile::target`] requests.
+    ///
+    /// Session-owned: the canonical `CompileRequest` (`verter_compiler`) is
+    /// the ONE fail-closed construction authority for the actual compile
+    /// pipeline: every production entry point that reaches `compile_bundle`/
+    /// `compile()` builds a `CompileRequest` (via `CompileRequest::new` or
+    /// the equivalent per-route reverse-mapping helper) and refuses an
+    /// invalid product/mode combination by construction. This bitset exists
+    /// only because `CompileProfile` needs a `Hash`/`Eq` cache-slot
+    /// discriminant, and most of `CompileRequest`'s nested types are not
+    /// `Hash`. It is never passed into the compiler directly; call sites
+    /// convert it through `CompileRequest::new` (or a route's reverse-
+    /// mapping helper) before it can influence a compile.
+    ///
+    /// Use the preset constants for common configurations:
+    /// - [`BUNDLER`](Self::BUNDLER) — style + script + template codegen (runtime output)
+    /// - [`IDE`](Self::IDE) — TSX only (LSP type checking)
+    /// - [`ANALYSIS`](Self::ANALYSIS) — script + template data (MCP static analysis)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct CompileTarget: u8 {
+        /// Run style codegen (v-bind scan, scoped CSS, CSS modules).
+        const STYLE         = 0b0000_0001;
+        /// Run script codegen (macros, bindings, imports, CodeTransform).
+        const SCRIPT        = 0b0000_0010;
+        /// Run template VDOM/Vapor/SSR codegen (render function output).
+        const TEMPLATE      = 0b0000_0100;
+        /// Run TSX codegen (valid JSX for LSP/TSGO type checking).
+        const TSX           = 0b0000_1000;
+        /// Run TSC codegen (minimal TypeScript declarations).
+        const TSC           = 0b0001_0000;
+        /// Extract raw template data for cross-file analysis.
+        const TEMPLATE_DATA = 0b0010_0000;
+
+        /// Bundler preset: style + script + template VDOM codegen.
+        const BUNDLER  = Self::STYLE.bits() | Self::SCRIPT.bits() | Self::TEMPLATE.bits();
+        /// IDE/LSP preset: TSX only (independent of style/script/template).
+        const IDE      = Self::TSX.bits();
+        /// MCP analysis preset: script (for bindings) + template data extraction.
+        const ANALYSIS = Self::SCRIPT.bits() | Self::TEMPLATE_DATA.bits();
+        /// Component metadata preset: script bindings + template data extraction.
+        const META     = Self::SCRIPT.bits() | Self::TEMPLATE_DATA.bits();
+    }
+}
+
+impl Default for CompileTarget {
+    fn default() -> Self {
+        Self::BUNDLER
+    }
+}
+
+impl CompileTarget {
+    /// Whether style codegen should run.
+    pub fn needs_style(self) -> bool {
+        self.intersects(Self::STYLE)
+    }
+
+    /// Whether script codegen should run.
+    ///
+    /// True when SCRIPT, TEMPLATE, or TEMPLATE_DATA is set, since template
+    /// codegen and template data extraction both consume script bindings.
+    pub fn needs_script(self) -> bool {
+        self.intersects(Self::SCRIPT | Self::TEMPLATE | Self::TEMPLATE_DATA)
+    }
+
+    /// Whether compilation consumes authoritative runtime macro semantics.
+    pub fn needs_runtime_macro_semantics(self) -> bool {
+        self.needs_script() || self.needs_tsx()
+    }
+
+    /// Whether the emitted output actually carries the Vue runtime `props` /
+    /// `model` option objects.
+    pub fn needs_runtime_prop_constructors(self) -> bool {
+        self.publishes_runtime_module()
+    }
+
+    pub fn publishes_runtime_module(self) -> bool {
+        self.intersects(Self::SCRIPT | Self::TEMPLATE)
+    }
+
+    pub fn needs_runtime_module(self) -> bool {
+        self.intersects(Self::STYLE | Self::SCRIPT | Self::TEMPLATE)
+    }
+
+    /// Whether VDOM/Vapor/SSR template codegen should run.
+    pub fn needs_template_codegen(self) -> bool {
+        self.intersects(Self::TEMPLATE)
+    }
+
+    /// Whether TSX codegen should run.
+    pub fn needs_tsx(self) -> bool {
+        self.intersects(Self::TSX)
+    }
+
+    /// Whether TSC codegen should run.
+    pub fn needs_tsc(self) -> bool {
+        self.intersects(Self::TSC)
+    }
+
+    /// Whether raw template data extraction should run.
+    pub fn needs_template_data(self) -> bool {
+        self.intersects(Self::TEMPLATE_DATA)
+    }
+}
+
 /// Per-compilation variant options.
 ///
 /// A single `.vue` file can be compiled multiple times with different profiles
@@ -1378,8 +1483,8 @@ pub struct CompileProfile {
     /// Generate source maps for compiled output.
     pub source_map: bool,
     /// Controls which compilation steps run.
-    /// See [`verter_compiler::compile::CompileTarget`] for available flags and presets.
-    pub target: verter_compiler::compile::CompileTarget,
+    /// See [`CompileTarget`] for available flags and presets.
+    pub target: CompileTarget,
     /// Embed `declare module "@verter/types"` in generated TSX.
     /// When `false` (default), relies on the real `@verter/types` package.
     pub embed_ambient_types: bool,
@@ -1399,6 +1504,60 @@ pub struct CompileProfile {
     /// caching stays safe because the exact override is in the profile identity
     /// and re-validated on every warm hit.
     pub svelte_css_hash_override: Option<String>,
+    /// Svelte `ModuleCompileOptions.dev` — distinct from `is_production`
+    /// (dev-mode codegen currently fails closed;
+    /// `UnsupportedSvelteRuntimeSurface::DevMode`). `None` leaves dev
+    /// codegen off, matching today's default.
+    pub svelte_dev: Option<bool>,
+    /// Svelte `CompileOptions.runes` — explicit `true`/`false` selection.
+    /// `None` defers to source/usage inference (`forced_runes_option` /
+    /// script-usage detection), matching today's default.
+    pub svelte_runes: Option<bool>,
+    /// Svelte `CompileOptions.namespace` — `"html"` (the only backend this
+    /// carrier emits), `"svg"`, or `"mathml"`. A non-`"html"` selection
+    /// fails closed (`UnsupportedSvelteRuntimeSurface::NamespaceUnsupported`).
+    pub svelte_namespace: Option<String>,
+    /// Svelte `CompileOptions.fragments` — `"html"` (default) or `"tree"`.
+    pub svelte_fragments: Option<String>,
+    /// Svelte `CompileOptions.preserveWhitespace`.
+    pub svelte_preserve_whitespace: Option<bool>,
+    /// Svelte `CompileOptions.preserveComments`.
+    pub svelte_preserve_comments: Option<bool>,
+    /// Svelte `CompileOptions.discloseVersion`.
+    pub svelte_disclose_version: Option<bool>,
+    /// Svelte `ModuleCompileOptions.generate`. Settable here (a
+    /// `supported canonical` option row in isolation), but there is no
+    /// Verter product for Svelte's `ModuleJavaScript` output family
+    /// today: setting this refuses `build_compile_request` with a typed
+    /// `UnsupportedOption` naming the `SvelteModule` capability cell,
+    /// `unsupported fail-closed` per `capability-matrix.tsv` — the same
+    /// "option admits fine, the capability it depends on does not"
+    /// pattern as `VUE-COMPAT-V2`.
+    pub svelte_generate_module: Option<bool>,
+    /// Svelte `ModuleCompileOptions.experimental.async`. Same capability
+    /// gate as [`Self::svelte_generate_module`] — also refuses.
+    pub svelte_experimental_async: Option<bool>,
+    /// Svelte `CompileOptions.css` — `"injected"` or `"external"`. Not yet
+    /// consulted by the carrier's own css-mode detection (which derives
+    /// the mode from the source's `<svelte:options css>` / `<style>`
+    /// content instead) — representable on the request, not yet live.
+    pub svelte_css: Option<String>,
+    /// Svelte `SvelteOptions.customElement.tag` — the custom-element tag
+    /// name. Not yet consulted by the carrier's custom-element
+    /// resolution (`resolve_custom_element`, which only reads the plain
+    /// `customElement: bool` axis today) — representable, not yet live.
+    pub svelte_custom_element_tag: Option<String>,
+    /// Svelte `SvelteOptions.customElement.shadow` — `true` (open shadow
+    /// root, the default) or `false` (no shadow root). Same carrier-
+    /// wiring status as [`Self::svelte_custom_element_tag`].
+    pub svelte_custom_element_shadow: Option<bool>,
+    /// Svelte `CompileOptions.compatibility` — presence-only (the
+    /// canonical `SvelteCompatibilityRequest` object carries no
+    /// meaningful sub-fields once its `componentApi` axis is excluded as
+    /// `unsupported fail-closed`; only WHETHER the caller specified
+    /// `compatibility: {}` at all is representable). `Some(true)` sets
+    /// the presence marker; `None`/`Some(false)` omit it.
+    pub svelte_compatibility: Option<bool>,
     /// Caller-requested compile cache mode for this request.
     ///
     /// The host classifies this against the request's eligibility
@@ -1444,11 +1603,24 @@ impl Default for CompileProfile {
             force_js: false,
             inline: None,
             source_map: false,
-            target: verter_compiler::compile::CompileTarget::BUNDLER,
+            target: CompileTarget::BUNDLER,
             embed_ambient_types: false,
             conditional_root_narrowing: false,
             strict_slots: false,
             svelte_css_hash_override: None,
+            svelte_dev: None,
+            svelte_runes: None,
+            svelte_namespace: None,
+            svelte_fragments: None,
+            svelte_preserve_whitespace: None,
+            svelte_preserve_comments: None,
+            svelte_disclose_version: None,
+            svelte_generate_module: None,
+            svelte_experimental_async: None,
+            svelte_css: None,
+            svelte_custom_element_tag: None,
+            svelte_custom_element_shadow: None,
+            svelte_compatibility: None,
             requested_mode: CompileCacheMode::Session,
         }
     }
@@ -2662,7 +2834,7 @@ impl FileMeta {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Geometry fields remain until the B4 physical cleanup.
+#[allow(dead_code)] // Geometry fields remain until the physical cleanup lands.
 pub(crate) struct SrcBlockInfo {
     pub(crate) tag_name: String,
     pub(crate) resolved_canonical_id: String,

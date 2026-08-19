@@ -31,7 +31,7 @@ use verter_language::{
 use super::FrameworkParseArtifact;
 
 use crate::compile::template_data::RawTemplateData;
-use crate::compile::types::{CompileDiagnosticSeverity, CompileTarget, DestructuredBlockMeta};
+use crate::compile::types::{CompileDiagnosticSeverity, DestructuredBlockMeta};
 
 /// IDE-codegen options threaded into [`CarrierCompiler::compile_ide`].
 ///
@@ -281,16 +281,19 @@ impl RuntimeOutputDescriptor {
 /// The typed reason a carrier compiler cannot satisfy a requested IDE
 /// compile.
 ///
-/// Invariant 4: an unsupported [`CompileTarget`] bit (or a framework that
+/// Invariant 4: an unsupported `CompileTarget` bit (or a framework that
 /// does not project an IDE file) returns this typed value, NEVER a silent
 /// empty output and NEVER a panic. The neutral host seam matches on it
 /// explicitly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileUnsupported {
     /// The requested target did not include the IDE (`TSX`) bit, so there
-    /// is no IDE artifact to produce. Carries the requested target for
-    /// diagnostics.
-    TargetMissingIde(CompileTarget),
+    /// is no IDE artifact to produce. No longer carries the requested
+    /// target: `CompileTarget` is crate-private (the canonical
+    /// `CompileRequest` is the only production-reachable option authority),
+    /// and every external match on this variant already discards the
+    /// payload (`TargetMissingIde(_)`).
+    TargetMissingIde,
     /// The framework does not project an IDE virtual file at all.
     NoIdeProjection {
         /// The adapter that declined the IDE compile.
@@ -308,6 +311,12 @@ pub enum CompileUnsupported {
         /// The adapter that declined the IDE compile.
         adapter_id: FrameworkAdapterId,
     },
+    /// The canonical `CompileRequest` refused at post-parse resolution —
+    /// `SSR x Vapor` (implicit `<template vapor>` marker) or `inline x
+    /// Vapor` (deferred capability). Every other fail-closed rule is
+    /// enforced at `CompileRequest::new` (before any carrier compile is
+    /// attempted at all); this is the residual post-parse half.
+    RequestExecutionRefused(crate::compile_request::CompileRequestError),
 }
 
 /// Framework-neutral template facts extracted from a carrier parse.
@@ -358,6 +367,23 @@ pub struct RuntimeCompileOptions {
     /// it. Distinct from `component_id` (a Vue explicit scope id — never overloaded
     /// for the Svelte cssHash override).
     pub svelte_css_hash_override: Option<String>,
+    /// Svelte `ModuleCompileOptions.dev`. Vue ignores it.
+    pub svelte_dev: Option<bool>,
+    /// Svelte `CompileOptions.runes` — explicit `true`/`false` selection;
+    /// `None` defers to source/usage inference. Vue ignores it.
+    pub svelte_runes: Option<bool>,
+    /// Svelte `CompileOptions.namespace` — `"html"`, `"svg"`, or
+    /// `"mathml"`. Vue ignores it.
+    pub svelte_namespace: Option<String>,
+    /// Svelte `CompileOptions.fragments` — `"html"` or `"tree"`. Vue
+    /// ignores it.
+    pub svelte_fragments: Option<String>,
+    /// Svelte `CompileOptions.preserveWhitespace`. Vue ignores it.
+    pub svelte_preserve_whitespace: Option<bool>,
+    /// Svelte `CompileOptions.preserveComments`. Vue ignores it.
+    pub svelte_preserve_comments: Option<bool>,
+    /// Svelte `CompileOptions.discloseVersion`. Vue ignores it.
+    pub svelte_disclose_version: Option<bool>,
     /// Force JavaScript output (strip TypeScript syntax).
     pub force_js: bool,
     /// Force Vapor-mode codegen regardless of template attributes (Vue).
@@ -402,14 +428,13 @@ pub struct RuntimeCompileOptions {
     /// builds). Only the client VDOM backend honors this; Vapor inline and
     /// inline SSR are deferred (the carrier falls back to non-inline).
     pub inline: Option<bool>,
-    /// Framework-PRIVATE resolved compile inputs, opaque to the neutral
-    /// surface. A carrier downcasts this to its own typed extras
-    /// (`vue_bridge::VueRuntimeCompileExtras` — the host-resolved
-    /// macro DTOs / `prop_constness` / `style_v_bind_vars`); a carrier
-    /// without a private extras shape ignores it. Keeping it opaque keeps each
-    /// framework's resolution-specific DTOs out of the cross-framework
-    /// contract.
-    pub framework_extras: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+    /// Vue-PRIVATE resolved compile inputs — the host-resolved macro DTO,
+    /// prop-constness overrides, and style `v-bind()` usage facts. Typed
+    /// (replaces the former `framework_extras: Option<Arc<dyn Any + Send +
+    /// Sync>>` opaque downcast channel per the ruling's ephemeral
+    /// execution-input carrier: excluded from `CompileRequest` identity,
+    /// but no longer erased — a Svelte carrier simply ignores it.
+    pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -431,6 +456,13 @@ impl Default for RuntimeCompileOptions {
             runtime_module_name: None,
             component_id: None,
             svelte_css_hash_override: None,
+            svelte_dev: None,
+            svelte_runes: None,
+            svelte_namespace: None,
+            svelte_fragments: None,
+            svelte_preserve_whitespace: None,
+            svelte_preserve_comments: None,
+            svelte_disclose_version: None,
             force_js: false,
             force_vapor: false,
             comments: None,
@@ -445,7 +477,7 @@ impl Default for RuntimeCompileOptions {
             strict_slots: false,
             block_content: RuntimeBlockContentInputs::default(),
             inline: None,
-            framework_extras: None,
+            vue_facts: None,
         }
     }
 }
@@ -1178,15 +1210,8 @@ mod contract_tests {
     }
 
     #[test]
-    fn target_missing_ide_carries_the_requested_target() {
-        // The typed unsupported variant carries the offending target — a
-        // bundler-only target has no IDE bit.
-        let err = CompileUnsupported::TargetMissingIde(CompileTarget::BUNDLER);
-        match err {
-            CompileUnsupported::TargetMissingIde(t) => {
-                assert!(!t.needs_tsx(), "BUNDLER carries no TSX bit");
-            }
-            other => panic!("unexpected variant: {other:?}"),
-        }
+    fn target_missing_ide_is_constructible() {
+        let err = CompileUnsupported::TargetMissingIde;
+        assert!(matches!(err, CompileUnsupported::TargetMissingIde));
     }
 }

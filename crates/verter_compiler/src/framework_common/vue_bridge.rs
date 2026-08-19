@@ -27,12 +27,14 @@ use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
 use crate::compile::types::{
-    CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueExecutionInputs,
+    VueMacroSemanticInput,
 };
 use crate::compile::{
-    compile_from_parsed, parse_script_block, parse_sfc, parse_template_block,
-    template_unit_used_vars,
+    compile_from_parsed, compile_from_parsed_legacy, parse_script_block, parse_sfc,
+    parse_template_block, template_unit_used_vars,
 };
+use crate::compile_request::CompileRequestError;
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
@@ -203,27 +205,6 @@ pub fn build_vue_parse_artifact(
     ))
 }
 
-/// Vue-PRIVATE resolved runtime-compile inputs, carried opaquely through
-/// [`RuntimeCompileOptions::framework_extras`](crate::framework_common::RuntimeCompileOptions::framework_extras)
-/// and downcast here.
-///
-/// These are the host-resolved inputs the Vue runtime compile consumes:
-/// authoritative macro runtime semantics, `prop_constness_overrides`, and
-/// `style_v_bind_vars`. They live HERE (the Vue module) rather than on the
-/// neutral [`RuntimeCompileOptions`] so Vue's typed macro DTO never enters the
-/// cross-framework carrier contract — a non-Vue carrier never names or sees it.
-#[derive(Debug, Default)]
-pub struct VueRuntimeCompileExtras {
-    /// Authoritative runtime projection produced once by the session.
-    pub macro_runtime: Option<std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>>,
-    /// Props known const across all call sites (cross-file analysis).
-    pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
-    /// Binding names referenced in style `v-bind()` expressions.
-    pub style_v_bind_vars: Vec<String>,
-    /// Whether every projected-style `v-bind()` expression was parsed.
-    pub style_v_bind_usage_complete: bool,
-}
-
 /// The Vue carrier compiler — the reference [`CarrierCompiler`].
 ///
 /// Delegates call-for-call to the existing Vue pipeline (`parse_sfc` +
@@ -293,10 +274,7 @@ impl VueCarrierCompiler {
                 adapter_id: self.adapter_id(),
             });
         }
-        let extras = opts
-            .framework_extras
-            .as_ref()
-            .and_then(|any| any.downcast_ref::<VueRuntimeCompileExtras>());
+        let extras = opts.vue_facts.as_ref();
         let macro_semantics = extras
             .and_then(|extras| extras.macro_runtime.clone())
             .map(VueMacroSemanticInput::Runtime)
@@ -318,7 +296,7 @@ impl VueCarrierCompiler {
         if opts.want_ide {
             script_target |= CompileTarget::TSX;
         }
-        let script_result = compile_from_parsed(
+        let script_result = compile_from_parsed_legacy(
             &input.code,
             &script_parsed,
             &CodegenOptions {
@@ -336,15 +314,22 @@ impl VueCarrierCompiler {
                 ide_chunk_boundaries: opts.want_ide,
                 ..Default::default()
             },
-            &VerterCompileOptions {
+            &ResolvedVueCompileOptions {
                 force_js: opts.force_js,
-                source_map: opts.source_map || opts.want_ide,
+                // Decoupled (the fixed map-coupling bug): requesting the IDE
+                // product no longer silently forces the runtime script map
+                // on. Each output's map tracks the caller's own
+                // `source_map` request, gated on whether that product was
+                // actually asked for.
+                source_map: opts.source_map,
+                ide_source_map: opts.source_map && opts.want_ide,
                 template_used_vars: Some(template_used_vars),
                 ..Default::default()
             },
             &macro_semantics,
             alloc,
-        );
+        )
+        .map_err(CompileUnsupported::RequestExecutionRefused)?;
         let binding_metadata = script_result.template_binding_metadata.clone();
         let mut script_bundle =
             vue_result_to_runtime_bundle(&input.code, &script_parsed, script_result);
@@ -361,7 +346,7 @@ impl VueCarrierCompiler {
         if opts.want_template_data {
             carrier_target |= CompileTarget::TEMPLATE_DATA;
         }
-        let carrier_result = compile_from_parsed(
+        let carrier_result = compile_from_parsed_legacy(
             source,
             &carrier_view,
             &CodegenOptions {
@@ -381,19 +366,21 @@ impl VueCarrierCompiler {
                 ide_chunk_boundaries: opts.want_ide,
                 ..Default::default()
             },
-            &VerterCompileOptions {
+            &ResolvedVueCompileOptions {
                 force_vapor: opts.force_vapor,
                 force_js: opts.force_js,
-                source_map: opts.source_map || opts.want_ide,
+                // Decoupled — see the sibling script-unit compile above.
+                source_map: opts.source_map,
+                ide_source_map: opts.source_map && opts.want_ide,
                 ssr: opts.ssr,
-                extract_template_data: opts.want_template_data,
                 prop_constness_overrides: binding_metadata.const_props.clone(),
                 template_binding_metadata: Some(binding_metadata),
                 ..Default::default()
             },
             &VueMacroSemanticInput::default(),
             alloc,
-        );
+        )
+        .map_err(CompileUnsupported::RequestExecutionRefused)?;
         let mut bundle = vue_result_to_runtime_bundle(source, &carrier_view, carrier_result);
         let mut script = script_bundle.script.take().ok_or(
             CompileUnsupported::BlockContentRuntimeUnavailable {
@@ -493,8 +480,8 @@ impl VueCarrierCompiler {
 pub fn compile_registered_vue_artifact(
     source: &str,
     artifact: &FrameworkParseArtifact,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
     macro_semantics: &VueMacroSemanticInput,
     allocator: &oxc_allocator::Allocator,
 ) -> Result<crate::compile::VerterCompileResult, CompileUnsupported> {
@@ -517,11 +504,12 @@ pub fn compile_registered_vue_artifact(
     let result = compile_from_parsed(
         source,
         parsed,
-        options,
-        verter_options,
+        request,
+        execution_inputs,
         macro_semantics,
         allocator,
-    );
+    )
+    .map_err(CompileUnsupported::RequestExecutionRefused)?;
     // Determinism digest over the emitted block LENGTHS: two runs over the
     // same source must emit the same sizes. A cheap tripwire for
     // nondeterministic codegen — it does not hash the bytes.
@@ -535,6 +523,26 @@ pub fn compile_registered_vue_artifact(
             ^ (result.styles.len() as u64).wrapping_mul(0x1000_000d)
     );
     Ok(result)
+}
+
+/// Resolves the Vue backend (Vdom/Vapor) a [`compile_registered_vue_artifact`]
+/// call against this exact `(artifact, request)` pair will use — the SAME
+/// resolution `compile_from_parsed` applies internally
+/// (`request.resolve_vue_backend(parsed.is_vapor())`), exposed so audit /
+/// reporting call sites can attribute the REAL resolved backend (accounting
+/// for the source's own implicit `<template vapor>` marker) rather than
+/// re-deriving a lossy approximation from the request's declared backend
+/// intent alone. Returns `None` when the artifact carries no parsed Vue SFC
+/// (foreign carrier) — the caller has nothing to resolve against.
+pub fn resolve_vue_backend_for_audit(
+    artifact: &FrameworkParseArtifact,
+    request: &crate::compile_request::CompileRequest,
+) -> Option<
+    Result<crate::compile_request::ResolvedVueBackend, crate::compile_request::CompileRequestError>,
+> {
+    let compiler = VueCarrierCompiler;
+    let parsed = compiler.parsed_sfc(artifact)?;
+    Some(request.resolve_vue_backend(parsed.is_vapor()))
 }
 
 impl CarrierCompiler for VueCarrierCompiler {
@@ -668,23 +676,26 @@ impl CarrierCompiler for VueCarrierCompiler {
         let core_opts = CodegenOptions {
             filename: opts.filename.clone(),
             target: CompileTarget::IDE,
-            skip_source_map: opts.skip_source_map,
             embed_ambient_types: opts.embed_ambient_types,
             ..Default::default()
         };
-        let verter_opts = VerterCompileOptions {
-            source_map: !opts.skip_source_map,
+        let verter_opts = ResolvedVueCompileOptions {
+            // `target` is `CompileTarget::IDE` only — the only output this
+            // call ever produces is the TSX block, so it is
+            // `ide_source_map` that gates it, not the runtime `source_map`.
+            ide_source_map: !opts.skip_source_map,
             ..Default::default()
         };
         let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed(
+        let result = compile_from_parsed_legacy(
             source,
             parsed,
             &core_opts,
             &verter_opts,
             &VueMacroSemanticInput::Unavailable,
             &alloc,
-        );
+        )
+        .map_err(CompileUnsupported::RequestExecutionRefused)?;
 
         match result.tsx {
             Some(tsx) => {
@@ -709,7 +720,7 @@ impl CarrierCompiler for VueCarrierCompiler {
             // `CompileTarget::IDE` always sets `TSX`, so a missing `tsx`
             // block means the codegen produced no IDE artifact for this
             // carrier — the typed unsupported answer, never a silent empty.
-            None => Err(CompileUnsupported::TargetMissingIde(core_opts.target)),
+            None => Err(CompileUnsupported::TargetMissingIde),
         }
     }
 
@@ -719,23 +730,28 @@ impl CarrierCompiler for VueCarrierCompiler {
         };
         let core_opts = CodegenOptions {
             target: CompileTarget::TEMPLATE_DATA,
-            skip_source_map: true,
             ..Default::default()
         };
-        let verter_opts = VerterCompileOptions {
-            extract_template_data: true,
+        let verter_opts = ResolvedVueCompileOptions {
             source_map: false,
             ..Default::default()
         };
         let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed(
+        // `CarrierCompiler::template_data` returns a bare `TemplateFacts`
+        // (its trait signature has no error channel), so a construction
+        // refusal fails closed to the empty facts the caller already
+        // treats as "nothing extracted" — the SAME fallback this function
+        // uses two lines up for a missing parsed artifact, never a panic.
+        let Ok(result) = compile_from_parsed_legacy(
             source,
             parsed,
             &core_opts,
             &verter_opts,
             &VueMacroSemanticInput::Unavailable,
             &alloc,
-        );
+        ) else {
+            return TemplateFacts::default();
+        };
         TemplateFacts {
             data: result.template_data.unwrap_or_default(),
         }
@@ -753,6 +769,30 @@ impl CarrierCompiler for VueCarrierCompiler {
                 adapter_id: self.adapter_id(),
             });
         };
+
+        // The same two fail-closed rules `CompileRequest::new` /
+        // `resolve_vue_backend` apply to every `CompileRequest`-constructed
+        // route apply here too: this trait method is a SEPARATE production
+        // entry into the same shared codegen substrate, reached by the
+        // session's per-file/virtual-product compile path (not yet
+        // converted onto `CompileRequest` itself). Without this check an
+        // SSR x Vapor or inline x SSR request would silently reach codegen
+        // and produce wrong output instead of a typed refusal — the same
+        // bug class `CompileRequest` construction closes for its own
+        // callers. `parsed.is_vapor()` covers the implicit `<template
+        // vapor>` marker; `opts.force_vapor` covers the explicit request —
+        // together they mirror `resolve_vue_backend`'s `Inferred` fallback.
+        let effective_vapor = opts.force_vapor || parsed.is_vapor();
+        if opts.ssr && effective_vapor {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                CompileRequestError::SsrVaporBackendUnsupported,
+            ));
+        }
+        if opts.ssr && opts.inline == Some(true) {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                CompileRequestError::InlineSsrUnsupported,
+            ));
+        }
 
         // A selected template fragment is inserted at the compiler-registered
         // IDE hole. For a carrier with only a plain script that hole is the
@@ -861,19 +901,18 @@ impl CarrierCompiler for VueCarrierCompiler {
             ide_chunk_boundaries: opts.want_ide && opts.block_content.template.is_some(),
             ..CodegenOptions::default()
         };
-        // The Vue-private resolved inputs ride opaquely on `framework_extras`;
-        // downcast them here (a foreign / absent extras yields defaults, so a
-        // generic caller that did not supply Vue extras still compiles).
-        let extras = opts
-            .framework_extras
-            .as_ref()
-            .and_then(|any| any.downcast_ref::<VueRuntimeCompileExtras>());
-        let verter_opts = VerterCompileOptions {
+        // The Vue-private resolved inputs ride on the typed `vue_facts`
+        // carrier (a foreign / absent value yields defaults, so a generic
+        // caller that did not supply Vue extras still compiles).
+        let extras = opts.vue_facts.as_ref();
+        let verter_opts = ResolvedVueCompileOptions {
             force_vapor: opts.force_vapor,
             force_js: opts.force_js,
-            source_map: opts.source_map || (opts.want_ide && opts.block_content.template.is_some()),
+            // Decoupled — see the map-coupling fix note on the sibling
+            // sub-compiles in this file.
+            source_map: opts.source_map,
+            ide_source_map: opts.source_map && opts.want_ide,
             ssr: opts.ssr,
-            extract_template_data: opts.want_template_data,
             prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
             style_v_bind_vars: extras
                 .map(|e| e.style_v_bind_vars.clone())
@@ -883,7 +922,11 @@ impl CarrierCompiler for VueCarrierCompiler {
                 .styles
                 .iter()
                 .any(Option::is_some)
-                .then(|| extras.is_some_and(|e| e.style_v_bind_usage_complete)),
+                .then(|| {
+                    extras
+                        .and_then(|e| e.style_v_bind_usage_complete)
+                        .unwrap_or(false)
+                }),
             template_binding_metadata: None,
             template_used_vars: None,
             runtime_template_hole: supplied_inline_template,
@@ -934,14 +977,15 @@ impl CarrierCompiler for VueCarrierCompiler {
         verter_opts.template_used_vars = selected_template
             .as_ref()
             .map(|(_, _, used_vars)| used_vars.clone());
-        let result = compile_from_parsed(
+        let result = compile_from_parsed_legacy(
             source,
             &carrier_view,
             &core_opts,
             &verter_opts,
             &macro_semantics,
             alloc,
-        );
+        )
+        .map_err(CompileUnsupported::RequestExecutionRefused)?;
         let binding_metadata = result.template_binding_metadata.clone();
         let mut bundle = vue_result_to_runtime_bundle(source, &carrier_view, result);
 
@@ -968,25 +1012,27 @@ impl CarrierCompiler for VueCarrierCompiler {
                 ide_chunk_boundaries: opts.want_ide,
                 ..CodegenOptions::default()
             };
-            let template_verter_opts = VerterCompileOptions {
+            let template_verter_opts = ResolvedVueCompileOptions {
                 force_vapor: opts.force_vapor,
                 force_js: opts.force_js,
-                source_map: opts.source_map || opts.want_ide,
+                // Decoupled — see the map-coupling fix note above.
+                source_map: opts.source_map,
+                ide_source_map: opts.source_map && opts.want_ide,
                 ssr: opts.ssr,
-                extract_template_data: opts.want_template_data,
                 prop_constness_overrides: binding_metadata.const_props.clone(),
                 template_binding_metadata: Some(binding_metadata),
                 runtime_inline_template_chunk: supplied_inline_template,
                 ..Default::default()
             };
-            let compiled = compile_from_parsed(
+            let compiled = compile_from_parsed_legacy(
                 &input.code,
                 &parsed_template,
                 &template_core_opts,
                 &template_verter_opts,
                 &VueMacroSemanticInput::default(),
                 alloc,
-            );
+            )
+            .map_err(CompileUnsupported::RequestExecutionRefused)?;
             let mut selected =
                 vue_result_to_runtime_bundle(&input.code, &parsed_template, compiled);
             if let Some(template) = selected.template.as_mut() {
@@ -1928,6 +1974,221 @@ mod tests {
             result,
             Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn compile_bundle_refuses_explicit_ssr_and_force_vapor() {
+        // SSR requested together with an explicit Vapor backend — RC.3
+        // defines no Cartesian Vapor server compiler backend. This trait
+        // method is a SEPARATE production entry into the shared codegen
+        // substrate from `CompileRequest::new` (the session's per-file
+        // compile path routes here without constructing a `CompileRequest`
+        // first); without this guard the combination would reach codegen
+        // and produce wrong output instead of a typed refusal.
+        let source = "<template><div>{{ a }}</div></template>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("SsrVapor.vue".to_string()),
+                want_runtime: true,
+                ssr: true,
+                force_vapor: true,
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    CompileRequestError::SsrVaporBackendUnsupported
+                ))
+            ),
+            "expected a typed SsrVaporBackendUnsupported refusal, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_implicit_vapor_marker_with_ssr() {
+        // The implicit half of the same rule: the source's own `<template
+        // vapor>` marker (not an explicit `force_vapor` request) resolves
+        // to a Vapor backend just as surely, and must refuse identically —
+        // mirrors `CompileRequest::resolve_vue_backend`'s post-parse check.
+        let source = "<template vapor><div>{{ a }}</div></template>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("ImplicitVaporSsr.vue".to_string()),
+                want_runtime: true,
+                ssr: true,
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    CompileRequestError::SsrVaporBackendUnsupported
+                ))
+            ),
+            "expected a typed SsrVaporBackendUnsupported refusal for the implicit marker, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_inline_with_ssr() {
+        // Inline assembly requested together with SSR — the SSR capability
+        // has no inline axis; must never be silently demoted to non-inline.
+        let source = concat!(
+            "<script setup>const a = 1</script>",
+            "<template><div>{{ a }}</div></template>"
+        );
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("InlineSsr.vue".to_string()),
+                want_runtime: true,
+                ssr: true,
+                inline: Some(true),
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    CompileRequestError::InlineSsrUnsupported
+                ))
+            ),
+            "expected a typed InlineSsrUnsupported refusal, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_permits_ssr_without_vapor_or_inline() {
+        // Negative control for the two guards above: SSR alone (no Vapor,
+        // no explicit inline) must still produce a runtime bundle — the
+        // guards are precise to the Cartesian combination, not a blanket
+        // SSR refusal.
+        let source = "<template><div>{{ a }}</div></template>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("SsrOnly.vue".to_string()),
+                    want_runtime: true,
+                    ssr: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("SSR alone must still compile");
+        assert!(bundle.script.is_some() || bundle.template.is_some());
+    }
+
+    /// The map-coupling regression, proven through the real production
+    /// route (`compile_bundle` itself — not the `CompileRequest`
+    /// predicate-level unit test in `compile_request/mod.rs`, which only
+    /// proves `wants_runtime_source_map()`'s own logic in isolation and
+    /// never actually runs a compile). Requesting BOTH the runtime AND the
+    /// IDE product with `source_map: false` must produce a runtime script
+    /// with NO source map — the pre-fix bug computed
+    /// `source_map: opts.source_map || opts.want_ide`, which would
+    /// silently turn the runtime map ON here purely because `want_ide` was
+    /// set, even though the caller asked for no map at all.
+    #[test]
+    fn compile_bundle_does_not_force_the_runtime_map_on_merely_because_ide_is_requested() {
+        let source = concat!(
+            "<script setup>const count = 1</script>",
+            "<template><div>{{ count }}</div></template>"
+        );
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("NoMap.vue".to_string()),
+                    want_runtime: true,
+                    want_ide: true,
+                    source_map: false,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("runtime + IDE compile without a requested map still produces both outputs");
+        let script = bundle.script.expect("runtime script block");
+        assert!(
+            script.source_map.is_empty(),
+            "requesting the IDE product must NOT force the runtime script's own \
+             source map on when source_map=false was requested; got: {:?}",
+            script.source_map
+        );
+        let tsx = bundle.tsx.expect("IDE tsx block");
+        assert!(
+            tsx.source_map.is_empty(),
+            "the IDE map must independently honor source_map=false too; got: {:?}",
+            tsx.source_map
+        );
+    }
+
+    /// The companion positive control: `source_map: true` with BOTH
+    /// products requested must populate BOTH maps independently — proving
+    /// the decoupling is precise (neither field is a dead flag), not just
+    /// that both happen to stay off together.
+    #[test]
+    fn compile_bundle_populates_both_maps_independently_when_both_are_requested() {
+        let source = concat!(
+            "<script setup>const count = 1</script>",
+            "<template><div>{{ count }}</div></template>"
+        );
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("BothMaps.vue".to_string()),
+                    want_runtime: true,
+                    want_ide: true,
+                    source_map: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("runtime + IDE compile with a requested map produces both outputs");
+        let script = bundle.script.expect("runtime script block");
+        assert!(
+            !script.source_map.is_empty(),
+            "source_map=true must populate the runtime script's own map"
+        );
+        let tsx = bundle.tsx.expect("IDE tsx block");
+        assert!(
+            !tsx.source_map.is_empty(),
+            "source_map=true must independently populate the IDE map too"
+        );
     }
 
     #[test]

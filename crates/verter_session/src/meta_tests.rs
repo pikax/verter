@@ -2620,7 +2620,7 @@ fn render_runtime_macro(
     macro_call: &str,
     option_key: &str,
 ) -> RenderedRuntime {
-    use verter_compiler::compile::CompileTarget;
+    use crate::CompileTarget;
 
     let project = make_project();
     project
@@ -3034,8 +3034,7 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
         // lane's constructor demand and calls it the TSX lane.
         let profile = crate::types::CompileProfile {
             source_map: true,
-            target: verter_compiler::compile::CompileTarget::IDE
-                | verter_compiler::compile::CompileTarget::TEMPLATE_DATA,
+            target: crate::CompileTarget::IDE | crate::CompileTarget::TEMPLATE_DATA,
             ..crate::types::CompileProfile::default()
         };
         let compiled = host

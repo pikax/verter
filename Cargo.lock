@@ -3971,6 +3971,7 @@ dependencies = [
  "verter_audit",
  "verter_css_syntax",
  "verter_ecma",
+ "verter_identity",
  "verter_language",
  "verter_macro_dto",
  "verter_parser",

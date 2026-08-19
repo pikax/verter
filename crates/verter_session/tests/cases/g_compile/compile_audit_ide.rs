@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use verter_audit::payloads::tags::CompileTargetTag;
-use verter_compiler::compile::CompileTarget;
+use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag};
+use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -88,12 +88,20 @@ fn compile_with_audit_ide_publishes_record_with_ide_tag_and_tsx_block() {
 
     // record is always present now (carrier `audit` field is mandatory).
     match &record.kind {
-        verter_audit::RequestKind::Compile { target } => {
+        verter_audit::RequestKind::Compile { products, backend } => {
             assert_eq!(
-                *target,
-                CompileTargetTag::Ide,
-                "IDE target ⇒ Ide tag — discriminates against a regression that \
-                 always tags as Vdom regardless of the bitflags input",
+                *products,
+                CompileProductSetTag {
+                    ide_companion: true,
+                    ..Default::default()
+                },
+                "IDE target ⇒ ide_companion alone — discriminates against a regression \
+                 that always tags as the runtime products regardless of the bitflags input",
+            );
+            assert_eq!(
+                *backend,
+                CompileBackendTag::Vdom,
+                "no <template vapor> marker ⇒ resolved backend is Vdom",
             );
         }
         other => panic!("expected RequestKind::Compile, got {other:?}"),
@@ -102,7 +110,14 @@ fn compile_with_audit_ide_publishes_record_with_ide_tag_and_tsx_block() {
     let payload = record
         .compile_payload()
         .expect("Compile kind ⇒ kind_payload must carry CompilePayload");
-    assert_eq!(payload.target, CompileTargetTag::Ide);
+    assert_eq!(
+        payload.products,
+        CompileProductSetTag {
+            ide_companion: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(payload.backend, CompileBackendTag::Vdom);
     // IDE codegen heavily uses CodeTransform — non-zero op count
     // confirms TLS observer reached the producer crate.
     assert!(

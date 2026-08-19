@@ -382,8 +382,12 @@ fn component_meta_props_surface_is_stable() {
 /// bytes than the direct `compile()`.
 #[test]
 fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
-    use verter_compiler::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
+    use verter_compiler::compile::types::VueExecutionInputs;
     use verter_compiler::compile::VueMacroSemanticInput;
+    use verter_compiler::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+        RuntimeProductRequest, VueCompileRequest,
+    };
     use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
     use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
@@ -397,27 +401,40 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
     ];
 
     for source in fixtures {
-        let core_opts = CodegenOptions {
-            filename: Some("App.vue".to_string()),
-            target: CompileTarget::BUNDLER | CompileTarget::TSX,
-            ..Default::default()
-        };
-        let verter_opts = VerterCompileOptions {
-            source_map: true,
-            ..Default::default()
-        };
+        let request = CompileRequest::new(
+            vec![
+                CompileProduct::RuntimeClient(RuntimeProductRequest {
+                    runtime_source_map: true,
+                    ..Default::default()
+                }),
+                CompileProduct::IdeCompanion(IdeProductRequest {
+                    want_source_map: true,
+                    ..Default::default()
+                }),
+            ],
+            FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+            None,
+            Some("App.vue".to_string()),
+            None,
+            false,
+            false,
+        )
+        .expect("RuntimeClient + IdeCompanion together must construct");
 
         // Direct path: the compiler's untouched public `compile()`.
-        let direct = StandaloneCompiler.compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &core_opts,
-            &verter_opts,
-            &VueMacroSemanticInput::Unavailable,
-        );
+        let direct = StandaloneCompiler
+            .compile_source(
+                &StandaloneSourceBytes::copied_from(source),
+                &request,
+                &VueExecutionInputs::default(),
+                &VueMacroSemanticInput::Unavailable,
+            )
+            .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
 
         // Rehoused path: the session's carrier dispatch produces the
         // framework-neutral artifact, the host reaches its parsed SFC back
-        // out, and `compile_from_parsed` drives the SAME compile.
+        // out, and `compile_from_parsed` drives the SAME compile from the
+        // SAME canonical request.
         let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
             "App.vue",
             source,
@@ -430,8 +447,8 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         let rehoused = compile_registered_vue_artifact(
             source,
             &artifact,
-            &core_opts,
-            &verter_opts,
+            &request,
+            &VueExecutionInputs::default(),
             &VueMacroSemanticInput::Unavailable,
             &alloc_b,
         )

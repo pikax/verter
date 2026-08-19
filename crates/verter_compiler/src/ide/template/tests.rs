@@ -5278,13 +5278,13 @@ export default defineComponent({
 });
 </script>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("BalCard.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -5316,17 +5316,17 @@ fn balcard_vue_full_sfc_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("BalCard.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions {
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions {
         source_map: true,
         ..Default::default()
     };
-    let result = crate::compile::compile(
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5366,14 +5366,14 @@ import { ref } from 'vue';
 const checked = ref<boolean>(false);
 </script>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Basic.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -5410,14 +5410,14 @@ fn ant_design_switch_basic_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("basic.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5447,14 +5447,14 @@ fn activist_card_topic_selection_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("CardTopicSelection.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5483,14 +5483,14 @@ fn activist_machine_steps_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("MachineStepsCreateEventTime.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5521,14 +5521,14 @@ fn component_is_dynamic_no_comp_function() {
 const tag = 'div';
 </script>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("App.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -5562,14 +5562,14 @@ fn nexus_notification_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Notification.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5610,14 +5610,14 @@ const { msg, count } = defineProps<{
   <div>{{ msg }} {{ count }}</div>
 </template>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("App.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -5661,14 +5661,14 @@ fn nexus_bloc_produces_valid_tsx() {
         return;
     };
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Bloc.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         &source,
         &options,
         &verter_opts,
@@ -5706,13 +5706,13 @@ defineProps({
 });
 </script>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("BoardBadge.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -6177,14 +6177,14 @@ fn v_slot_with_v_for() {
 
 fn compile_full_sfc_tsx(source: &str, filename: &str) -> String {
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some(filename.to_string()),
         target: crate::compile::CompileTarget::TSX,
         embed_ambient_types: false,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -8260,13 +8260,13 @@ export default defineComponent({
   <MyAlias />
 </template>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Test.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,
@@ -8313,13 +8313,13 @@ export default defineComponent({
   <SomeComp />
 </template>"#;
     let alloc = Allocator::new();
-    let options = crate::compile::CodegenOptions {
+    let options = crate::compile::legacy_test_support::CodegenOptions {
         filename: Some("Test.vue".to_string()),
         target: crate::compile::CompileTarget::TSX,
         ..Default::default()
     };
-    let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(
+    let verter_opts = crate::compile::legacy_test_support::VerterCompileOptions::default();
+    let result = crate::compile::legacy_test_support::compile(
         source,
         &options,
         &verter_opts,

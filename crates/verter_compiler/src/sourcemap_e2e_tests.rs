@@ -1,12 +1,10 @@
-use super::compile::compile;
+use super::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
 /// @ai-generated — E2E sourcemap correctness tests.
 ///
 /// Verifies that sourcemap tokens resolve to **matching text** at mapped positions,
 /// not just valid line/column bounds. Every meaningful token in the generated output
 /// is checked against the original SFC source.
-use super::compile::types::{
-    CodegenOptions, CompileTarget, VerterCompileOptions, VerterCompileResult,
-};
+use super::compile::types::{CompileTarget, VerterCompileResult};
 use super::cursor::position::utf16_len;
 use oxc_allocator::Allocator;
 

@@ -66,68 +66,101 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
 }
 
 /// Convert FFI compile profile to internal compile profile.
+///
+/// EXHAUSTIVELY destructures `FfiCompileProfile` (no `..` rest pattern) so
+/// a field added to the wire struct without a corresponding admission arm
+/// here is a COMPILE ERROR, not a silently-dropped option — the
+/// per-field-admission half of the boundary's "no silently ignored
+/// option" contract. `#[serde(deny_unknown_fields)]` on `FfiCompileProfile`
+/// itself is the companion decode-time half: an unrecognized wire KEY
+/// refuses before this function ever runs; this exhaustive match is what
+/// keeps every recognized field's mapping honest once it does.
 pub fn ffi_profile_to_host(
     input: Option<FfiCompileProfile>,
 ) -> Result<host::CompileProfile, FfiConversionError> {
     let mut out = host::CompileProfile::default();
-    if let Some(input) = input {
-        out.filename = input.filename;
-        if let Some(is_production) = input.is_production {
-            out.is_production = is_production;
-        }
-        if let Some(custom_element) = input.custom_element {
-            out.custom_element = custom_element;
-        }
-        if let Some(ssr) = input.ssr {
-            out.ssr = ssr;
-        }
-        if let Some(hmr_strategy) = input.hmr_strategy {
-            out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
-                host::HmrStrategy::Vite
-            } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
-                host::HmrStrategy::Webpack
-            } else if hmr_strategy.eq_ignore_ascii_case("none") {
-                host::HmrStrategy::None
-            } else {
-                return Err(FfiConversionError::InvalidHmrStrategy(hmr_strategy));
-            };
-        }
-        out.component_id = input.component_id;
-        out.delimiters = if let Some(d) = input.delimiters {
-            if d.len() != 2 {
-                return Err(FfiConversionError::InvalidDelimiters(d.len()));
-            }
-            Some((d[0].clone(), d[1].clone()))
+    let Some(input) = input else {
+        return Ok(out);
+    };
+    let FfiCompileProfile {
+        filename,
+        is_production,
+        custom_element,
+        ssr,
+        ssr_module_id,
+        hmr_strategy,
+        component_id,
+        delimiters,
+        custom_elements,
+        comments,
+        runtime_module_name,
+        types_module_name,
+        force_vapor,
+        force_js,
+        source_map,
+        target,
+        inline,
+        strict_slots,
+        requested_mode,
+    } = input;
+
+    out.filename = filename;
+    if let Some(is_production) = is_production {
+        out.is_production = is_production;
+    }
+    if let Some(custom_element) = custom_element {
+        out.custom_element = custom_element;
+    }
+    if let Some(ssr) = ssr {
+        out.ssr = ssr;
+    }
+    out.ssr_module_id = ssr_module_id;
+    if let Some(hmr_strategy) = hmr_strategy {
+        out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
+            host::HmrStrategy::Vite
+        } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
+            host::HmrStrategy::Webpack
+        } else if hmr_strategy.eq_ignore_ascii_case("none") {
+            host::HmrStrategy::None
         } else {
-            None
+            return Err(FfiConversionError::InvalidHmrStrategy(hmr_strategy));
         };
-        out.custom_elements = input.custom_elements;
-        out.comments = input.comments;
-        if let Some(runtime_module_name) = input.runtime_module_name {
-            out.runtime_module_name = Some(runtime_module_name);
+    }
+    out.component_id = component_id;
+    out.delimiters = if let Some(d) = delimiters {
+        if d.len() != 2 {
+            return Err(FfiConversionError::InvalidDelimiters(d.len()));
         }
-        if let Some(types_module_name) = input.types_module_name {
-            out.types_module_name = Some(types_module_name);
-        }
-        if let Some(force_vapor) = input.force_vapor {
-            out.force_vapor = force_vapor;
-        }
-        if let Some(force_js) = input.force_js {
-            out.force_js = force_js;
-        }
-        if let Some(source_map) = input.source_map {
-            out.source_map = source_map;
-        }
-        if let Some(target) = input.target {
-            out.target = ffi_target_to_compile_target(&target)?;
-        }
-        out.inline = input.inline;
-        if let Some(strict_slots) = input.strict_slots {
-            out.strict_slots = strict_slots;
-        }
-        if let Some(requested_mode) = input.requested_mode {
-            out.requested_mode = ffi_compile_cache_mode_to_host(&requested_mode)?;
-        }
+        Some((d[0].clone(), d[1].clone()))
+    } else {
+        None
+    };
+    out.custom_elements = custom_elements;
+    out.comments = comments;
+    if let Some(runtime_module_name) = runtime_module_name {
+        out.runtime_module_name = Some(runtime_module_name);
+    }
+    if let Some(types_module_name) = types_module_name {
+        out.types_module_name = Some(types_module_name);
+    }
+    if let Some(force_vapor) = force_vapor {
+        out.force_vapor = force_vapor;
+    }
+    if let Some(force_js) = force_js {
+        out.force_js = force_js;
+    }
+    if let Some(source_map) = source_map {
+        out.source_map = source_map;
+    }
+    if let Some(target) = target {
+        out.target = ffi_target_to_compile_target(&target)?;
+    }
+    out.inline = inline;
+    if let Some(strict_slots) = strict_slots {
+        out.strict_slots = strict_slots;
+    }
+    if let Some(requested_mode) = requested_mode {
+        out.requested_mode = ffi_compile_cache_mode_to_host(&requested_mode)?;
     }
     Ok(out)
 }

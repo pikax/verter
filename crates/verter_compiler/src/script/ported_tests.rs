@@ -4,9 +4,8 @@
 //! Each test calls `compile()` directly and checks the appropriate result block
 //! (script, template, or diagnostics).
 
-use crate::compile::{
-    compile, CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
-};
+use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::{VerterCompileResult, VueMacroSemanticInput};
 use oxc_allocator::Allocator;
 
 fn compile_force_js_with_runtime(

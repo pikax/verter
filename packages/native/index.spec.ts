@@ -165,7 +165,14 @@ describe("VerterHost", () => {
       fileKind: "svelte",
     });
 
-    const profile = { target: "ide" };
+    // "full" (bundler + TSX + template data) — this test exercises BOTH
+    // the IDE and runtime surfaces off the SAME profile, so the target
+    // must carry both a runtime output bit and the TSX bit;
+    // `compileProfile.target` gates which products a compile actually
+    // produces (an "ide"-only profile deliberately produces no runtime
+    // Main — see `ensure_compile_artifacts`'s "demand is consulted only
+    // to validate, never to steer" contract).
+    const profile = { target: "full" };
     const ensured = host.ensureIdeCompiled("Counter.svelte", profile);
     expect(ensured).toBe(true);
 
@@ -345,10 +352,17 @@ const height = ref('100px')
       );
       expect(parseDup, "upsert should not produce DuplicateAttribute").toEqual([]);
 
+      // A `getVirtualFile(nodeKind: main)` query needs a profile whose
+      // target carries a runtime output bit — `compileProfile.target`
+      // gates which products a compile actually produces, and an
+      // `"ide"`-only profile deliberately produces no runtime Main (see
+      // `ensure_compile_artifacts`'s "demand is consulted only to
+      // validate, never to steer" contract). `"bundler"` is the correct
+      // preset here; this test only exercises the runtime compile.
       const mainFile = host.getVirtualFile({
         canonicalId: result.canonicalId,
         nodeKind: { kind: "main" },
-        compileProfile: { target: "ide" },
+        compileProfile: { target: "bundler" },
       });
 
       expect(mainFile.code).toBeTruthy();

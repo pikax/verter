@@ -105,9 +105,9 @@ pub use published_surface::{
 
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
-    AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag,
-    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, FlowSliceBudgetAxisTag, LspMethodTag,
-    ProjectionModeTag,
+    AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileBackendTag,
+    CompileProductSetTag, FactKeyKindTag, FactLaneTag, FileArtifactCacheAction,
+    FlowSliceBudgetAxisTag, LspMethodTag, ProjectionModeTag,
 };
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,

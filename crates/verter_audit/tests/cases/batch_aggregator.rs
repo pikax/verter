@@ -14,7 +14,9 @@
 use std::time::Instant;
 
 use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator, SLOWEST_RECORD_LIMIT};
-use verter_audit::payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag};
+use verter_audit::payloads::tags::{
+    BundlerKindTag, CompileBackendTag, CompileProductSetTag, LspMethodTag,
+};
 use verter_audit::payloads::workspace::WorkspaceOp;
 use verter_audit::record::{RequestAuditRecord, RequestKind, RequestKindPayload};
 use verter_audit::{
@@ -126,7 +128,11 @@ fn known_53_records() -> Vec<(Instant, RequestAuditRecord)> {
         name: "free".into(),
     };
     let make_compile = || RequestKind::Compile {
-        target: CompileTargetTag::Ide,
+        products: CompileProductSetTag {
+            ide_companion: true,
+            ..Default::default()
+        },
+        backend: CompileBackendTag::Inferred,
     };
     kinds.extend(std::iter::repeat_n(RequestKind::ComponentMeta, 12));
     kinds.extend(std::iter::repeat_with(make_compile).take(8));

@@ -8,24 +8,40 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use verter_compiler::compile::{
-    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile::{VerterCompileResult, VueMacroSemanticInput};
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+    VueCompileRequest,
 };
 use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
 fn compile(
     source: &str,
-    options: &CodegenOptions,
-    verter_options: &VerterCompileOptions,
+    filename: &str,
     macro_semantics: &VueMacroSemanticInput,
     _allocator: &oxc_allocator::Allocator,
 ) -> VerterCompileResult {
-    StandaloneCompiler.compile_source(
-        &StandaloneSourceBytes::copied_from(source),
-        options,
-        verter_options,
-        macro_semantics,
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        Some(filename.to_string()),
+        None,
+        false,
+        false,
     )
+    .expect("a lone RuntimeClient product must construct");
+    StandaloneCompiler
+        .compile_source(
+            &StandaloneSourceBytes::copied_from(source),
+            &request,
+            &VueExecutionInputs::default(),
+            macro_semantics,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
 }
 
 // ── File discovery ──────────────────────────────────────────────────
@@ -220,18 +236,9 @@ fn main() {
         // Catch panics
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let allocator = oxc_allocator::Allocator::new();
-            let options = CodegenOptions {
-                filename: Some(filename.clone()),
-                ..Default::default()
-            };
-            let verter_opts = VerterCompileOptions {
-                force_js: false,
-                ..Default::default()
-            };
             compile(
                 &content,
-                &options,
-                &verter_opts,
+                &filename,
                 &VueMacroSemanticInput::Unavailable,
                 &allocator,
             )

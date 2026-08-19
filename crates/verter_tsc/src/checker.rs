@@ -28,11 +28,14 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use rayon::prelude::*;
 use tempfile::TempDir;
-use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest, VueCompileRequest,
+};
 use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_session::{
-    FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest,
-    VerterHost,
+    CompileTarget, FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject,
+    UpsertRequest, VerterHost,
 };
 
 use crate::api_check;
@@ -332,23 +335,38 @@ fn generate_all_tsx(
             let component_name = sanitize_component_name(raw_name);
 
             let filename = canonical_path_id(vue_path);
-            let options = CodegenOptions {
-                filename: Some(filename),
-                target: CompileTarget::TSX,
-                skip_source_map: false,
-                embed_ambient_types: false,
-                ..Default::default()
-            };
-            let verter_options = VerterCompileOptions {
-                source_map: true,
-                ..Default::default()
-            };
-            let result = StandaloneCompiler.compile_source(
-                &StandaloneSourceBytes::copied_from(&source),
-                &options,
-                &verter_options,
-                macro_input,
-            );
+            let request = CompileRequest::new(
+                vec![CompileProduct::IdeCompanion(IdeProductRequest {
+                    want_source_map: true,
+                    embed_ambient_types: false,
+                    ..Default::default()
+                })],
+                FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+                None,
+                Some(filename),
+                None,
+                false,
+                false,
+            )
+            .map_err(|error| {
+                api_check::TypecheckError::new(format!(
+                    "verter-tsc: canonical compile request refused for {}: {error:?}",
+                    vue_path.display()
+                ))
+            })?;
+            let result = StandaloneCompiler
+                .compile_source(
+                    &StandaloneSourceBytes::copied_from(&source),
+                    &request,
+                    &VueExecutionInputs::default(),
+                    macro_input,
+                )
+                .map_err(|error| {
+                    api_check::TypecheckError::new(format!(
+                        "verter-tsc: compile refused for {}: {error:?}",
+                        vue_path.display()
+                    ))
+                })?;
 
             let tsx_block = result.tsx.ok_or_else(|| {
                 api_check::TypecheckError::new(format!(
