@@ -470,7 +470,7 @@ required_exactness = "exact"
 # independently recorded digest in ../evidence/framework-conformance/validation.md.
 # Without this, a candidate could pass every timing/counter gate while
 # silently emitting a different manifest.
-output_oracle = "sha256(vue-official-cases.tsv) == 30123a6d88e1e7382afdcc752b5438c3486dd462e59ce831742ad0a3a3dd95bd"
+output_oracle = "sha256(vue-official-cases.tsv) == 76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba"
 # This tool performs no network I/O by contract; the assertion is enforced
 # structurally by execution_profile's mandatory deny-network sandbox (a
 # violation aborts the run rather than passing silently).
@@ -607,7 +607,7 @@ required_serialization_profiles = []
 required_mapping_kinds = []
 required_diagnostics_policy = "not_applicable"
 required_exactness = "exact"
-output_oracle = "sha256(svelte-official-cases.tsv) == c251be5b8b1de3e58c526700c426e2502e8bd1eb1dd622e22119b667adee7a8e"
+output_oracle = "sha256(svelte-official-cases.tsv) == 09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e"
 zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
 
 # ── timing and memory: identical measured numbers to the sibling

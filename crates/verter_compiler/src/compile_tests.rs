@@ -2919,6 +2919,63 @@ fn empty_sfc_tsx_output_is_valid() {
     assert_tsx_parses("<!-- comment only -->", "comment-only SFC");
 }
 
+/// Official Vue's SFC parser unconditionally rejects a carrier with no
+/// `<template>`, `<script>`, or `<script setup>` block — see the `# 6676`
+/// regression test in `compiler-sfc/__tests__/parse.spec.ts` ("should throw
+/// error if no <template> or <script> is present"). Verter's trivia-only
+/// shell exemption ([`empty_sfc_compiles_to_empty_component_shell`]) does not
+/// extend to style/custom-block-only or arbitrary-text carriers: those still
+/// diagnose `MissingSfcEntryBlock`, matching the oracle.
+#[test]
+fn missing_sfc_entry_block_for_non_trivia_block_less_carriers() {
+    for src in [
+        "import { ref } from 'vue'",
+        "<style>.css { color: red; }</style>",
+        "<i18n>{ \"en\": { \"hello\": \"Hello\" } }</i18n>",
+    ] {
+        let result = compile_sfc(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == "MissingSfcEntryBlock"),
+            "{src:?} must diagnose MissingSfcEntryBlock, got: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// `<template functional>` is no longer supported in Vue 3 — see
+/// `compiler-sfc/__tests__/parse.spec.ts` ("should throw error if template
+/// functional is given").
+#[test]
+fn template_functional_unsupported() {
+    let result = compile_sfc("<template functional></template>");
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.code == "TemplateFunctionalUnsupported"),
+        "must diagnose TemplateFunctionalUnsupported, got: {:?}",
+        result.errors
+    );
+}
+
+/// A plain `<template>` (no `functional` attribute) never diagnoses
+/// `TemplateFunctionalUnsupported`.
+#[test]
+fn plain_template_has_no_functional_error() {
+    let result = compile_sfc("<template><div>x</div></template>");
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| e.code == "TemplateFunctionalUnsupported"),
+        "plain template must not diagnose TemplateFunctionalUnsupported, got: {:?}",
+        result.errors
+    );
+}
+
 /// `v-model="(myValue as string)"` — valid in the official Vue compiler
 /// (the TS cast unwraps to a plain identifier). With `force_js` the emitted
 /// render code must strip the TS cast (JS output), while still assigning to

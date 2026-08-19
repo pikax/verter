@@ -487,7 +487,7 @@ struct LoweredStatementBatch {
 pub struct DeclBodyMemo {
     key: SnapshotKey,
     eval_source: Arc<str>,
-    framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     source_type: oxc_span::SourceType,
     owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
     /// Scope-aware component mode captured from the SAME retained eval program
@@ -557,7 +557,7 @@ impl DeclBodyMemo {
     pub(crate) fn new(
         key: SnapshotKey,
         eval_source: Arc<str>,
-        framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+        framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
         owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
         svelte_component_runes_mode: bool,
@@ -785,7 +785,9 @@ impl DeclBodyMemo {
     /// the carrier's module-script region without re-fetching it through
     /// `current_eval_state` (which re-enters `current_content_pinned_indexed`
     /// for the owner and recurses while the owner is mid-index).
-    pub(crate) fn framework_parse(&self) -> Option<&Arc<verter_language::FrameworkParseArtifact>> {
+    pub(crate) fn framework_parse(
+        &self,
+    ) -> Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
         self.framework_parse.as_ref()
     }
 
@@ -3187,7 +3189,9 @@ fn fold_flow_body_env_identity(
         buf.extend_from_slice(SALT);
         buf.extend_from_slice(stable);
         buf.extend_from_slice(parse_env_hash);
-        buf.extend_from_slice(&crate::file_artifact_store::CURRENT_PARSER_VERSION.to_le_bytes());
+        buf.extend_from_slice(
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint().as_bytes(),
+        );
         buf.extend_from_slice(format!("{source_type:?}").as_bytes());
         crate::hash::hash_16(&buf)
     })

@@ -4,16 +4,17 @@ error[E0425]: cannot find value `project_registered_carrier` in module `verter_c
 6 |     let _facade = verter_compiler::framework_common::project_registered_carrier;
   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `verter_compiler::framework_common`
 
-error[E0603]: module `registered_carrier_projection` is private
- --> tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs:4:44
+error[E0603]: function `project_registered_carrier` is private
+ --> tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs:4:75
   |
 4 |         verter_compiler::framework_common::registered_carrier_projection::project_registered_carrier;
-  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  -------------------------- function `project_registered_carrier` is not publicly re-exported
-  |                                            |
-  |                                            private module
+  |                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
   |
-note: the module `registered_carrier_projection` is defined here
- --> $WORKSPACE/crates/verter_compiler/src/framework_common/mod.rs
+note: the function `project_registered_carrier` is defined here
+ --> $WORKSPACE/crates/verter_compiler/src/framework_common/registered_carrier_projection.rs
   |
-  | mod registered_carrier_projection;
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | / pub(super) fn project_registered_carrier(
+  | |     known: &KnownRegisteredCompiler,
+  | |     accepted: &AcceptedRegisteredCarrierSource,
+  | | ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
+  | |______________________________________________________^

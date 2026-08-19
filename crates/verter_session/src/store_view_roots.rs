@@ -763,7 +763,7 @@ impl StoreViewRoots {
                     parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
                         parse_env_hash,
                     ),
-                    parser_version: key.parser_version,
+                    parse_key: key.parse_key.clone(),
                     file_language_id: key.file_language_id.clone(),
                 });
             }

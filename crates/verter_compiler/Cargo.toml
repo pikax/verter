@@ -42,6 +42,9 @@ svelte-oracle = []
 # producer hooks, and every trace collection site are compiled out, and the
 # production IR structs carry no trace state under either setting.
 conformance-trace = []
+# Enables the corpus-only JSONL parse probe used to regenerate committed
+# framework parse evidence. The binary is absent from default builds.
+external-corpus = []
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
@@ -103,3 +106,8 @@ tempfile = "3.27"
 serde = { workspace = true }
 serde_json = { workspace = true }
 trybuild = "1.0"
+
+[[bin]]
+name = "parse_corpus_probe"
+path = "src/bin/parse_corpus_probe.rs"
+required-features = ["external-corpus"]

@@ -2021,7 +2021,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             flow_body_stable_hash: entry.flow_body_stable_hash,
             flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
-            parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         };
         let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
             function: slice_key_function.clone(),

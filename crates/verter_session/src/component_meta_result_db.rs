@@ -290,10 +290,16 @@ impl ResolutionTemplate {
         whole_hash: Hash16,
         request_id: u64,
     ) -> Option<crate::meta_resolve::ResolvedComponentMetaState> {
-        let indexed = host
-            .project_type_store()
-            .indexed()
-            .get(canonical_id, whole_hash)?;
+        let key = host.authoritative_current_artifact_key(canonical_id)?;
+        if key.content_hash != whole_hash {
+            return None;
+        }
+        let indexed = host.project_type_store().indexed().get(
+            canonical_id,
+            whole_hash,
+            &key.parse_key,
+            &key.file_language_id,
+        )?;
         let snapshot = (*indexed.snapshot).clone();
         Some(crate::meta_resolve::ResolvedComponentMetaState {
             snapshot,

@@ -4,7 +4,7 @@
 //! These tests assert the cache-key composition invariants:
 //!
 //! - **R5**: content-addressed caches carry `content_hash` AND
-//!   `parse_env_hash` (and `parser_version` for `FileArtifactKey`).
+//!   `parse_env_hash` (and `parse_key` for `FileArtifactKey`).
 //! - **R6**: cache keys NEVER include `fact_dep_signature` or other
 //!   version-tracking payload — those live on the cached value.
 //!   `FileArtifactKey` carries no fact-dep-signature, so this test
@@ -26,14 +26,19 @@ fn make_key(
     canonical: &str,
     content_hash: [u8; 16],
     parse_env_hash: [u8; 16],
-    parser_version: u32,
+    parse_marker: u8,
 ) -> FileArtifactKey {
     FileArtifactKey {
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash,
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
+        parse_key: verter_session::build_toolchain_fingerprint::parse_key_for_test(
+            canonical,
+            parse_marker,
+        ),
+        build_toolchain_fingerprint:
+            verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        file_language_id: FileArtifactKey::synthetic_file_language_for_test(canonical),
     }
 }
 
@@ -70,7 +75,7 @@ fn parse_env_hash_change_breaks_key_equality() {
 }
 
 #[test]
-fn parser_version_change_breaks_key_equality() {
+fn parse_key_change_breaks_key_equality() {
     let a = make_key("/a.ts", [1u8; 16], [2u8; 16], 1);
     let b = make_key("/a.ts", [1u8; 16], [2u8; 16], 2);
     assert_ne!(a, b);
@@ -89,7 +94,7 @@ fn identical_inputs_produce_equal_keys() {
 fn r6_key_struct_has_no_fact_dep_signature_field() {
     // R6 codification by structural assertion: the FileArtifactKey type
     // has exactly five fields (canonical, content_hash, parse_env_hash,
-    // parser_version, file_language_id). If `fact_dep_signature` or
+    // parse_key, file_language_id). If `fact_dep_signature` or
     // similar is added to the key, this test fails at compile time (the
     // destructuring pattern below would not match).
     let key = make_key("/a.ts", [1u8; 16], [2u8; 16], 1);
@@ -97,13 +102,21 @@ fn r6_key_struct_has_no_fact_dep_signature_field() {
         canonical,
         content_hash,
         parse_env_hash,
-        parser_version,
+        parse_key,
+        build_toolchain_fingerprint,
         file_language_id,
     } = key;
     assert_eq!(&*canonical, "/a.ts");
     assert_eq!(content_hash, [1u8; 16]);
     assert_eq!(parse_env_hash, [2u8; 16]);
-    assert_eq!(parser_version, 1);
+    assert_eq!(
+        parse_key,
+        verter_session::build_toolchain_fingerprint::parse_key_for_test("/a.ts", 1)
+    );
+    assert_eq!(
+        build_toolchain_fingerprint,
+        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+    );
     assert_eq!(
         file_language_id,
         verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts)

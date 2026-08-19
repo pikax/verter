@@ -2296,7 +2296,7 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
     // suite whose whole point is comparing against how production actually
     // invokes the compiler.
     let allocator = Allocator::new();
-    let compiled = VueCarrierCompiler::default()
+    let compiled = VueCarrierCompiler
         .compile_bundle(
             &source,
             &artifact,
@@ -2612,7 +2612,7 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
 
     let allocator = Allocator::new();
     // `filename: None` — the shape the real host never produces.
-    let compiled = VueCarrierCompiler::default()
+    let compiled = VueCarrierCompiler
         .compile_bundle(
             &source,
             &artifact,

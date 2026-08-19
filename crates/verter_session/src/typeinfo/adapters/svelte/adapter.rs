@@ -345,10 +345,7 @@ mod tests {
             export: crate::typeinfo::framework_surface::ComponentExport::Default,
         };
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
-        let registry = crate::framework::FrameworkAdapterRegistry::built_in(
-            crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
-            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
-        );
+        let registry = crate::framework::FrameworkAdapterRegistry::built_in();
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::svelte())
             .expect("svelte registered");
@@ -426,10 +423,7 @@ mod tests {
         // a kind with ANY resolved source is PRESENT (Resolved), not Missing.
         let adapter = SvelteFrameworkAdapter::default();
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
-        let registry = crate::framework::FrameworkAdapterRegistry::built_in(
-            crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
-            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
-        );
+        let registry = crate::framework::FrameworkAdapterRegistry::built_in();
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::svelte())
             .expect("svelte registered");

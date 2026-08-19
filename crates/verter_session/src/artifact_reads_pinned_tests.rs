@@ -375,9 +375,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
     // Sanity: the base artifact is still in the store under the base
     // hash — both candidates coexist.
     let base_indexed = host
-        .project_type_store()
-        .indexed()
-        .get(canonical, base_hash)
+        .exact_current_indexed_for_test(canonical, base_hash)
         .expect("base artifact must still be cached under the base hash");
     assert_eq!(base_indexed.whole_hash, base_hash);
 

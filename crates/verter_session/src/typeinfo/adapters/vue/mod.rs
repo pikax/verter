@@ -13,10 +13,9 @@
 //!   it PLANS the Vue component's typed surface demands and NORMALIZES the
 //!   executor-resolved surfaces into per-kind DTO bundles. It holds NO
 //!   resolution.
-//! - [`parse_access`] — the `vue_parse()` carrier accessor + the carrier-token
-//!   receipt.
+//! - [`parse_access`] — the `vue_parse()` carrier accessor.
 
 pub mod adapter;
 pub mod parse_access;
 
-pub(crate) use parse_access::{receive_vue_carrier_token, vue_carrier_token_clone, vue_parse};
+pub(crate) use parse_access::vue_parse;

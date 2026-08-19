@@ -21,14 +21,9 @@ macro_rules! nonzero_version {
     };
 }
 
-nonzero_version!(CarrierParserVersion);
-nonzero_version!(FrameworkParseArtifactSchemaVersion);
 nonzero_version!(CarrierSourceSpaceSchemaVersion);
 nonzero_version!(CarrierSourceMapSchemaVersion);
 
-/// First frozen neutral inventory/envelope schema.
-pub const FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION: FrameworkParseArtifactSchemaVersion =
-    FrameworkParseArtifactSchemaVersion(1);
 /// First frozen registered/derived source-space serialization schema.
 pub const CARRIER_SOURCE_SPACE_SCHEMA_VERSION: CarrierSourceSpaceSchemaVersion =
     CarrierSourceSpaceSchemaVersion(1);
@@ -42,8 +37,6 @@ mod tests {
 
     #[test]
     fn carrier_versions_are_nonzero_nominal_values() {
-        assert!(CarrierParserVersion::new(0).is_none());
-        assert_eq!(FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION.get(), 1);
         assert_eq!(CARRIER_SOURCE_SPACE_SCHEMA_VERSION.get(), 1);
         assert_eq!(CARRIER_SOURCE_MAP_SCHEMA_VERSION.get(), 1);
     }

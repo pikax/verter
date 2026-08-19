@@ -631,7 +631,7 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// ([`FactVersionRef::FileSourceEnv`]) from the EXACT artifact key the
 /// contributor read actually used.
 ///
-/// `canonical_id`, `parser_version`, and `file_language_id` are sourced
+/// `canonical_id`, `parse_key`, and `file_language_id` are sourced
 /// from `artifact_key` itself, never re-derived from a canonical/path
 /// at the recording site and never read back from an index entry that
 /// could be stale. The `parse_env_hash` dimension is DIFFERENT: it is
@@ -674,7 +674,7 @@ pub(crate) fn observe_file_source_env_from_artifact_key(
     let fact = FactVersionRef::FileSourceEnv {
         canonical_id: key.canonical.as_ref().to_owned(),
         parse_env_hash: identity.parse_env_hash,
-        parser_version: identity.parser_version,
+        parse_key: identity.parse_key,
         file_language_id: identity.file_language_id,
     };
     ctx.observe(fact.clone());
@@ -870,19 +870,16 @@ fn zero_hash() -> Hash16 {
 
 /// Build a [`ParseFactRef`] for `(canonical_id, key, lane)` pinned to a
 /// caller-supplied **observed** content hash — a provenance-pure parse
-/// fact that records the file identity a producer actually observed,
-/// not whatever content is current at signature-build time.
+/// fact that records the exact file identity a producer observed.
 ///
-/// This does NOT consult
-/// [`ResolverContext::authoritative_current_content_hash`] and never
-/// reads whatever content is current at signature-build time. It
-/// performs a
-/// content-addressed [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
-/// lookup keyed on the passed `observed_content_hash`: the parse
-/// registry it reads is the one published for exactly that content
-/// version. The emitted fact's `expected_hash` is therefore the fact
-/// hash that was live when the producer observed the file, regardless
-/// of any edit that has landed since.
+/// The supplied hash must equal the current content identity visible through
+/// `ctx`. That request-bound authority contributes the exact source-derived
+/// `ParseKey` and runtime `FileLanguage`, so a base context cannot recover an
+/// overlay-only version and an overlay context cannot silently fall back to
+/// base content. The subsequent content-addressed
+/// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore) lookup
+/// may ignore `parse_env_hash` because parse facts are content-derived, but it
+/// remains exact in content, parse identity, and language.
 ///
 /// ## Two-identity recovery — raw owner vs analysis canonical
 ///
@@ -909,11 +906,11 @@ fn zero_hash() -> Hash16 {
 ///   fact's id to equal the observation's raw scope id. Normalising the
 ///   emitted id would break both.
 ///
-/// `None` is returned when no artifact is cached for the
-/// `(analysis_canonical, observed_content_hash)` identity — the observed
-/// version's parse facts cannot be recovered, so the caller must refuse
-/// shared-cache admission rather than emit a fact rooted on a guessed
-/// hash.
+/// `None` is returned when the observed hash is not current in this request
+/// view, or when no artifact is cached for its exact
+/// `(analysis_canonical, content_hash, parse_key, file_language)` identity.
+/// The caller must then refuse shared-cache admission rather than emit a fact
+/// rooted on a guessed hash.
 ///
 /// This is the construction primitive for a cache entry whose value
 /// was materialised against a specific observed file version: the
@@ -930,16 +927,11 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     key: FactKey,
     lane: FactLane,
 ) -> Option<ParseFactRef> {
-    // Content-addressed by `(analysis_canonical, observed_content_hash)`
-    // — explicitly NOT view-dependent. The looked-up `FileFacts`
-    // registry is parse-domain and content-derived: a base artifact
-    // (base key) and a session-overlay artifact (overlay-scoped key)
-    // for the SAME content version carry an identical parse-fact
-    // registry, so the `parse_env_hash` key dimension is irrelevant
-    // here. `get_artifacts_for_content` scans for a `FileArtifacts`
-    // matching the `(canonical, content_hash)` pair regardless of
-    // `parse_env_hash`, so a producer recovers the same observed parse
-    // fact whether or not it ran under a session view.
+    // Resolve source identity through the request-bound view first. The
+    // looked-up FileFacts registry is parse-domain and content-derived, so
+    // siblings with the same exact source identity may differ in
+    // `parse_env_hash` without changing these facts. Content, ParseKey, and
+    // FileLanguage remain mandatory dimensions.
     //
     // The lookup is keyed by the NORMALISED analysis canonical — the
     // `FileArtifactKey::canonical` identity every artifact is published
@@ -948,10 +940,19 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     // emitted `ParseFactRef.canonical_id` below stays the raw owner the
     // validator expects.
     let analysis_canonical = ctx.normalized_analysis_canonical(canonical_id);
+    let current_key = ctx.artifact_key_for_current_content(canonical_id)?;
+    if current_key.content_hash != observed_content_hash {
+        return None;
+    }
     let artifacts = ctx
         .project_type_store()
         .indexed()
-        .get_artifacts_for_content(analysis_canonical.as_ref(), observed_content_hash)?;
+        .get_artifacts_for_content(
+            analysis_canonical.as_ref(),
+            observed_content_hash,
+            &current_key.parse_key,
+            &current_key.file_language_id,
+        )?;
     // Body-sensitive `Export` / `LocalDecl` facts are LAZY: the
     // lookup demands exactly the named declaration's body through the
     // artifact's memo on first observation (`lookup_or_compute`);

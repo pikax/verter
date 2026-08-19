@@ -185,8 +185,8 @@ mod file_source_env_observation_tests {
         let fact = FactVersionRef::FileSourceEnv {
             canonical_id: "/contrib.d.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parser_version: 2,
-            file_language_id: FileArtifactKey::derived_file_language_id("/contrib.d.ts"),
+            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test("/contrib.d.ts"),
         };
         let sig = ReadSetSignature::new(StdArc::from(vec![fact]));
         let canons = sig.canonical_ids();
@@ -194,14 +194,14 @@ mod file_source_env_observation_tests {
         assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
     }
 
-    /// The observation API sources `parser_version` / `file_language_id`
+    /// The observation API sources `parse_key` / `file_language_id`
     /// from the exact artifact key the read used — never re-derived from
     /// the canonical/path at the call site — while the `parse_env_hash`
     /// dimension is the canonical's LIVE per-canonical parse env (the
     /// same dimension the contributor `LowerLocator` key folds), NEVER
     /// the key's `parse_env_hash` slot (a base key carries the zero
     /// sentinel there, not an env identity). The planted key carries a
-    /// non-current parser version, a language row derived from a
+    /// non-current parse key, a language row derived from a
     /// DIFFERENT path than the key's canonical, and a non-live
     /// `parse_env_hash`, so any re-derivation (or a key-copied env)
     /// would produce different field values and fail the assertions.
@@ -209,11 +209,9 @@ mod file_source_env_observation_tests {
     fn observe_file_source_env_from_artifact_key_builds_fact_from_key_identity() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let key = FileArtifactKey {
-            canonical: StdArc::from("/dep.ts"),
-            content_hash: [7u8; 16],
             parse_env_hash: [3u8; 16],
-            parser_version: 9,
-            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test("/dep.vue"),
+            ..FileArtifactKey::base_for_test(StdArc::from("/dep.ts"), [7u8; 16])
         };
         let live_parse_env =
             ParseEnvHash::from_env_hash(host.host_view_env_hashes_for("/dep.ts").parse_env_hash);
@@ -230,13 +228,13 @@ mod file_source_env_observation_tests {
         let expected = FactVersionRef::FileSourceEnv {
             canonical_id: "/dep.ts".to_string(),
             parse_env_hash: live_parse_env,
-            parser_version: 9,
-            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
+            parse_key: key.parse_key.clone(),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test("/dep.vue"),
         };
         assert_eq!(
             returned.as_ref(),
             Some(&expected),
-            "the returned fact must carry the key's parser-version/language identity \
+            "the returned fact must carry the key's parse-key/language identity \
              and the canonical's LIVE parse-env dimension"
         );
         let facts = match read_set.finalise() {

@@ -135,7 +135,7 @@ pub struct ScriptBodyProbe {
     /// failure arbitrates against the other parse-defect rails by minimum `encounter_order`.
     pub encounter_order: u32,
     /// The script body content `Span` the gate parses (the inner text between the open and
-    /// close tags). The REPORT anchor for a body parse failure; never the arbitration key.
+    /// close tags). The REPORT anchor and equal-order normative tie-break for a body failure.
     pub body_span: Span,
     /// The grammar the body is parsed under — plain `<script>` is JS (Acorn-equivalent, so
     /// TS-only syntax in a plain script is `js_parse_error`); `lang="ts"` is TS.
@@ -159,7 +159,7 @@ pub struct StyleBodyProbe {
     /// gate's CSS reader parses from HERE into the rest of the source (honouring upstream's
     /// `</style`-or-EOF body-loop finish predicate), so a nested CSS reader that runs into the
     /// literal `</style>` reproduces the exact upstream code. The REPORT anchor for a CSS body
-    /// failure; never the arbitration key.
+    /// failure and equal-order normative span tie-break.
     pub content_start: u32,
 }
 
@@ -609,16 +609,15 @@ pub struct CloseTagViolation {
     /// or the stray / void close tag's name).
     pub tag: String,
     /// The source span of the offending tag (the open tag for an unclosed element, or
-    /// the close tag for a stray / void-content close). This is the REPORT / IDE anchor;
-    /// it is NOT the official-reject gate's arbitration key (see `encounter_order`).
+    /// the close tag for a stray / void-content close). This is the REPORT / IDE anchor
+    /// and the first normative tie-break after `encounter_order`.
     pub span: Span,
     /// The parser's monotonic discovery sequence for this defect (assigned when the
     /// defect was PROVEN/recorded during the single forward pass) — the official-reject
     /// gate arbitrates competing parse defects by minimum `encounter_order` so the
     /// FIRST-discovered defect wins (matching official, which stops at the first parse
-    /// error). The `span` is the report anchor, which for an `Unclosed` defect is the
-    /// open tag even though the defect is only proven at EOF; `encounter_order`, not
-    /// `span`, is the arbitration key.
+    /// error). The `span` cannot outrank a distinct discovery order; it participates
+    /// only when two facts carry the same `encounter_order`.
     pub encounter_order: u32,
 }
 
@@ -658,14 +657,14 @@ pub struct SvelteParseRejectFact {
     /// `context` vs valued-`module` site) carries its EXACT site code here.
     pub official_code: &'static str,
     /// The REPORT / IDE anchor span — the offending `<script>` open tag's attribute, the
-    /// duplicate `<script>` open tag, or the surviving `</p>` close tag. This is NOT the
-    /// arbitration key (see `encounter_order`).
+    /// duplicate `<script>` open tag, or the surviving `</p>` close tag. It is the first
+    /// normative tie-break after `encounter_order`.
     pub span: Span,
     /// The parser's monotonic discovery sequence for this defect (drawn from the shared
     /// defect counter at the moment it was recorded during the single forward pass) — the
     /// official-reject gate arbitrates competing parse defects by minimum `encounter_order`
     /// so the FIRST-discovered defect wins (matching official, which stops at the first
-    /// parse error). `span`, the report anchor, never arbitrates.
+    /// parse error). Equal discovery orders use the normative diagnostic key.
     pub encounter_order: u32,
 }
 
@@ -693,6 +692,8 @@ pub enum SvelteParseRejectKind {
     /// `<svelte:head>` / … NOT at the component root) — official
     /// `svelte_meta_invalid_placement`.
     SvelteMetaInvalidPlacement,
+    /// A root-only host meta element carried authored children.
+    SvelteMetaInvalidContent,
     /// A `<script>` body that fails to parse — official `js_parse_error`. Minted from the
     /// RESERVED body-probe slot by the official-reject gate (which holds OXC), at the
     /// reserved `encounter_order` (the upstream-faithful body-parse position), NOT from the
@@ -1273,6 +1274,8 @@ pub enum SvelteTagKind {
 pub struct SvelteParseDiagnostic {
     /// A short machine-stable code (e.g. `unterminated-block`).
     pub code: &'static str,
+    /// Official parser code when the recovery rail has a distinct internal name.
+    pub official_code: Option<&'static str>,
     /// A human-readable message.
     pub message: String,
     /// The diagnostic span.
@@ -1310,9 +1313,8 @@ pub struct SvelteStrictParseError {
     /// defect was PROVEN/recorded during the single forward pass) — the official-reject
     /// gate arbitrates competing parse defects by minimum `encounter_order` so the
     /// FIRST-discovered defect wins (matching official, which stops at the first parse
-    /// error). The `span` is the report anchor, which for an `Unclosed` defect is the
-    /// open tag even though the defect is only proven at EOF; `encounter_order`, not
-    /// `span`, is the arbitration key.
+    /// error). The `span` cannot outrank a distinct discovery order; it participates
+    /// only when two facts carry the same `encounter_order`.
     pub encounter_order: u32,
 }
 
@@ -1345,6 +1347,15 @@ pub enum SvelteStrictParseErrorKind {
     /// `element_unclosed`, which is the RAW-block close-recognition failure used for
     /// `<script>`).
     CssExpectedIdentifier,
+    /// A block continuation reached while an element was still open.
+    BlockInvalidContinuationPlacement,
+    /// A logic block appeared in a raw-text element that forbids it.
+    BlockInvalidPlacement,
+    BlockUnexpectedCharacter,
+    DeclarationTagInvalidType,
+    UnexpectedReservedWord,
+    /// A template expression or binding pattern is not valid JavaScript.
+    JsParseError,
 }
 
 impl SvelteStrictParseErrorKind {
@@ -1359,6 +1370,12 @@ impl SvelteStrictParseErrorKind {
             Self::ElementUnclosed => "element_unclosed",
             Self::UnexpectedEof => "unexpected_eof",
             Self::CssExpectedIdentifier => "css_expected_identifier",
+            Self::BlockInvalidContinuationPlacement => "block_invalid_continuation_placement",
+            Self::BlockInvalidPlacement => "block_invalid_placement",
+            Self::BlockUnexpectedCharacter => "block_unexpected_character",
+            Self::DeclarationTagInvalidType => "declaration_tag_invalid_type",
+            Self::UnexpectedReservedWord => "unexpected_reserved_word",
+            Self::JsParseError => "js_parse_error",
         }
     }
 }

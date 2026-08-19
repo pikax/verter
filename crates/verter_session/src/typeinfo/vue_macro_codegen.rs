@@ -219,6 +219,11 @@ pub(crate) enum VueMacroDependencyFailure {
         import_source: String,
         /// Exact authored local type name.
         type_name: String,
+        /// The originating macro call's own span (`(start, end)`) — the
+        /// real fallback anchor when the precise import binding cannot be
+        /// relocated. A plain tuple, not `verter_span::Span`, because this
+        /// enum derives `Ord` and `Span` does not.
+        macro_span: (u32, u32),
     },
     /// A resolved root dropped one imported heritage/intersection/union arm.
     UnresolvedSurfaceArm {
@@ -905,6 +910,7 @@ impl VerterHost {
                             owner: mac.owner,
                             import_source: dependency.import_source.clone(),
                             type_name: dependency.type_name.clone(),
+                            macro_span: (dependency.macro_span.start, dependency.macro_span.end),
                         }),
                 );
             }

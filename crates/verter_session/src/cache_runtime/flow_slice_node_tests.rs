@@ -95,8 +95,41 @@ fn function_key(canonical: &str, name: &str, body_hash_tag: u8) -> FlowSliceFunc
         flow_body_stable_hash: [body_hash_tag; 16],
         flow_body_exact_hash: [body_hash_tag; 16],
         parse_env_hash: [0u8; 16],
-        parser_version: 1,
+        build_toolchain_fingerprint:
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     }
+}
+
+#[test]
+fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
+    let baseline = function_key("/same.ts", "same", 7);
+    let repeated = function_key("/same.ts", "same", 7);
+    let changed = FlowSliceFunctionKey {
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(0x9a),
+        ..baseline.clone()
+    };
+    assert_eq!(baseline, repeated);
+    assert_ne!(baseline, changed);
+    assert_eq!(
+        baseline.build_toolchain_fingerprint,
+        crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+    );
+
+    let rig = rig(
+        vec![
+            (baseline.clone(), MYTYPE_FIXTURE),
+            (changed.clone(), MYTYPE_FIXTURE),
+        ],
+        FlowSliceBudget::default(),
+    );
+    let ctx: &dyn ResolverContext = &rig.host;
+    lookup(&rig.hash_node, hash_key(baseline, &["b"]), ctx).expect("baseline build");
+    lookup(&rig.hash_node, hash_key(changed, &["b"]), ctx).expect("fingerprint-changed build");
+    assert_eq!(
+        rig.graphs.build_count(),
+        2,
+        "a private-shape fingerprint change must miss the prior flow graph"
+    );
 }
 
 fn hash_key(function: FlowSliceFunctionKey, path: &[&str]) -> FlowSliceHashKey {
@@ -496,7 +529,8 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
                 .flow_body_exact_hash
                 .expect("a served function position addresses its own bytes"),
             parse_env_hash: env.parse_env_hash,
-            parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         },
         demand: FlowSliceDemandIdentity {
             projection_path: Arc::from(vec![Arc::<str>::from("b")].into_boxed_slice()),

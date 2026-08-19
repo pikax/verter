@@ -30,6 +30,7 @@ use oxc_ast::ast::{
     ArrowFunctionExpression, CallExpression, Expression, Function, Program, Statement,
 };
 use rustc_hash::FxHashSet;
+use verter_span::Span;
 
 use super::cross_slot_redeclaration;
 use super::expr::{collect_pattern_names, reparse_module, BindTargetFact, ShadowStack};
@@ -75,10 +76,10 @@ pub(super) fn official_reject_gate_with_runes(
     // parse defect (close-tag / strict-parse / script-domain / explicit-`</p>` autoclose)
     // was recorded with an `encounter_order` minted at its DISCOVERY point in the parser's
     // single forward pass; the gate selects the FIRST-discovered (minimum `encounter_order`)
-    // unsuppressed defect, matching official, which stops at the first parse error. Source
-    // span is the report ANCHOR only — it NEVER arbitrates. ───
-    if let Some(rejection) = select_parse_phase_defect(source, parsed) {
-        return Some(rejection);
+    // unsuppressed defect, matching official, which stops at the first parse error. Equal
+    // discovery orders use the shared span/severity/code/argument diagnostic key. ───
+    if let Some(defect) = select_parse_phase_defect(source, parsed) {
+        return Some(defect.rejection);
     }
 
     // ─── ANALYZE PHASE (official `phases/2-analyze`) — runs ONLY on a CLEAN parse (the
@@ -576,8 +577,8 @@ fn attribute_name_is_invalid(name: &str) -> bool {
 
 /// Select the FIRST-discovered (minimum `encounter_order`) unsuppressed PARSE defect from
 /// the parser's three encounter-ordered fact rails — the SOLE parse-error arbitration
-/// source. `span` (the report anchor on each fact) NEVER participates; arbitration is
-/// purely by `encounter_order`, the parser's single forward-pass discovery sequence.
+/// source. The parser's single forward-pass `encounter_order` is primary; equal orders
+/// use the shared span/severity/code/argument diagnostic key.
 ///
 /// The rails:
 /// - the parser-recorded [`CloseTagViolation`]s — an unclosed intrinsic element
@@ -595,7 +596,115 @@ fn attribute_name_is_invalid(name: &str) -> bool {
 /// [`CloseTagViolation`]: crate::svelte::parser::CloseTagViolation
 /// [`ParsedSvelte::strict_parse_errors`]: crate::svelte::parser::ParsedSvelte::strict_parse_errors
 /// [`ParsedSvelte::parse_reject_facts`]: crate::svelte::parser::ParsedSvelte::parse_reject_facts
-fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<OfficialRejection> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelectedParseDefect {
+    pub(crate) encounter_order: u32,
+    pub(crate) span: Span,
+    pub(crate) rejection: OfficialRejection,
+}
+
+/// Materialize the NON-CSS parse-phase defects whose validation is
+/// intentionally deferred until the complete carrier source is available.
+/// These defects do not make the recovered carrier geometry unusable, so the
+/// carrier seam publishes them as mapped diagnostics; the runtime gate still
+/// includes them (through [`deferred_parse_defects`]) in its strict
+/// first-defect arbitration and emits no module.
+///
+/// CSS style-body defects are intentionally excluded here — see
+/// [`deferred_css_style_defects`]. Carrier-boundary geometry recognizes a
+/// `<style>` block's byte boundaries; it does not run CSS semantic parsing
+/// or publish CSS diagnostics through the carrier's mapped-diagnostic
+/// channel.
+pub(crate) fn deferred_parse_defects_excluding_css(
+    source: &str,
+    parsed: &ParsedSvelte,
+) -> Vec<SelectedParseDefect> {
+    let mut defects = Vec::new();
+
+    for probe in &parsed.script_body_probes {
+        let body = &source[probe.body_span.start as usize..probe.body_span.end as usize];
+        if super::script_body_parse::script_body_fails_to_parse(body, probe.grammar) {
+            defects.push(SelectedParseDefect {
+                encounter_order: probe.encounter_order,
+                span: probe.body_span,
+                rejection: OfficialRejection::with_code(
+                    CoreOfficialValidationRule::ScriptBodyParse,
+                    "js_parse_error",
+                ),
+            });
+        }
+    }
+
+    for probe in &parsed.options_custom_element_probes {
+        if let Err(code) = &probe.resolution {
+            let code = *code;
+            let encounter_order = if is_options_ce_attribute_parse_fault(code) {
+                probe.parse_encounter_order
+            } else {
+                probe.encounter_order
+            };
+            defects.push(SelectedParseDefect {
+                encounter_order,
+                span: probe.expr_span,
+                rejection: OfficialRejection::with_code(
+                    CoreOfficialValidationRule::OptionsInvalid,
+                    code,
+                ),
+            });
+        }
+    }
+
+    defects
+}
+
+/// Materialize the CSS style-body parse-phase defects — the reserved
+/// style-body-probe slots the runtime gate's first-defect arbitration fills
+/// via [`deferred_parse_defects`]. Runtime-gate-only: this defect class does
+/// NOT publish through the carrier's mapped-diagnostic channel (see
+/// [`deferred_parse_defects_excluding_css`]).
+fn deferred_css_style_defects(source: &str, parsed: &ParsedSvelte) -> Vec<SelectedParseDefect> {
+    let mut defects = Vec::new();
+    for probe in &parsed.style_body_probes {
+        if let Some(code) =
+            super::css_reject::css_body_parse_error(source, probe.content_start as usize)
+        {
+            defects.push(SelectedParseDefect {
+                encounter_order: probe.encounter_order,
+                span: Span::new(
+                    probe.content_start,
+                    probe
+                        .content_start
+                        .saturating_add(1)
+                        .min(source.len() as u32),
+                ),
+                rejection: OfficialRejection::with_code(
+                    CoreOfficialValidationRule::StyleBodyParse,
+                    code,
+                ),
+            });
+        }
+    }
+    defects
+}
+
+/// Materialize every deferred parse-phase defect (non-CSS plus CSS) for the
+/// runtime gate's strict first-defect arbitration. The carrier's
+/// mapped-diagnostic channel uses
+/// [`deferred_parse_defects_excluding_css`] directly instead — CSS defects
+/// never reach that channel.
+pub(crate) fn deferred_parse_defects(
+    source: &str,
+    parsed: &ParsedSvelte,
+) -> Vec<SelectedParseDefect> {
+    let mut defects = deferred_parse_defects_excluding_css(source, parsed);
+    defects.extend(deferred_css_style_defects(source, parsed));
+    defects
+}
+
+pub(crate) fn select_parse_phase_defect(
+    source: &str,
+    parsed: &ParsedSvelte,
+) -> Option<SelectedParseDefect> {
     // The `<p>` elements in an IMPLICIT-autoclose situation (a direct disallowed block child
     // but NO explicit `</p>`) — their parser-reported `Unclosed` is a FEATURE, not a reject,
     // so it is suppressed below. (The EXPLICIT-`</p>` autoclose is a parse_reject_fact, not
@@ -603,12 +712,15 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
     let implicit_autoclose_p_spans =
         collect_implicit_autoclose_paragraph_open_spans(&parsed.template);
 
-    // Track the minimum-`encounter_order` unsuppressed defect across all three rails.
-    let mut best: Option<(u32, OfficialRejection)> = None;
-    let mut consider = |order: u32, rejection: OfficialRejection| {
-        if best.is_none_or(|(o, _)| order < o) {
-            best = Some((order, rejection));
-        }
+    // Track the minimum semantic-order defect across all three rails.
+    let mut candidates = Vec::new();
+    let mut consider = |encounter_order: u32, span: Span, rejection: OfficialRejection| {
+        candidates.push(crate::svelte::parser::defect_order::ParseDefectCandidate {
+            encounter_order,
+            span,
+            code: rejection.official_code,
+            payload: rejection,
+        });
     };
 
     for v in &parsed.close_tag_violations {
@@ -628,12 +740,13 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
                 CoreOfficialValidationRule::VoidElementInvalidContent
             }
         };
-        consider(v.encounter_order, OfficialRejection::of(rule));
+        consider(v.encounter_order, v.span, OfficialRejection::of(rule));
     }
 
     for fact in &parsed.strict_parse_errors {
         consider(
             fact.encounter_order,
+            fact.span,
             OfficialRejection {
                 rule: CoreOfficialValidationRule::ParserStrictness,
                 official_code: fact.official_code,
@@ -655,10 +768,10 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
                 CoreOfficialValidationRule::AttributeDuplicate
             }
             // A duplicate / nested root-only `<svelte:*>` meta element, OR an invalid
-            // `<svelte:options>` attribute / child-content (the `read_options` finalization) —
+            // `<svelte:options>` attribute (the `read_options` finalization) —
             // all ride the `OptionsInvalid` rule (the meta-element class), carrying the exact site
             // code (`svelte_meta_duplicate` / `svelte_meta_invalid_placement` /
-            // `svelte_options_*` / `svelte_meta_invalid_content`) per fact.
+            // `svelte_options_*`) per fact.
             SvelteParseRejectKind::SvelteMetaDuplicate
             | SvelteParseRejectKind::SvelteMetaInvalidPlacement
             | SvelteParseRejectKind::OptionsInvalid => CoreOfficialValidationRule::OptionsInvalid,
@@ -668,80 +781,32 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
             // The body-parse reject is NOT carried as a parse_reject_fact (the parser does not
             // run OXC); it is filled from the RESERVED body-probe slots below.
             SvelteParseRejectKind::ScriptBodyParse => continue,
+            // A parser-level parse-diagnostic-channel fact only (mapped via
+            // `parsed.parse_reject_facts` directly in the carrier seam) — it
+            // does not participate in the runtime gate's strict first-defect
+            // (component-rejection) arbitration.
+            SvelteParseRejectKind::SvelteMetaInvalidContent => continue,
         };
         consider(
             fact.encounter_order,
+            fact.span,
             OfficialRejection::with_code(rule, fact.official_code),
         );
     }
 
-    // FILL the RESERVED script-body-parse slots: parse each script body ONCE with OXC at the
-    // probe's grammar (plain `<script>` = JS, `lang="ts"` = TS). A parse FAILURE mints
-    // `js_parse_error` at the probe's RESERVED `encounter_order` (the upstream-faithful
-    // body-parse position — strictly after the open-tag attribute-duplicate, before the
-    // source-order semantic-attr faults — NOT the body span or this execution time). A body
-    // that parses CLEAN contributes NO defect.
-    for probe in &parsed.script_body_probes {
-        let body = &source[probe.body_span.start as usize..probe.body_span.end as usize];
-        if super::script_body_parse::script_body_fails_to_parse(body, probe.grammar) {
-            consider(
-                probe.encounter_order,
-                OfficialRejection::with_code(
-                    CoreOfficialValidationRule::ScriptBodyParse,
-                    "js_parse_error",
-                ),
-            );
-        }
+    // Fill the reserved script/CSS/custom-element slots once. Their discovery
+    // order remains part of the runtime's exact first-error arbitration.
+    for defect in deferred_parse_defects(source, parsed) {
+        consider(defect.encounter_order, defect.span, defect.rejection);
     }
 
-    // FILL the RESERVED style-body-parse slots: run the faithful `read/style.js` CSS body reader
-    // from each `<style>`'s content-start. A CSS body parse FAILURE mints the EXACT upstream CSS
-    // parse code (`css_expected_identifier` / `css_empty_declaration` / `css_selector_invalid` /
-    // `expected_token` / `unexpected_eof`) at the probe's RESERVED `encounter_order` — the
-    // upstream `read_style` position, BEFORE the `style_duplicate` check — so a malformed 2nd
-    // (or 1st) style body wins the first-error race over the duplicate. A body that parses CLEAN
-    // contributes NO defect (the later `style_duplicate` / unsupported-`<style>` rail wins). The
-    // reader parses from the ORIGINAL source cursor (NOT an isolated slice): upstream's nested
-    // CSS readers run PAST `</style>` into the rest of the source, and that decides the code.
-    for probe in &parsed.style_body_probes {
-        if let Some(code) =
-            super::css_reject::css_body_parse_error(source, probe.content_start as usize)
-        {
-            consider(
-                probe.encounter_order,
-                OfficialRejection::with_code(CoreOfficialValidationRule::StyleBodyParse, code),
-            );
+    crate::svelte::parser::defect_order::select_parse_defect(candidates).map(|candidate| {
+        SelectedParseDefect {
+            encounter_order: candidate.encounter_order,
+            span: candidate.span,
+            rejection: candidate.payload,
         }
-    }
-
-    // ARBITRATE the RESOLVED `<svelte:options customElement={EXPR}>` validation slots: the
-    // parser already ran the one validate+extract engine at options finalization and RETAINED
-    // the typed outcome on each probe — this loop only routes a retained reject code to its
-    // upstream-faithful position (no re-parse). A SYNTACTIC attribute-expression PARSE fault — a
-    // malformed prefix (`js_parse_error`) OR a clean prefix with trailing junk before the `}`
-    // (`expected_token`) — mints AT THE PARSE POSITION (`parse_encounter_order` — upstream's
-    // `read_expression` runs during the `<svelte:options>` attribute loop, so it beats a LATER
-    // template defect / duplicate attribute and loses to an EARLIER one); a parseable-and-fully-
-    // consumed-but-invalid expression mints the EXACT `svelte_options_*` code AT THE FINALIZATION
-    // POSITION (`encounter_order` — upstream's `read_options` runs after the whole template parse,
-    // losing to ANY template parse defect). A retained ACCEPT (a `null` literal, a valid object)
-    // contributes NO defect — the native client path lowers its retained descriptor.
-    for probe in &parsed.options_custom_element_probes {
-        if let Err(code) = &probe.resolution {
-            let code = *code;
-            let order = if is_options_ce_attribute_parse_fault(code) {
-                probe.parse_encounter_order
-            } else {
-                probe.encounter_order
-            };
-            consider(
-                order,
-                OfficialRejection::with_code(CoreOfficialValidationRule::OptionsInvalid, code),
-            );
-        }
-    }
-
-    best.map(|(_, rejection)| rejection)
+    })
 }
 
 /// Whether a `customElement={EXPR}` disposition code is a SYNTACTIC attribute-expression PARSE fault

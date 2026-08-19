@@ -35,6 +35,16 @@ use crate::fact_cache::{
 use crate::fact_registry::{
     AugmentationTargetKindTag, FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
+
+fn test_parse_key(marker: u8) -> verter_language::ParseKey {
+    let language = FileLanguage::script(ScriptSourceType::Ts);
+    verter_language::default_parse_identity_for(
+        &format!("/* source-env test {marker} */"),
+        &language,
+    )
+    .unwrap()
+    .1
+}
 use crate::resolution_currency::{
     CanonicalResolutionId, RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef,
     ResolutionFactVersion, ResolutionPopulation, SessionFingerprint,
@@ -233,19 +243,19 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::script(ScriptSourceType::Ts),
         },
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::script(ScriptSourceType::Tsx),
         },
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
                 adapter_id: FrameworkAdapterId::vue(),
                 language_id: LanguageId::new("vue"),
@@ -254,7 +264,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
                 adapter_id: FrameworkAdapterId::svelte(),
                 language_id: LanguageId::new("svelte"),
@@ -264,7 +274,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
                 adapter_id: FrameworkAdapterId::svelte(),
                 language_id: LanguageId::new("svelte_template"),
@@ -273,7 +283,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::FrameworkTemplate {
                 adapter_id: FrameworkAdapterId::vue(),
                 owner_hint: None,
@@ -282,7 +292,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
-            parser_version: 3,
+            parse_key: test_parse_key(3),
             file_language_id: FileLanguage::FrameworkTemplate {
                 adapter_id: FrameworkAdapterId::vue(),
                 owner_hint: Some(Arc::from("/p/Owner.vue")),
@@ -407,7 +417,7 @@ fn canonical_order_is_by_variant_then_field() {
         FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(0)),
-            parser_version: 1,
+            parse_key: test_parse_key(1),
             file_language_id: FileLanguage::script(ScriptSourceType::Ts),
         },
         FactVersionRef::RouteSurface(RouteSurfaceFactRef {
@@ -477,7 +487,7 @@ fn open_set_ids_order_by_content_not_by_intern_or_allocation_order() {
         .map(|name| FactVersionRef::FileSourceEnv {
             canonical_id: "/p/a.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(0)),
-            parser_version: 1,
+            parse_key: test_parse_key(1),
             file_language_id: FileLanguage::Framework {
                 adapter_id: FrameworkAdapterId::new(name),
                 language_id: LanguageId::new(name),

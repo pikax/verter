@@ -13,7 +13,7 @@
 //! requires:
 //! - [`FrameworkScriptCandidateStore`] — a CONTENT-ADDRESSED artifact store. Its
 //!   key carries the file's content/version dimensions
-//!   (`canonical`, `content_hash`, `parse_env_hash`, `parser_version`,
+//!   (`canonical`, `content_hash`, `parse_env_hash`, `parse_key`,
 //!   `file_language_id`) plus `(provider_id, provider_version)`. A content edit
 //!   or a provider upgrade misses the stale slot (the content-addressed
 //!   family).
@@ -445,8 +445,10 @@ pub struct CandidateSlotKey {
     pub content_hash: Hash16,
     /// The parse-env dimension.
     pub parse_env_hash: Hash16,
-    /// The parser version.
-    pub parser_version: u32,
+    /// Exact syntax-construction identity.
+    pub parse_key: verter_language::ParseKey,
+    /// Session-private derived-artifact shape identity.
+    pub build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
     /// The file's `FileLanguage` row.
     pub file_language_id: verter_language::FileLanguage,
     /// The capturing provider's adapter id.
@@ -937,7 +939,16 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         canonical: Arc::clone(&candidate_canonical),
         content_hash: whole_hash,
         parse_env_hash: env.parse_env_hash,
-        parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        parse_key: framework_parse.as_ref().map_or_else(
+            || {
+                verter_language::default_parse_identity_for(source.as_ref(), &file_language)
+                    .expect("script facts require a supported parse identity")
+                    .1
+            },
+            |artifact| artifact.parse_key().clone(),
+        ),
+        build_toolchain_fingerprint:
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         file_language_id: file_language.clone(),
         provider_id: provider.adapter_id(),
         provider_version: provider.provider_version(),
@@ -1317,7 +1328,7 @@ fn capture_candidates_for(
     framework_mode_hint: Option<
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
-    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Result<CandidateCapture, ScriptFactUnavailableReason> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {

@@ -1581,7 +1581,7 @@ fn resolution_currency_overlay_reveal_tracks_effective_population_value() {
 ///
 /// The source-env / content split is the load-bearing half: a config
 /// change republishes the env-hash tables (`parse_env_hash`,
-/// `parser_version`, `file_language_id`) with NO content bump, so a
+/// `parse_key`, `file_language_id`) with NO content bump, so a
 /// source-env fact folded into the content domain would survive it.
 ///
 /// Mutation recipe, VERIFIED: delete the `bump_source_env_generation()`
@@ -1618,7 +1618,7 @@ fn each_engine_owned_compaction_domain_has_a_live_producer() {
     }]);
     assert!(
         engine.current_source_env_generation() > source_env_before,
-        "a config change moves parse_env_hash / parser_version / file_language_id, so \
+        "a config change moves parse_env_hash / parse_key / file_language_id, so \
          the source-env domain's generation MUST advance"
     );
     assert_eq!(

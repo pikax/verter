@@ -630,7 +630,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_language::FrameworkParseArtifact>>,
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         Hash16,
     )> {
         if canonical_id.is_empty() {
@@ -648,7 +648,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
-        Option<Arc<verter_language::FrameworkParseArtifact>>,
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         Hash16,
     )> {
         component_meta_trace_custom!("current_eval_state", format!("owner={}", canonical_id),);

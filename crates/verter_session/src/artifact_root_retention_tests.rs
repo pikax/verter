@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use crate::file_artifact_store::FileArtifactKey;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
@@ -55,7 +54,9 @@ fn view_still_resolves_its_captured_artifact_after_the_host_supersedes_it() {
     let v1 = host
         .ensure_indexed_ready(CANONICAL)
         .expect("v1 artifact must materialise");
-    let v1_key = FileArtifactKey::base(Arc::from(CANONICAL), v1.whole_hash);
+    let v1_key = host
+        .authoritative_current_artifact_key(CANONICAL)
+        .expect("v1 runtime-authoritative key");
 
     let view = host.resolver_store_view_read().into_owned_view();
     let root = Arc::clone(
@@ -69,6 +70,9 @@ fn view_still_resolves_its_captured_artifact_after_the_host_supersedes_it() {
     let v2 = host
         .ensure_indexed_ready(CANONICAL)
         .expect("v2 artifact must materialise");
+    let v2_key = host
+        .authoritative_current_artifact_key(CANONICAL)
+        .expect("v2 runtime-authoritative key");
     assert_ne!(
         v1.whole_hash, v2.whole_hash,
         "the mutation must actually change the content version, else this proves nothing"
@@ -76,7 +80,8 @@ fn view_still_resolves_its_captured_artifact_after_the_host_supersedes_it() {
 
     let store = host.project_type_store();
     assert!(
-        store.indexed().get(CANONICAL, v1.whole_hash).is_none(),
+        host.exact_current_indexed_for_test(CANONICAL, v1.whole_hash)
+            .is_none(),
         "the CURRENT root must no longer serve the superseded version"
     );
 
@@ -89,13 +94,7 @@ fn view_still_resolves_its_captured_artifact_after_the_host_supersedes_it() {
         "the lease must resolve the version the view captured, not the current one"
     );
     assert!(
-        store
-            .indexed()
-            .indexed_at_root(
-                &root,
-                &FileArtifactKey::base(Arc::from(CANONICAL), v2.whole_hash)
-            )
-            .is_none(),
+        store.indexed().indexed_at_root(&root, &v2_key).is_none(),
         "the view must never see a version published after its capture"
     );
 }
@@ -105,10 +104,12 @@ fn view_still_resolves_its_captured_artifact_after_the_host_supersedes_it() {
 #[test]
 fn view_still_resolves_its_captured_artifact_after_the_canonical_cascade_evicts_it() {
     let host = host_with_file("export interface B { b: number }\n");
-    let artifact = host
+    let _ = host
         .ensure_indexed_ready(CANONICAL)
         .expect("artifact must materialise");
-    let key = FileArtifactKey::base(Arc::from(CANONICAL), artifact.whole_hash);
+    let key = host
+        .authoritative_current_artifact_key(CANONICAL)
+        .expect("runtime-authoritative artifact key");
 
     let view = host.resolver_store_view_read().into_owned_view();
     let root = Arc::clone(view.artifact_root().expect("view carries a lease"));
@@ -133,10 +134,12 @@ fn view_still_resolves_its_captured_artifact_after_the_canonical_cascade_evicts_
 #[test]
 fn reachability_gc_does_not_free_a_version_a_live_view_still_leases() {
     let host = host_with_file("export interface C { c: number }\n");
-    let artifact = host
+    let _ = host
         .ensure_indexed_ready(CANONICAL)
         .expect("artifact must materialise");
-    let key = FileArtifactKey::base(Arc::from(CANONICAL), artifact.whole_hash);
+    let key = host
+        .authoritative_current_artifact_key(CANONICAL)
+        .expect("runtime-authoritative artifact key");
 
     let view = host.resolver_store_view_read().into_owned_view();
     let root = Arc::clone(view.artifact_root().expect("view carries a lease"));

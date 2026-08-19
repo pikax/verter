@@ -1,7 +1,7 @@
 # BRT0 — landing record
 
-Partial landing. `TR-1` and `BND-2` are corrected and gated; `RT-1` is **not executed**
-and remains open. Context in [`context-packet.md`](context-packet.md).
+Complete. `TR-1` and `BND-2` landed in a first pass; `RT-1` in a second, after the block
+that owned its correction site landed. Context in [`context-packet.md`](context-packet.md).
 
 ## What shipped
 
@@ -73,12 +73,40 @@ that fails if the map were attached to every transform return.
 `packages/unplugin/scripts/probe-bundler-route.freshness.json` regenerated: the record
 fingerprints production `src` plus the built `dist`, both of which moved.
 
-### `RT-1` — NOT EXECUTED
+### `RT-1` — the batch route selects each input carrier
 
-Its correction site is the active file of a concurrently running block, and the change
-alters which responses reach that block's in-flight transaction construction. Held
-rather than split by line range. The finding, its owner and its target test are
-unchanged.
+The batch registered EVERY input under the Vue carrier regardless of the canonical id, so
+a `.svelte` source in a batch was parsed and compiled by the Vue carrier: the route
+published Vue-assembled bytes where the single-file route publishes a Svelte client
+module, and neither Svelte runtime refusal could fire on that route at all.
+
+**Code.** The language is derived from the canonical id by the host classifier — the same
+authority every other session consumer reads — at one function that takes NO language
+argument (`VerterHost::batch_upsert_request`), so a batch call site has nothing to get
+wrong. The Stage-B skip decision consumes that BUILT request and compares source bytes AND
+language row, because a canonical already holding those bytes under another carrier would
+otherwise keep it for the whole batch: deriving the language is not enough if the decision
+that skips the registration cannot see it.
+
+**Gate.** `a_svelte_batch_matches_the_single_file_route_item_for_item` (previously
+`#[ignore]`d) compares each item — published, refused, published, with the refusal in the
+MIDDLE — against the single-file route for the same typed request.
+
+The three tests that recorded the divergence now assert the corrected behaviour, each with
+a NON-Svelte input in the same batch so a route that swapped one fixed carrier for another
+fails them: carrier registration per input, both runtime refusals firing with the
+single-file route's typed codes and no product beside them, and the same on the
+host-backed lane. Two tests are added: the batch re-registers a canonical another carrier
+left behind, and the derivation itself is read per path off the one function that performs
+it.
+
+**The edge this creates, recorded rather than discovered later.** An id that names no
+carrier — no extension, an unknown extension, a `.ts` module — is no longer compiled into a
+component module. That is the correct consequence of deriving the carrier from the path
+(compiling a `.ts` path as a Vue SFC was the same defect), and `CompileBatchInput` has no
+field with which a caller could state a language for a path that implies none. Both public
+batch entry points document it and a test pins it with a compiling control. It is a
+public-contract narrowing and is recorded here for ratification.
 
 ## Verification
 
@@ -130,6 +158,84 @@ arbitrary bytes fails the host-byte comparison; a transform that returns `map: n
 fails the JS regression while the Vite negative control stays green; a map attached to
 the Vite routing wrapper fails that control.
 
+## Second pass — verification
+
+| surface | invocation | result |
+|---|---|---|
+| batch route + derivation | `cargo test -p verter_session --lib -- svelte_batch_route the_batch_derives_each_inputs_language --test-threads=1` | `running 17 tests` → 15 passed, 2 ignored, 0 failed |
+| whole session library | `cargo test -p verter_session --lib` | `running 6342 tests` → 5805 passed, 537 ignored, 0 failed |
+| transports + bundler | `cargo test -p verter_session --lib --features transport-authoritative transport_route_equivalence -- --test-threads=1` | `running 22 tests` → 22 passed, 0 failed |
+| session integration binaries | `cargo test -p verter_session --tests` | 2464 passed, 30 ignored, 0 failed (plus the library above) |
+
+**RED before, GREEN after.** The target failed with Vue-assembled bytes for
+`/batch/EqOne.svelte`, an absent refusal for `/batch/EqRefused.svelte`, a partial product
+published beside it, and differing bytes for `/batch/EqTwo.svelte`; it passes after.
+
+**Discrimination proven by plant, each shown present, unique and new first.** A fixed VUE
+carrier fails 5 of the 14 batch tests; a fixed SVELTE carrier fails 8 — a different set,
+which is the point: the item-for-item target alone cannot tell a correct route from one
+pinned to Svelte, and the mixed-carrier tests are what do. A bytes-only skip predicate
+fails the stale-carrier regression with `vue != svelte`. An always-upsert predicate is
+caught by a submission count.
+
+## Second pass — what the reachable refusals changed
+
+Making Svelte classification reachable makes the Svelte runtime refusals reachable, so two
+assertions in the transport suite that assumed every lane publishes bytes were re-measured:
+the server lane refuses the Svelte carrier outright, and the refusal-shaped input is refused
+on every lane. Those entries are now asserted to carry the typed refusal and no product,
+while the non-contamination and source-map axes are asserted over the entries that publish,
+with a guard that at least one does.
+
+That suite ALSO no longer compiled: it still used the batch entry fields that a landed
+sibling replaced with accessors, and being feature-gated it was not built by that block's
+gate. It was migrated to the accessors in the same change — a suite that does not compile
+proves nothing.
+
+## Second pass — the canonical gate
+
+Run at landing readiness on the squashed tree
+(`node scripts/gate.mjs --test-threads 8 --memory-limit 18GiB`):
+**VERDICT PASS, all three surfaces green** — 24417 run / 24417 passed on the
+process-isolation surface, 3 suites clean in-process, 8638 run / 8638 passed on the
+shipped-`cfg(debug_assertions)` surface.
+
+An earlier run, before the rebase onto the Svelte correction block, failed on exactly one
+non-tolerated test —
+`verter_type_runtime resilient::resilient_tests::failed_respawn_retries_within_budget_and_recovers`
+— and is recorded rather than dropped. It is discriminated as outside this change on three
+grounds: `verter_type_runtime` does not depend on anything this change touches (its
+dependencies are `verter_span`, `verter_language`, `verter_tsgo_api`; its dev-dependencies
+`blake3`, `trybuild`, `tempfile`, `tokio` — neither `verter_session` nor `verter_napi` is
+in its build graph); it passed four consecutive standalone re-runs on that same tree; and
+it is a real-tsserver respawn/hover test already observed failing on the base by the
+preceding block. It passed in the final run above.
+
+Also green before the gate: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings`,
+`cargo check --workspace --release`, `pnpm install --frozen-lockfile`, and the session
+integration binaries (2464 passed, 30 ignored, 0 failed).
+
+The only change made after that PASS is this section; the guard that reads tracked
+documentation was re-run green afterwards.
+
+## Second pass — the Svelte map re-measurement
+
+The Svelte correction block landed while this one was gating, and this branch was rebased
+onto it. Its map corrections flipped a characterization that this suite owns and that
+explicitly named the flip as its own re-measure signal: the published Svelte
+virtual-script map went from one segment naming no authored position to 7 generated
+lines / 3 segments / 1 naming an authored position.
+
+Re-measured rather than reverted, and strengthened while re-measuring:
+
+* the characterization is now a FLOOR for BOTH carriers instead of an exact pin for Svelte
+  and a floor for Vue, and it is renamed for the invariant it holds — that each published
+  virtual-script map covers its output — rather than the divergence that no longer exists;
+* the Svelte virtual-script product is promoted from the envelope-only oracle to the same
+  MAPPED oracle the Vue product is held to, which the empty map could not have satisfied.
+
 ## Findings dispositioned
 
 | finding | disposition | record |
@@ -144,6 +250,11 @@ the Vite routing wrapper fails that control.
 Zero open deferrals other than the one recorded row above, which carries its owner, gate
 and acceptance test.
 
+| a canonical already registered under another carrier kept it through a batch, because the upsert skip compared only the source bytes | **ADOPT-NOW** | the skip decision now consumes the BUILT registration and compares bytes and language; regression `a_batch_re_registers_a_canonical_that_was_left_under_another_carrier` compares a poisoned host against a fresh one given the same batch |
+| an id naming no carrier is no longer compiled as a component | **ADOPT-NOW as a documented narrowing** | the correct consequence of deriving the carrier from the path; documented at both public batch entry points and pinned by a test with a compiling control. Recorded for ratification |
+| the virtual-file route answers `missing source` for a file whose source IS registered but is not a carrier | **DEFER** | the taxonomy is that route's, and correcting it changes the error every consumer sees. Captured as `#[ignore]`d `a_non_carrier_batch_id_is_not_reported_as_a_missing_source`, proven to fail today, naming `host_resolve/virtual_file_pipeline.rs` as owner |
+| the feature-gated transport suite no longer compiled against the landed batch entry API | **ADOPT-NOW** | migrated to the accessors; without it this block could not run its own gate |
+
 ## Reviews
 
 | seat | agent | verdict |
@@ -153,6 +264,14 @@ and acceptance test.
 | scope consult | `codex` gpt-5.6-sol @ high | **DEFER** ruled for the source-map shift, with owner, gate and acceptance test |
 | contract check | `grok` 4.6 @ xhigh, default-to-BLOCK | **CONTRACT CORRECT** — see above |
 | delta (structural hardening) | `codex` gpt-5.6-sol @ high | **BLOCK** on two P2s, both inaccurate CLAIMS rather than code defects: a residual generic status mapping meant "neither binding names the variant" was too strong, and this record still described the superseded implementation. Both corrected here and in the classifier's own documentation. Executable behaviour verified unchanged on both bindings, plants proven in both directions |
+
+
+**Second pass.** adversarial `codex` gpt-5.6-sol @ high: **BLOCK** (one P1 — the cached-source
+skip bypassing derivation — plus a public-contract P2 and a stale-comment P3), then **BLOCK**
+on the fix delta for two stale comments only, with the functional half verified in both
+directions including a submission-count probe of the warm path. conformance `grok` 4.6 @
+xhigh, default-to-BLOCK: **LAND**, its strongest case against being exactly those stale
+comments, all of which are corrected here.
 
 The architecture mandate was not run: this is a subsystem-class block and no structural
 doubt arose. Conformance and adversarial both ran.

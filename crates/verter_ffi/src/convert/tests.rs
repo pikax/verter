@@ -1488,19 +1488,22 @@ fn diagnostics_all_severity_levels() {
                 severity: host::HostSeverity::Error,
                 code: "E001".to_string(),
                 message: "error msg".to_string(),
-                span: Some(verter_span::Span::new(0, 10)),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(0, 10),
             },
             host::HostDiagnostic {
                 severity: host::HostSeverity::Warning,
                 code: "W001".to_string(),
                 message: "warning msg".to_string(),
-                span: None,
+                arguments: Vec::new(),
+                span: verter_span::Span::new(12, 15),
             },
             host::HostDiagnostic {
                 severity: host::HostSeverity::Info,
                 code: "I001".to_string(),
                 message: "info msg".to_string(),
-                span: None,
+                arguments: Vec::new(),
+                span: verter_span::Span::new(20, 24),
             },
         ],
         has_errors: true,
@@ -1510,13 +1513,14 @@ fn diagnostics_all_severity_levels() {
     assert_eq!(ffi.diagnostics.len(), 3);
     assert_eq!(ffi.diagnostics[0].severity, "error");
     assert_eq!(ffi.diagnostics[0].code, "E001");
-    assert_eq!(ffi.diagnostics[0].span_start, Some(0));
-    assert_eq!(ffi.diagnostics[0].span_end, Some(10));
+    assert_eq!(ffi.diagnostics[0].span_start, 0);
+    assert_eq!(ffi.diagnostics[0].span_end, 10);
     assert_eq!(ffi.diagnostics[1].severity, "warning");
-    assert_eq!(ffi.diagnostics[1].span_start, None);
+    assert_eq!(ffi.diagnostics[1].span_start, 12);
+    assert_eq!(ffi.diagnostics[1].span_end, 15);
     assert_eq!(ffi.diagnostics[2].severity, "info");
-    assert_eq!(ffi.diagnostics[2].span_start, None);
-    assert_eq!(ffi.diagnostics[2].span_end, None);
+    assert_eq!(ffi.diagnostics[2].span_start, 20);
+    assert_eq!(ffi.diagnostics[2].span_end, 24);
 }
 
 #[test]
@@ -1536,32 +1540,38 @@ fn host_diagnostics_to_ffi_converts_utf8_spans_to_utf16_with_unicode_source() {
             severity: host::HostSeverity::Error,
             code: "E_UTF".to_string(),
             message: "unicode".to_string(),
-            span: Some(verter_span::Span::new(1, 5)), // byte offset at 😀 start..right after
+            arguments: Vec::new(),
+            span: verter_span::Span::new(1, 5), // byte offset at 😀 start..right after
         }],
         has_errors: true,
     };
 
     let ffi = host_diagnostics_to_ffi(&snapshot, Some(source));
     assert_eq!(ffi.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics[0].span_start, Some(1));
-    assert_eq!(ffi.diagnostics[0].span_end, Some(3));
+    assert_eq!(ffi.diagnostics[0].span_start, 1);
+    assert_eq!(ffi.diagnostics[0].span_end, 3);
 }
 
 #[test]
-fn host_diagnostics_to_ffi_preserves_none_spans() {
+fn host_diagnostics_to_ffi_falls_back_to_raw_offsets_without_source() {
+    // `HostDiagnostic.span` is mandatory — every diagnostic carries a real
+    // mapped byte range. When the caller has no source text to convert
+    // against, the FFI boundary preserves the raw byte offsets as-is
+    // rather than manufacturing a missing span.
     let snapshot = host::DiagnosticsSnapshot {
         diagnostics: vec![host::HostDiagnostic {
             severity: host::HostSeverity::Warning,
-            code: "W_NONE".to_string(),
-            message: "none".to_string(),
-            span: None,
+            code: "W_RAW".to_string(),
+            message: "raw".to_string(),
+            arguments: Vec::new(),
+            span: verter_span::Span::new(1, 3),
         }],
         has_errors: false,
     };
-    let ffi = host_diagnostics_to_ffi(&snapshot, Some("abc"));
+    let ffi = host_diagnostics_to_ffi(&snapshot, None);
     assert_eq!(ffi.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics[0].span_start, None);
-    assert_eq!(ffi.diagnostics[0].span_end, None);
+    assert_eq!(ffi.diagnostics[0].span_start, 1);
+    assert_eq!(ffi.diagnostics[0].span_end, 3);
 }
 
 #[test]
@@ -1617,7 +1627,8 @@ fn update_result_full_round_trip() {
                 severity: host::HostSeverity::Warning,
                 code: "W002".to_string(),
                 message: "unused var".to_string(),
-                span: Some(verter_span::Span::new(42, 45)),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(42, 45),
             }],
             has_errors: false,
         },
@@ -1788,7 +1799,8 @@ fn host_update_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
                 severity: host::HostSeverity::Error,
                 code: "E_UTF".to_string(),
                 message: "unicode".to_string(),
-                span: Some(verter_span::Span::new(1, 5)),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(1, 5),
             }],
             has_errors: true,
         },
@@ -1797,8 +1809,8 @@ fn host_update_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
 
     let ffi = host_update_to_ffi(result, Some(source));
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
 }
 
 #[test]
@@ -1838,7 +1850,8 @@ fn virtual_file_arc_to_string() {
                 severity: host::HostSeverity::Warning,
                 code: "W_UTF".to_string(),
                 message: "unicode".to_string(),
-                span: Some(verter_span::Span::new(1, 5)),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(1, 5),
             }],
             has_errors: false,
         },
@@ -1862,8 +1875,8 @@ fn virtual_file_arc_to_string() {
     assert_eq!(ffi.meta.scope_id, Some("data-v-abc123".to_string()));
     assert!(ffi.meta.block_type.is_none());
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
 }
 
 #[test]
@@ -1880,7 +1893,8 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
                 severity: host::HostSeverity::Error,
                 code: "E_UTF".to_string(),
                 message: "unicode".to_string(),
-                span: Some(verter_span::Span::new(1, 5)),
+                arguments: Vec::new(),
+                span: verter_span::Span::new(1, 5),
             }],
             has_errors: true,
         },
@@ -1893,8 +1907,8 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
 
     let ffi = host_virtual_file_to_ffi(response, Some(source));
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
-    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_start, 1);
+    assert_eq!(ffi.diagnostics.diagnostics[0].span_end, 3);
 }
 
 #[test]
@@ -2029,13 +2043,15 @@ fn host_error_compile_error_with_diagnostics() {
                     severity: host::HostSeverity::Error,
                     code: "PARSE_ERR".to_string(),
                     message: "unexpected token".to_string(),
-                    span: None,
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, 1),
                 },
                 host::HostDiagnostic {
                     severity: host::HostSeverity::Warning,
                     code: "WARN_01".to_string(),
                     message: "unused import".to_string(),
-                    span: None,
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, 1),
                 },
             ],
             has_errors: true,

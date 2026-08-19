@@ -2057,7 +2057,7 @@ fn duplicate_static_attr_emits_error_on_second_occurrence() {
     // The error span must anchor on the SECOND `id` name (start..name_end).
     let first_id = input.find("id=").expect("first id");
     let second_id = first_id + 3 + input[first_id + 3..].find("id=").expect("second id");
-    let span = dup[0].span.expect("duplicate diagnostic carries a span");
+    let span = dup[0].span;
     assert_eq!(
         (span.start, span.end),
         (second_id as u32, (second_id + 2) as u32),
@@ -2116,7 +2116,7 @@ fn duplicate_namespaced_attr_is_flagged_literally() {
     // Anchored on the SECOND `xlink:href` name.
     let first = input.find("xlink:href").expect("first xlink:href");
     let second = first + 10 + input[first + 10..].find("xlink:href").expect("second");
-    let span = dup[0].span.expect("duplicate diagnostic carries a span");
+    let span = dup[0].span;
     assert_eq!(
         (span.start, span.end),
         (second as u32, (second + 10) as u32),

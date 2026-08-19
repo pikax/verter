@@ -231,9 +231,7 @@ pub fn assert_token_maps_to_source_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework_common::carrier_compiler::{
-        CarrierCompiler, IdeCompileOptions, ParseOptions,
-    };
+    use crate::framework_common::carrier_compiler::{CarrierCompiler, IdeCompileOptions};
     use crate::framework_common::vue_bridge::VueCarrierCompiler;
 
     #[test]
@@ -250,10 +248,19 @@ mod tests {
     fn helpers_assert_vue_ide_tokens_map_back_to_the_sfc() {
         // The reusable helpers exercised end-to-end against the Vue
         // bridge's IDE output — proving they are live, not a dead clone.
-        let compiler = VueCarrierCompiler::default();
+        let compiler = VueCarrierCompiler;
         let source =
             "<script setup lang=\"ts\">\nconst myUniqueBinding = 1\n</script>\n<template><div>{{ myUniqueBinding }}</div></template>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = crate::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+            verter_language::FileLanguage::vue(),
+            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+                "{{",
+                "}}",
+                std::iter::empty::<&str>(),
+            )
+            .expect("Vue grammar"),
+            source,
+        );
         let ide = compiler
             .compile_ide(
                 source,

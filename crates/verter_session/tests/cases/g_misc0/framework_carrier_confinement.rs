@@ -1,8 +1,12 @@
 //! LEGACY_GATE_SELF — framework parse-carrier confinement guards.
 //!
-//! Three static architecture guards for the framework parse-artifact
-//! substrate (`FrameworkParseArtifact` + `CarrierParse` +
-//! `CarrierAccessToken`):
+//! Two static architecture guards for the framework parse-artifact
+//! substrate (`FrameworkParseArtifact` + `CarrierParse`). There is no
+//! carrier-access-token model to guard anymore: typed-carrier recovery
+//! is a monomorphic first-party opener installed at registry-build time
+//! (`open_vue_carrier` / `open_svelte_carrier`, each confined by
+//! construction to its own adapter's artifacts), not a remintable
+//! adapter-id capability.
 //!
 //!  * `parsed_sfc_confined_to_vue_bridge` — production references to
 //!    BOTH Vue parse tokens — the `ParsedSfc` type AND the `parse_sfc`
@@ -19,20 +23,16 @@
 //!
 //!  * `carrier_downcast_confined_to_owning_adapter` — the raw
 //!    `#[doc(hidden)] __carrier_downcast_ref` / `__carrier_downcast_arc`
-//!    helpers appear ONLY in `verter_language::parse_artifact`,
-//!    `verter_session/src/framework/ctx.rs`, and
-//!    `verter_compiler/src/framework_common/ctx.rs` (the blessed
-//!    `carrier_for::<T>` wrapper homes); typed carrier use
+//!    helpers (the UNREGISTERED-artifact form — the registered-artifact
+//!    form was deleted entirely; registered typed-carrier recovery goes
+//!    through the `open_vue_carrier` / `open_svelte_carrier` openers
+//!    instead) appear ONLY in `verter_language::parse_artifact` (the
+//!    definition), `verter_language::lib` (the re-export), and each
+//!    adapter's own bridge module
+//!    (`verter_compiler/src/framework_common/vue_bridge.rs`,
+//!    `verter_compiler/src/svelte/carrier.rs`); typed carrier use
 //!    (`VueParseCarrier`) only inside the owning adapter/compiler
 //!    paths.
-//!
-//!  * `carrier_access_token_minted_only_in_verter_language` —
-//!    `CarrierAccessToken` construction expressions appear ONLY in the
-//!    owning `verter_language` minting files (`parse_artifact.rs` +
-//!    the `LanguageRegistry` row-construction module `registry.rs`);
-//!    the API-surface half pins that NO public arbitrary-id
-//!    constructor and NO public by-id token lookup exist — descriptors
-//!    and `vue_parse()` RECEIVE the token, never construct it.
 //!
 //! Scanner discipline mirrors `no_legacy_walker.rs`: production
 //! `crates/*/src/**/*.rs` only, comments + string literals + inline
@@ -62,12 +62,17 @@ const VUE_BRIDGE_ALLOWLIST: &[&str] = &[
 /// The blessed raw-downcast homes (`__carrier_downcast_ref` /
 /// `__carrier_downcast_arc` may appear nowhere else). The owning
 /// crate's `lib.rs` is allowlisted for its `pub use` export line only —
-/// it is the definition's export surface, not a consumer.
+/// it is the definition's export surface, not a consumer. Only the
+/// UNREGISTERED-artifact form still exists; each adapter's own bridge
+/// module calls it directly to recover its own typed carrier out of its
+/// own unregistered parse (registered-artifact recovery goes through the
+/// `open_vue_carrier` / `open_svelte_carrier` openers instead, which
+/// name neither raw helper).
 const RAW_DOWNCAST_ALLOWLIST: &[&str] = &[
     "crates/verter_language/src/parse_artifact.rs",
     "crates/verter_language/src/lib.rs",
-    "crates/verter_session/src/framework/ctx.rs",
-    "crates/verter_compiler/src/framework_common/ctx.rs",
+    "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+    "crates/verter_compiler/src/svelte/carrier.rs",
 ];
 
 /// Typed Vue carrier (`VueParseCarrier`) use is confined to the owning
@@ -75,32 +80,6 @@ const RAW_DOWNCAST_ALLOWLIST: &[&str] = &[
 const TYPED_CARRIER_ALLOWLIST: &[&str] = &[
     "crates/verter_compiler/src/framework_common/vue_bridge.rs",
     "crates/verter_session/src/typeinfo/adapters/vue/",
-];
-
-/// `CarrierAccessToken` construction expressions (struct literals and
-/// the crate-private factory) are confined to the `verter_language`
-/// minting files.
-const TOKEN_MINTING_ALLOWLIST: &[&str] = &[
-    "crates/verter_language/src/parse_artifact.rs",
-    "crates/verter_language/src/registry.rs",
-];
-
-/// The carrier-row REGISTRATION channel (`LanguageRow::carrier` /
-/// `LanguageRegistry::__built_in_with_carrier_tokens`) is itself
-/// confined: tokens flow only to verter_language internals and the
-/// sanctioned receipt sites — the session's per-carrier adapter accessors
-/// (`receive_vue_carrier_token` / the Svelte `svelte_carrier_token`) and
-/// the compiler-side blessed carrier ctx (each carrier bridge's
-/// `CarrierCompilerCtx` receives its carrier proof through this channel to
-/// downcast its own carrier back out of the type-erased artifact). Any
-/// OTHER production call site would let an arbitrary crate mint an
-/// adapter's token through the public row constructor — the same forging
-/// vector bans for a public arbitrary-id constructor.
-const TOKEN_RECEIPT_ALLOWLIST: &[&str] = &[
-    "crates/verter_language/src/",
-    "crates/verter_session/src/typeinfo/adapters/vue/parse_access.rs",
-    "crates/verter_session/src/typeinfo/adapters/svelte/parse_access.rs",
-    "crates/verter_compiler/src/framework_common/ctx.rs",
 ];
 
 // ───────────────────────────── the guards ─────────────────────────────
@@ -139,104 +118,6 @@ fn carrier_downcast_confined_to_owning_adapter() {
         typed_violations.is_empty(),
         "`VueParseCarrier` (the typed Vue carrier) may be used ONLY inside the owning \
          adapter/compiler paths {TYPED_CARRIER_ALLOWLIST:?}. Violations:\n{typed_violations:#?}"
-    );
-}
-
-#[test]
-fn carrier_access_token_minted_only_in_verter_language() {
-    // (1) Construction-expression confinement: a `CarrierAccessToken`
-    // struct literal (`CarrierAccessToken {`) or a call to the
-    // crate-private factory may appear ONLY in the minting files.
-    let mut violations = scan_predicate_outside_allowlist(
-        |line| line_has_token_struct_literal(line, "CarrierAccessToken"),
-        TOKEN_MINTING_ALLOWLIST,
-        "CarrierAccessToken struct literal",
-    );
-    violations.extend(scan_tokens_outside_allowlist(
-        &["mint_carrier_access_token"],
-        TOKEN_MINTING_ALLOWLIST,
-    ));
-    // The registration channel is confined to the sanctioned receipt
-    // sites: a call to `LanguageRow::carrier` or
-    // `__built_in_with_carrier_tokens` anywhere else is a forged-token
-    // vector through the public row constructor.
-    violations.extend(scan_predicate_outside_allowlist(
-        |line| line.contains("LanguageRow::carrier"),
-        TOKEN_RECEIPT_ALLOWLIST,
-        "LanguageRow::carrier registration-channel call",
-    ));
-    violations.extend(scan_tokens_outside_allowlist(
-        &["__built_in_with_carrier_tokens"],
-        TOKEN_RECEIPT_ALLOWLIST,
-    ));
-    assert!(
-        violations.is_empty(),
-        "`CarrierAccessToken` construction expressions are confined to the \
-         `verter_language` minting files {TOKEN_MINTING_ALLOWLIST:?}, and the \
-         registration channel to the sanctioned receipt sites \
-         {TOKEN_RECEIPT_ALLOWLIST:?} (`verter_language` is the SOLE minting \
-         authority — the token is minted during `LanguageRegistry` carrier-row \
-         construction and returned exactly once as the carrier row's registration \
-         proof). Violations:\n{violations:#?}"
-    );
-
-    // (2) API-surface half: NO public arbitrary-id constructor
-    // (`new(adapter_id)` / `From` / `Default`) and NO public by-id
-    // token lookup exist. The ONLY functions in `verter_language`
-    // whose return type carries `CarrierAccessToken` are the
-    // carrier-row registration channel.
-    let root = workspace_root();
-    let lang_src = root.join("crates/verter_language/src");
-    let mut files = Vec::new();
-    collect_production_rs(&lang_src, &mut files);
-    let mut offending: Vec<String> = Vec::new();
-    let allowed_fns = [
-        "carrier",
-        "__built_in_with_carrier_tokens",
-        "mint_carrier_access_token",
-    ];
-    for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        let processed = preprocess(&text);
-        // Forbid From / Default / TryFrom impls for the token.
-        for forbidden in [
-            "impl From<",
-            "impl Default for CarrierAccessToken",
-            "impl TryFrom<",
-        ] {
-            for (idx, line) in processed.lines().enumerate() {
-                if line.contains(forbidden) && line.contains("CarrierAccessToken") {
-                    offending.push(format!(
-                        "{}:{}: forbidden conversion impl `{}`",
-                        file.display(),
-                        idx + 1,
-                        line.trim()
-                    ));
-                }
-            }
-        }
-        // Every fn whose signature RETURNS the token must be one of the
-        // registration-proof channel functions.
-        for (name, line_no, line) in fns_returning_token(&processed) {
-            if !allowed_fns.contains(&name.as_str()) {
-                offending.push(format!(
-                    "{}:{}: fn `{}` returns CarrierAccessToken outside the \
-                     registration-proof channel: `{}`",
-                    file.display(),
-                    line_no,
-                    name,
-                    line.trim()
-                ));
-            }
-        }
-    }
-    assert!(
-        offending.is_empty(),
-        "CarrierAccessToken API surface violation (pinned: no public arbitrary-id \
-         constructor, no `From`/`Default`, no public by-id token lookup — the token is \
-         returned only through carrier-row construction):\n{offending:#?}"
     );
 }
 
@@ -287,8 +168,8 @@ pub(crate) fn misplaced(source: &str) {\n\
 #[test]
 fn scanner_detects_misplaced_raw_downcast_and_typed_carrier() {
     let synthetic = "\
-fn sneaky(artifact: &FrameworkParseArtifact, token: &CarrierAccessToken) {\n\
-    let _ = verter_language::__carrier_downcast_ref::<VueParseCarrier>(artifact, token);\n\
+fn sneaky(artifact: &FrameworkParseArtifact) {\n\
+    let _ = verter_language::__carrier_downcast_ref::<VueParseCarrier>(artifact);\n\
 }\n";
     let processed = preprocess(synthetic);
     assert!(
@@ -302,80 +183,6 @@ fn sneaky(artifact: &FrameworkParseArtifact, token: &CarrierAccessToken) {\n\
             .lines()
             .any(|l| line_contains_identifier(l, "VueParseCarrier")),
         "scanner must detect misplaced typed-carrier use"
-    );
-}
-
-#[test]
-fn scanner_detects_misplaced_token_construction() {
-    // Struct-literal form.
-    let literal = "let t = CarrierAccessToken { adapter_id, _private: () };\n";
-    assert!(
-        preprocess(literal)
-            .lines()
-            .any(|l| line_has_token_struct_literal(l, "CarrierAccessToken")),
-        "scanner must detect a misplaced CarrierAccessToken struct literal"
-    );
-    // A type ascription / parameter position is NOT a construction.
-    let ascription = "fn takes(token: &CarrierAccessToken) {}\n";
-    assert!(
-        !preprocess(ascription)
-            .lines()
-            .any(|l| line_has_token_struct_literal(l, "CarrierAccessToken")),
-        "a token parameter/ascription is not a construction expression"
-    );
-    // A return-type position is NOT a construction (the `{` opens the
-    // fn body), nor is an `impl` header.
-    let return_position = "fn token() -> &'static CarrierAccessToken {\n";
-    assert!(
-        !preprocess(return_position)
-            .lines()
-            .any(|l| line_has_token_struct_literal(l, "CarrierAccessToken")),
-        "a return-type position is not a construction expression"
-    );
-    let impl_header = "impl CarrierAccessToken {\n";
-    assert!(
-        !preprocess(impl_header)
-            .lines()
-            .any(|l| line_has_token_struct_literal(l, "CarrierAccessToken")),
-        "an impl header is not a construction expression"
-    );
-    // Factory-call form.
-    let factory = "let t = mint_carrier_access_token(adapter_id);\n";
-    assert!(
-        preprocess(factory)
-            .lines()
-            .any(|l| line_contains_identifier(l, "mint_carrier_access_token")),
-        "scanner must detect a misplaced factory call"
-    );
-    // Registration-channel forms: a misplaced row-construction call is
-    // the public-constructor forging vector and must be caught.
-    let row_channel = "let (_row, token) = LanguageRow::carrier(\"vue\", FileLanguage::vue());\n";
-    assert!(
-        preprocess(row_channel)
-            .lines()
-            .any(|l| l.contains("LanguageRow::carrier")),
-        "scanner must detect a misplaced LanguageRow::carrier call"
-    );
-    let registry_channel =
-        "let (_registry, tokens) = LanguageRegistry::__built_in_with_carrier_tokens();\n";
-    assert!(
-        preprocess(registry_channel)
-            .lines()
-            .any(|l| line_contains_identifier(l, "__built_in_with_carrier_tokens")),
-        "scanner must detect a misplaced __built_in_with_carrier_tokens call"
-    );
-    // API-surface half: a synthetic public arbitrary-id constructor
-    // must be caught by the return-type scan.
-    let forged_ctor = "\
-impl CarrierAccessToken {\n\
-    pub fn new(adapter_id: FrameworkAdapterId) -> CarrierAccessToken {\n\
-        mint_carrier_access_token(adapter_id)\n\
-    }\n\
-}\n";
-    let fns = fns_returning_token(&preprocess(forged_ctor));
-    assert!(
-        fns.iter().any(|(name, _, _)| name == "new"),
-        "the API-surface scan must catch a forged public arbitrary-id constructor; got {fns:?}"
     );
 }
 
@@ -425,106 +232,6 @@ mod tests {\n\
 
 // ───────────────────────────── scan machinery ─────────────────────────────
 
-/// A struct-literal construction expression: the token name followed
-/// (on the same line, modulo whitespace) by `{`. Parameter positions,
-/// ascriptions, paths (`CarrierAccessToken::`), `impl` headers, and
-/// return-type positions (`-> … CarrierAccessToken {`, where the brace
-/// opens the fn body) do not match.
-fn line_has_token_struct_literal(line: &str, type_name: &str) -> bool {
-    // `impl CarrierAccessToken {` / `impl X for CarrierAccessToken {`
-    // open an impl block, not a literal.
-    if line.trim_start().starts_with("impl") {
-        return false;
-    }
-    let bytes = line.as_bytes();
-    let needle = type_name.as_bytes();
-    let n = needle.len();
-    if bytes.len() < n {
-        return false;
-    }
-    let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let arrow = line.find("->");
-    let mut i = 0usize;
-    while i + n <= bytes.len() {
-        if &bytes[i..i + n] == needle {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after = bytes.get(i + n).copied();
-            let after_ok = after.is_none_or(|b| !is_ident_char(b));
-            // A token after `->` on the same line sits in return-type
-            // position — the `{` that follows opens the fn body.
-            let in_return_position = arrow.is_some_and(|a| a < i);
-            if before_ok && after_ok && !in_return_position {
-                // Skip whitespace after the token; a `{` means literal.
-                let mut k = i + n;
-                while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
-                    k += 1;
-                }
-                if bytes.get(k) == Some(&b'{') {
-                    return true;
-                }
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Functions whose signature line carries `-> … CarrierAccessToken …`.
-/// Returns `(fn_name, 1-based line, line text)`.
-fn fns_returning_token(processed: &str) -> Vec<(String, usize, String)> {
-    let mut out = Vec::new();
-    let lines: Vec<&str> = processed.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        let Some(fn_pos) = find_fn_keyword(line) else {
-            continue;
-        };
-        // Capture the fn name.
-        let after = &line[fn_pos + 3..];
-        let name: String = after
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if name.is_empty() {
-            continue;
-        }
-        // Look at the signature: this line plus up to 8 continuation
-        // lines (until `{` or `;`).
-        let mut sig = String::new();
-        for cont in lines.iter().skip(idx).take(9) {
-            sig.push_str(cont);
-            sig.push(' ');
-            if cont.contains('{') || cont.contains(';') {
-                break;
-            }
-        }
-        if let Some(arrow) = sig.find("->") {
-            let ret = &sig[arrow..];
-            let ret_end = ret.find('{').unwrap_or(ret.len());
-            if line_contains_identifier(&ret[..ret_end], "CarrierAccessToken") {
-                out.push((name, idx + 1, line.to_string()));
-            }
-        }
-    }
-    out
-}
-
-/// Position of a standalone `fn ` keyword on the line.
-fn find_fn_keyword(line: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i + 3 <= bytes.len() {
-        if &bytes[i..i + 2] == b"fn"
-            && bytes.get(i + 2) == Some(&b' ')
-            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
-        {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
 /// Scan all production sources for identifier-boundary token hits
 /// outside the given allowlist of `/`-separated path prefixes.
 fn scan_tokens_outside_allowlist(tokens: &[&str], allowlist: &[&str]) -> Vec<String> {
@@ -533,21 +240,6 @@ fn scan_tokens_outside_allowlist(tokens: &[&str], allowlist: &[&str]) -> Vec<Str
             .iter()
             .find(|t| line_contains_identifier(line, t))
             .map(|t| t.to_string())
-    })
-}
-
-/// Scan with an arbitrary per-line predicate (label used in reports).
-fn scan_predicate_outside_allowlist(
-    pred: impl Fn(&str) -> bool,
-    allowlist: &[&str],
-    label: &str,
-) -> Vec<String> {
-    scan_outside_allowlist(allowlist, |line| {
-        if pred(line) {
-            Some(label.to_string())
-        } else {
-            None
-        }
     })
 }
 

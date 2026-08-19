@@ -366,9 +366,7 @@ fn emit_parse_facts_never_hashes_decl_bodies() {
         .ensure_indexed_ready(SCRATCH_ID)
         .expect("artifact must materialise");
     let artifacts = host
-        .project_type_store()
-        .indexed()
-        .get_artifacts_for_content(SCRATCH_ID, indexed.whole_hash)
+        .exact_current_artifacts_for_test(SCRATCH_ID, indexed.whole_hash)
         .expect("published artifacts must be readable");
 
     let export_key = FactKey::Export {
@@ -455,9 +453,7 @@ fn local_export_alias_lazy_fact_uses_public_key_and_backing_decl() {
         .ensure_indexed_ready(ALIAS_ID)
         .expect("artifact must materialise");
     let artifacts = host
-        .project_type_store()
-        .indexed()
-        .get_artifacts_for_content(ALIAS_ID, indexed.whole_hash)
+        .exact_current_artifacts_for_test(ALIAS_ID, indexed.whole_hash)
         .expect("published artifacts must be readable");
 
     let type_alias_key = FactKey::Export {

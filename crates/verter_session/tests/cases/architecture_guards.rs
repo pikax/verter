@@ -5636,6 +5636,9 @@ pub(crate) mod foundations_guards {
         // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
         // drive the demand producer + read the artifact payload.
         "pub mod binder_identity_facts",
+        // Session-owned private-shape identity used by the cache-key invariant
+        // and module-augmentation integration fixtures.
+        "pub mod build_toolchain_fingerprint",
         // Frozen eight-field carrier-owned compatibility cohort consumed by
         // B2 persistence/adoption and exercised by its owning module tests.
         "pub mod carrier_artifact_cohort",

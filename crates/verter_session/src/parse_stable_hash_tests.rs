@@ -70,7 +70,9 @@ fn h(source: &str) -> [u8; 16] {
     compute_parse_stable_hash(&indexed_for(source))
 }
 
-fn artifact_for(carrier_source: &str) -> Arc<verter_language::FrameworkParseArtifact> {
+fn artifact_for(
+    carrier_source: &str,
+) -> Arc<verter_compiler::framework_common::FrameworkParseArtifact> {
     use verter_language::carrier_grammar::{
         CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
         FrameworkAdapterSemanticVersion,
@@ -102,15 +104,11 @@ fn artifact_for(carrier_source: &str) -> Arc<verter_language::FrameworkParseArti
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &source, &config)
         .unwrap();
-    let compiler = crate::parse::carrier_compiler_registry()
-        .get(&verter_language::FrameworkAdapterId::vue())
-        .unwrap();
     Arc::new(
-        verter_compiler::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
-            compiler.as_ref(),
-            &accepted,
-        )
-        .into_framework_parse_artifact(),
+        crate::parse::carrier_compiler_registry()
+            .project_registered(&accepted)
+            .expect("fixture source parses")
+            .into_framework_parse_artifact(),
     )
 }
 

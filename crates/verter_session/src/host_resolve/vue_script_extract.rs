@@ -65,10 +65,12 @@ pub(crate) fn template_converter_inputs(
 /// without `<script setup>` generics.
 pub(crate) fn sfc_script_setup_type_params(
     source: &str,
-    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+    framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Vec<verter_type_expr::TypeParam> {
-    let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
-    let Some(setup) = parsed.and_then(|parsed| parsed.script_setup()) else {
+    let Some(parsed) = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) else {
+        return Vec::new();
+    };
+    let Some(setup) = parsed.script_setup() else {
         return Vec::new();
     };
     let Some(generic_span) = setup.generic else {

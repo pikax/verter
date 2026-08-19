@@ -461,23 +461,38 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
     }
 }
 
-/// The rehoused-dispatch artifact's `parser_version` stamp equals the
+/// The rehoused-dispatch artifact's `parse_key` stamp equals the
 /// version the legacy direct producer stamped, so the
 /// `FileArtifactStore` legacy key dimension is unchanged — a stale
 /// artifact cannot serve nor be evicted spuriously by the rehousing.
 #[test]
-fn rehoused_carrier_artifact_stamps_unchanged_parser_version() {
+fn rehoused_carrier_artifact_stamps_exact_parse_key() {
+    let source = "<script setup lang=\"ts\">const a = 1</script>";
     let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
         "App.vue",
-        "<script setup lang=\"ts\">const a = 1</script>",
+        source,
         verter_semantic::analysis::AnalysisScope::LSP,
         &FileLanguage::vue(),
         &crate::types::MetaProvenance::default(),
     )
     .expect("Vue carrier dispatch yields a snapshot");
-    assert_eq!(
-        artifact.parser_version,
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        "the rehoused dispatch must stamp the same parser version the legacy producer did"
-    );
+    let language = FileLanguage::vue();
+    // `carrier_parse_snapshot` dispatches through the real carrier
+    // registration path, which uses Vue's actual standard `{{`/`}}`
+    // grammar — `ParseOptions::default()` no longer means that (it means
+    // "the caller supplied nothing," an empty value).
+    let profile = verter_language::syntax_profile_id_for(
+        &language,
+        &verter_language::ParseOptions::vue_standard(),
+    )
+    .unwrap();
+    let expected = verter_language::parse_key_for(
+        source,
+        &language,
+        verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+        verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        &profile,
+    )
+    .unwrap();
+    assert_eq!(artifact.parse_key(), &expected);
 }

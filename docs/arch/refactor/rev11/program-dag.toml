@@ -118,13 +118,13 @@ predecessors = ["BV0A"]
 id = "B2"
 name = "Framework parsing recovery diagnostics and stable identities"
 class = "foundational"
-predecessors = ["BV0", "BF3", "BA0", "BS0", "BCSS0", "BRT0"]
+predecessors = ["BV0", "BF3", "BA0", "BS0", "BRT0"]
 
 [[block]]
 id = "B3"
 name = "Canonical typed compiler request and prerequisite planner"
 class = "foundational"
-predecessors = ["BV0", "BF3", "BA0", "BS0", "BCSS0", "BRT0"]
+predecessors = ["BV0", "BF3", "BA0", "BS0", "BRT0"]
 
 [[block]]
 id = "B4"

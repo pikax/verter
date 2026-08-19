@@ -718,7 +718,7 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
     let import_end = import_start + "import type { Props } from './types'".len() as u32;
     assert_eq!(
         missing.span,
-        Some(Span::new(import_start, import_end)),
+        Span::new(import_start, import_end),
         "macro type dep span should point at the owning import"
     );
 
@@ -762,7 +762,7 @@ fn missing_aliased_macro_type_dependency_anchors_to_owning_import() {
         import_start + "import type { RemoteProps as Props } from './types'".len() as u32;
     assert_eq!(
         missing.span,
-        Some(Span::new(import_start, import_end)),
+        Span::new(import_start, import_end),
         "an aliased macro root must anchor by its local binding name"
     );
 }
@@ -5936,7 +5936,7 @@ fn found_macro_type_with_missing_heritage_parent_fails_compile() {
         import_start + "import type { FoundExtendsMissing } from './types'".len() as u32;
     assert_eq!(
         missing.span,
-        Some(Span::new(import_start, import_end)),
+        Span::new(import_start, import_end),
         "surface-arm miss span should point at the owning import"
     );
     // The intersection-arm miss belongs to FoundIntersectAlias, which this

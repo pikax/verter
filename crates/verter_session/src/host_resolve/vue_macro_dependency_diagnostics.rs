@@ -28,6 +28,7 @@ pub(super) fn collect(
                 owner,
                 import_source,
                 type_name,
+                macro_span,
             } => diagnostics.push(HostDiagnostic {
                 severity: HostSeverity::Error,
                 code: crate::types::HOST_MISSING_MACRO_TYPE_DEP.to_string(),
@@ -35,7 +36,9 @@ pub(super) fn collect(
                     "missing macro type dependency '{}' for type '{}' in '{}'",
                     import_source, type_name, snapshot.canonical_id
                 ),
-                span: macro_import_span(&snapshot.script_imports, *owner, import_source, type_name),
+                arguments: Vec::new(),
+                span: macro_import_span(&snapshot.script_imports, *owner, import_source, type_name)
+                    .unwrap_or_else(|| verter_span::Span::new(macro_span.0, macro_span.1)),
             }),
             VueMacroDependencyFailure::UnresolvedSurfaceArm {
                 macro_index,
@@ -59,24 +62,26 @@ pub(super) fn collect(
                         "missing macro type dependency: type '{}' resolves but its surface references unresolvable type '{}' (declared in '{}') in '{}'",
                         dep.type_name, name, owner_canonical, snapshot.canonical_id
                     ),
+                    arguments: Vec::new(),
                     span: macro_import_span(
                         &snapshot.script_imports,
                         *macro_owner,
                         &dep.import_source,
                         &dep.type_name,
-                    ),
+                    )
+                    .unwrap_or(dep.macro_span),
                 });
             }
         }
     }
     diagnostics.sort_by(|left, right| {
         (
-            left.span.map(|span| (span.start, span.end)),
+            (left.span.start, left.span.end),
             left.code.as_str(),
             left.message.as_str(),
         )
             .cmp(&(
-                right.span.map(|span| (span.start, span.end)),
+                (right.span.start, right.span.end),
                 right.code.as_str(),
                 right.message.as_str(),
             ))

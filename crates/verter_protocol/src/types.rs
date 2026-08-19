@@ -171,8 +171,8 @@ pub struct FfiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
-    pub span_start: Option<u32>,
-    pub span_end: Option<u32>,
+    pub span_start: u32,
+    pub span_end: u32,
 }
 
 /// Collection of diagnostics with a precomputed `hasErrors` flag.

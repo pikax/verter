@@ -617,7 +617,8 @@ fn the_diagnostics_fence_declines_a_moved_revision_and_accepts_the_live_one() {
             severity: crate::types::HostSeverity::Error,
             code: "XInvalidEndTag".to_string(),
             message: "Invalid end tag.".to_string(),
-            span: None,
+            arguments: Vec::new(),
+            span: verter_span::Span::new(0, 1),
         }],
         has_errors: true,
     };

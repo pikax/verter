@@ -323,9 +323,7 @@ fn overlay_materialiser_does_not_serve_stale_lingering_indexed_ready() {
     // The materialiser published its fresh candidate under the fresh
     // hash — a content-pinned read at the real hash now hits it.
     let pinned = host
-        .project_type_store()
-        .indexed()
-        .get(canonical, real_hash)
+        .exact_current_indexed_for_test(canonical, real_hash)
         .expect("the materialiser publishes the fresh candidate under the real hash");
     assert_eq!(pinned.whole_hash, real_hash);
 }
@@ -747,9 +745,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
     // The lookup is keyed by the NORMALISED canonical (the artifact-store
     // identity) so it reaches the published overlay artifact.
     let overlay_facts = host
-        .project_type_store()
-        .indexed()
-        .get_artifacts_for_content(normalized.as_ref(), overlay_hash)
+        .exact_overlay_artifacts_for_test("/pkg/index.js", overlay_hash, &view)
         .expect("the overlay artifact's FileArtifacts are reachable under the normalised key");
     let expected_export_set_hash = overlay_facts
         .facts

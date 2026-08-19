@@ -247,7 +247,7 @@ pub trait StoreView {
     ///
     /// Returns `true` only when the view tracks a current artifact
     /// identity for `canonical_id` whose `parse_env_hash`,
-    /// `parser_version`, and `file_language_id` all equal the recorded
+    /// `parse_key`, and `file_language_id` all equal the recorded
     /// values. A differing, missing, tombstoned, or untracked
     /// contributor identity rejects — there is deliberately NO
     /// untracked-file optimistic accept here (unlike the lazy
@@ -262,7 +262,7 @@ pub trait StoreView {
         &self,
         _canonical_id: &str,
         _parse_env_hash: crate::locator_identity::ParseEnvHash,
-        _parser_version: u32,
+        _parse_key: &verter_language::ParseKey,
         _file_language_id: &verter_language::FileLanguage,
     ) -> bool {
         false
@@ -545,13 +545,13 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         &self,
         canonical_id: &str,
         parse_env_hash: crate::locator_identity::ParseEnvHash,
-        parser_version: u32,
+        parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
         (**self).validates_file_source_env(
             canonical_id,
             parse_env_hash,
-            parser_version,
+            parse_key,
             file_language_id,
         )
     }
@@ -4954,14 +4954,17 @@ mod file_source_env_fact_rail_tests {
     fn source_env_fact(
         canonical: &str,
         env_byte: u8,
-        parser_version: u32,
+        parse_marker: u8,
         language_of: &str,
     ) -> FactVersionRef {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parser_version,
-            file_language_id: FileArtifactKey::derived_file_language_id(language_of),
+            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+                language_of,
+                parse_marker,
+            ),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test(language_of),
         }
     }
 
@@ -4999,13 +5002,13 @@ mod file_source_env_fact_rail_tests {
     }
 
     #[test]
-    fn fingerprint_discriminates_file_source_env_parser_version() {
+    fn fingerprint_discriminates_file_source_env_parse_key() {
         let a = source_env_fact("/dep.ts", 3, 2, "/dep.ts");
         let b = source_env_fact("/dep.ts", 3, 7, "/dep.ts");
         assert_ne!(
             fingerprint_with_sibling(&a),
             fingerprint_with_sibling(&b),
-            "a contributor parser_version change must change the fact-signature fingerprint"
+            "a contributor parse_key change must change the fact-signature fingerprint"
         );
     }
 
@@ -5123,8 +5126,8 @@ mod fact_signature_fingerprint_pins {
             FactVersionRef::FileSourceEnv {
                 canonical_id: "/w/env.ts".to_string(),
                 parse_env_hash: ParseEnvHash::from_env_hash([6u8; 16]),
-                parser_version: 2,
-                file_language_id: FileArtifactKey::derived_file_language_id("/w/env.ts"),
+                parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                file_language_id: FileArtifactKey::synthetic_file_language_for_test("/w/env.ts"),
             },
             FactVersionRef::ProjectGeneration { generation: 7 },
         ]
@@ -5198,8 +5201,10 @@ mod fact_signature_fingerprint_pins {
                 FactVersionRef::FileSourceEnv {
                     canonical_id: "/w/env.ts".to_string(),
                     parse_env_hash: ParseEnvHash::from_env_hash([66u8; 16]),
-                    parser_version: 2,
-                    file_language_id: FileArtifactKey::derived_file_language_id("/w/env.ts"),
+                    parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                    file_language_id: FileArtifactKey::synthetic_file_language_for_test(
+                        "/w/env.ts",
+                    ),
                 },
             ),
             (6, FactVersionRef::ProjectGeneration { generation: 8 }),

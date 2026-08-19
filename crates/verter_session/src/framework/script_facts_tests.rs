@@ -40,10 +40,11 @@ fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
         canonical: Arc::from(canonical),
         content_hash: content,
         parse_env_hash: [0u8; 16],
-        parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        file_language_id: crate::file_artifact_store::FileArtifactKey::derived_file_language_id(
-            canonical,
-        ),
+        parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(canonical, 1),
+        build_toolchain_fingerprint:
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        file_language_id:
+            crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(canonical),
         provider_id: FrameworkAdapterId::new("fixture-fw"),
         provider_version: 1,
     }
@@ -93,20 +94,13 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
 }
 
 #[test]
-fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
-    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 4;
-    const CALL_SIGNATURE_SPAN_PARSER_VERSION: u32 = 5;
-    const _: () = assert!(
-        crate::file_artifact_store::LEGACY_PARSER_VERSION >= CALL_SIGNATURE_SPAN_PARSER_VERSION
-    );
-
+fn stale_build_fingerprint_candidate_is_rejected_by_current_key() {
     let store = FrameworkScriptCandidateStore::new();
     let current = CandidateSlotKey {
-        parser_version: CALL_SIGNATURE_SPAN_PARSER_VERSION,
         ..candidate_key("/Fixture.vue", [3u8; 16])
     };
     let stale = CandidateSlotKey {
-        parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());
@@ -126,17 +120,11 @@ fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
 
 // @ai-generated - Pins the authored-only import-target carrier invalidation boundary.
 #[test]
-fn carrier_parser_v5_candidate_is_rejected_by_v6_key() {
-    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 5;
-    assert_eq!(
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        PREVIOUS_CARRIER_PARSER_VERSION + 1
-    );
-
+fn another_stale_build_fingerprint_candidate_is_rejected_by_current_key() {
     let store = FrameworkScriptCandidateStore::new();
     let current = candidate_key("/AuthoredImport.vue", [6u8; 16]);
     let stale = CandidateSlotKey {
-        parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(5),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());

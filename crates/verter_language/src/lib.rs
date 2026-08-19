@@ -31,6 +31,7 @@
 mod ids;
 mod language;
 pub mod parse_artifact;
+pub mod parse_identity;
 mod registry;
 
 pub mod carrier_grammar;
@@ -44,9 +45,18 @@ pub use parse_artifact::carrier_structure_hash::{
     compute_carrier_structure_hash, CarrierStructureHash,
 };
 pub use parse_artifact::{
-    __carrier_downcast_arc, __carrier_downcast_ref, CarrierAccessToken, CarrierParse, ExternalLink,
-    ExternalLinkKind, FrameworkParseArtifact, FrameworkParseCommon, LanguageDiagnostic,
-    LanguageDiagnosticSeverity, ScriptRegion, ScriptRegionKind, StyleRegion, TemplateRegion,
+    __carrier_downcast_arc, __carrier_downcast_ref, compare_language_diagnostic_fields,
+    compare_language_diagnostics, sort_language_diagnostics, CarrierParse, DiagnosticArg,
+    DiagnosticSpanRejectReason, ExternalLink, ExternalLinkKind, FrameworkParseCommon,
+    LanguageDiagnostic, LanguageDiagnosticOrderKey, LanguageDiagnosticSeverity, ScriptRegion,
+    ScriptRegionKind, StyleRegion, SyntaxReject, TemplateRegion,
+    UnregisteredFrameworkParseArtifact, UnsupportedSyntaxProfileReason,
+};
+pub use parse_identity::{
+    default_parse_identity_for, parse_key_for, syntax_profile_id_for, ParseKey, ParseOptions,
+    SyntaxProfileId, SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN, SCRIPT_SYNTAX_COMPATIBILITY_EPOCH,
+    SVELTE_SYNTAX_COMPATIBILITY_DOMAIN, SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+    VUE_SYNTAX_COMPATIBILITY_DOMAIN, VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 pub use registry::{
     GatedCandidate, LanguageRegistry, LanguageRow, RowClassification, StaticClassification,

@@ -29,7 +29,8 @@ pub struct HostSourceData {
     /// Framework-neutral parse artifact from the carrier producer
     /// (`parse_vue_snapshot` wraps the Vue parse into it). Reused during
     /// compilation to avoid re-parsing. `None` for plain scripts.
-    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    pub(crate) framework_parse:
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
     pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,

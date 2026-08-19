@@ -1,9 +1,9 @@
-//! ARCHITECTURE GUARD: the Svelte official-reject gate arbitrates PARSE defects PURELY by
-//! the parser's `encounter_order` (the single forward-pass discovery sequence) — never by
-//! source span, and never via a pre-stream script-domain priority pass.
+//! ARCHITECTURE GUARD: the Svelte official-reject gate arbitrates PARSE defects primarily by
+//! the parser's `encounter_order` (the single forward-pass discovery sequence), with the
+//! normative diagnostic key breaking equal orders and no pre-stream script-domain priority pass.
 //!
 //! The gate consumes one parser-owned, encounter-ordered defect stream (close-tag +
-//! strict-parse + parse-domain reject facts) and selects the minimum-`encounter_order`
+//! strict-parse + parse-domain reject facts) and selects the minimum semantic-order
 //! unsuppressed defect — matching the official `svelte@5.56.3` compiler, which stops at the
 //! FIRST parse error. Two regressions this gate has historically carried are FORBIDDEN:
 //!   (a) MIXED-UNIT / SPAN arbitration — picking the defect with the smallest `span.start`
@@ -277,6 +277,30 @@ fn gate_has_no_pre_stream_script_priority_pass_on_a_script_sensitive_case() {
         "PRE-STREAM SCRIPT-PRIORITY REGRESSION: the gate matched the script-first pick \
          (`{script}`) — a script-domain reject is being returned before the encounter-ordered \
          parse stream is consulted"
+    );
+}
+
+#[test]
+fn equal_encounter_order_uses_the_normative_diagnostic_tie_break() {
+    let source = "<div id=></div></span>";
+    let mut parsed = parse_svelte(source);
+    assert_eq!(parsed.strict_parse_errors.len(), 1, "fixture strict fact");
+    assert_eq!(parsed.close_tag_violations.len(), 1, "fixture close fact");
+
+    // Production minting is monotonic, but equal order is a required defensive
+    // arbitration case. Plant it directly on the parser-owned facts so the
+    // secondary normative key, rather than rail traversal order, decides.
+    parsed.strict_parse_errors[0].encounter_order = 7;
+    parsed.close_tag_violations[0].encounter_order = 7;
+    assert!(
+        parsed.strict_parse_errors[0].span.start < parsed.close_tag_violations[0].span.start,
+        "fixture must put the strict diagnostic first by authored span"
+    );
+
+    let selected = official_reject_gate(source, &parsed).expect("fixture must reject");
+    assert_eq!(
+        selected.official_code, "expected_attribute_value",
+        "equal encounter order must fall through to span, severity, code, and typed arguments"
     );
 }
 

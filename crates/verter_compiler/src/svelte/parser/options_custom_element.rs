@@ -214,7 +214,7 @@ pub fn resolve_custom_element_expr(
 /// in the parser-parity debt ledger — see `docs/arch/svelte-native-compiler-plan.md`).
 ///
 /// [`find_matching_brace_in`]: super::tokenizer_scan::find_matching_brace_in
-fn is_only_expression_trivia(rest: &str) -> bool {
+pub(super) fn is_only_expression_trivia(rest: &str) -> bool {
     let b = rest.as_bytes();
     let mut i = 0;
     while i < b.len() {

@@ -488,7 +488,7 @@ fn assemble_main_module_template_only_sfc() {
     // so this end-to-end assembly test exercises the neutral bundle path.
     let source = "<template><div>hello</div></template>";
     let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler::default();
+    let compiler = VueCarrierCompiler;
     // Route the carrier parse through the counted chokepoint (the dedup
     // rail authority), not a raw `compiler.parse`.
     let provenance = crate::types::MetaProvenance::default();
@@ -556,7 +556,7 @@ fn assemble_main_module_inline_topology() {
 
     let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
     let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler::default();
+    let compiler = VueCarrierCompiler;
     let provenance = crate::types::MetaProvenance::default();
     let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
     let result = compiler
@@ -644,7 +644,7 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
     // assembly-level text filtering); `msg` is template-used and stays.
     let source = "<script setup>\nimport { ref } from 'vue'\nimport UnusedComp from './UnusedComp.vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
     let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler::default();
+    let compiler = VueCarrierCompiler;
     let provenance = crate::types::MetaProvenance::default();
     let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
     let result = compiler

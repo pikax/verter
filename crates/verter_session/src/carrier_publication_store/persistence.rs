@@ -4,12 +4,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_language::carrier_grammar::AcceptedRegisteredCarrierSource;
-use verter_language::carrier_versions::{
-    CarrierParserVersion, FrameworkParseArtifactSchemaVersion,
-};
 use verter_language::registered_source_authority::{RegisteredSourceSnapshotId, WholeSourceHash};
-use verter_language::{FileLanguage, FrameworkParseArtifact};
+use verter_language::FileLanguage;
 
 use crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort;
 
@@ -20,8 +18,8 @@ struct PersistentCarrierKey {
     source_hash: WholeSourceHash,
     language: FileLanguage,
     grammar_fingerprint: verter_language::carrier_grammar::CarrierGrammarFingerprint,
-    parser_version: CarrierParserVersion,
-    artifact_schema_version: FrameworkParseArtifactSchemaVersion,
+    parse_key: verter_language::ParseKey,
+    build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
 }
 
 impl PersistentCarrierKey {
@@ -30,8 +28,9 @@ impl PersistentCarrierKey {
             source_hash: accepted.source().content_hash(),
             language: accepted.source().resolved_file_language().clone(),
             grammar_fingerprint: accepted.grammar().fingerprint(),
-            parser_version: id.carrier_parser_version,
-            artifact_schema_version: id.artifact_schema_version,
+            parse_key: id.parse_key.clone(),
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         }
     }
 }
@@ -50,6 +49,7 @@ impl PersistedCarrierCandidate {
     pub(crate) fn validate(
         &self,
         accepted: &AcceptedRegisteredCarrierSource,
+        expected_id: &FrameworkArtifactId,
         expected_cohort: PersistedCarrierArtifactCohort,
     ) -> Result<(), PersistentAdoptionRejection> {
         if self.cohort != expected_cohort {
@@ -67,13 +67,18 @@ impl PersistedCarrierCandidate {
         if self.checksum != candidate_checksum(&self.artifact, self.cohort) {
             return Err(PersistentAdoptionRejection::ChecksumMismatch);
         }
+        if self.artifact.parse_key() != &expected_id.parse_key
+            || self.artifact.adapter_id() != &expected_id.adapter_id
+            || self.artifact.language_id() != &expected_id.language_id
+        {
+            return Err(PersistentAdoptionRejection::ParserValidationFailed);
+        }
         self.artifact
-            .common
-            .inventory
+            .inventory()
             .validate()
             .map_err(|_| PersistentAdoptionRejection::SourceSpaceInvalid)?;
-        if self.artifact.carrier_structure_hash
-            != verter_language::compute_carrier_structure_hash(&self.artifact.common.inventory)
+        if self.artifact.carrier_structure_hash()
+            != verter_language::compute_carrier_structure_hash(self.artifact.inventory())
         {
             return Err(PersistentAdoptionRejection::ParserValidationFailed);
         }
@@ -84,6 +89,12 @@ impl PersistedCarrierCandidate {
     pub(crate) fn corrupt_checksum_for_test(&mut self) {
         self.checksum[0] ^= 0xff;
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_artifact_for_test(&mut self, artifact: Arc<FrameworkParseArtifact>) {
+        self.artifact = artifact;
+        self.checksum = candidate_checksum(&self.artifact, self.cohort);
+    }
 }
 
 fn candidate_checksum(
@@ -92,15 +103,13 @@ fn candidate_checksum(
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"verter.persisted-carrier-candidate.v1\0");
-    hasher.update(artifact.carrier_structure_hash.as_bytes());
+    hasher.update(artifact.carrier_structure_hash().as_bytes());
+    hasher.update(artifact.parse_key().digest().as_bytes());
+    hasher.update(cohort.build_toolchain_fingerprint().as_bytes());
     for word in [
-        cohort.vue_parser_version().get(),
-        cohort.svelte_parser_version().get(),
         cohort.grammar_fingerprint_schema_version().get(),
-        cohort.framework_artifact_schema_version().get(),
         cohort.carrier_source_space_schema_version().get(),
         cohort.carrier_source_map_schema_version().get(),
-        cohort.session_current_parser_version().get(),
         cohort.carrier_cache_serialization_version().get(),
     ] {
         hasher.update(word.to_le_bytes());
@@ -159,5 +168,63 @@ impl CarrierPersistence for InMemoryCarrierPersistence {
         if let Ok(mut candidates) = self.candidates.lock() {
             candidates.insert(PersistentCarrierKey::new(id, accepted), candidate);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_language::carrier_grammar::{
+        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
+        FrameworkAdapterSemanticVersion,
+    };
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
+
+    #[test]
+    fn framework_and_persistent_ids_carry_parse_and_build_identity() {
+        let source_authority = RegisteredSourceAuthority::new().unwrap();
+        let grammar_authority = CarrierGrammarAuthority::new().unwrap();
+        let language = FileLanguage::vue();
+        let config = CarrierGrammarConfig::vue("{{", "}}", ["fixture-box"]).unwrap();
+        grammar_authority
+            .register_carrier_grammar(
+                language.clone(),
+                FrameworkAdapterSemanticVersion::new(1).unwrap(),
+                CarrierParserGrammarVersion::new(1).unwrap(),
+                config.clone(),
+            )
+            .unwrap();
+        let source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///Fixture.vue"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                language,
+                Arc::from("<template><fixture-box /></template>"),
+            )
+            .unwrap();
+        let accepted = grammar_authority
+            .accept_registered_source(&source_authority, &source, &config)
+            .unwrap();
+        let parse_key = super::super::parse_key_for_accepted(&accepted);
+        let id = FrameworkArtifactId::derive(&accepted, parse_key.clone());
+        let persistent = PersistentCarrierKey::new(&id, &accepted);
+
+        assert_eq!(id.parse_key, parse_key);
+        assert_eq!(persistent.parse_key, parse_key);
+        assert_eq!(
+            persistent.build_toolchain_fingerprint,
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+        );
+        assert_eq!(
+            persistent.language,
+            *accepted.source().resolved_file_language()
+        );
+        assert_eq!(
+            persistent.grammar_fingerprint,
+            accepted.grammar().fingerprint()
+        );
     }
 }

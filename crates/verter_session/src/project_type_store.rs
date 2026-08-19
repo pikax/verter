@@ -113,6 +113,14 @@ pub struct AnalysisArtifactKey {
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
     pub whole_hash: Hash16,
+    /// Runtime-authoritative language under which this exact source was parsed.
+    ///
+    /// This is retained from the scheduler's [`crate::types::EffectiveFileState`]
+    /// for base artifacts. Overlay artifacts retain that same runtime override
+    /// when the canonical already exists, and classify by path only when the
+    /// overlay introduces a genuinely new canonical. Exact artifact writers
+    /// key from this row; they never reclassify the canonical path after parse.
+    pub file_language: verter_language::FileLanguage,
     /// Canonical imports / exports + shallow symbol inventory.
     pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
     /// The workspace `content_generation` this artifact was BUILT at —
@@ -160,7 +168,7 @@ pub struct IndexedReady {
     pub eval_source: Arc<str>,
     /// Framework-neutral parse artifact when the canonical file is a
     /// framework carrier. Plain scripts carry `None`.
-    pub framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    pub framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
     /// Always present after materialization.
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
@@ -235,6 +243,7 @@ impl IndexedReady {
         let route_inventory = Arc::clone(&shallow_state.route_inventory);
         Self {
             whole_hash,
+            file_language: verter_language::FileLanguage::script_ts(),
             shallow_state,
             built_at_content_generation: 0,
             parse_env_hash: [0u8; 16],
@@ -270,6 +279,7 @@ impl IndexedReady {
             );
         Self {
             whole_hash,
+            file_language: verter_language::FileLanguage::script_ts(),
             shallow_state: Arc::new(shallow),
             built_at_content_generation: 0,
             parse_env_hash: [0u8; 16],
@@ -2001,6 +2011,7 @@ mod tests {
             Arc::from("/w/a.ts"),
             Arc::new(IndexedReady {
                 whole_hash: hash_v1,
+                file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: shallow,
                 built_at_content_generation: 0,
                 parse_env_hash: [0u8; 16],
@@ -2015,9 +2026,13 @@ mod tests {
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             }),
         );
-        assert!(db.get("/w/a.ts", hash_v1).is_some());
+        assert!(db
+            .get_synthetic_empty_source_base_for_test("/w/a.ts", hash_v1)
+            .is_some());
         // Wrong hash — caller expects a different version → miss.
-        assert!(db.get("/w/a.ts", hash_v2).is_none());
+        assert!(db
+            .get_synthetic_empty_source_base_for_test("/w/a.ts", hash_v2)
+            .is_none());
     }
 
     #[test]
@@ -2044,6 +2059,7 @@ mod tests {
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
                 whole_hash: hash,
+                file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: Arc::new(
                     crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
                         hash,

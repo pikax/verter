@@ -8,6 +8,7 @@ use super::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
     FileArtifacts, ProjectIdentity,
 };
+use crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint;
 use crate::project_type_store::IndexedReady;
 
 fn synth_indexed(hash: u8) -> Arc<IndexedReady> {
@@ -18,13 +19,211 @@ fn synth_artifacts(hash: u8) -> Arc<FileArtifacts> {
     Arc::new(FileArtifacts::with_indexed(synth_indexed(hash)))
 }
 
+fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifactKey {
+    let language = verter_language::FileLanguage::vue();
+    let syntax_profile =
+        verter_language::syntax_profile_id_for(&language, options).expect("Vue syntax profile");
+    let parse_key = verter_language::parse_key_for(
+        source,
+        &language,
+        verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+        verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        &syntax_profile,
+    )
+    .expect("Vue parse key");
+    FileArtifactKey {
+        canonical: Arc::from("/component.vue"),
+        content_hash: crate::hash::hash_16(source.as_bytes()),
+        parse_env_hash: super::BASE_PARSE_ENV_HASH,
+        parse_key,
+        build_toolchain_fingerprint: current_build_toolchain_fingerprint(),
+        file_language_id: language,
+    }
+}
+
+#[test]
+fn parse_key_columns_reuse_identical_profiles_and_miss_changed_delimiters() {
+    const SOURCE: &str = "<template>{{ value }}</template>";
+    let store = FileArtifactStore::new();
+    let first = vue_key(SOURCE, &verter_language::ParseOptions::vue_standard());
+    let repeated = vue_key(SOURCE, &verter_language::ParseOptions::vue_standard());
+    let changed = vue_key(
+        SOURCE,
+        &verter_language::ParseOptions {
+            delimiters: ("[[".to_string(), "]]".to_string()),
+            custom_elements: Vec::new(),
+            svelte_loose: false,
+        },
+    );
+
+    assert_eq!(first.parse_key, repeated.parse_key);
+    assert_eq!(first, repeated);
+    assert_ne!(first.parse_key, changed.parse_key);
+    assert_ne!(first, changed);
+
+    let payload = synth_artifacts(0x51);
+    store.insert_artifacts(first.clone(), Arc::clone(&payload));
+    assert!(Arc::ptr_eq(
+        &store.get_artifacts(&repeated).expect("identical key hits"),
+        &payload
+    ));
+    assert!(
+        store.get_artifacts(&changed).is_none(),
+        "a parse-affecting delimiter change must miss the prior artifact slot"
+    );
+}
+
+#[test]
+fn convenience_reads_do_not_serve_a_same_content_different_profile() {
+    const SOURCE: &str = "<template>{{ value }}</template>";
+    let requested = vue_key(SOURCE, &verter_language::ParseOptions::vue_standard());
+    let stored = vue_key(
+        SOURCE,
+        &verter_language::ParseOptions {
+            delimiters: ("[[".to_string(), "]]".to_string()),
+            custom_elements: Vec::new(),
+            svelte_loose: false,
+        },
+    );
+    assert_eq!(requested.content_hash, stored.content_hash);
+    assert_ne!(requested.parse_key, stored.parse_key);
+
+    let base = FileArtifactStore::new();
+    base.insert_artifacts(stored.clone(), synth_artifacts(0x31));
+    assert!(
+        base.get(
+            &requested.canonical,
+            requested.content_hash,
+            &requested.parse_key,
+            &requested.file_language_id,
+        )
+        .is_none(),
+        "a base indexed read for the default profile must not serve the delimiter profile"
+    );
+    assert!(
+        base.get_artifacts_for_content(
+            &requested.canonical,
+            requested.content_hash,
+            &requested.parse_key,
+            &requested.file_language_id,
+        )
+        .is_none(),
+        "a content-pinned fact read for the default profile must not serve the delimiter profile"
+    );
+    assert!(
+        base.get_base_artifacts_for_content(
+            &requested.canonical,
+            requested.content_hash,
+            &requested.parse_key,
+            &requested.file_language_id,
+        )
+        .is_none(),
+        "a base artifact read for the default profile must not serve the delimiter profile"
+    );
+
+    let discriminator = [0x71; 16];
+    let overlay_requested = FileArtifactKey {
+        parse_env_hash: discriminator,
+        ..requested.clone()
+    };
+    let overlay_stored = FileArtifactKey {
+        parse_env_hash: discriminator,
+        ..stored.clone()
+    };
+    let overlay = FileArtifactStore::new();
+    overlay.insert_artifacts(overlay_stored, synth_artifacts(0x32));
+    assert!(
+        overlay
+            .get_overlay_scoped(
+                &overlay_requested.canonical,
+                overlay_requested.content_hash,
+                discriminator,
+                &overlay_requested.parse_key,
+                &overlay_requested.file_language_id,
+            )
+            .is_none(),
+        "an overlay indexed read for the default profile must not serve the delimiter profile"
+    );
+    assert!(
+        overlay
+            .get_overlay_artifacts_scoped(
+                &overlay_requested.canonical,
+                overlay_requested.content_hash,
+                discriminator,
+                &overlay_requested.parse_key,
+                &overlay_requested.file_language_id,
+            )
+            .is_none(),
+        "an overlay artifact read for the default profile must not serve the delimiter profile"
+    );
+
+    let old_requested = FileArtifactKey {
+        content_hash: [0x41; 16],
+        ..requested
+    };
+    let current_wrong_profile = FileArtifactKey {
+        content_hash: [0x42; 16],
+        ..stored
+    };
+    let healing = FileArtifactStore::new();
+    healing.insert_artifacts(current_wrong_profile, synth_artifacts(0x42));
+    assert!(
+        healing
+            .augmenter_artifacts_self_healing(&old_requested, [0x42; 16])
+            .is_none(),
+        "self-healing must not replace a captured default-profile key with another profile"
+    );
+}
+
+#[test]
+fn indexed_and_source_identity_keys_match_actual_source_and_runtime_language() {
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let canonical: Arc<str> = Arc::from("/w/runtime-script.vue");
+    let source = "export const value: number = 1;\n";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert runtime script");
+    let indexed = host
+        .ensure_indexed_ready(&canonical)
+        .expect("materialize runtime script");
+    let indexed_key =
+        FileArtifactKey::for_indexed(Arc::clone(&canonical), &indexed, indexed.parse_env_hash);
+    let source_key = FileArtifactKey::for_source_identity(
+        Arc::clone(&canonical),
+        indexed.whole_hash,
+        source,
+        verter_language::FileLanguage::script_ts(),
+        None,
+        indexed.parse_env_hash,
+    )
+    .expect("runtime script has a parse identity");
+    let synthetic_empty_key =
+        FileArtifactKey::base_for_test(Arc::clone(&canonical), indexed.whole_hash);
+
+    assert_eq!(
+        indexed_key, source_key,
+        "writer and exact reader must construct byte-identical keys from the same artifact"
+    );
+    assert_ne!(
+        synthetic_empty_key.parse_key, source_key.parse_key,
+        "an empty-source synthetic key must not equal the actual non-empty source key"
+    );
+    assert_ne!(
+        synthetic_empty_key, source_key,
+        "synthetic empty-source identity must remain distinct from host-produced identity"
+    );
+}
+
 fn synth_key(canonical: &str, content_hash: Hash16, parse_env_hash: Hash16) -> FileArtifactKey {
     FileArtifactKey {
-        canonical: Arc::from(canonical),
-        content_hash,
         parse_env_hash,
-        parser_version: 1,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
+        ..FileArtifactKey::base_for_test(Arc::from(canonical), content_hash)
     }
 }
 
@@ -91,16 +290,11 @@ fn empty_store_returns_none() {
 }
 
 #[test]
-fn parser_v3_artifact_is_rejected_by_v4_base_key() {
-    use super::CURRENT_PARSER_VERSION;
-
-    const PREVIOUS_PARSER_VERSION: u32 = 3;
-    const _: () = assert!(CURRENT_PARSER_VERSION > PREVIOUS_PARSER_VERSION);
-
+fn stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
-    let current = FileArtifactKey::base(Arc::from("/owner-exact.ts"), [3u8; 16]);
+    let current = FileArtifactKey::base_for_test(Arc::from("/owner-exact.ts"), [3u8; 16]);
     let stale = FileArtifactKey {
-        parser_version: PREVIOUS_PARSER_VERSION,
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(3),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(3);
@@ -132,16 +326,11 @@ fn parser_v3_artifact_is_rejected_by_v4_base_key() {
 
 // @ai-generated - Pins the authored-only import-target parser invalidation boundary.
 #[test]
-fn parser_v4_artifact_is_rejected_by_v5_base_key() {
-    use super::CURRENT_PARSER_VERSION;
-
-    const PREVIOUS_PARSER_VERSION: u32 = 4;
-    assert_eq!(CURRENT_PARSER_VERSION, PREVIOUS_PARSER_VERSION + 1);
-
+fn another_stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
-    let current = FileArtifactKey::base(Arc::from("/authored-import.ts"), [4u8; 16]);
+    let current = FileArtifactKey::base_for_test(Arc::from("/authored-import.ts"), [4u8; 16]);
     let stale = FileArtifactKey {
-        parser_version: PREVIOUS_PARSER_VERSION,
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(4);
@@ -246,7 +435,7 @@ fn get_artifacts_any_returns_some_entry_for_canonical() {
     let store = FileArtifactStore::new();
     // `get_artifacts_any` is a base canonical-wide scan — it surfaces
     // only base-key artifacts, never overlay-scoped ones.
-    let key = FileArtifactKey::base(Arc::from("/a.ts"), [9u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/a.ts"), [9u8; 16]);
     store.insert_artifacts(key, synth_artifacts(0xaa));
     assert!(store.get_artifacts_any("/a.ts").is_some());
     assert!(store.get_artifacts_any("/nonexistent.ts").is_none());
@@ -282,7 +471,7 @@ fn augmentation_index_round_trip() {
     };
     let set = Arc::new(AugmenterSet {
         entries: smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
+            artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }],
         fingerprint: [4u8; 16],
@@ -325,7 +514,9 @@ fn legacy_insert_get_round_trip() {
     let canonical: Arc<str> = Arc::from("/legacy.ts");
     let indexed = Arc::new(IndexedReady::new_for_test([7u8; 16]));
     store.insert(Arc::clone(&canonical), Arc::clone(&indexed));
-    let got = store.get("/legacy.ts", [7u8; 16]).expect("MUST hit");
+    let got = store
+        .get_synthetic_empty_source_base_for_test("/legacy.ts", [7u8; 16])
+        .expect("MUST hit");
     assert!(Arc::ptr_eq(&got, &indexed));
     assert_eq!(store.len(), 1);
     // get_any without hash lookup also succeeds.
@@ -340,7 +531,9 @@ fn legacy_remove_drops_entry() {
     let indexed = Arc::new(IndexedReady::new_for_test([7u8; 16]));
     store.insert(Arc::clone(&canonical), indexed);
     store.remove("/legacy.ts");
-    assert!(store.get("/legacy.ts", [7u8; 16]).is_none());
+    assert!(store
+        .get_synthetic_empty_source_base_for_test("/legacy.ts", [7u8; 16])
+        .is_none());
     assert!(store.is_empty());
 }
 
@@ -384,7 +577,7 @@ fn base_canonical_wide_scans_do_not_surface_overlay_only_artifact() {
     // reader.
     let store = FileArtifactStore::new();
     let content_hash = [0x5au8; 16];
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/overlay-only.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -411,7 +604,7 @@ fn base_canonical_wide_scans_do_not_surface_overlay_only_artifact() {
     // Inverse: the view-aware exact-key accessor still reaches it.
     assert!(
         store
-            .get_overlay_scoped(
+            .get_synthetic_empty_source_overlay_for_test(
                 "/overlay-only.ts",
                 content_hash,
                 overlay_discriminator_for_test()
@@ -435,13 +628,13 @@ fn base_canonical_wide_scans_return_base_artifact_when_base_and_overlay_coexist(
     let store = FileArtifactStore::new();
     let content_hash = [0x77u8; 16];
     let base_indexed = synth_indexed(0xb0);
-    let base_key = FileArtifactKey::base(Arc::from("/shared.ts"), content_hash);
+    let base_key = FileArtifactKey::base_for_test(Arc::from("/shared.ts"), content_hash);
     store.insert_artifacts(
         base_key,
         Arc::new(FileArtifacts::with_indexed(Arc::clone(&base_indexed))),
     );
     let overlay_indexed = synth_indexed(0x0e);
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/shared.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -483,7 +676,11 @@ fn base_canonical_wide_scans_return_base_artifact_when_base_and_overlay_coexist(
 
     // The overlay-scoped exact-key read still reaches the overlay.
     let overlay_hit = store
-        .get_overlay_scoped("/shared.ts", content_hash, overlay_discriminator_for_test())
+        .get_synthetic_empty_source_overlay_for_test(
+            "/shared.ts",
+            content_hash,
+            overlay_discriminator_for_test(),
+        )
         .expect("get_overlay_scoped MUST still reach the overlay artifact");
     assert!(
         Arc::ptr_eq(&overlay_hit, &overlay_indexed),
@@ -504,7 +701,7 @@ fn get_artifacts_for_content_stays_view_independent_across_base_and_overlay() {
     // parse fact can still be recovered.
     let store = FileArtifactStore::new();
     let content_hash = [0x3cu8; 16];
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/overlay-only.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -512,7 +709,7 @@ fn get_artifacts_for_content_stays_view_independent_across_base_and_overlay() {
     store.insert_artifacts(overlay_key, synth_artifacts(0x3c));
     assert!(
         store
-            .get_artifacts_for_content("/overlay-only.ts", content_hash)
+            .scan_artifacts_by_content_for_test("/overlay-only.ts", content_hash)
             .is_some(),
         "get_artifacts_for_content MUST stay content-addressed / view-independent \
          so parse-fact recovery works for an overlay-only content version"
@@ -520,7 +717,7 @@ fn get_artifacts_for_content_stays_view_independent_across_base_and_overlay() {
     // A mismatched content hash still misses (content-pinned).
     assert!(
         store
-            .get_artifacts_for_content("/overlay-only.ts", [0x00u8; 16])
+            .scan_artifacts_by_content_for_test("/overlay-only.ts", [0x00u8; 16])
             .is_none(),
         "get_artifacts_for_content MUST stay content-pinned"
     );
@@ -534,8 +731,8 @@ fn remove_canonical_drains_overlay_scoped_keys() {
     // is a lifecycle scan, NOT a base-read scan: it stays unfiltered.
     let store = FileArtifactStore::new();
     let content_hash = [0x9bu8; 16];
-    let base_key = FileArtifactKey::base(Arc::from("/evict-me.ts"), content_hash);
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let base_key = FileArtifactKey::base_for_test(Arc::from("/evict-me.ts"), content_hash);
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/evict-me.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -570,8 +767,8 @@ fn legacy_remove_drains_overlay_scoped_keys() {
     // lifecycle scan and MUST drain overlay-scoped keys too.
     let store = FileArtifactStore::new();
     let content_hash = [0xa5u8; 16];
-    let base_key = FileArtifactKey::base(Arc::from("/drop-me.ts"), content_hash);
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let base_key = FileArtifactKey::base_for_test(Arc::from("/drop-me.ts"), content_hash);
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/drop-me.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -608,7 +805,7 @@ fn artifact_generation_does_not_bump_on_noop_replace_of_base_key() {
     // discriminates against an implementation that bumped unconditionally
     // on the replace.
     let store = FileArtifactStore::new();
-    let key = FileArtifactKey::base(Arc::from("/noop.ts"), [0x42u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/noop.ts"), [0x42u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x42));
     let after_first = store.artifact_generation();
     // Distinct `Arc`, identical content (same whole_hash / surface / facts).
@@ -628,7 +825,7 @@ fn artifact_generation_bumps_on_base_visible_change_of_base_key() {
     // dimension) differs MUST advance the generation, or a manager-cached
     // base view would go stale and warm-hit validation would false-MISS.
     let store = FileArtifactStore::new();
-    let key = FileArtifactKey::base(Arc::from("/changed.ts"), [0x42u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/changed.ts"), [0x42u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x42));
     let after_first = store.artifact_generation();
     // Same key, DIFFERENT content → different whole_hash → base-visible.
@@ -647,7 +844,7 @@ fn artifact_generation_bumps_on_fresh_insert() {
     // which is always a base-visible change and MUST bump.
     let store = FileArtifactStore::new();
     let before = store.artifact_generation();
-    let key = FileArtifactKey::base(Arc::from("/fresh.ts"), [0x11u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/fresh.ts"), [0x11u8; 16]);
     store.insert_artifacts(key, synth_artifacts(0x11));
     assert_ne!(
         before,
@@ -670,10 +867,10 @@ fn artifact_generation_does_not_bump_on_noop_overlay_reinsert() {
     // Base artifact under a DIFFERENT content so the overlay never aliases
     // the base `file_facts` slot (whole_hashes[canonical] != overlay hash).
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/ov.ts"), [0x01u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/ov.ts"), [0x01u8; 16]),
         synth_artifacts(0x01),
     );
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/ov.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -740,14 +937,18 @@ fn legacy_insert_drains_only_its_own_canonicals_prior_versions() {
         "the legacy surface keeps exactly one entry per canonical"
     );
     assert!(
-        store.get("/target.ts", [0x33u8; 16]).is_none(),
+        store
+            .get_synthetic_empty_source_base_for_test("/target.ts", [0x33u8; 16])
+            .is_none(),
         "the stale prior version MUST be drained"
     );
-    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    assert!(store
+        .get_synthetic_empty_source_base_for_test("/target.ts", [0x44u8; 16])
+        .is_some());
     for i in 0u8..8 {
         assert!(
             store
-                .get(&format!("/other{i}.ts"), [0x10 + i; 16])
+                .get_synthetic_empty_source_base_for_test(&format!("/other{i}.ts"), [0x10 + i; 16],)
                 .is_some(),
             "an insert on /target.ts MUST NOT drain /other{i}.ts"
         );
@@ -762,7 +963,9 @@ fn legacy_insert_drains_only_its_own_canonicals_prior_versions() {
         store.artifact_generation(),
         "a base-equivalent re-insert is a literal no-op"
     );
-    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    assert!(store
+        .get_synthetic_empty_source_base_for_test("/target.ts", [0x44u8; 16])
+        .is_some());
     assert_eq!(store.len(), 9);
 }
 
@@ -798,7 +1001,7 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     let make_set = |fingerprint: Hash16| {
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
-                artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
+                artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
                 parse_stable_hash: [3u8; 16],
             }],
             fingerprint,
@@ -860,7 +1063,7 @@ fn noop_legacy_replace_leaves_current_key_entry_in_place() {
     let canonical: Arc<str> = Arc::from("/g2-noop.ts");
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
 
-    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0x55u8; 16]);
     let before = store
         .get_artifacts(&current_key)
         .expect("current-key entry must exist after the first insert");
@@ -896,9 +1099,9 @@ fn noop_legacy_replace_still_drains_stale_and_overlay_keys() {
     let canonical: Arc<str> = Arc::from("/g2-drain.ts");
 
     // Seed a STALE-content legacy entry and an overlay-scoped entry directly.
-    let stale_key = FileArtifactKey::base(Arc::clone(&canonical), [0xAAu8; 16]);
+    let stale_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0xAAu8; 16]);
     store.insert_artifacts(stale_key.clone(), synth_artifacts(0xAA));
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::clone(&canonical),
         [0xBBu8; 16],
         overlay_discriminator_for_test(),
@@ -907,7 +1110,7 @@ fn noop_legacy_replace_still_drains_stale_and_overlay_keys() {
 
     // Insert the CURRENT content, then re-insert it byte-identically (no-op).
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
-    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0x55u8; 16]);
     assert!(store.get_artifacts(&current_key).is_some());
 
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
@@ -947,7 +1150,7 @@ fn noop_legacy_replace_never_exposes_absent_current_key_under_race() {
     let store = Arc::new(FileArtifactStore::new());
     let canonical: Arc<str> = Arc::from("/g2-race.ts");
     store.insert(Arc::clone(&canonical), synth_indexed(0x55));
-    let current_key = FileArtifactKey::base(Arc::clone(&canonical), [0x55u8; 16]);
+    let current_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0x55u8; 16]);
 
     let stop = Arc::new(AtomicBool::new(false));
     let saw_absent = Arc::new(AtomicBool::new(false));
@@ -1071,7 +1274,7 @@ fn bare_dot_dot_augmentation_fact_classifies_relative_not_external() {
     // prefix check.
     let store = FileArtifactStore::new();
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/src/pkg/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/src/pkg/aug.ts"), [9u8; 16]),
         synth_augmenter_artifacts_for_specifier("..", [0x33u8; 16]),
     );
 
@@ -1117,7 +1320,7 @@ fn backslash_relative_augmentation_fact_classifies_relative_not_external() {
     // TS regex's `[\\/]` covers both separators).
     let store = FileArtifactStore::new();
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/src/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
         synth_augmenter_artifacts_for_specifier(".\\theme", [0x44u8; 16]),
     );
 
@@ -1170,7 +1373,10 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
         key.clone(),
         Arc::new(AugmenterSet {
             entries: smallvec![AugmenterEntry {
-                artifact_key: FileArtifactKey::base(Arc::from("/src/pkg/aug.ts"), [9u8; 16]),
+                artifact_key: FileArtifactKey::base_for_test(
+                    Arc::from("/src/pkg/aug.ts"),
+                    [9u8; 16]
+                ),
                 parse_stable_hash: [3u8; 16],
             }],
             fingerprint: [4u8; 16],
@@ -1223,7 +1429,7 @@ fn cold_populate_concurrent_duplicate_does_not_overbump_artifact_generation() {
     let store = Arc::new(FileArtifactStore::new());
     // One base augmenter declaring `module "./dep"`.
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
     );
     let key = relative_dep_target_key();
@@ -1284,7 +1490,7 @@ fn cold_populate_fresh_transition_bumps_artifact_generation() {
     // handled the `None` / fresh case would fail to bump here).
     let store = FileArtifactStore::new();
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/aug.ts"), [9u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
         synth_relative_augmenter_artifacts([0x22u8; 16]),
     );
     let key = relative_dep_target_key();
@@ -1337,7 +1543,7 @@ fn noop_augmenter_reinsert_via_insert_artifacts_does_not_bump_artifact_generatio
     // POST-FIX: the invalidation is gated on contribution equivalence and is
     // skipped, so the token is unchanged.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1380,7 +1586,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
     // `artifact_generation`. Guards against a fix that suppresses the
     // invalidation unconditionally rather than only on a true no-op.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1448,7 +1654,7 @@ fn parse_stable_hash_change_with_same_facts_invalidates_augmentation_index_and_b
     // `parse_stable_hash`): a `parse_stable_hash` change is NOT equivalent → the
     // row is invalidated and the generation bumps.
     let store = FileArtifactStore::new();
-    let aug_key = FileArtifactKey::base(Arc::from("/aug.ts"), [0xA9u8; 16]);
+    let aug_key = FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0xA9u8; 16]);
     store.insert_artifacts(
         aug_key.clone(),
         synth_relative_augmenter_artifacts([0x11u8; 16]),
@@ -1510,7 +1716,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     let canonical: Arc<str> = Arc::from("/aug.ts");
     let fingerprint_for = |parse_stable_hash: Hash16| -> Hash16 {
         let entries: smallvec::SmallVec<[AugmenterEntry; 2]> = smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::base(Arc::clone(&canonical), [9u8; 16]),
+            artifact_key: FileArtifactKey::base_for_test(Arc::clone(&canonical), [9u8; 16]),
             parse_stable_hash,
         }];
         compute_augmenter_set_fingerprint(&entries)
@@ -1635,12 +1841,14 @@ fn get_any_follows_legacy_insert_content_drain() {
     );
 
     // The drained prior version is unreachable through every read shape.
-    assert!(store.get("/drain-follow.ts", [0x01u8; 16]).is_none());
     assert!(store
-        .get_artifacts_for_content("/drain-follow.ts", [0x01u8; 16])
+        .get_synthetic_empty_source_base_for_test("/drain-follow.ts", [0x01u8; 16])
         .is_none());
     assert!(store
-        .get_artifacts_for_content("/drain-follow.ts", [0x02u8; 16])
+        .scan_artifacts_by_content_for_test("/drain-follow.ts", [0x01u8; 16])
+        .is_none());
+    assert!(store
+        .scan_artifacts_by_content_for_test("/drain-follow.ts", [0x02u8; 16])
         .is_some());
     assert_eq!(store.len(), 1, "the drain leaves exactly one live entry");
 }
@@ -1649,7 +1857,7 @@ fn get_any_follows_legacy_insert_content_drain() {
 fn get_any_is_none_after_every_removal_shape() {
     // Keyed remove (`remove_artifacts`).
     let store = FileArtifactStore::new();
-    let key = FileArtifactKey::base(Arc::from("/removed.ts"), [0x11u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/removed.ts"), [0x11u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x11));
     assert!(store.get_any("/removed.ts").is_some());
     store.remove_artifacts(&key);
@@ -1659,7 +1867,7 @@ fn get_any_is_none_after_every_removal_shape() {
     );
     assert!(store.get_artifacts_any("/removed.ts").is_none());
     assert!(store
-        .get_artifacts_for_content("/removed.ts", [0x11u8; 16])
+        .scan_artifacts_by_content_for_test("/removed.ts", [0x11u8; 16])
         .is_none());
 
     // Legacy per-canonical remove.
@@ -1676,7 +1884,7 @@ fn get_any_is_none_after_every_removal_shape() {
     assert_eq!(store.remove_canonical("/removed.ts"), 1);
     assert!(store.get_any("/removed.ts").is_none());
     assert!(store
-        .get_artifacts_for_content("/removed.ts", [0x33u8; 16])
+        .scan_artifacts_by_content_for_test("/removed.ts", [0x33u8; 16])
         .is_none());
 
     // Whole-store clear.
@@ -1694,7 +1902,7 @@ fn base_reads_follow_eviction_sweeps() {
     for i in 0..4u8 {
         let canonical = format!("/lru{i}.ts");
         store.insert_artifacts(
-            FileArtifactKey::base(Arc::from(canonical.as_str()), [i; 16]),
+            FileArtifactKey::base_for_test(Arc::from(canonical.as_str()), [i; 16]),
             synth_artifacts(i),
         );
     }
@@ -1713,7 +1921,7 @@ fn base_reads_follow_eviction_sweeps() {
             "an LRU-evicted canonical MUST read None (no stale read path)"
         );
         assert!(store
-            .get_artifacts_for_content(&canonical, [i; 16])
+            .scan_artifacts_by_content_for_test(&canonical, [i; 16])
             .is_none());
     }
 
@@ -1723,12 +1931,12 @@ fn base_reads_follow_eviction_sweeps() {
     let kept = synth_artifacts(2);
     for seed in 0..2u8 {
         store.insert_artifacts(
-            FileArtifactKey::base(Arc::from("/retained.ts"), [seed; 16]),
+            FileArtifactKey::base_for_test(Arc::from("/retained.ts"), [seed; 16]),
             synth_artifacts(seed),
         );
     }
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/retained.ts"), [2u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/retained.ts"), [2u8; 16]),
         Arc::clone(&kept),
     );
     store.enforce_per_canonical_retention(1);
@@ -1736,13 +1944,13 @@ fn base_reads_follow_eviction_sweeps() {
     for seed in 0..2u8 {
         assert!(
             store
-                .get_artifacts_for_content("/retained.ts", [seed; 16])
+                .scan_artifacts_by_content_for_test("/retained.ts", [seed; 16])
                 .is_none(),
             "a retention-dropped variant MUST read None per content hash"
         );
     }
     let survivor = store
-        .get_artifacts_for_content("/retained.ts", [2u8; 16])
+        .scan_artifacts_by_content_for_test("/retained.ts", [2u8; 16])
         .expect("the kept variant MUST stay readable");
     assert!(Arc::ptr_eq(&survivor, &kept));
     let any = store
@@ -1759,7 +1967,7 @@ fn get_any_skips_overlay_key_inserted_before_base() {
     // is removed while the overlay survives.
     let store = FileArtifactStore::new();
     let content_hash = [0x66u8; 16];
-    let overlay_key = FileArtifactKey::overlay_scoped(
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
         Arc::from("/ordered.ts"),
         content_hash,
         overlay_discriminator_for_test(),
@@ -1771,7 +1979,7 @@ fn get_any_skips_overlay_key_inserted_before_base() {
     );
 
     let base_indexed = synth_indexed(0xb1);
-    let base_key = FileArtifactKey::base(Arc::from("/ordered.ts"), [0xb1u8; 16]);
+    let base_key = FileArtifactKey::base_for_test(Arc::from("/ordered.ts"), [0xb1u8; 16]);
     store.insert_artifacts(
         base_key.clone(),
         Arc::new(FileArtifacts::with_indexed(Arc::clone(&base_indexed))),
@@ -1790,7 +1998,7 @@ fn get_any_skips_overlay_key_inserted_before_base() {
     assert!(store.get_any("/ordered.ts").is_none());
     assert!(
         store
-            .get_artifacts_for_content("/ordered.ts", content_hash)
+            .scan_artifacts_by_content_for_test("/ordered.ts", content_hash)
             .is_some(),
         "the surviving overlay entry MUST stay reachable content-addressed"
     );
@@ -1802,11 +2010,11 @@ fn get_artifacts_for_content_selects_by_hash_across_key_shapes() {
     let base_payload = synth_artifacts(0xa1);
     let overlay_payload = synth_artifacts(0xa2);
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/mixed.ts"), [0xa1u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/mixed.ts"), [0xa1u8; 16]),
         Arc::clone(&base_payload),
     );
     store.insert_artifacts(
-        FileArtifactKey::overlay_scoped(
+        FileArtifactKey::overlay_scoped_for_test(
             Arc::from("/mixed.ts"),
             [0xa2u8; 16],
             overlay_discriminator_for_test(),
@@ -1815,22 +2023,22 @@ fn get_artifacts_for_content_selects_by_hash_across_key_shapes() {
     );
 
     let base_hit = store
-        .get_artifacts_for_content("/mixed.ts", [0xa1u8; 16])
+        .scan_artifacts_by_content_for_test("/mixed.ts", [0xa1u8; 16])
         .expect("the base content version MUST resolve");
     assert!(Arc::ptr_eq(&base_hit, &base_payload));
     let overlay_hit = store
-        .get_artifacts_for_content("/mixed.ts", [0xa2u8; 16])
+        .scan_artifacts_by_content_for_test("/mixed.ts", [0xa2u8; 16])
         .expect("the overlay content version MUST resolve (view-independent)");
     assert!(Arc::ptr_eq(&overlay_hit, &overlay_payload));
     assert!(
         store
-            .get_artifacts_for_content("/mixed.ts", [0xa3u8; 16])
+            .scan_artifacts_by_content_for_test("/mixed.ts", [0xa3u8; 16])
             .is_none(),
         "an unknown content hash MUST miss (content-pinned)"
     );
     assert!(
         store
-            .get_artifacts_for_content("/other.ts", [0xa1u8; 16])
+            .scan_artifacts_by_content_for_test("/other.ts", [0xa1u8; 16])
             .is_none(),
         "a different canonical MUST miss"
     );
@@ -1855,7 +2063,7 @@ fn noop_legacy_reinsert_keeps_base_reads_warm() {
         "a no-op reinsert MUST leave the same artifact readable (no absent window)"
     );
     assert!(store
-        .get_artifacts_for_content("/noop-read.ts", [0x55u8; 16])
+        .scan_artifacts_by_content_for_test("/noop-read.ts", [0x55u8; 16])
         .is_some());
 }
 
@@ -1863,16 +2071,18 @@ fn noop_legacy_reinsert_keeps_base_reads_warm() {
 fn warm_hit_counter_increments_and_dies_with_the_entry() {
     let store = FileArtifactStore::new();
     store.insert(Arc::from("/hits.ts"), synth_indexed(0x55));
-    let key = FileArtifactKey::base(Arc::from("/hits.ts"), [0x55u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/hits.ts"), [0x55u8; 16]);
     assert_eq!(store.hit_count(&key), 0, "a fresh entry starts cold");
 
     // Every warm read shape bumps the per-entry counter exactly once.
-    assert!(store.get("/hits.ts", [0x55u8; 16]).is_some());
+    assert!(store
+        .get_synthetic_empty_source_base_for_test("/hits.ts", [0x55u8; 16])
+        .is_some());
     assert!(store.get_any("/hits.ts").is_some());
     assert!(store.get_artifacts(&key).is_some());
     assert!(store.get_artifacts_any("/hits.ts").is_some());
     assert!(store
-        .get_artifacts_for_content("/hits.ts", [0x55u8; 16])
+        .scan_artifacts_by_content_for_test("/hits.ts", [0x55u8; 16])
         .is_some());
     assert_eq!(
         store.hit_count(&key),
@@ -1882,7 +2092,9 @@ fn warm_hit_counter_increments_and_dies_with_the_entry() {
     );
 
     // A miss does not bump.
-    assert!(store.get("/hits.ts", [0x66u8; 16]).is_none());
+    assert!(store
+        .get_synthetic_empty_source_base_for_test("/hits.ts", [0x66u8; 16])
+        .is_none());
     assert_eq!(store.hit_count(&key), 5, "a miss MUST NOT bump");
 
     // The counter dies with the entry: an evicted key never carries a stale
@@ -1939,18 +2151,18 @@ fn for_each_artifact_for_canonical_content_visits_exactly_matching_variants() {
     let live = [1u8; 16];
     let stale = [2u8; 16];
 
-    let base_key = FileArtifactKey::base(Arc::from("/a.ts"), live);
+    let base_key = FileArtifactKey::base_for_test(Arc::from("/a.ts"), live);
     store.insert_artifacts(base_key.clone(), synth_artifacts(0xaa));
-    let overlay_key = FileArtifactKey::overlay_scoped(Arc::from("/a.ts"), live, [7u8; 16]);
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(Arc::from("/a.ts"), live, [7u8; 16]);
     store.insert_artifacts(overlay_key.clone(), synth_artifacts(0xab));
     // Stale content generation of the same canonical: excluded.
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/a.ts"), stale),
+        FileArtifactKey::base_for_test(Arc::from("/a.ts"), stale),
         synth_artifacts(0xac),
     );
     // Different canonical at the live hash: excluded.
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/b.ts"), live),
+        FileArtifactKey::base_for_test(Arc::from("/b.ts"), live),
         synth_artifacts(0xba),
     );
 
@@ -1984,15 +2196,15 @@ fn for_each_artifact_for_canonical_content_visits_exactly_matching_variants() {
 fn artifact_count_and_source_bytes_agrees_with_snapshot_artifacts() {
     let store = FileArtifactStore::new();
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/one.ts"), [1u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/one.ts"), [1u8; 16]),
         synth_artifacts(0x11),
     );
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::from("/longer/two.ts"), [2u8; 16]),
+        FileArtifactKey::base_for_test(Arc::from("/longer/two.ts"), [2u8; 16]),
         synth_artifacts(0x22),
     );
     store.insert_artifacts(
-        FileArtifactKey::overlay_scoped(Arc::from("/one.ts"), [3u8; 16], [9u8; 16]),
+        FileArtifactKey::overlay_scoped_for_test(Arc::from("/one.ts"), [3u8; 16], [9u8; 16]),
         synth_artifacts(0x33),
     );
 
@@ -2035,7 +2247,7 @@ fn captured_root_still_reaches_superseded_artifact_version() {
     let canonical: Arc<str> = Arc::from("/edited.ts");
     let v1_hash = [1u8; 16];
     let v2_hash = [2u8; 16];
-    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), v1_hash);
+    let v1_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), v1_hash);
 
     store.insert(Arc::clone(&canonical), synth_indexed(1));
     let root = store.capture_root();
@@ -2049,11 +2261,15 @@ fn captured_root_still_reaches_superseded_artifact_version() {
     store.insert(Arc::clone(&canonical), synth_indexed(2));
 
     assert!(
-        store.get(&canonical, v1_hash).is_none(),
+        store
+            .get_synthetic_empty_source_base_for_test(&canonical, v1_hash)
+            .is_none(),
         "the CURRENT root must no longer serve the superseded version"
     );
     assert!(
-        store.get(&canonical, v2_hash).is_some(),
+        store
+            .get_synthetic_empty_source_base_for_test(&canonical, v2_hash)
+            .is_some(),
         "the CURRENT root must serve the new version"
     );
     let through_root = store
@@ -2068,7 +2284,7 @@ fn captured_root_still_reaches_superseded_artifact_version() {
         store
             .indexed_at_root(
                 &root,
-                &FileArtifactKey::base(Arc::clone(&canonical), v2_hash)
+                &FileArtifactKey::base_for_test(Arc::clone(&canonical), v2_hash)
             )
             .is_none(),
         "a root must never see a version published after its capture"
@@ -2081,8 +2297,8 @@ fn captured_root_still_reaches_superseded_artifact_version() {
 fn captured_root_enumerates_its_own_canonical_key_membership() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/enum.ts");
-    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
-    let v2_key = FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16]);
+    let v1_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [1u8; 16]);
+    let v2_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [2u8; 16]);
 
     store.insert_artifacts(v1_key.clone(), synth_artifacts(0x11));
     let root = store.capture_root();
@@ -2113,7 +2329,7 @@ fn per_canonical_cap_does_not_discard_a_pinned_version() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/capped.ts");
     let keys: Vec<FileArtifactKey> = (1u8..=3)
-        .map(|marker| FileArtifactKey::base(Arc::clone(&canonical), [marker; 16]))
+        .map(|marker| FileArtifactKey::base_for_test(Arc::clone(&canonical), [marker; 16]))
         .collect();
     for (index, key) in keys.iter().enumerate() {
         store.insert_artifacts(key.clone(), synth_artifacts(0x10 + index as u8));
@@ -2155,7 +2371,7 @@ fn per_canonical_cap_does_not_discard_a_pinned_version() {
 fn unreachable_retired_version_is_reclaimed_once_no_root_sees_it() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/reclaimed.ts");
-    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+    let v1_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [1u8; 16]);
 
     store.insert(Arc::clone(&canonical), synth_indexed(1));
     let root = store.capture_root();
@@ -2194,7 +2410,7 @@ fn unreachable_retired_version_is_reclaimed_once_no_root_sees_it() {
         store
             .artifacts_at_root(
                 &fresh,
-                &FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16])
+                &FileArtifactKey::base_for_test(Arc::clone(&canonical), [2u8; 16])
             )
             .is_some(),
         "the current version stays reachable"
@@ -2208,7 +2424,7 @@ fn unreachable_retired_version_is_reclaimed_once_no_root_sees_it() {
 fn reclamation_floor_is_the_oldest_live_root_not_the_newest() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/two-roots.ts");
-    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+    let v1_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [1u8; 16]);
 
     store.insert(Arc::clone(&canonical), synth_indexed(1));
     let old_root = store.capture_root();
@@ -2234,7 +2450,7 @@ fn reclamation_floor_is_the_oldest_live_root_not_the_newest() {
 fn captured_root_still_reaches_an_evicted_canonical() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/evicted.ts");
-    let key = FileArtifactKey::base(Arc::clone(&canonical), [7u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [7u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x77));
 
     let root = store.capture_root();
@@ -2263,7 +2479,7 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     let target = relative_dep_target_key();
     let set = Arc::new(AugmenterSet {
         entries: smallvec![AugmenterEntry {
-            artifact_key: FileArtifactKey::base(Arc::from("/src/aug.ts"), [9u8; 16]),
+            artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }] as SmallVec<[AugmenterEntry; 2]>,
         fingerprint: [0xaa; 16],
@@ -2314,7 +2530,7 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
 fn foreign_root_reads_fail_closed() {
     let store_a = FileArtifactStore::new();
     let store_b = FileArtifactStore::new();
-    let key = FileArtifactKey::base(Arc::from("/shared-path.ts"), [5u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::from("/shared-path.ts"), [5u8; 16]);
     store_a.insert_artifacts(key.clone(), synth_artifacts(0x55));
     store_b.insert_artifacts(key.clone(), synth_artifacts(0x55));
 
@@ -2344,9 +2560,9 @@ fn foreign_root_reads_fail_closed() {
 fn current_epoch_read_equals_root_relative_read_at_current_epoch() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/equiv.ts");
-    let live_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
-    let retired_key = FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16]);
-    let absent_key = FileArtifactKey::base(Arc::clone(&canonical), [3u8; 16]);
+    let live_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [1u8; 16]);
+    let retired_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [2u8; 16]);
+    let absent_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [3u8; 16]);
 
     store.insert_artifacts(retired_key.clone(), synth_artifacts(0x22));
     store.insert_artifacts(live_key.clone(), synth_artifacts(0x11));
@@ -2465,7 +2681,7 @@ fn a_retiring_key_is_never_enumerable_without_a_resolvable_version() {
         .collect();
 
     for round in 0..ROUNDS {
-        let key = FileArtifactKey::base(Arc::clone(&canonical), [round as u8; 16]);
+        let key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [round as u8; 16]);
         store.insert_artifacts(key.clone(), synth_artifacts(round as u8));
         barrier.wait(); // A
         barrier.wait(); // B
@@ -2506,7 +2722,7 @@ fn a_captured_root_answer_never_changes_under_a_concurrent_mutation() {
 
     let store = Arc::new(FileArtifactStore::new());
     let canonical: Arc<str> = Arc::from("/mutating.ts");
-    let key = FileArtifactKey::base(Arc::clone(&canonical), [9u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [9u8; 16]);
     store.insert_artifacts(key.clone(), synth_artifacts(0x01));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -2568,7 +2784,7 @@ fn a_captured_root_answer_never_changes_under_a_concurrent_mutation() {
 fn the_membership_epoch_saturates_and_the_exhausted_root_fails_closed() {
     let store = FileArtifactStore::new();
     let canonical: Arc<str> = Arc::from("/exhausted.ts");
-    let key = FileArtifactKey::base(Arc::clone(&canonical), [4u8; 16]);
+    let key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [4u8; 16]);
 
     store.seed_membership_epoch_for_test(u64::MAX - 2);
     store.insert_artifacts(key.clone(), synth_artifacts(0x44));
@@ -2581,11 +2797,11 @@ fn the_membership_epoch_saturates_and_the_exhausted_root_fails_closed() {
 
     // Two more mutations take the counter to the terminal epoch.
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::clone(&canonical), [5u8; 16]),
+        FileArtifactKey::base_for_test(Arc::clone(&canonical), [5u8; 16]),
         synth_artifacts(0x55),
     );
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::clone(&canonical), [6u8; 16]),
+        FileArtifactKey::base_for_test(Arc::clone(&canonical), [6u8; 16]),
         synth_artifacts(0x66),
     );
     assert_eq!(
@@ -2596,7 +2812,7 @@ fn the_membership_epoch_saturates_and_the_exhausted_root_fails_closed() {
 
     // A further mutation must neither wrap nor panic.
     store.insert_artifacts(
-        FileArtifactKey::base(Arc::clone(&canonical), [7u8; 16]),
+        FileArtifactKey::base_for_test(Arc::clone(&canonical), [7u8; 16]),
         synth_artifacts(0x77),
     );
     assert_eq!(
@@ -2640,7 +2856,7 @@ fn one_pinned_root_does_not_retain_the_versions_born_after_it() {
     store.insert(Arc::clone(&canonical), synth_indexed(0));
     // ONE root, held for the whole loop.
     let pinned = store.capture_root();
-    let pinned_key = FileArtifactKey::base(Arc::clone(&canonical), [0u8; 16]);
+    let pinned_key = FileArtifactKey::base_for_test(Arc::clone(&canonical), [0u8; 16]);
 
     for marker in 1u8..=200 {
         store.insert(Arc::clone(&canonical), synth_indexed(marker));
@@ -2663,7 +2879,7 @@ fn one_pinned_root_does_not_retain_the_versions_born_after_it() {
             store
                 .artifacts_at_root(
                     &pinned,
-                    &FileArtifactKey::base(Arc::clone(&canonical), [marker; 16])
+                    &FileArtifactKey::base_for_test(Arc::clone(&canonical), [marker; 16])
                 )
                 .is_none(),
             "a version born after the pinned root is invisible from it",
@@ -2671,7 +2887,10 @@ fn one_pinned_root_does_not_retain_the_versions_born_after_it() {
     }
     assert!(
         store
-            .get_artifacts(&FileArtifactKey::base(Arc::clone(&canonical), [200u8; 16]))
+            .get_artifacts(&FileArtifactKey::base_for_test(
+                Arc::clone(&canonical),
+                [200u8; 16]
+            ))
             .is_some(),
         "the current version is untouched"
     );

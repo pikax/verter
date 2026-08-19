@@ -581,6 +581,72 @@ fn svelte_projector_diagnostic_reaches_diagnostics_snapshot() {
 }
 
 #[test]
+fn recoverable_svelte_parse_diagnostic_reaches_host_once_with_authored_span() {
+    let host = host();
+    let source = "{/if}";
+    upsert(
+        &host,
+        "/src/Malformed.svelte",
+        source,
+        FileLanguage::svelte(),
+    );
+    let result = host.ensure_ide_compiled("/src/Malformed.svelte", &ide_profile());
+    assert!(
+        matches!(result, Err(HostError::CompileError(_))),
+        "an error-level parse diagnostic must fail the requested compile surface: {result:?}"
+    );
+
+    let diagnostics = host
+        .get_diagnostics("/src/Malformed.svelte", &ide_profile())
+        .expect("a parsed Svelte document has a diagnostics snapshot");
+    let matching = diagnostics
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "unexpected-block-close")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the parser diagnostic has exactly one authoritative host channel: {:?}",
+        diagnostics
+            .diagnostics
+            .iter()
+            .map(|diagnostic| &diagnostic.code)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(matching[0].span, verter_span::Span::new(0, 5));
+}
+
+#[test]
+fn well_formed_svelte_has_no_parse_diagnostics() {
+    let host = host();
+    upsert(
+        &host,
+        "/src/Clean.svelte",
+        "<h1>Hello</h1>",
+        FileLanguage::svelte(),
+    );
+    assert!(
+        host.ensure_ide_compiled("/src/Clean.svelte", &ide_profile())
+            .expect("well-formed Svelte compile"),
+        "the clean component should publish its requested IDE surface"
+    );
+
+    let diagnostics = host
+        .get_diagnostics("/src/Clean.svelte", &ide_profile())
+        .expect("a parsed Svelte document has a diagnostics snapshot");
+    assert!(
+        diagnostics.diagnostics.is_empty(),
+        "well-formed Svelte source produced unexpected diagnostics: {:?}",
+        diagnostics
+            .diagnostics
+            .iter()
+            .map(|diagnostic| &diagnostic.code)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_scoped_to_that_identity(
 ) {
     // R6: requesting the runtime `Main` of a Svelte component whose runtime surface

@@ -688,7 +688,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     /// Monotonic generation of the SOURCE-ENV compaction domain — the
     /// counter behind every `FileSourceEnv` observation
-    /// (`parse_env_hash` / `parser_version` / `file_language_id`).
+    /// (`parse_env_hash` / `parse_key` / `file_language_id`).
     ///
     /// Deliberately NOT folded into
     /// [`WorkspaceRead::content_generation`]: the production paths that

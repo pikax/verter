@@ -206,6 +206,7 @@ impl VerterHost {
         verter_audit::attribute!(AnalysisSnapshotCopy);
         Some(EffectiveFileState {
             source: snap.source.clone(),
+            file_language: hd.file_language.clone(),
             meta: hd.parse.meta.clone(),
             script_analysis: hd.parse.script_analysis.clone(),
             framework_parse: hd.framework_parse.clone(),

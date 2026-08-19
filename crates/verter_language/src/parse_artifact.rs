@@ -1,36 +1,28 @@
-//! The open framework parse artifact.
+//! Framework-neutral parse vocabulary and the unregistered carrier payload.
 //!
-//! [`FrameworkParseArtifact`] is the single framework-neutral post-parse
-//! payload every host carrier slot stores (`framework_parse:
-//! Option<Arc<FrameworkParseArtifact>>`): typed common metadata
-//! ([`FrameworkParseCommon`] — script/template/style regions, external
-//! links, diagnostics) plus a PRIVATE type-erased carrier
-//! (`Arc<dyn CarrierParse>`) holding the owning adapter's full parse
-//! result (e.g. Vue's `ParsedSfc` behind the compiler-owned
-//! `VueParseCarrier`).
+//! [`UnregisteredFrameworkParseArtifact`] is the frontend result before the
+//! compiler-owned registered projector proves carrier geometry. It carries
+//! parse identity, mapped diagnostics, and a private type-erased carrier, but
+//! deliberately exposes no inventory or block lookup surface.
 //!
-//! Carrier privacy is public-hidden + token-gated + statically guarded:
-//!
-//! * the raw downcast helpers ([`__carrier_downcast_ref`] /
-//!   [`__carrier_downcast_arc`]) are `#[doc(hidden)]` and verify the
-//!   caller's [`CarrierAccessToken`] names the artifact's own adapter;
-//! * [`CarrierAccessToken`] is minted ONLY inside this crate, during
-//!   `LanguageRegistry` carrier-row construction
-//!   (`LanguageRow::carrier`), and returned exactly once to the
-//!   registry-construction caller as the carrier row's registration
-//!   proof — the non-public `_private: ()` field keeps out-of-crate
-//!   struct literals uncompilable, and NO public arbitrary-id
-//!   constructor and NO public by-id token lookup exist;
-//! * the `carrier_downcast_confined_to_owning_adapter` and
-//!   `carrier_access_token_minted_only_in_verter_language` static
-//!   guards (in `verter_session`'s architecture-guard suite) are the
-//!   enforcement authority across crate seams, where a literal
-//!   `pub(crate)` cannot compile.
+//! Carrier privacy is public-hidden + statically guarded, not
+//! capability-token-gated: the raw downcast helpers
+//! ([`__carrier_downcast_ref`] / [`__carrier_downcast_arc`]) are
+//! `#[doc(hidden)]` and stay confined to each adapter's own bridge module
+//! (a foreign artifact's erased payload is a DIFFERENT concrete
+//! `CarrierParse` type, so the `Any` downcast already fails structurally
+//! for it — no separate adapter-identity gate is needed). The
+//! `carrier_downcast_confined_to_owning_adapter` static guard (in
+//! `verter_session`'s architecture-guard suite) is the enforcement
+//! authority across the crate seam, where a literal `pub(crate)` cannot
+//! compile.
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
+use verter_identity::identity::{ParseKey, SyntaxProfileId};
 use verter_span::Span;
 
 use crate::ids::{FrameworkAdapterId, LanguageId};
@@ -39,7 +31,6 @@ use carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, CarrierBlockInventory, ScriptRole,
     ScriptSourceType as InventoryScriptSourceType, SectionRole,
 };
-use carrier_structure_hash::{compute_carrier_structure_hash, CarrierStructureHash};
 
 pub mod carrier_inventory;
 pub mod carrier_structure_hash;
@@ -122,6 +113,25 @@ pub enum LanguageDiagnosticSeverity {
     Info,
 }
 
+/// Canonically comparable semantic argument carried by a diagnostic.
+///
+/// Display text is intentionally excluded from diagnostic ordering. Frontends
+/// encode the values used to render that text here so equivalent diagnostics
+/// retain a deterministic order across runs and insertion paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DiagnosticArg {
+    /// Boolean argument.
+    Bool(bool),
+    /// Unsigned integer argument.
+    Unsigned(u64),
+    /// Signed integer argument.
+    Signed(i64),
+    /// Authored text argument.
+    Text(String),
+    /// Authored source range argument.
+    Span { start: u32, end: u32 },
+}
+
 /// A framework-neutral carrier-parse diagnostic.
 ///
 /// Defined HERE (not borrowed from a compiler crate) so the leaf
@@ -134,8 +144,159 @@ pub struct LanguageDiagnostic {
     pub severity: LanguageDiagnosticSeverity,
     /// Stable machine-readable code.
     pub code: &'static str,
+    /// Typed semantic values used to render the diagnostic.
+    pub arguments: Vec<DiagnosticArg>,
     /// Human-readable message.
     pub message: String,
+}
+
+/// Source-local fields in the normative diagnostic ordering key.
+#[derive(Debug, Clone, Copy)]
+pub struct LanguageDiagnosticOrderKey<'a> {
+    span: Span,
+    severity: LanguageDiagnosticSeverity,
+    code: &'a str,
+    arguments: &'a [DiagnosticArg],
+}
+
+impl<'a> LanguageDiagnosticOrderKey<'a> {
+    /// Build a source-local ordering key from mapped diagnostic facts.
+    #[must_use]
+    pub const fn new(
+        span: Span,
+        severity: LanguageDiagnosticSeverity,
+        code: &'a str,
+        arguments: &'a [DiagnosticArg],
+    ) -> Self {
+        Self {
+            span,
+            severity,
+            code,
+            arguments,
+        }
+    }
+}
+
+/// Compare two mapped diagnostics by the normative cross-frontend key.
+///
+/// The display message is deliberately absent. Callers sorting diagnostics
+/// from one parse pass the same `ParseKey` on both sides; the two-source form
+/// also supports deterministic merges without weakening source identity.
+pub fn compare_language_diagnostics(
+    left_source: &ParseKey,
+    left: &LanguageDiagnostic,
+    right_source: &ParseKey,
+    right: &LanguageDiagnostic,
+) -> Ordering {
+    left_source.cmp(right_source).then_with(|| {
+        compare_language_diagnostic_fields(
+            LanguageDiagnosticOrderKey::new(left.span, left.severity, left.code, &left.arguments),
+            LanguageDiagnosticOrderKey::new(
+                right.span,
+                right.severity,
+                right.code,
+                &right.arguments,
+            ),
+        )
+    })
+}
+
+/// Compare the source-local portion of the normative diagnostic key.
+///
+/// Strict-rejection arbitration uses this after its stronger semantic
+/// discovery-order key. Ordinary diagnostics use it after source identity.
+pub fn compare_language_diagnostic_fields(
+    left: LanguageDiagnosticOrderKey<'_>,
+    right: LanguageDiagnosticOrderKey<'_>,
+) -> Ordering {
+    left.span
+        .start
+        .cmp(&right.span.start)
+        .then_with(|| left.span.end.cmp(&right.span.end))
+        .then_with(|| {
+            diagnostic_severity_rank(left.severity).cmp(&diagnostic_severity_rank(right.severity))
+        })
+        .then_with(|| left.code.cmp(right.code))
+        .then_with(|| left.arguments.cmp(right.arguments))
+}
+
+/// Sort one parse's mapped diagnostics by the normative key.
+pub fn sort_language_diagnostics(parse_key: &ParseKey, diagnostics: &mut [LanguageDiagnostic]) {
+    diagnostics
+        .sort_by(|left, right| compare_language_diagnostics(parse_key, left, parse_key, right));
+}
+
+const fn diagnostic_severity_rank(severity: LanguageDiagnosticSeverity) -> u8 {
+    match severity {
+        LanguageDiagnosticSeverity::Error => 0,
+        LanguageDiagnosticSeverity::Warning => 1,
+        LanguageDiagnosticSeverity::Info => 2,
+    }
+}
+
+/// A parse-affecting profile condition a registered frontend cannot honor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedSyntaxProfileReason {
+    /// The registered frontend does not implement the requested syntax option.
+    UnsupportedOption,
+    /// The requested language/profile pair does not belong to this frontend.
+    FrontendMismatch,
+}
+
+/// Why a parser diagnostic cannot be mapped to authored source geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSpanRejectReason {
+    /// The parser supplied no authored-source anchor.
+    MissingSourceAnchor,
+    /// The parser supplied a range outside the exact source byte extent.
+    OutsideSourceBounds,
+    /// The parser supplied an offset that is not a UTF-8 boundary.
+    InvalidUtf8Boundary,
+}
+
+/// A closed, inspectable refusal produced before a parsed artifact can be published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxReject {
+    /// The requested syntax profile is not supported by the selected frontend.
+    UnsupportedProfile {
+        /// Exact parse construction identity.
+        parse_key: Arc<ParseKey>,
+        /// Normalized parse-option identity.
+        syntax_profile: Arc<SyntaxProfileId>,
+        /// Closed unsupported-profile classification.
+        reason: UnsupportedSyntaxProfileReason,
+    },
+    /// The source contains a syntax defect whose strict grammar outcome is rejection.
+    RejectedSyntax {
+        /// Exact parse construction identity.
+        parse_key: Arc<ParseKey>,
+        /// Normalized parse-option identity.
+        syntax_profile: Arc<SyntaxProfileId>,
+        /// First diagnostic by the frontend's normative rejection arbitration.
+        primary: Arc<LanguageDiagnostic>,
+        /// Remaining mapped diagnostics participating in the same rejection.
+        related: Arc<[LanguageDiagnostic]>,
+    },
+    /// A frontend reported a diagnostic without usable authored-source geometry.
+    UnmappedDiagnostic {
+        /// Exact parse construction identity.
+        parse_key: Arc<ParseKey>,
+        /// Normalized parse-option identity.
+        syntax_profile: Arc<SyntaxProfileId>,
+        /// Stable diagnostic code.
+        code: &'static str,
+        /// Closed mapping-failure classification.
+        reason: DiagnosticSpanRejectReason,
+    },
+    /// The registered projection could not prove its inventory geometry.
+    InvalidCarrierGeometry {
+        /// Exact parse construction identity.
+        parse_key: Arc<ParseKey>,
+        /// Normalized parse-option identity.
+        syntax_profile: Arc<SyntaxProfileId>,
+        /// Structural inventory validation failure.
+        error: Arc<carrier_inventory::InventoryValidationError>,
+    },
 }
 
 /// Typed framework-neutral metadata shared by every carrier parse.
@@ -156,7 +317,8 @@ impl FrameworkParseCommon {
         self.script_regions_for_adapter(None)
     }
 
-    fn script_regions_for_adapter(
+    #[doc(hidden)]
+    pub fn script_regions_for_adapter(
         &self,
         adapter_id: Option<&FrameworkAdapterId>,
     ) -> Vec<ScriptRegion> {
@@ -284,199 +446,91 @@ const fn source_span(span: carrier_inventory::SourceSpan) -> Span {
 ///
 /// Implemented by each adapter's concrete carrier (e.g. the
 /// compiler-owned `VueParseCarrier`). The trait is an erasure seam, not
-/// an API: the only member is the hidden `Any` bridge the token-gated
+/// an API: the only member is the hidden `Any` bridge the doc-hidden
 /// downcast helpers use.
 pub trait CarrierParse: Any + Send + Sync {
-    /// Hidden `Any` bridge for the token-gated downcast helpers.
+    /// Hidden `Any` bridge for the doc-hidden downcast helpers.
     #[doc(hidden)]
     fn __verter_as_any(&self) -> &dyn Any;
 
-    /// Hidden `Arc`-preserving `Any` bridge for the token-gated `Arc`
+    /// Hidden `Arc`-preserving `Any` bridge for the doc-hidden `Arc`
     /// downcast helper.
     #[doc(hidden)]
     fn __verter_as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
 
-/// The single framework-neutral post-parse artifact.
+/// A frontend parse that has not yet received registered carrier geometry.
 ///
-/// `carrier` is private by design: consumers read the typed
-/// [`FrameworkParseCommon`] surface; ONLY the owning adapter reaches
-/// its concrete parse through the blessed token-gated `carrier_for`
-/// wrappers.
-pub struct FrameworkParseArtifact {
+/// This value deliberately has no inventory or block lookup surface. The
+/// compiler-owned registered projector consumes it together with registered
+/// source facts before any geometry-sensitive downstream API can observe it.
+pub struct UnregisteredFrameworkParseArtifact {
     /// Owning adapter (open set).
     pub adapter_id: FrameworkAdapterId,
     /// Concrete language within the adapter (open set).
     pub language_id: LanguageId,
-    /// Version of the adapter's parser that produced this artifact.
-    pub parser_version: u32,
-    /// Typed framework-neutral metadata.
-    pub common: FrameworkParseCommon,
-    /// Integrity hash of the sole neutral inventory.
-    pub carrier_structure_hash: CarrierStructureHash,
+    /// Exact syntax construction identity.
+    pub parse_key: Arc<ParseKey>,
+    /// Normalized parse-option identity.
+    pub syntax_profile: Arc<SyntaxProfileId>,
+    /// Mapped frontend diagnostics retained across registered projection.
+    pub diagnostics: Vec<LanguageDiagnostic>,
     /// Private type-erased adapter parse payload.
     carrier: Arc<dyn CarrierParse>,
 }
 
-impl FrameworkParseArtifact {
-    /// Adapter-aware compatibility projection derived from the sole inventory.
-    pub fn script_regions(&self) -> Vec<ScriptRegion> {
-        self.common
-            .script_regions_for_adapter(Some(&self.adapter_id))
-    }
-
-    /// Construct an artifact. Construction is open (producers live in
-    /// adapter crates); only DOWNCAST of the erased carrier is
-    /// token-gated.
+impl UnregisteredFrameworkParseArtifact {
+    /// Construct a frontend parse without registered geometry.
     pub fn new(
         adapter_id: FrameworkAdapterId,
         language_id: LanguageId,
-        parser_version: u32,
-        common: FrameworkParseCommon,
+        parse_key: Arc<ParseKey>,
+        syntax_profile: Arc<SyntaxProfileId>,
+        diagnostics: Vec<LanguageDiagnostic>,
         carrier: Arc<dyn CarrierParse>,
     ) -> Self {
-        let carrier_structure_hash = compute_carrier_structure_hash(&common.inventory);
         Self {
             adapter_id,
             language_id,
-            parser_version,
-            common,
-            carrier_structure_hash,
+            parse_key,
+            syntax_profile,
+            diagnostics,
             carrier,
-        }
-    }
-
-    /// Construct from an already validated projector result without rebuilding
-    /// inventory geometry or its nominal hash.
-    #[doc(hidden)]
-    pub fn __from_registered_projection(
-        adapter_id: FrameworkAdapterId,
-        language_id: LanguageId,
-        parser_version: u32,
-        inventory: Arc<CarrierBlockInventory>,
-        carrier_structure_hash: CarrierStructureHash,
-        carrier: Arc<dyn CarrierParse>,
-    ) -> Self {
-        debug_assert_eq!(
-            compute_carrier_structure_hash(&inventory),
-            carrier_structure_hash
-        );
-        Self {
-            adapter_id,
-            language_id,
-            parser_version,
-            common: FrameworkParseCommon {
-                inventory,
-                diagnostics: Vec::new(),
-            },
-            carrier_structure_hash,
-            carrier,
-        }
-    }
-
-    /// Rebind a validated carrier artifact to the current authority snapshot.
-    /// Geometry and carrier payload are cloned exactly; only source authority
-    /// identity is rehomed.
-    #[doc(hidden)]
-    pub fn __rehome_registered(
-        &self,
-        source: &crate::registered_source_authority::RegisteredSourceSnapshot,
-    ) -> Self {
-        use carrier_inventory::{SourceSpaceDescriptor, SourceSpaceId};
-        let inventory = CarrierBlockInventory::new_registered(
-            Arc::from([SourceSpaceDescriptor::registered(SourceSpaceId(0), source)]),
-            Arc::new(self.common.inventory.normalized_names().clone()),
-            Arc::from(self.common.inventory.blocks().to_vec()),
-            Arc::new(self.common.inventory.markup().clone()),
-            &[source],
-        )
-        .expect("rehomed registered inventory remains valid");
-        let hash = compute_carrier_structure_hash(&inventory);
-        Self {
-            adapter_id: self.adapter_id.clone(),
-            language_id: self.language_id.clone(),
-            parser_version: self.parser_version,
-            common: FrameworkParseCommon {
-                inventory: Arc::new(inventory),
-                diagnostics: self.common.diagnostics.clone(),
-            },
-            carrier_structure_hash: hash,
-            carrier: Arc::clone(&self.carrier),
         }
     }
 }
 
-impl fmt::Debug for FrameworkParseArtifact {
+impl fmt::Debug for UnregisteredFrameworkParseArtifact {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FrameworkParseArtifact")
+        f.debug_struct("UnregisteredFrameworkParseArtifact")
             .field("adapter_id", &self.adapter_id)
             .field("language_id", &self.language_id)
-            .field("parser_version", &self.parser_version)
-            .field("common", &self.common)
+            .field("parse_key", &self.parse_key)
+            .field("diagnostics", &self.diagnostics)
             .finish_non_exhaustive()
     }
 }
 
-/// Capability token proving the holder is the registered owner of an
-/// adapter's carrier payload.
+/// Raw carrier downcast (reference form).
 ///
-/// Minted ONLY inside `verter_language`, during `LanguageRegistry`
-/// carrier-row construction, and returned exactly once to the
-/// registry-construction caller as the carrier row's registration
-/// proof. The non-public `_private: ()` field keeps out-of-crate
-/// struct literals uncompilable; there is deliberately NO public
-/// arbitrary-id constructor (`new(adapter_id)` / `From` / `Default`)
-/// and NO public by-id token lookup — consumers RECEIVE the token,
-/// never construct it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CarrierAccessToken {
-    adapter_id: FrameworkAdapterId,
-    _private: (),
-}
-
-impl CarrierAccessToken {
-    /// The adapter this token grants carrier access for.
-    pub fn adapter_id(&self) -> &FrameworkAdapterId {
-        &self.adapter_id
-    }
-}
-
-/// The crate-private token factory — the SOLE minting authority's
-/// named construction point. Called only from `LanguageRow::carrier`
-/// during registry carrier-row construction.
-pub(crate) fn mint_carrier_access_token(adapter_id: FrameworkAdapterId) -> CarrierAccessToken {
-    CarrierAccessToken {
-        adapter_id,
-        _private: (),
-    }
-}
-
-/// Token-gated raw carrier downcast (reference form).
-///
-/// Returns the typed carrier ONLY when `token` names the artifact's own
-/// adapter AND the erased payload is a `T`. Hidden: production code
-/// routes through the blessed `carrier_for::<T>` wrappers (see the
-/// `carrier_downcast_confined_to_owning_adapter` guard).
+/// Returns the erased payload as a `T` when the concrete type matches — a
+/// foreign adapter's artifact carries a DIFFERENT concrete `CarrierParse`
+/// type, so the `Any` downcast already fails structurally for it; no
+/// separate adapter-identity gate is needed on top of the type witness.
+/// Doc-hidden: production code routes through each adapter's own typed
+/// accessor (see the `carrier_downcast_confined_to_owning_adapter` guard).
 #[doc(hidden)]
-pub fn __carrier_downcast_ref<'a, T: CarrierParse>(
-    artifact: &'a FrameworkParseArtifact,
-    token: &CarrierAccessToken,
-) -> Option<&'a T> {
-    if artifact.adapter_id != token.adapter_id {
-        return None;
-    }
+pub fn __carrier_downcast_ref<T: CarrierParse>(
+    artifact: &UnregisteredFrameworkParseArtifact,
+) -> Option<&T> {
     artifact.carrier.__verter_as_any().downcast_ref::<T>()
 }
 
-/// Token-gated raw carrier downcast (`Arc` form).
+/// Raw carrier downcast (`Arc` form).
 #[doc(hidden)]
 pub fn __carrier_downcast_arc<T: CarrierParse>(
-    artifact: &FrameworkParseArtifact,
-    token: &CarrierAccessToken,
+    artifact: &UnregisteredFrameworkParseArtifact,
 ) -> Option<Arc<T>> {
-    if artifact.adapter_id != token.adapter_id {
-        return None;
-    }
     Arc::clone(&artifact.carrier)
         .__verter_as_any_arc()
         .downcast::<T>()
@@ -486,7 +540,6 @@ pub fn __carrier_downcast_arc<T: CarrierParse>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::LanguageRow;
     use crate::FileLanguage;
 
     #[derive(Debug)]
@@ -515,58 +568,44 @@ mod tests {
         }
     }
 
-    fn vue_artifact() -> FrameworkParseArtifact {
-        FrameworkParseArtifact::new(
+    fn vue_artifact() -> UnregisteredFrameworkParseArtifact {
+        let language = FileLanguage::vue();
+        let syntax_profile =
+            crate::syntax_profile_id_for(&language, &crate::ParseOptions::default())
+                .expect("Vue syntax profile");
+        let parse_key = crate::parse_key_for(
+            "",
+            &language,
+            crate::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+            crate::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+            &syntax_profile,
+        )
+        .expect("Vue parse key");
+        UnregisteredFrameworkParseArtifact::new(
             FrameworkAdapterId::vue(),
             LanguageId::new("vue"),
-            1,
-            FrameworkParseCommon::default(),
+            Arc::new(parse_key),
+            Arc::new(syntax_profile),
+            Vec::new(),
             Arc::new(TestCarrier { value: 7 }),
         )
     }
 
-    fn token_for(language: FileLanguage) -> CarrierAccessToken {
-        let extension = match &language {
-            FileLanguage::Framework { language_id, .. } => language_id.as_str().to_string(),
-            _ => panic!("carrier language required"),
-        };
-        let (_row, token) = LanguageRow::carrier(&extension, language);
-        token
-    }
-
     #[test]
-    fn owning_adapter_token_downcasts_to_typed_carrier() {
+    fn owning_type_downcasts_to_typed_carrier() {
         let artifact = vue_artifact();
-        let token = token_for(FileLanguage::vue());
-        let carrier =
-            __carrier_downcast_ref::<TestCarrier>(&artifact, &token).expect("owning downcast");
+        let carrier = __carrier_downcast_ref::<TestCarrier>(&artifact).expect("owning downcast");
         assert_eq!(carrier.value, 7);
 
-        let arc =
-            __carrier_downcast_arc::<TestCarrier>(&artifact, &token).expect("owning Arc downcast");
+        let arc = __carrier_downcast_arc::<TestCarrier>(&artifact).expect("owning Arc downcast");
         assert_eq!(arc.value, 7);
-    }
-
-    #[test]
-    fn wrong_adapter_token_downcast_returns_none() {
-        let artifact = vue_artifact();
-        let svelte_token = token_for(FileLanguage::svelte());
-        assert!(
-            __carrier_downcast_ref::<TestCarrier>(&artifact, &svelte_token).is_none(),
-            "a token minted for another adapter must NOT open the carrier"
-        );
-        assert!(
-            __carrier_downcast_arc::<TestCarrier>(&artifact, &svelte_token).is_none(),
-            "the Arc form must apply the same adapter gate"
-        );
     }
 
     #[test]
     fn wrong_carrier_type_downcast_returns_none() {
         let artifact = vue_artifact();
-        let token = token_for(FileLanguage::vue());
         assert!(
-            __carrier_downcast_ref::<OtherCarrier>(&artifact, &token).is_none(),
+            __carrier_downcast_ref::<OtherCarrier>(&artifact).is_none(),
             "a mismatched concrete carrier type must downcast to None"
         );
     }
@@ -574,7 +613,7 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_carrier() {
         let rendered = format!("{:?}", vue_artifact());
-        assert!(rendered.contains("FrameworkParseArtifact"));
+        assert!(rendered.contains("UnregisteredFrameworkParseArtifact"));
         assert!(
             !rendered.contains("TestCarrier"),
             "Debug must not expose the erased carrier payload"

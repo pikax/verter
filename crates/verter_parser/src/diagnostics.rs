@@ -5,6 +5,7 @@
 //! errors; others are standard HTML parse errors.
 
 use crate::{common::Span, utils::vue::is_void_tag};
+use verter_language::DiagnosticArg;
 
 // =============================================================================
 // Compiler Error Codes (Vue-compatible)
@@ -14,7 +15,7 @@ use crate::{common::Span, utils::vue::is_void_tag};
 ///
 /// Codes prefixed with `X_` are Vue-specific (template validation).
 /// Other codes are standard HTML parse errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CompilerErrorCode {
     // -- HTML parse errors --
     /// Malformed empty comment: `<!-->` or `<!--->`.
@@ -90,6 +91,12 @@ pub enum CompilerErrorCode {
     DuplicateScriptSetup,
     /// Duplicate `<script>` block.
     DuplicateScript,
+    /// Duplicate top-level `<template>` block.
+    DuplicateTemplate,
+    /// An SFC has neither a template nor a script block.
+    MissingSfcEntryBlock,
+    /// Vue 3 does not support the Vue 2 `<template functional>` marker.
+    TemplateFunctionalUnsupported,
     /// `<script setup>` and `<script>` declare different `lang`s. Vue rejects
     /// the SFC outright; Verter reports it rather than silently picking one
     /// block's language for the generated companions.
@@ -154,6 +161,73 @@ pub const X_MISSING_MACRO_SEMANTIC_BUNDLE: &str = "XMissingMacroSemanticBundle";
 pub const X_UNAVAILABLE_MACRO_SEMANTIC_RESULT: &str = "XUnavailableMacroSemanticResult";
 
 impl CompilerErrorCode {
+    /// The machine-stable diagnostic-code string — exactly the `{:?}` (Debug)
+    /// spelling of the variant, as a genuine `&'static str` rather than a
+    /// per-call formatted `String`. Downstream consumers that need an owned
+    /// or borrowed code string already rely on this "leaves the compiler as
+    /// the `{:?}` spelling" contract (see [`X_MISSING_MACRO_SEMANTIC_BUNDLE`]
+    /// / [`X_UNAVAILABLE_MACRO_SEMANTIC_RESULT`]); this method is the same
+    /// contract for every variant, without an allocation.
+    pub fn code_str(&self) -> &'static str {
+        match self {
+            Self::AbruptClosingOfEmptyComment => "AbruptClosingOfEmptyComment",
+            Self::CdataInHtmlContent => "CdataInHtmlContent",
+            Self::DuplicateAttribute => "DuplicateAttribute",
+            Self::EndTagWithAttributes => "EndTagWithAttributes",
+            Self::EofBeforeTagName => "EofBeforeTagName",
+            Self::EofInCdata => "EofInCdata",
+            Self::EofInComment => "EofInComment",
+            Self::EofInTag => "EofInTag",
+            Self::IncorrectlyClosedComment => "IncorrectlyClosedComment",
+            Self::IncorrectlyOpenedComment => "IncorrectlyOpenedComment",
+            Self::InvalidFirstCharacterOfTagName => "InvalidFirstCharacterOfTagName",
+            Self::MissingAttributeValue => "MissingAttributeValue",
+            Self::MissingEndTagName => "MissingEndTagName",
+            Self::MissingWhitespaceBetweenAttributes => "MissingWhitespaceBetweenAttributes",
+            Self::NestedComment => "NestedComment",
+            Self::UnexpectedCharacterInAttributeName => "UnexpectedCharacterInAttributeName",
+            Self::UnexpectedCharacterInUnquotedAttributeValue => {
+                "UnexpectedCharacterInUnquotedAttributeValue"
+            }
+            Self::UnexpectedEqualsSignBeforeAttributeName => {
+                "UnexpectedEqualsSignBeforeAttributeName"
+            }
+            Self::UnexpectedQuestionMarkInsteadOfTagName => {
+                "UnexpectedQuestionMarkInsteadOfTagName"
+            }
+            Self::XInvalidEndTag => "XInvalidEndTag",
+            Self::XMissingEndTag => "XMissingEndTag",
+            Self::XMissingInterpolationEnd => "XMissingInterpolationEnd",
+            Self::XMissingDirectiveName => "XMissingDirectiveName",
+            Self::XMissingDynamicDirectiveArgumentEnd => "XMissingDynamicDirectiveArgumentEnd",
+            Self::XVIfNoExpression => "XVIfNoExpression",
+            Self::XVIfSameKey => "XVIfSameKey",
+            Self::XVElseNoAdjacentIf => "XVElseNoAdjacentIf",
+            Self::XVForNoExpression => "XVForNoExpression",
+            Self::XVForMalformedExpression => "XVForMalformedExpression",
+            Self::XVBindNoExpression => "XVBindNoExpression",
+            Self::XVOnNoExpression => "XVOnNoExpression",
+            Self::XVSlotMisplaced => "XVSlotMisplaced",
+            Self::XVSlotDuplicateSlotNames => "XVSlotDuplicateSlotNames",
+            Self::XVModelNoExpression => "XVModelNoExpression",
+            Self::XVModelMalformedExpression => "XVModelMalformedExpression",
+            Self::DuplicateScriptSetup => "DuplicateScriptSetup",
+            Self::DuplicateScript => "DuplicateScript",
+            Self::ScriptLangMismatch => "ScriptLangMismatch",
+            Self::XDuplicateDirective => "XDuplicateDirective",
+            Self::XInvalidExpression => "XInvalidExpression",
+            Self::XInvalidMacroType => "XInvalidMacroType",
+            Self::XInvalidMacroScopeReference => "XInvalidMacroScopeReference",
+            Self::XUnresolvedImportedMacroType => "XUnresolvedImportedMacroType",
+            Self::XMissingMacroSemanticBundle => X_MISSING_MACRO_SEMANTIC_BUNDLE,
+            Self::XUnavailableMacroSemanticResult => X_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+            Self::DuplicateTemplate => "DuplicateTemplate",
+            Self::MissingSfcEntryBlock => "MissingSfcEntryBlock",
+            Self::TemplateFunctionalUnsupported => "TemplateFunctionalUnsupported",
+            Self::XCssParseError => "XCssParseError",
+        }
+    }
+
     /// The default human-readable message for this error code (Vue-compatible).
     pub fn message(&self) -> &'static str {
         match self {
@@ -224,6 +298,15 @@ impl CompilerErrorCode {
             Self::XUnavailableMacroSemanticResult => {
                 "Macro semantic result is unavailable for code generation."
             }
+            Self::DuplicateTemplate => {
+                "Single file component can contain only one <template> element."
+            }
+            Self::MissingSfcEntryBlock => {
+                "At least one <template> or <script> is required in a single file component."
+            }
+            Self::TemplateFunctionalUnsupported => {
+                "The <template functional> marker is not supported in Vue 3."
+            }
             Self::XCssParseError => "Error parsing or processing CSS.",
         }
     }
@@ -261,19 +344,22 @@ pub struct Diagnostic {
     pub plugin: &'static str,
     /// Human-readable message.
     pub message: String,
-    /// Optional source span for the diagnostic.
-    pub span: Option<Span>,
+    /// Canonically comparable semantic values used to render the message.
+    pub arguments: Vec<DiagnosticArg>,
+    /// Authored source span for the diagnostic.
+    pub span: Span,
 }
 
 impl Diagnostic {
     /// Create an error diagnostic with a Vue-compatible error code.
-    pub fn error(plugin: &'static str, code: CompilerErrorCode) -> Self {
+    pub fn error(plugin: &'static str, code: CompilerErrorCode, span: Span) -> Self {
         Self {
             severity: DiagnosticSeverity::Error,
             code,
             plugin,
             message: code.message().to_string(),
-            span: None,
+            arguments: Vec::new(),
+            span,
         }
     }
 
@@ -282,46 +368,74 @@ impl Diagnostic {
         plugin: &'static str,
         code: CompilerErrorCode,
         message: impl Into<String>,
+        span: Span,
     ) -> Self {
         Self {
             severity: DiagnosticSeverity::Error,
             code,
             plugin,
             message: message.into(),
-            span: None,
+            arguments: Vec::new(),
+            span,
         }
     }
 
     /// Create a warning diagnostic with a Vue-compatible error code.
-    pub fn warning(plugin: &'static str, code: CompilerErrorCode) -> Self {
+    pub fn warning(plugin: &'static str, code: CompilerErrorCode, span: Span) -> Self {
         Self {
             severity: DiagnosticSeverity::Warning,
             code,
             plugin,
             message: code.message().to_string(),
-            span: None,
+            arguments: Vec::new(),
+            span,
         }
     }
 
     /// Create an informational diagnostic.
-    pub fn info(plugin: &'static str, code: CompilerErrorCode) -> Self {
+    pub fn info(plugin: &'static str, code: CompilerErrorCode, span: Span) -> Self {
         Self {
             severity: DiagnosticSeverity::Info,
             code,
             plugin,
             message: code.message().to_string(),
-            span: None,
+            arguments: Vec::new(),
+            span,
         }
-    }
-
-    pub fn with_span(mut self, span: Span) -> Self {
-        self.span = Some(span);
-        self
     }
 
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
         self
+    }
+
+    /// Attach one semantic rendering argument without coupling order to display text.
+    pub fn with_argument(mut self, argument: DiagnosticArg) -> Self {
+        self.arguments.push(argument);
+        self
+    }
+}
+
+/// Sort one Vue parse's diagnostics by the source-local portion of the
+/// cross-frontend normative key. The parse identity is constant within this
+/// vector and is applied when diagnostics from different sources are merged.
+pub fn sort_diagnostics(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by(|left, right| {
+        left.span
+            .start
+            .cmp(&right.span.start)
+            .then_with(|| left.span.end.cmp(&right.span.end))
+            .then_with(|| severity_rank(left.severity).cmp(&severity_rank(right.severity)))
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.arguments.cmp(&right.arguments))
+    });
+}
+
+const fn severity_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Info => 2,
     }
 }
 
@@ -376,15 +490,9 @@ pub struct SyntaxPluginContext<'a> {
 }
 
 impl<'a> SyntaxPluginContext<'a> {
-    /// Report an error diagnostic with a Vue-compatible error code.
-    pub fn error(&mut self, plugin: &'static str, code: CompilerErrorCode) {
-        self.diagnostics.push(Diagnostic::error(plugin, code));
-    }
-
     /// Report an error with a source span.
     pub fn error_at(&mut self, plugin: &'static str, code: CompilerErrorCode, span: Span) {
-        self.diagnostics
-            .push(Diagnostic::error(plugin, code).with_span(span));
+        self.diagnostics.push(Diagnostic::error(plugin, code, span));
     }
 
     /// Report an error with a custom message and source span.
@@ -396,18 +504,13 @@ impl<'a> SyntaxPluginContext<'a> {
         span: Span,
     ) {
         self.diagnostics
-            .push(Diagnostic::error_with_message(plugin, code, message).with_span(span));
-    }
-
-    /// Report a warning diagnostic.
-    pub fn warn(&mut self, plugin: &'static str, code: CompilerErrorCode) {
-        self.diagnostics.push(Diagnostic::warning(plugin, code));
+            .push(Diagnostic::error_with_message(plugin, code, message, span));
     }
 
     /// Report a warning with a source span.
     pub fn warn_at(&mut self, plugin: &'static str, code: CompilerErrorCode, span: Span) {
         self.diagnostics
-            .push(Diagnostic::warning(plugin, code).with_span(span));
+            .push(Diagnostic::warning(plugin, code, span));
     }
 
     /// Check if any error-level diagnostics have been reported.
@@ -454,14 +557,85 @@ mod tests {
         );
     }
 
+    /// `code_str()` must equal the `{:?}` (Debug) spelling for EVERY variant,
+    /// not merely the two constants the sibling test above pins. The list
+    /// below is hand-maintained (not compiler-enforced exhaustive); a new
+    /// variant added without a matching `code_str()` arm falls through to
+    /// nothing here — `code_str()`'s own match is exhaustive at compile
+    /// time, so a missing arm there fails to build, but this list must
+    /// still be updated by hand to keep covering it.
+    #[test]
+    fn code_str_matches_debug_spelling_for_every_variant() {
+        use CompilerErrorCode::*;
+        let all = [
+            AbruptClosingOfEmptyComment,
+            CdataInHtmlContent,
+            DuplicateAttribute,
+            EndTagWithAttributes,
+            EofBeforeTagName,
+            EofInCdata,
+            EofInComment,
+            EofInTag,
+            IncorrectlyClosedComment,
+            IncorrectlyOpenedComment,
+            InvalidFirstCharacterOfTagName,
+            MissingAttributeValue,
+            MissingEndTagName,
+            MissingWhitespaceBetweenAttributes,
+            NestedComment,
+            UnexpectedCharacterInAttributeName,
+            UnexpectedCharacterInUnquotedAttributeValue,
+            UnexpectedEqualsSignBeforeAttributeName,
+            UnexpectedQuestionMarkInsteadOfTagName,
+            XInvalidEndTag,
+            XMissingEndTag,
+            XMissingInterpolationEnd,
+            XMissingDirectiveName,
+            XMissingDynamicDirectiveArgumentEnd,
+            XVIfNoExpression,
+            XVIfSameKey,
+            XVElseNoAdjacentIf,
+            XVForNoExpression,
+            XVForMalformedExpression,
+            XVBindNoExpression,
+            XVOnNoExpression,
+            XVSlotMisplaced,
+            XVSlotDuplicateSlotNames,
+            XVModelNoExpression,
+            XVModelMalformedExpression,
+            DuplicateScriptSetup,
+            DuplicateScript,
+            ScriptLangMismatch,
+            XDuplicateDirective,
+            XInvalidExpression,
+            XInvalidMacroType,
+            XInvalidMacroScopeReference,
+            XUnresolvedImportedMacroType,
+            XMissingMacroSemanticBundle,
+            XUnavailableMacroSemanticResult,
+            DuplicateTemplate,
+            MissingSfcEntryBlock,
+            TemplateFunctionalUnsupported,
+            XCssParseError,
+        ];
+        for code in all {
+            assert_eq!(
+                code.code_str(),
+                format!("{code:?}"),
+                "code_str() must be the exact Debug spelling for {code:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_diagnostic_error_creation() {
-        let d = Diagnostic::error("test-plugin", CompilerErrorCode::XInvalidEndTag);
+        let span = Span::new(2, 4);
+        let d = Diagnostic::error("test-plugin", CompilerErrorCode::XInvalidEndTag, span);
         assert_eq!(d.severity, DiagnosticSeverity::Error);
         assert_eq!(d.plugin, "test-plugin");
         assert_eq!(d.message, "Invalid end tag.");
         assert_eq!(d.code, CompilerErrorCode::XInvalidEndTag);
-        assert!(d.span.is_none());
+        assert_eq!(d.span, span);
     }
 
     #[test]
@@ -470,6 +644,7 @@ mod tests {
             "test",
             CompilerErrorCode::XMissingEndTag,
             "Element <div> is missing end tag.",
+            Span::new(1, 6),
         );
         assert_eq!(d.code, CompilerErrorCode::XMissingEndTag);
         assert_eq!(d.message, "Element <div> is missing end tag.");
@@ -477,28 +652,33 @@ mod tests {
 
     #[test]
     fn test_diagnostic_warning_creation() {
-        let d = Diagnostic::warning("parser", CompilerErrorCode::DuplicateAttribute);
+        let d = Diagnostic::warning(
+            "parser",
+            CompilerErrorCode::DuplicateAttribute,
+            Span::new(1, 4),
+        );
         assert_eq!(d.severity, DiagnosticSeverity::Warning);
         assert_eq!(d.plugin, "parser");
         assert_eq!(d.message, "Duplicate attribute.");
     }
 
     #[test]
-    fn test_diagnostic_with_span() {
-        let d = Diagnostic::error("test", CompilerErrorCode::XInvalidEndTag)
-            .with_span(Span { start: 10, end: 20 });
-        assert_eq!(d.span, Some(Span { start: 10, end: 20 }));
-    }
-
-    #[test]
     fn test_diagnostic_display() {
-        let d = Diagnostic::error("script", CompilerErrorCode::XInvalidExpression);
+        let d = Diagnostic::error(
+            "script",
+            CompilerErrorCode::XInvalidExpression,
+            Span::new(1, 2),
+        );
         assert_eq!(
             d.to_string(),
             "[script] error: Error parsing JavaScript expression."
         );
 
-        let d = Diagnostic::warning("template", CompilerErrorCode::DuplicateAttribute);
+        let d = Diagnostic::warning(
+            "template",
+            CompilerErrorCode::DuplicateAttribute,
+            Span::new(1, 2),
+        );
         assert_eq!(d.to_string(), "[template] warning: Duplicate attribute.");
     }
 
@@ -525,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn test_context_error_helpers() {
+    fn test_context_anchored_error_helpers() {
         let opts = SyntaxPluginOptions::default();
         let input = "";
         let mut ctx = SyntaxPluginContext {
@@ -537,11 +717,19 @@ mod tests {
 
         assert!(!ctx.has_errors());
 
-        ctx.error("plugin-a", CompilerErrorCode::XInvalidEndTag);
+        ctx.error_at(
+            "plugin-a",
+            CompilerErrorCode::XInvalidEndTag,
+            Span::new(1, 2),
+        );
         assert!(ctx.has_errors());
         assert_eq!(ctx.diagnostics.len(), 1);
 
-        ctx.warn("plugin-a", CompilerErrorCode::DuplicateAttribute);
+        ctx.warn_at(
+            "plugin-a",
+            CompilerErrorCode::DuplicateAttribute,
+            Span::new(2, 3),
+        );
         assert_eq!(ctx.diagnostics.len(), 2);
     }
 
@@ -562,7 +750,7 @@ mod tests {
             Span { start: 0, end: 5 },
         );
         assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].span, Some(Span { start: 0, end: 5 }));
+        assert_eq!(ctx.diagnostics[0].span, Span { start: 0, end: 5 });
         assert_eq!(ctx.diagnostics[0].code, CompilerErrorCode::XInvalidEndTag);
     }
 
@@ -577,8 +765,8 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        ctx.error("a", CompilerErrorCode::XInvalidEndTag);
-        ctx.warn("b", CompilerErrorCode::DuplicateAttribute);
+        ctx.error_at("a", CompilerErrorCode::XInvalidEndTag, Span::new(1, 2));
+        ctx.warn_at("b", CompilerErrorCode::DuplicateAttribute, Span::new(2, 3));
 
         let diags = ctx.take_diagnostics();
         assert_eq!(diags.len(), 2);
@@ -596,10 +784,10 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        ctx.warn("a", CompilerErrorCode::DuplicateAttribute);
+        ctx.warn_at("a", CompilerErrorCode::DuplicateAttribute, Span::new(1, 2));
         assert!(!ctx.has_errors(), "warnings should not count as errors");
 
-        ctx.error("c", CompilerErrorCode::XMissingEndTag);
+        ctx.error_at("c", CompilerErrorCode::XMissingEndTag, Span::new(2, 3));
         assert!(ctx.has_errors());
     }
 }

@@ -1,0 +1,5 @@
+error[E0063]: missing field `span` in initializer of `HostDiagnostic`
+ --> tests/cases/compile-fail/host_diagnostic_span_is_mandatory.rs:8:13
+  |
+8 |     let _ = verter_session::HostDiagnostic {
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `span`

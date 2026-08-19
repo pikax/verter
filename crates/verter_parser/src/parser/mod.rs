@@ -275,6 +275,7 @@ impl Syntax {
     /// state (stack, current_prop, builder) is dropped.
     pub fn into_parsed_sfc(mut self) -> types::ParsedSfc {
         let has_errors = self.has_errors();
+        crate::diagnostics::sort_diagnostics(&mut self.diagnostics);
         types::ParsedSfc {
             template_ast: self.template_ast.take(),
             script_node: self.script_node.take(),
@@ -510,10 +511,11 @@ impl Syntax {
             last.tag_open_end = end;
         } else {
             // OpenTagEnd with empty stack — should not happen in well-formed input.
-            self.diagnostics.push(
-                Diagnostic::error("syntax", CompilerErrorCode::EofInTag)
-                    .with_span(Span::new(end.saturating_sub(1), end)),
-            );
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::EofInTag,
+                Span::new(end.saturating_sub(1), end),
+            ));
             return;
         }
 
@@ -571,10 +573,11 @@ impl Syntax {
             Some(se) => se,
             None => {
                 // Self-closing tag with empty stack — should not happen.
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::EofInTag)
-                        .with_span(Span::new(end.saturating_sub(2), end)),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::EofInTag,
+                    Span::new(end.saturating_sub(2), end),
+                ));
                 return;
             }
         };
@@ -651,10 +654,11 @@ impl Syntax {
             Some(se) => se,
             None => {
                 // Orphan close tag — nothing on the stack to match.
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::XInvalidEndTag)
-                        .with_span(Span::new(start, end)),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::XInvalidEndTag,
+                    Span::new(start, end),
+                ));
                 return;
             }
         };
@@ -664,10 +668,11 @@ impl Syntax {
         if !open_name.eq_ignore_ascii_case(close_name) {
             // Mismatch: close tag doesn't match the current open element.
             // Strict mode: emit diagnostic and reject the close tag entirely.
-            self.diagnostics.push(
-                Diagnostic::error("syntax", CompilerErrorCode::XInvalidEndTag)
-                    .with_span(Span::new(start, end)),
-            );
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::XInvalidEndTag,
+                Span::new(start, end),
+            ));
             return;
         }
 
@@ -727,10 +732,11 @@ impl Syntax {
         while let Some(se) = self.stack_elements.pop() {
             let is_sfc_root = !self.template_mode && self.stack_elements.is_empty();
 
-            self.diagnostics.push(
-                Diagnostic::error("syntax", CompilerErrorCode::XMissingEndTag)
-                    .with_span(Span::new(se.tag_open_start, se.tag_open_end)),
-            );
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::XMissingEndTag,
+                Span::new(se.tag_open_start, se.tag_open_end),
+            ));
 
             // If this was a template element inside the builder, force-close it
             // so the node gets attached and isn't orphaned.
@@ -852,10 +858,10 @@ impl Syntax {
         let span = Span::new(index.saturating_sub(1), index);
         if severity_is_error {
             self.diagnostics
-                .push(Diagnostic::error("syntax", compiler_code).with_span(span));
+                .push(Diagnostic::error("syntax", compiler_code, span));
         } else {
             self.diagnostics
-                .push(Diagnostic::warning("syntax", compiler_code).with_span(span));
+                .push(Diagnostic::warning("syntax", compiler_code, span));
         }
     }
 }
@@ -877,6 +883,13 @@ impl Syntax {
     ) {
         match resolve_root_kind(name) {
             RootNodeKind::Template => {
+                if self.template_ast.is_some() {
+                    self.diagnostics.push(Diagnostic::error(
+                        "syntax",
+                        CompilerErrorCode::DuplicateTemplate,
+                        Span::new(se.tag_open_start, se.tag_open_end),
+                    ));
+                }
                 let root = RootNodeTemplate {
                     tag_open: make_open_tag(se),
                     tag_close: None,
@@ -958,26 +971,29 @@ impl Syntax {
             && crate::parser::types::sfc_script_lang_conflict(setup_side, plain_side).is_some()
         {
             self.script_lang_mismatch_reported = true;
-            self.diagnostics.push(
-                Diagnostic::error("syntax", CompilerErrorCode::ScriptLangMismatch)
-                    .with_span(Span::new(se.tag_open_start, se.tag_open_end)),
-            );
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::ScriptLangMismatch,
+                Span::new(se.tag_open_start, se.tag_open_end),
+            ));
         }
 
         if self.prop_setup {
             if self.script_setup_node.is_some() {
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::DuplicateScriptSetup)
-                        .with_span(Span::new(se.tag_open_start, se.tag_open_end)),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::DuplicateScriptSetup,
+                    Span::new(se.tag_open_start, se.tag_open_end),
+                ));
             }
             self.script_setup_node = Some(node);
         } else {
             if self.script_node.is_some() {
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::DuplicateScript)
-                        .with_span(Span::new(se.tag_open_start, se.tag_open_end)),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::DuplicateScript,
+                    Span::new(se.tag_open_start, se.tag_open_end),
+                ));
             }
             self.script_node = Some(node);
         }
@@ -1068,10 +1084,11 @@ impl Syntax {
         // The tokenizer emits DirName for the full span including "v-", so a
         // 2-byte name means only the prefix was present.
         if name_end - start == 2 {
-            self.diagnostics.push(
-                Diagnostic::error("syntax", CompilerErrorCode::XMissingDirectiveName)
-                    .with_span(Span::new(start, name_end)),
-            );
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::XMissingDirectiveName,
+                Span::new(start, name_end),
+            ));
         }
         self.current_prop = Some(NodeProp {
             start,
@@ -1172,10 +1189,11 @@ impl Syntax {
                 .iter()
                 .any(|seen| &ctx.bytes[seen.start as usize..seen.end as usize] == attr_name);
             if is_duplicate {
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::DuplicateAttribute)
-                        .with_span(Span::new(prop.start, prop.name_end)),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::DuplicateAttribute,
+                    Span::new(prop.start, prop.name_end),
+                ));
             } else {
                 self.seen_attr_spans
                     .push(Span::new(prop.start, prop.name_end));
@@ -1242,13 +1260,11 @@ impl Syntax {
                 macro_rules! warn_if_dup {
                     ($is_dup:expr) => {
                         if $is_dup {
-                            self.diagnostics.push(
-                                Diagnostic::warning(
-                                    "syntax",
-                                    CompilerErrorCode::XDuplicateDirective,
-                                )
-                                .with_span(Span::new(prop_start, prop_name_end)),
-                            );
+                            self.diagnostics.push(Diagnostic::warning(
+                                "syntax",
+                                CompilerErrorCode::XDuplicateDirective,
+                                Span::new(prop_start, prop_name_end),
+                            ));
                         }
                     };
                 }
@@ -1264,13 +1280,11 @@ impl Syntax {
                         if !matches!(kind, ElementNodeConditionKind::Else) {
                             let p = prop.as_ref().expect("invariant: prop is Some");
                             if !prop_has_value(p) {
-                                self.diagnostics.push(
-                                    Diagnostic::error(
-                                        "syntax",
-                                        CompilerErrorCode::XVIfNoExpression,
-                                    )
-                                    .with_span(Span::new(prop_start, prop_name_end)),
-                                );
+                                self.diagnostics.push(Diagnostic::error(
+                                    "syntax",
+                                    CompilerErrorCode::XVIfNoExpression,
+                                    Span::new(prop_start, prop_name_end),
+                                ));
                             }
                         }
                         let cond = ElementNodeCondition {
@@ -1284,23 +1298,22 @@ impl Syntax {
                     b"v-for" => {
                         let p = prop.as_ref().expect("invariant: prop is Some");
                         if !prop_has_value(p) {
-                            self.diagnostics.push(
-                                Diagnostic::error("syntax", CompilerErrorCode::XVForNoExpression)
-                                    .with_span(Span::new(prop_start, prop_name_end)),
-                            );
+                            self.diagnostics.push(Diagnostic::error(
+                                "syntax",
+                                CompilerErrorCode::XVForNoExpression,
+                                Span::new(prop_start, prop_name_end),
+                            ));
                         } else {
                             // Check for "in" or "of" separator
                             let val_s = p.value_start.unwrap() as usize;
                             let val_e = p.value_end.unwrap() as usize;
                             let val = &ctx.input[val_s..val_e];
                             if !has_v_for_separator(val) {
-                                self.diagnostics.push(
-                                    Diagnostic::error(
-                                        "syntax",
-                                        CompilerErrorCode::XVForMalformedExpression,
-                                    )
-                                    .with_span(Span::new(val_s as u32, val_e as u32)),
-                                );
+                                self.diagnostics.push(Diagnostic::error(
+                                    "syntax",
+                                    CompilerErrorCode::XVForMalformedExpression,
+                                    Span::new(val_s as u32, val_e as u32),
+                                ));
                             }
                         }
                         warn_if_dup!(builder.set_v_for(
@@ -1309,15 +1322,14 @@ impl Syntax {
                         ));
                     }
                     b"v-slot" | b"#" => {
-                        // Validate v-slot placement: only on components or <template>
-                        if let Some(tag_type) = builder.current_tag_type() {
-                            if !matches!(tag_type, TagType::Component | TagType::Template) {
-                                self.diagnostics.push(
-                                    Diagnostic::error("syntax", CompilerErrorCode::XVSlotMisplaced)
-                                        .with_span(Span::new(prop_start, prop_name_end)),
-                                );
-                            }
-                        }
+                        // v-slot placement (components/<template> only) is a
+                        // compiler-core TRANSFORM-time check in official Vue
+                        // (`X_V_SLOT_MISPLACED` in `transformElement.ts`), not
+                        // a raw-parse rejection — Vue's own SFC parser accepts
+                        // `v-slot`/`#` on any element. Rejecting it here would
+                        // falsely fail parsing of otherwise-valid sources (see
+                        // the dynamic-argument-shorthand corpus case). The
+                        // template-compile stage owns this check.
                         // v-slot uses dots as part of the slot name (e.g. v-slot:item.title),
                         // not as modifier separators. Extend arg_end to include modifiers
                         // so downstream code gets the full slot name from arg_start..arg_end.
@@ -1377,10 +1389,11 @@ impl Syntax {
                             .as_ref()
                             .expect("invariant: prop is Some in v-model branch");
                         if !prop_has_value(p) {
-                            self.diagnostics.push(
-                                Diagnostic::error("syntax", CompilerErrorCode::XVModelNoExpression)
-                                    .with_span(Span::new(prop_start, prop_name_end)),
-                            );
+                            self.diagnostics.push(Diagnostic::error(
+                                "syntax",
+                                CompilerErrorCode::XVModelNoExpression,
+                                Span::new(prop_start, prop_name_end),
+                            ));
                         } else {
                             // Validate v-model value is a member expression.
                             // The raw slice may carry HTML entities
@@ -1401,13 +1414,11 @@ impl Syntax {
                                 is_member_expression(raw)
                             };
                             if !valid {
-                                self.diagnostics.push(
-                                    Diagnostic::error(
-                                        "syntax",
-                                        CompilerErrorCode::XVModelMalformedExpression,
-                                    )
-                                    .with_span(Span::new(val_s as u32, val_e as u32)),
-                                );
+                                self.diagnostics.push(Diagnostic::error(
+                                    "syntax",
+                                    CompilerErrorCode::XVModelMalformedExpression,
+                                    Span::new(val_s as u32, val_e as u32),
+                                ));
                             }
                         }
                         builder.add_prop_flag(PropFlags::HasModel);
@@ -1556,10 +1567,11 @@ impl Syntax {
                         prev = ast.prev_sibling(prev_id);
                     } else {
                         // Non-whitespace text before v-else — invalid
-                        self.diagnostics.push(
-                            Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf)
-                                .with_span(tag_span),
-                        );
+                        self.diagnostics.push(Diagnostic::error(
+                            "syntax",
+                            CompilerErrorCode::XVElseNoAdjacentIf,
+                            tag_span,
+                        ));
                         return;
                     }
                 }
@@ -1574,27 +1586,31 @@ impl Syntax {
                         }
                     }
                     // Previous element has no v-condition or has v-else — invalid
-                    self.diagnostics.push(
-                        Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf)
-                            .with_span(tag_span),
-                    );
+                    self.diagnostics.push(Diagnostic::error(
+                        "syntax",
+                        CompilerErrorCode::XVElseNoAdjacentIf,
+                        tag_span,
+                    ));
                     return;
                 }
                 AstNodeKind::Interpolation(_) => {
                     // Interpolation before v-else — invalid
-                    self.diagnostics.push(
-                        Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf)
-                            .with_span(tag_span),
-                    );
+                    self.diagnostics.push(Diagnostic::error(
+                        "syntax",
+                        CompilerErrorCode::XVElseNoAdjacentIf,
+                        tag_span,
+                    ));
                     return;
                 }
             }
         }
 
         // No previous sibling at all → error
-        self.diagnostics.push(
-            Diagnostic::error("syntax", CompilerErrorCode::XVElseNoAdjacentIf).with_span(tag_span),
-        );
+        self.diagnostics.push(Diagnostic::error(
+            "syntax",
+            CompilerErrorCode::XVElseNoAdjacentIf,
+            tag_span,
+        ));
     }
 }
 
@@ -1635,10 +1651,11 @@ impl Syntax {
                         // Check if previous sibling has same key value
                         if let Some(prev_key) = find_key_value(prev_el, ctx.bytes) {
                             if my_key == prev_key {
-                                self.diagnostics.push(
-                                    Diagnostic::error("syntax", CompilerErrorCode::XVIfSameKey)
-                                        .with_span(key_span),
-                                );
+                                self.diagnostics.push(Diagnostic::error(
+                                    "syntax",
+                                    CompilerErrorCode::XVIfSameKey,
+                                    key_span,
+                                ));
                                 return;
                             }
                         }
@@ -1768,10 +1785,11 @@ impl Syntax {
                 .iter()
                 .any(|(name, _, _)| *name == slot_name)
             {
-                self.diagnostics.push(
-                    Diagnostic::error("syntax", CompilerErrorCode::XVSlotDuplicateSlotNames)
-                        .with_span(slot_span),
-                );
+                self.diagnostics.push(Diagnostic::error(
+                    "syntax",
+                    CompilerErrorCode::XVSlotDuplicateSlotNames,
+                    slot_span,
+                ));
             } else {
                 seen_slot_names.push((slot_name, chain_id, slot_span));
             }
@@ -1870,5 +1888,5 @@ pub fn sfc_script_lang_mismatch_span(source: &str) -> Option<Span> {
         .diagnostics
         .iter()
         .find(|diagnostic| diagnostic.code == CompilerErrorCode::ScriptLangMismatch)
-        .and_then(|diagnostic| diagnostic.span)
+        .map(|diagnostic| diagnostic.span)
 }

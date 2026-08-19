@@ -91,20 +91,13 @@ fn lib_env_change_does_not_change_file_artifact_key() {
 
     let canonical: std::sync::Arc<str> = std::sync::Arc::from("/ws/proj/src/foo.ts");
     let content_hash = [0u8; 16];
-    let parser_version = 1u32;
     let key_a = FileArtifactKey {
-        canonical: canonical.clone(),
-        content_hash,
         parse_env_hash: parse_env_hash_a,
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
+        ..FileArtifactKey::base_for_test(canonical.clone(), content_hash)
     };
     let key_b = FileArtifactKey {
-        canonical,
-        content_hash,
         parse_env_hash: parse_env_hash_b,
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
+        ..FileArtifactKey::base_for_test(canonical, content_hash)
     };
     assert_eq!(
         key_a, key_b,
@@ -174,20 +167,13 @@ fn paths_edit_changes_augmentation_target_key_but_not_file_artifact_key() {
 
     let canonical: std::sync::Arc<str> = std::sync::Arc::from("/ws/proj/src/foo.ts");
     let content_hash = [0u8; 16];
-    let parser_version = 1u32;
     let file_key_a = FileArtifactKey {
-        canonical: canonical.clone(),
-        content_hash,
         parse_env_hash: parse_a,
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
+        ..FileArtifactKey::base_for_test(canonical.clone(), content_hash)
     };
     let file_key_b = FileArtifactKey {
-        canonical,
-        content_hash,
         parse_env_hash: parse_b,
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
+        ..FileArtifactKey::base_for_test(canonical, content_hash)
     };
     assert_eq!(
         file_key_a, file_key_b,
@@ -228,18 +214,12 @@ fn two_project_envs_coexist_for_same_canonical() {
     let content_hash = [42u8; 16];
 
     let key_a = FileArtifactKey {
-        canonical: canonical.clone(),
-        content_hash,
         parse_env_hash: cfg_a.parse_env_hash(&inputs),
-        parser_version: 1,
-        file_language_id: FileArtifactKey::derived_file_language_id(&canonical),
+        ..FileArtifactKey::base_for_test(canonical.clone(), content_hash)
     };
     let key_b = FileArtifactKey {
-        canonical,
-        content_hash,
         parse_env_hash: cfg_b.parse_env_hash(&inputs),
-        parser_version: 1,
-        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
+        ..FileArtifactKey::base_for_test(canonical, content_hash)
     };
     // Two configs with identical parser flags but different paths produce
     // the SAME parse_env_hash (parse is independent of resolve / paths).
@@ -253,13 +233,8 @@ fn two_project_envs_coexist_for_same_canonical() {
     let mut inputs_b = inputs;
     inputs_b.parser_flags = &["preserve_jsx", "vue_macros_v3"];
     let key_c = FileArtifactKey {
-        canonical: std::sync::Arc::from("/ws/proj/src/foo.ts"),
-        content_hash,
         parse_env_hash: cfg_a.parse_env_hash(&inputs_b),
-        parser_version: 1,
-        file_language_id: FileArtifactKey::derived_file_language_id(&std::sync::Arc::from(
-            "/ws/proj/src/foo.ts",
-        )),
+        ..FileArtifactKey::base_for_test(std::sync::Arc::from("/ws/proj/src/foo.ts"), content_hash)
     };
     assert_ne!(
         key_a, key_c,

@@ -2095,7 +2095,11 @@ mod tests {
     #[test]
     fn supplied_change_during_compile_cannot_publish_stale_output() {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-        let source = "<style lang=\"customcss\">.authored { color: red }</style>";
+        // This test exercises the supplied-content publish fence, not Vue's
+        // missing-entry diagnostic. Keep the carrier valid while retaining the
+        // single preprocessed style block that drives the race below.
+        let source =
+            "<template></template><style lang=\"customcss\">.authored { color: red }</style>";
         let first = host
             .upsert(UpsertRequest {
                 canonical_id: None,

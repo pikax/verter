@@ -1,0 +1,14 @@
+error[E0603]: function `project_registered_carrier` is private
+ --> tests/cases/compile-fail/registered_projector_direct_invocation.rs:1:71
+  |
+1 | use verter_compiler::framework_common::registered_carrier_projection::project_registered_carrier;
+  |                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `project_registered_carrier` is defined here
+ --> src/framework_common/registered_carrier_projection.rs
+  |
+  | / pub(super) fn project_registered_carrier(
+  | |     known: &KnownRegisteredCompiler,
+  | |     accepted: &AcceptedRegisteredCarrierSource,
+  | | ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
+  | |______________________________________________________^

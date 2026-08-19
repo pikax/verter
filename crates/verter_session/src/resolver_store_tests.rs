@@ -131,22 +131,25 @@ mod file_source_env_validation {
     fn live_identity() -> SourceEnvIdentity {
         SourceEnvIdentity {
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parser_version: 2,
-            file_language_id: FileArtifactKey::derived_file_language_id(CONTRIB),
+            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(CONTRIB, 2),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test(CONTRIB),
         }
     }
 
     fn recorded_fact(
         canonical: &str,
         env_byte: u8,
-        parser_version: u32,
+        parse_marker: u8,
         language_of: &str,
     ) -> FactVersionRef {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parser_version,
-            file_language_id: FileArtifactKey::derived_file_language_id(language_of),
+            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+                language_of,
+                parse_marker,
+            ),
+            file_language_id: FileArtifactKey::synthetic_file_language_for_test(language_of),
         }
     }
 
@@ -212,11 +215,11 @@ mod file_source_env_validation {
     }
 
     #[test]
-    fn file_source_env_rejects_parser_version_mismatch() {
+    fn file_source_env_rejects_parse_key_mismatch() {
         let view = planted_view();
         assert!(
             !view.validates(&recorded_fact(CONTRIB, 3, 7, CONTRIB)),
-            "a recorded parser_version differing from the view-current identity must reject"
+            "a recorded parse_key differing from the view-current identity must reject"
         );
     }
 

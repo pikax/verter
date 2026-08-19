@@ -564,6 +564,40 @@ fn no_error_x_v_slot_misplaced_on_template() {
     assert_no_error(&result, "XVSlotMisplaced");
 }
 
+/// Official Vue's SFC parser accepts `v-slot`/`#` dynamic-argument shorthand
+/// on a native element — `X_V_SLOT_MISPLACED` is a compiler-core TRANSFORM
+/// check (`transformElement.ts`), not a raw-parse rejection. Mirrors the
+/// `dynamic arguments` corpus case in
+/// `compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts`, which
+/// compiles `<div #[\`item:${baz.key}\`]="{ value }">` without error.
+#[test]
+fn parse_does_not_reject_v_slot_dynamic_arg_on_native_element() {
+    let parsed = crate::compile::parse_sfc(
+        r#"<template><div #[`item:${baz.key}`]="{ value }"></div></template>"#,
+        None,
+        None,
+    );
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.code == crate::diagnostics::CompilerErrorCode::XVSlotMisplaced),
+        "parse must not reject v-slot placement, diagnostics: {:?}",
+        parsed.diagnostics
+    );
+}
+
+/// The same construct, when fully compiled (not just parsed), still hits the
+/// official `X_V_SLOT_MISPLACED` transform check — the misplacement check
+/// belongs to `compile_sfc`/`collect_template_compile_diagnostics`, not
+/// `parse_sfc`.
+#[test]
+fn error_x_v_slot_misplaced_dynamic_arg_on_native_element() {
+    let src = r#"<template><div #[`item:${baz.key}`]="{ value }"></div></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVSlotMisplaced");
+}
+
 #[test]
 fn error_x_v_slot_duplicate_slot_names() {
     let src = r#"<template><MyComp><template #default>a</template><template #default>b</template></MyComp></template>"#;

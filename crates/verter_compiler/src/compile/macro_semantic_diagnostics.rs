@@ -11,19 +11,24 @@ use crate::diagnostics::{CompilerErrorCode, Diagnostic};
 use crate::script::prepared::PreparedScript;
 use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
+use super::types::{CompileDiagnostic, CompileDiagnosticSeverity};
 use super::{CompileTarget, VueMacroSemanticInput};
 use crate::tsc::{TscInvalidOutcome, TscUnavailableOutcome};
 
-pub(super) fn tsc_generation_diagnostic(error: crate::tsc::TscGenerationError) -> Diagnostic {
-    Diagnostic::error_with_message(
-        "script",
-        CompilerErrorCode::XUnavailableMacroSemanticResult,
-        format!("Authoritative TSC generation failed: {error}."),
-    )
+pub(super) fn tsc_generation_diagnostic(
+    error: crate::tsc::TscGenerationError,
+) -> CompileDiagnostic {
+    CompileDiagnostic {
+        severity: CompileDiagnosticSeverity::Error,
+        code: format!("{:?}", CompilerErrorCode::XUnavailableMacroSemanticResult),
+        message: format!("Authoritative TSC generation failed: {error}."),
+        span: None,
+    }
 }
 
 pub(super) struct MacroSemanticValidation {
     pub diagnostics: Vec<Diagnostic>,
+    pub compile_failures: Vec<CompileDiagnostic>,
     /// A runtime bundle drives codegen only after its complete syntax join,
     /// identity, role, name, and anchor contract has been validated.
     pub runtime_valid: bool,
@@ -59,13 +64,15 @@ pub(super) fn collect_macro_semantic_diagnostics(
     semantics: &VueMacroSemanticInput,
 ) -> MacroSemanticValidation {
     let mut diagnostics = Vec::new();
+    let mut compile_failures = Vec::new();
     let mut runtime_valid = true;
     let Some(setup) = prepared.setup() else {
         if target.needs_runtime_macro_semantics() {
-            runtime_valid = validate_no_runtime_slots(semantics.runtime(), &mut diagnostics);
+            runtime_valid = validate_no_runtime_slots(semantics.runtime(), &mut compile_failures);
         }
         return MacroSemanticValidation {
             diagnostics,
+            compile_failures,
             runtime_valid,
         };
     };
@@ -125,7 +132,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
                     push_runtime_join_failure(
                         &mut diagnostics,
                         entry.syntax_index,
-                        None,
+                        setup.content_span(),
                         "unexpected-entry",
                     );
                 }
@@ -135,6 +142,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
 
     MacroSemanticValidation {
         diagnostics,
+        compile_failures,
         runtime_valid,
     }
 }
@@ -209,13 +217,21 @@ fn model_syntax(mac: &ScriptMacro<'_>, content_start: u32) -> (Option<String>, O
 
 fn validate_no_runtime_slots(
     bundle: Option<&MacroRuntimeBundle>,
-    diagnostics: &mut Vec<Diagnostic>,
+    compile_failures: &mut Vec<CompileDiagnostic>,
 ) -> bool {
     let Some(bundle) = bundle else {
         return true;
     };
     for entry in &bundle.entries {
-        push_runtime_join_failure(diagnostics, entry.syntax_index, None, "unexpected-entry");
+        compile_failures.push(CompileDiagnostic {
+            severity: CompileDiagnosticSeverity::Error,
+            code: format!("{:?}", CompilerErrorCode::XUnavailableMacroSemanticResult),
+            message: format!(
+                "Authoritative runtime semantics for macro syntax index {} has no authored setup syntax.",
+                entry.syntax_index
+            ),
+            span: None,
+        });
     }
     bundle.entries.is_empty()
 }
@@ -241,7 +257,7 @@ fn validate_runtime_entry(
         push_runtime_join_failure(
             diagnostics,
             slot.syntax_index,
-            Some(slot.type_span()),
+            slot.type_span(),
             "duplicate-entry",
         );
         return false;
@@ -250,7 +266,7 @@ fn validate_runtime_entry(
         push_runtime_join_failure(
             diagnostics,
             slot.syntax_index,
-            Some(slot.type_span()),
+            slot.type_span(),
             "macro-identity-mismatch",
         );
         return false;
@@ -317,7 +333,7 @@ fn validate_runtime_entry(
                 push_runtime_join_failure(
                     diagnostics,
                     slot.syntax_index,
-                    Some(slot.type_span()),
+                    slot.type_span(),
                     "defaults-association-mismatch",
                 );
                 return false;
@@ -334,7 +350,7 @@ fn validate_runtime_entry(
             push_runtime_join_failure(
                 diagnostics,
                 slot.syntax_index,
-                Some(slot.type_span()),
+                slot.type_span(),
                 "role-mismatch",
             );
             false
@@ -355,7 +371,7 @@ fn validate_props_shape(
             push_runtime_join_failure(
                 diagnostics,
                 slot.syntax_index,
-                Some(slot.type_span()),
+                slot.type_span(),
                 "duplicate-public-name",
             );
             continue;
@@ -364,12 +380,7 @@ fn validate_props_shape(
             Ok(span) => span,
             Err(code) => {
                 valid = false;
-                push_runtime_join_failure(
-                    diagnostics,
-                    slot.syntax_index,
-                    Some(slot.type_span()),
-                    code,
-                );
+                push_runtime_join_failure(diagnostics, slot.syntax_index, slot.type_span(), code);
                 continue;
             }
         };
@@ -400,14 +411,14 @@ fn validate_emits_shape(
             push_runtime_join_failure(
                 diagnostics,
                 slot.syntax_index,
-                Some(slot.type_span()),
+                slot.type_span(),
                 "duplicate-public-name",
             );
             continue;
         }
         if let Err(code) = authored_anchor_span(slot, emit.anchor, None) {
             valid = false;
-            push_runtime_join_failure(diagnostics, slot.syntax_index, Some(slot.type_span()), code);
+            push_runtime_join_failure(diagnostics, slot.syntax_index, slot.type_span(), code);
         }
     }
     valid
@@ -431,7 +442,7 @@ fn validate_model_shape(
         push_runtime_join_failure(
             diagnostics,
             slot.syntax_index,
-            Some(slot.type_span()),
+            slot.type_span(),
             "public-name-mismatch",
         );
         return false;
@@ -458,7 +469,7 @@ fn validate_model_shape(
             push_runtime_join_failure(
                 diagnostics,
                 slot.syntax_index,
-                Some(slot.type_span()),
+                slot.type_span(),
                 "invalid-macro-anchor",
             );
         }
@@ -595,10 +606,12 @@ fn push_invalid_macro_type(
     } else {
         message
     };
-    diagnostics.push(
-        Diagnostic::error_with_message("script", CompilerErrorCode::XInvalidMacroType, message)
-            .with_span(slot.type_span()),
-    );
+    diagnostics.push(Diagnostic::error_with_message(
+        "script",
+        CompilerErrorCode::XInvalidMacroType,
+        message,
+        slot.type_span(),
+    ));
 }
 
 fn push_tsc_unavailable(
@@ -621,7 +634,9 @@ fn push_tsc_unavailable(
         message.push(' ');
         message.push_str(diagnostic);
     }
-    diagnostics.push(Diagnostic::error_with_message("script", code, message).with_span(anchor));
+    diagnostics.push(Diagnostic::error_with_message(
+        "script", code, message, anchor,
+    ));
 }
 
 fn push_runtime_unavailable(
@@ -639,14 +654,12 @@ fn push_runtime_unavailable(
         message.push(' ');
         message.push_str(detail);
     }
-    diagnostics.push(
-        Diagnostic::error_with_message(
-            "script",
-            CompilerErrorCode::XUnavailableMacroSemanticResult,
-            message,
-        )
-        .with_span(anchor),
-    );
+    diagnostics.push(Diagnostic::error_with_message(
+        "script",
+        CompilerErrorCode::XUnavailableMacroSemanticResult,
+        message,
+        anchor,
+    ));
 }
 
 fn push_member_degraded(
@@ -666,42 +679,38 @@ fn push_member_degraded(
         message.push_str(detail);
     }
     diagnostics.push(
-        Diagnostic::warning("script", CompilerErrorCode::XUnresolvedImportedMacroType)
-            .with_message(message)
-            .with_span(anchor),
+        Diagnostic::warning(
+            "script",
+            CompilerErrorCode::XUnresolvedImportedMacroType,
+            anchor,
+        )
+        .with_message(message),
     );
 }
 
 fn push_runtime_join_failure(
     diagnostics: &mut Vec<Diagnostic>,
     syntax_index: u32,
-    anchor: Option<Span>,
+    anchor: Span,
     reason: &str,
 ) {
-    let diagnostic = Diagnostic::error_with_message(
+    diagnostics.push(Diagnostic::error_with_message(
         "script",
         CompilerErrorCode::XUnavailableMacroSemanticResult,
         format!(
             "Authoritative runtime semantics for macro syntax index {syntax_index} failed compiler syntax validation ({reason})."
         ),
-    );
-    diagnostics.push(match anchor {
-        Some(anchor) => diagnostic.with_span(anchor),
-        None => diagnostic,
-    });
+        anchor,
+    ));
 }
 
 fn push_missing(diagnostics: &mut Vec<Diagnostic>, lane: &str, syntax_index: u32, anchor: Span) {
-    diagnostics.push(
-        Diagnostic::error_with_message(
-            "script",
-            CompilerErrorCode::XMissingMacroSemanticBundle,
-            format!(
-                "Missing authoritative {lane} semantics for macro syntax index {syntax_index}."
-            ),
-        )
-        .with_span(anchor),
-    );
+    diagnostics.push(Diagnostic::error_with_message(
+        "script",
+        CompilerErrorCode::XMissingMacroSemanticBundle,
+        format!("Missing authoritative {lane} semantics for macro syntax index {syntax_index}."),
+        anchor,
+    ));
 }
 
 fn push_unavailable(
@@ -717,8 +726,8 @@ fn push_unavailable(
             format!(
                 "Authoritative {lane} semantics for macro syntax index {syntax_index} are incomplete or incompatible."
             ),
-        )
-        .with_span(anchor),
+            anchor,
+        ),
     );
 }
 

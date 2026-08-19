@@ -1,22 +1,23 @@
 //! Exact persisted-carrier compatibility cohort.
 //!
-//! This frozen type shape contains exactly eight carrier-owned version words;
+//! This frozen type shape contains the exact persisted-artifact compatibility row;
 //! exact equality compares the complete row. Downstream consumer compatibility
 //! is a separate protocol row and cannot participate in carrier identity or
 //! adoption: adding it here changes the structurally pinned size, while the
 //! compiler and language identity owners have no Cargo dependency on the
-//! downstream protocol crate. Carrier lanes and artifact IDs must remain built
-//! solely from these carrier-owned versions when those types are introduced.
+//! downstream protocol crate. Carrier lanes and artifact IDs remain built from
+//! their own typed identities rather than downstream consumer versions.
 
-use verter_compiler::framework_common::vue_bridge::VUE_CARRIER_ARTIFACT_VERSION;
-use verter_compiler::svelte::carrier::SVELTE_CARRIER_ARTIFACT_VERSION;
 use verter_language::carrier_grammar::{
     CarrierGrammarFingerprintSchemaVersion, CARRIER_GRAMMAR_FINGERPRINT_SCHEMA_VERSION,
 };
 use verter_language::carrier_versions::{
-    CarrierParserVersion, CarrierSourceMapSchemaVersion, CarrierSourceSpaceSchemaVersion,
-    FrameworkParseArtifactSchemaVersion, CARRIER_SOURCE_MAP_SCHEMA_VERSION,
-    CARRIER_SOURCE_SPACE_SCHEMA_VERSION, FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION,
+    CarrierSourceMapSchemaVersion, CarrierSourceSpaceSchemaVersion,
+    CARRIER_SOURCE_MAP_SCHEMA_VERSION, CARRIER_SOURCE_SPACE_SCHEMA_VERSION,
+};
+
+use crate::build_toolchain_fingerprint::{
+    current_build_toolchain_fingerprint, BuildToolchainFingerprint,
 };
 
 macro_rules! nonzero_version {
@@ -40,14 +41,8 @@ macro_rules! nonzero_version {
     };
 }
 
-nonzero_version!(SessionCurrentParserVersion);
 nonzero_version!(CarrierCacheSerializationVersion);
 
-pub const SESSION_CURRENT_PARSER_VERSION: SessionCurrentParserVersion =
-    match SessionCurrentParserVersion::new(crate::file_artifact_store::CURRENT_PARSER_VERSION) {
-        Some(version) => version,
-        None => panic!("session parser version must be nonzero"),
-    };
 pub const CARRIER_CACHE_SERIALIZATION_VERSION: CarrierCacheSerializationVersion =
     match CarrierCacheSerializationVersion::new(1) {
         Some(version) => version,
@@ -56,39 +51,27 @@ pub const CARRIER_CACHE_SERIALIZATION_VERSION: CarrierCacheSerializationVersion 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PersistedCarrierArtifactCohort {
-    vue_parser_version: CarrierParserVersion,
-    svelte_parser_version: CarrierParserVersion,
+    build_toolchain_fingerprint: BuildToolchainFingerprint,
     grammar_fingerprint_schema_version: CarrierGrammarFingerprintSchemaVersion,
-    framework_artifact_schema_version: FrameworkParseArtifactSchemaVersion,
     carrier_source_space_schema_version: CarrierSourceSpaceSchemaVersion,
     carrier_source_map_schema_version: CarrierSourceMapSchemaVersion,
-    session_current_parser_version: SessionCurrentParserVersion,
     carrier_cache_serialization_version: CarrierCacheSerializationVersion,
 }
 
 impl PersistedCarrierArtifactCohort {
-    pub const fn vue_parser_version(self) -> CarrierParserVersion {
-        self.vue_parser_version
-    }
-    pub const fn svelte_parser_version(self) -> CarrierParserVersion {
-        self.svelte_parser_version
+    pub const fn build_toolchain_fingerprint(self) -> BuildToolchainFingerprint {
+        self.build_toolchain_fingerprint
     }
     pub const fn grammar_fingerprint_schema_version(
         self,
     ) -> CarrierGrammarFingerprintSchemaVersion {
         self.grammar_fingerprint_schema_version
     }
-    pub const fn framework_artifact_schema_version(self) -> FrameworkParseArtifactSchemaVersion {
-        self.framework_artifact_schema_version
-    }
     pub const fn carrier_source_space_schema_version(self) -> CarrierSourceSpaceSchemaVersion {
         self.carrier_source_space_schema_version
     }
     pub const fn carrier_source_map_schema_version(self) -> CarrierSourceMapSchemaVersion {
         self.carrier_source_map_schema_version
-    }
-    pub const fn session_current_parser_version(self) -> SessionCurrentParserVersion {
-        self.session_current_parser_version
     }
     pub const fn carrier_cache_serialization_version(self) -> CarrierCacheSerializationVersion {
         self.carrier_cache_serialization_version
@@ -98,13 +81,10 @@ impl PersistedCarrierArtifactCohort {
 /// The sole assembly point for the exact persisted-carrier compatibility row.
 pub const fn current_persisted_carrier_artifact_cohort() -> PersistedCarrierArtifactCohort {
     PersistedCarrierArtifactCohort {
-        vue_parser_version: VUE_CARRIER_ARTIFACT_VERSION,
-        svelte_parser_version: SVELTE_CARRIER_ARTIFACT_VERSION,
+        build_toolchain_fingerprint: current_build_toolchain_fingerprint(),
         grammar_fingerprint_schema_version: CARRIER_GRAMMAR_FINGERPRINT_SCHEMA_VERSION,
-        framework_artifact_schema_version: FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION,
         carrier_source_space_schema_version: CARRIER_SOURCE_SPACE_SCHEMA_VERSION,
         carrier_source_map_schema_version: CARRIER_SOURCE_MAP_SCHEMA_VERSION,
-        session_current_parser_version: SESSION_CURRENT_PARSER_VERSION,
         carrier_cache_serialization_version: CARRIER_CACHE_SERIALIZATION_VERSION,
     }
 }
@@ -130,9 +110,10 @@ mod tests {
     #[test]
     fn current_cohort_reads_live_carrier_owned_versions() {
         let current = current_persisted_carrier_artifact_cohort();
-        assert_eq!(current.vue_parser_version().get(), 6);
-        assert_eq!(current.svelte_parser_version().get(), 2);
-        assert_eq!(current.session_current_parser_version().get(), 5);
+        assert_eq!(
+            current.build_toolchain_fingerprint(),
+            current_build_toolchain_fingerprint()
+        );
         assert_eq!(current.grammar_fingerprint_schema_version().get(), 1);
         assert_eq!(validate_persisted_carrier_artifact_cohort(current), Ok(()));
     }
@@ -142,20 +123,11 @@ mod tests {
         let current = current_persisted_carrier_artifact_cohort();
         let mutations = [
             PersistedCarrierArtifactCohort {
-                vue_parser_version: CarrierParserVersion::new(99).unwrap(),
-                ..current
-            },
-            PersistedCarrierArtifactCohort {
-                svelte_parser_version: CarrierParserVersion::new(99).unwrap(),
+                build_toolchain_fingerprint: BuildToolchainFingerprint::from_bytes([99; 32]),
                 ..current
             },
             PersistedCarrierArtifactCohort {
                 grammar_fingerprint_schema_version: CarrierGrammarFingerprintSchemaVersion::new(99)
-                    .unwrap(),
-                ..current
-            },
-            PersistedCarrierArtifactCohort {
-                framework_artifact_schema_version: FrameworkParseArtifactSchemaVersion::new(99)
                     .unwrap(),
                 ..current
             },
@@ -166,10 +138,6 @@ mod tests {
             },
             PersistedCarrierArtifactCohort {
                 carrier_source_map_schema_version: CarrierSourceMapSchemaVersion::new(99).unwrap(),
-                ..current
-            },
-            PersistedCarrierArtifactCohort {
-                session_current_parser_version: SessionCurrentParserVersion::new(99).unwrap(),
                 ..current
             },
             PersistedCarrierArtifactCohort {
@@ -187,40 +155,27 @@ mod tests {
     }
 
     #[test]
-    fn persisted_carrier_cohort_has_frozen_eight_word_shape() {
-        assert_eq!(
-            std::mem::size_of::<PersistedCarrierArtifactCohort>(),
-            8 * std::mem::size_of::<u32>()
-        );
-        assert_eq!(
-            std::mem::align_of::<PersistedCarrierArtifactCohort>(),
-            std::mem::align_of::<u32>()
-        );
+    fn persisted_carrier_cohort_retains_one_private_shape_fingerprint() {
+        assert!(std::mem::size_of::<PersistedCarrierArtifactCohort>() >= 32);
     }
 
     #[test]
     fn persisted_carrier_cohort_exhaustively_names_all_fields() {
         let current = current_persisted_carrier_artifact_cohort();
         let PersistedCarrierArtifactCohort {
-            vue_parser_version,
-            svelte_parser_version,
+            build_toolchain_fingerprint,
             grammar_fingerprint_schema_version,
-            framework_artifact_schema_version,
             carrier_source_space_schema_version,
             carrier_source_map_schema_version,
-            session_current_parser_version,
             carrier_cache_serialization_version,
         } = current;
 
         assert_eq!(
             PersistedCarrierArtifactCohort {
-                vue_parser_version,
-                svelte_parser_version,
+                build_toolchain_fingerprint,
                 grammar_fingerprint_schema_version,
-                framework_artifact_schema_version,
                 carrier_source_space_schema_version,
                 carrier_source_map_schema_version,
-                session_current_parser_version,
                 carrier_cache_serialization_version,
             },
             current

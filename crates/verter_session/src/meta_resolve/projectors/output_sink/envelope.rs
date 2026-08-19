@@ -645,7 +645,7 @@ pub(crate) fn build_component_meta_output(
                 .indexed
                 .framework_parse
                 .as_ref()
-                .map(|artifact| artifact.adapter_id.clone())
+                .map(|artifact| artifact.adapter_id().clone())
         });
     let contract = adapter_id.map_or_else(
         || {

@@ -21,30 +21,17 @@
 //! not the codegen authority, which would weaken the
 //! CodeTransform-single-source invariant rather than honour it.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use verter_language::{FrameworkAdapterId, FrameworkParseArtifact, LanguageId};
+use verter_language::{
+    FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
+};
+
+use super::FrameworkParseArtifact;
 
 use crate::compile::template_data::RawTemplateData;
 use crate::compile::types::{CompileDiagnosticSeverity, CompileTarget, DestructuredBlockMeta};
-
-/// Parse-affecting options threaded into [`CarrierCompiler::parse`].
-///
-/// These mirror the parse-cache-key inputs the framework's tokenizer
-/// consumes. For Vue they map onto `parse_sfc`'s `delimiters` /
-/// `custom_elements`. The default (`None` / `None`) is the exact input
-/// the host's carrier parse path has always used.
-#[derive(Debug, Clone, Default)]
-pub struct ParseOptions {
-    /// Custom interpolation delimiters, when the framework supports them
-    /// (Vue `{{ }}` override). `None` uses the framework default.
-    pub delimiters: Option<(String, String)>,
-    /// Tag-name prefixes treated as custom elements (skip component
-    /// resolution). `None` uses the framework default.
-    pub custom_elements: Option<Vec<String>>,
-}
 
 /// IDE-codegen options threaded into [`CarrierCompiler::compile_ide`].
 ///
@@ -541,8 +528,11 @@ pub struct RuntimeDiagnostic {
     pub code: String,
     /// Human-readable message.
     pub message: String,
-    /// Optional carrier-absolute source span.
-    pub span: Option<verter_span::Span>,
+    /// Carrier-absolute source span. A diagnostic with no finer-grained
+    /// location (a whole-component oracle result) carries the whole-source
+    /// span rather than an absent one — the producer decides that mapping,
+    /// never a downstream call site.
+    pub span: verter_span::Span,
 }
 
 /// The framework-OWNED ESM body the carrier emits for the runtime module.
@@ -750,8 +740,11 @@ pub struct RuntimeSurfaceRefusal {
     pub diagnostic_code: String,
     /// Human-readable reason.
     pub message: String,
-    /// Optional carrier-absolute source span of the refusing construct.
-    pub span: Option<verter_span::Span>,
+    /// Carrier-absolute source span of the refusing construct. A refusal
+    /// with no construct-specific location (a whole-component oracle
+    /// result) carries the whole-source span — decided by the producer,
+    /// never fabricated by a downstream call site.
+    pub span: verter_span::Span,
     /// Diagnostics accumulated BEFORE the refusal (non-fatal). A refusal
     /// carries no product, so these are the whole of what it reports.
     pub diagnostics: Vec<RuntimeDiagnostic>,
@@ -805,9 +798,6 @@ impl CarrierCompileOutcome {
 /// (`vue_bridge::VueCarrierCompiler`) delegates to the existing Vue
 /// pipeline without editing any Vue parser/codegen module.
 pub trait CarrierCompiler: Send + Sync {
-    #[doc(hidden)]
-    fn __verter_as_any(&self) -> &dyn Any;
-
     /// The adapter id this compiler answers to (the registry key).
     fn adapter_id(&self) -> FrameworkAdapterId;
 
@@ -823,11 +813,20 @@ pub trait CarrierCompiler: Send + Sync {
 
     /// Parse carrier `source` into the framework-neutral artifact.
     ///
-    /// Infallible at this surface: framework tokenizers collect
-    /// diagnostics inline rather than failing the parse, so the artifact
-    /// is always produced (its `common.diagnostics` / the host's parse
-    /// channel carry any problems).
-    fn parse(&self, source: &str, opts: &ParseOptions) -> Arc<FrameworkParseArtifact>;
+    /// Recoverable malformed syntax is NOT a rejection: framework
+    /// tokenizers collect diagnostics inline, so ordinary malformed input
+    /// still returns `Ok` with the problem recorded on the artifact's
+    /// mapped diagnostic channel (`common.diagnostics` / the host's parse
+    /// channel). `Err(SyntaxReject)` is reserved for a request this
+    /// frontend cannot honor at all — an explicitly unsupported
+    /// parse-option combination, or a construction failure that is not
+    /// itself recoverable syntax — and is returned BEFORE any artifact is
+    /// constructed: nothing downstream publishes for a rejected request.
+    fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>;
 
     /// Build the POSITION-PRESERVING eval source for `source`.
     ///
@@ -900,7 +899,7 @@ mod contract_tests {
 
     use super::*;
     use std::any::Any;
-    use verter_language::{CarrierParse, FrameworkAdapterId, FrameworkParseCommon, LanguageId};
+    use verter_language::{CarrierParse, FrameworkAdapterId, LanguageId};
     use verter_span::Span;
 
     /// A trivial carrier payload — the fixture's parse "result".
@@ -931,22 +930,8 @@ mod contract_tests {
             let close = source[content_start..].find("@@")? + content_start;
             Some(Span::new(content_start as u32, close as u32))
         }
-    }
 
-    impl CarrierCompiler for FixtureCompiler {
-        fn __verter_as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn adapter_id(&self) -> FrameworkAdapterId {
-            FrameworkAdapterId::new(Self::ADAPTER)
-        }
-
-        fn carrier_language_id(&self) -> LanguageId {
-            LanguageId::new(Self::ADAPTER)
-        }
-
-        fn parse(&self, source: &str, _opts: &ParseOptions) -> Arc<FrameworkParseArtifact> {
+        fn inventory(source: &str) -> verter_language::CarrierBlockInventory {
             use verter_language::parse_artifact::carrier_inventory::{
                 BlockId, CarrierBlock, CarrierBlockInventory, InternedNameId, MarkupSyntaxArena,
                 NormalizedNameTable, ScriptRole, ScriptSourceType as InventoryScriptSourceType,
@@ -1000,7 +985,7 @@ mod contract_tests {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .into();
-            let inventory = CarrierBlockInventory::new_registered(
+            CarrierBlockInventory::new_registered(
                 Arc::from([SourceSpaceDescriptor::registered(source_space, &registered)]),
                 Arc::new(NormalizedNameTable {
                     values: Arc::from([Arc::<str>::from("script")]),
@@ -1009,17 +994,58 @@ mod contract_tests {
                 Arc::new(MarkupSyntaxArena::default()),
                 &[&registered],
             )
-            .expect("fixture inventory");
-            Arc::new(FrameworkParseArtifact::new(
+            .expect("fixture inventory")
+        }
+
+        fn registered(&self, source: &str) -> Arc<FrameworkParseArtifact> {
+            let parsed = self
+                .parse(source, &ParseOptions::default())
+                .expect("fixture compiler parse");
+            crate::framework_common::registered_carrier_projection::registered_artifact_for_tests(
+                &parsed,
+                Arc::new(Self::inventory(source)),
+                Arc::new(FixtureCarrier),
+            )
+        }
+    }
+
+    impl CarrierCompiler for FixtureCompiler {
+        fn adapter_id(&self) -> FrameworkAdapterId {
+            FrameworkAdapterId::new(Self::ADAPTER)
+        }
+
+        fn carrier_language_id(&self) -> LanguageId {
+            LanguageId::new(Self::ADAPTER)
+        }
+
+        fn parse(
+            &self,
+            source: &str,
+            _opts: &ParseOptions,
+        ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, verter_language::SyntaxReject>
+        {
+            let language = verter_language::FileLanguage::vue();
+            let syntax_profile = verter_language::syntax_profile_id_for(
+                &language,
+                &verter_language::ParseOptions::default(),
+            )
+            .expect("Vue syntax profile");
+            let parse_key = verter_language::parse_key_for(
+                source,
+                &language,
+                verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+                verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+                &syntax_profile,
+            )
+            .expect("Vue parse key");
+            Ok(Arc::new(UnregisteredFrameworkParseArtifact::new(
                 self.adapter_id(),
                 LanguageId::new(Self::ADAPTER),
-                1,
-                FrameworkParseCommon {
-                    inventory: Arc::new(inventory),
-                    ..Default::default()
-                },
+                Arc::new(parse_key),
+                Arc::new(syntax_profile),
+                Vec::new(),
                 Arc::new(FixtureCarrier),
-            ))
+            )))
         }
 
         fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
@@ -1085,7 +1111,7 @@ mod contract_tests {
         let compiler = FixtureCompiler;
         // `markup @@const x = 1@@ trailing` — the script run is between @@.
         let source = "markup @@const x = 1@@ trailing\nsecond line";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = compiler.registered(source);
         let eval = compiler.eval_source(source, &artifact);
 
         // Length invariant: byte-for-byte same length.
@@ -1122,7 +1148,7 @@ mod contract_tests {
     fn eval_source_with_no_script_region_is_all_blank_same_length() {
         let compiler = FixtureCompiler;
         let source = "no script here\njust markup";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = compiler.registered(source);
         assert!(artifact.script_regions().is_empty());
         let eval = compiler.eval_source(source, &artifact);
         assert_eq!(eval.len(), source.len());
@@ -1139,7 +1165,7 @@ mod contract_tests {
     fn compile_ide_returns_typed_unsupported_never_silent_empty() {
         let compiler = FixtureCompiler;
         let source = "@@x@@";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = compiler.registered(source);
         let err = compiler
             .compile_ide(source, &artifact, &IdeCompileOptions::default())
             .expect_err("the fixture projects no IDE file");

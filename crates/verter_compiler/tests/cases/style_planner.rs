@@ -47,7 +47,11 @@ fn normalize_selector(source: &str) -> String {
 }
 
 fn compile_style(source: &str) -> verter_compiler::compile::VerterCompileResult {
-    let source = StandaloneSourceBytes::copied_from(source);
+    // Style-planner tests need a valid carrier around the authored style. A style-only SFC is
+    // intentionally diagnosed as missing its template/script entry, which is unrelated to the
+    // rewrite behavior these fixtures exercise.
+    let carrier = format!("<template></template>{source}");
+    let source = StandaloneSourceBytes::copied_from(&carrier);
     StandaloneCompiler.compile_source(
         &source,
         &CodegenOptions {

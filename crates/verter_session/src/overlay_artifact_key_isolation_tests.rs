@@ -8,7 +8,7 @@
 //! hash therefore equals the base file's content hash. Before the
 //! view-aware key-isolation fix, the view-aware overlay materialiser
 //! published its `IndexedReady` candidate under
-//! `FileArtifactKey::base(canonical,
+//! `FileArtifactKey::base_for_test(canonical,
 //! hash)` — the *same* key the base `ensure_indexed_ready` uses. Two
 //! distinct artifacts then occupy one slot.
 //!
@@ -29,7 +29,7 @@
 //! ## The fix
 //!
 //! The view-aware overlay materialiser keys its candidate under
-//! `FileArtifactKey::overlay_scoped(canonical, hash, discriminator)` —
+//! `FileArtifactKey::overlay_scoped_for_test(canonical, hash, discriminator)` —
 //! the discriminator (derived from the session view's overlay-set
 //! fingerprint) occupies the `parse_env_hash` dimension. The base
 //! artifact keeps `parse_env_hash = BASE_PARSE_ENV_HASH`. A base
@@ -270,9 +270,6 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     let overlay_hash = view
         .overlay_content_hash_for("/workspace/owner.ts")
         .expect("overlay hash present");
-    let discriminator = view
-        .overlay_artifact_discriminator("/workspace/owner.ts")
-        .expect("overlay discriminator present");
     // The materialiser derives the overlay source + content hash from
     // the view itself.
     let _ = host
@@ -282,9 +279,7 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     // The base base-key read returns the base artifact: `./helper`
     // unresolved.
     let base_via_base_key = host
-        .project_type_store()
-        .indexed()
-        .get("/workspace/owner.ts", base_hash)
+        .exact_current_indexed_for_test("/workspace/owner.ts", base_hash)
         .expect("base artifact present under the base key");
     assert_eq!(
         helper_specifier(&base_via_base_key).as_deref(),
@@ -295,9 +290,7 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     // The overlay-scoped read returns the overlay artifact: `./helper`
     // resolved to the overlay-only `/helper.ts`.
     let overlay_via_scoped = host
-        .project_type_store()
-        .indexed()
-        .get_overlay_scoped("/workspace/owner.ts", overlay_hash, discriminator)
+        .exact_overlay_indexed_for_test("/workspace/owner.ts", overlay_hash, &view)
         .expect("overlay artifact present under the overlay-scoped key");
     assert_eq!(
         helper_specifier(&overlay_via_scoped).as_deref(),

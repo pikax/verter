@@ -22,10 +22,15 @@ concurrently running block.
 |---|---|---|
 | `TR-1` | YES | `crates/verter_wasm/src/lib.rs` + `crates/verter_napi/src/lib.rs`; no overlap with any concurrent block |
 | `BND-2` (Rollup/non-Vite inline) | YES | `packages/unplugin/src/index.ts`; no overlap |
-| `RT-1` | NO — NOT EXECUTED | its correction site `crates/verter_session/src/host_compile.rs:469` is the active file of a concurrently running block, and the carrier-classification change alters which responses reach that block's in-flight transaction construction |
+| `RT-1` | YES — in a SECOND pass | held while a concurrently running block owned its correction site, then executed after that block landed and this branch was rebased onto it |
 
-`RT-1` therefore remains OPEN against this block's charter. This is a partial landing,
-not a completed one; see the landing record's disposition section.
+The block landed in two passes. The first landed `TR-1` and `BND-2`; `RT-1` was held
+because its correction site was the active file of a concurrently running block, and the
+carrier-classification change alters which responses reach that block's in-flight
+transaction construction. The second pass rebased onto that block's landing and executed
+`RT-1` against its corrected shape — which matters, because `RT-1` is what makes a Svelte
+refusal REACHABLE on the batch route for the first time, and those refusals now travel
+through the landed typed outcome rather than the deleted string-scanned path.
 
 ## Binding constraints applied
 

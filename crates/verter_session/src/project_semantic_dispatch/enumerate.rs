@@ -1164,11 +1164,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the signature builder at
         // `fact_signature_helpers::parse_fact_ref_for_observed_current_content`).
         let analysis_canonical = self.ctx.normalized_analysis_canonical(canonical);
+        let current_key = self.ctx.artifact_key_for_current_content(canonical)?;
+        if current_key.content_hash != observed_hash {
+            return None;
+        }
         let artifacts = self
             .ctx
             .project_type_store()
             .indexed()
-            .get_artifacts_for_content(analysis_canonical.as_ref(), observed_hash)?;
+            .get_artifacts_for_content(
+                analysis_canonical.as_ref(),
+                observed_hash,
+                &current_key.parse_key,
+                &current_key.file_language_id,
+            )?;
         let presence_key = FactKey::MemberPresence {
             exporter: InternedName::from(type_name),
             name: needle.clone(),

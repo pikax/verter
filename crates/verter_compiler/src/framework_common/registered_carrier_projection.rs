@@ -5,30 +5,351 @@ use verter_language::carrier_grammar::{AcceptedRegisteredCarrierSource, CarrierG
 use verter_language::parse_artifact::carrier_inventory::*;
 use verter_language::{
     compute_carrier_structure_hash, CarrierParse, CarrierStructureHash, FrameworkAdapterId,
-    LanguageId,
+    FrameworkParseCommon, LanguageDiagnostic, LanguageId, SyntaxReject,
+    UnregisteredFrameworkParseArtifact, UnsupportedSyntaxProfileReason,
 };
 use verter_span::Span;
 
-use super::carrier_compiler::{CarrierCompiler, ParseOptions};
-use super::registered_projector_seal::RegisteredProjectorSeal;
+use verter_language::ParseOptions;
+
+use super::carrier_compiler::CarrierCompiler;
 use super::vue_bridge::VueCarrierCompiler;
 use crate::svelte::SvelteCarrierCompiler;
 
 /// Opaque in-process carrier retained by the registered projector.
 ///
-/// Only immutable producer metadata is observable. The erased carrier has no
-/// accessor or downcast surface, and this type has no serialization, equality,
-/// or hashing implementation that could turn it into publication identity.
+/// This type's own public API surface has no accessor or downcast method,
+/// and it has no serialization, equality, or hashing implementation that
+/// could turn it into publication identity. Reaching the erased carrier
+/// back out requires calling INTO this module (`FrameworkParseArtifact`'s
+/// `pub(crate)` `carrier_ref`/`carrier_arc`/`erased_carrier_for_adapter`
+/// methods below) — there is no free-standing token that could be
+/// re-minted or handed to an unrelated caller.
 #[derive(Clone)]
 pub struct RegisteredCarrierPayload {
     inner: Arc<RegisteredCarrierPayloadInner>,
+}
+
+/// A framework parse whose geometry was proven by the registered projector.
+///
+/// The private state and carrier fields make direct construction impossible.
+/// Geometry-sensitive consumers receive only this registered form.
+pub struct FrameworkParseArtifact {
+    adapter_id: FrameworkAdapterId,
+    language_id: LanguageId,
+    parse_key: Arc<verter_language::ParseKey>,
+    syntax_profile: Arc<verter_language::SyntaxProfileId>,
+    common: FrameworkParseCommon,
+    carrier_structure_hash: CarrierStructureHash,
+    carrier: RegisteredCarrierPayload,
+    _geometry: super::registered_geometry_state::RegisteredGeometry,
+}
+
+impl FrameworkParseArtifact {
+    /// Owning adapter.
+    #[must_use]
+    pub fn adapter_id(&self) -> &FrameworkAdapterId {
+        &self.adapter_id
+    }
+
+    /// Concrete language within the adapter.
+    #[must_use]
+    pub fn language_id(&self) -> &LanguageId {
+        &self.language_id
+    }
+
+    /// Exact syntax construction identity.
+    #[must_use]
+    pub fn parse_key(&self) -> &verter_language::ParseKey {
+        &self.parse_key
+    }
+
+    /// Normalized parse-option identity.
+    #[must_use]
+    pub fn syntax_profile(&self) -> &verter_language::SyntaxProfileId {
+        &self.syntax_profile
+    }
+
+    /// Registered neutral geometry and mapped diagnostics.
+    #[must_use]
+    pub fn common(&self) -> &FrameworkParseCommon {
+        &self.common
+    }
+
+    /// Registered carrier inventory.
+    #[must_use]
+    pub fn inventory(&self) -> &Arc<CarrierBlockInventory> {
+        &self.common.inventory
+    }
+
+    /// Mapped parse diagnostics retained with the registered geometry.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[LanguageDiagnostic] {
+        &self.common.diagnostics
+    }
+
+    /// Integrity hash of the registered inventory.
+    #[must_use]
+    pub fn carrier_structure_hash(&self) -> CarrierStructureHash {
+        self.carrier_structure_hash
+    }
+
+    /// Adapter-aware compatibility projection derived from registered inventory.
+    pub fn script_regions(&self) -> Vec<verter_language::ScriptRegion> {
+        self.common
+            .script_regions_for_adapter(Some(&self.adapter_id))
+    }
+
+    /// Crate-internal reference-form typed carrier recovery: no capability
+    /// token — a foreign adapter's artifact carries a DIFFERENT concrete
+    /// `CarrierParse` type, so the `Any` downcast already fails
+    /// structurally for it. Confined to `verter_compiler` by visibility;
+    /// each owning adapter's own inherent methods are the only callers
+    /// (each hardcodes its own concrete `T`, so cross-adapter confusion is
+    /// not even syntactically possible).
+    pub(crate) fn carrier_ref<T: CarrierParse>(&self) -> Option<&T> {
+        self.carrier
+            .inner
+            .carrier
+            .__verter_as_any()
+            .downcast_ref::<T>()
+    }
+
+    /// The artifact's erased carrier payload, gated ONLY by adapter
+    /// identity — the sole cross-crate entry point for a registered
+    /// adapter's own opener function (`open_vue_carrier` /
+    /// `open_svelte_carrier`) to reach its artifact's carrier. The final
+    /// typed narrowing happens at the generic call site, which only ever
+    /// requests the owning adapter's own concrete carrier type.
+    pub(crate) fn erased_carrier_for_adapter(
+        &self,
+        adapter_id: &FrameworkAdapterId,
+    ) -> Option<Arc<dyn CarrierParse>> {
+        (self.adapter_id == *adapter_id).then(|| Arc::clone(&self.carrier.inner.carrier))
+    }
+
+    /// The artifact's carrier payload, for identity-preservation witness
+    /// tests only.
+    #[cfg(test)]
+    pub(super) fn carrier_payload_for_tests(&self) -> &RegisteredCarrierPayload {
+        &self.carrier
+    }
+
+    /// Rebind registered geometry to the current source-authority snapshot.
+    #[doc(hidden)]
+    pub fn __rehome_registered(
+        &self,
+        accepted: &AcceptedRegisteredCarrierSource,
+        expected_parse_key: &verter_language::ParseKey,
+    ) -> Result<Self, SyntaxReject> {
+        use verter_language::{SourceSpaceDescriptor, SourceSpaceId};
+        let source = accepted.source();
+        let (syntax_profile, accepted_parse_key) = parse_identity_for_accepted(accepted)
+            .ok_or_else(|| SyntaxReject::UnsupportedProfile {
+                parse_key: Arc::new(expected_parse_key.clone()),
+                syntax_profile: Arc::clone(&self.syntax_profile),
+                reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+            })?;
+        let identity_matches = accepted_parse_key == *expected_parse_key
+            && *self.parse_key == accepted_parse_key
+            && *self.syntax_profile == syntax_profile
+            && self.adapter_id == *accepted.grammar().adapter_id()
+            && self.language_id == *accepted.grammar().language_id()
+            && self.adapter_id
+                == *source
+                    .resolved_file_language()
+                    .adapter_id()
+                    .ok_or(())
+                    .map_err(|()| SyntaxReject::UnsupportedProfile {
+                        parse_key: Arc::new(accepted_parse_key.clone()),
+                        syntax_profile: Arc::new(syntax_profile.clone()),
+                        reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+                    })?
+            && self.language_id
+                == *source
+                    .resolved_file_language()
+                    .carrier_language_id()
+                    .ok_or(())
+                    .map_err(|()| SyntaxReject::UnsupportedProfile {
+                        parse_key: Arc::new(accepted_parse_key.clone()),
+                        syntax_profile: Arc::new(syntax_profile.clone()),
+                        reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+                    })?
+            && *self.carrier.adapter_id() == self.adapter_id
+            && *self.carrier.language_id() == self.language_id;
+        if !identity_matches {
+            return Err(SyntaxReject::UnsupportedProfile {
+                parse_key: Arc::new(accepted_parse_key),
+                syntax_profile: Arc::new(syntax_profile),
+                reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+            });
+        }
+        let inventory = CarrierBlockInventory::new_registered(
+            Arc::from([SourceSpaceDescriptor::registered(SourceSpaceId(0), source)]),
+            Arc::new(self.common.inventory.normalized_names().clone()),
+            Arc::from(self.common.inventory.blocks().to_vec()),
+            Arc::new(self.common.inventory.markup().clone()),
+            &[source],
+        )
+        .map_err(|error| SyntaxReject::InvalidCarrierGeometry {
+            parse_key: Arc::clone(&self.parse_key),
+            syntax_profile: Arc::clone(&self.syntax_profile),
+            error: Arc::new(error),
+        })?;
+        let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
+        Ok(Self {
+            adapter_id: self.adapter_id.clone(),
+            language_id: self.language_id.clone(),
+            parse_key: Arc::clone(&self.parse_key),
+            syntax_profile: Arc::clone(&self.syntax_profile),
+            common: FrameworkParseCommon {
+                inventory: Arc::new(inventory),
+                diagnostics: self.common.diagnostics.clone(),
+            },
+            carrier_structure_hash,
+            carrier: self.carrier.clone(),
+            _geometry: super::registered_geometry_state::RegisteredGeometry { _private: () },
+        })
+    }
+}
+
+fn parse_identity_for_accepted(
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> Option<(verter_language::SyntaxProfileId, verter_language::ParseKey)> {
+    let options = parse_options_for_accepted(accepted);
+    let language = accepted.source().resolved_file_language();
+    let syntax_profile = verter_language::syntax_profile_id_for(language, &options).ok()?;
+    let (domain, epoch) = if language.is_vue() {
+        (
+            verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+            verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else if language.is_svelte() {
+        (
+            verter_language::SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            verter_language::SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else {
+        return None;
+    };
+    let parse_key = verter_language::parse_key_for(
+        accepted.source().bytes(),
+        language,
+        domain,
+        epoch,
+        &syntax_profile,
+    )
+    .ok()?;
+    Some((syntax_profile, parse_key))
+}
+
+fn parse_options_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseOptions {
+    match accepted.grammar().canonical_config() {
+        CarrierGrammarConfig::Vue {
+            delimiters,
+            custom_elements,
+        } => ParseOptions {
+            delimiters: (
+                delimiters.open().to_string(),
+                delimiters.close().to_string(),
+            ),
+            custom_elements: custom_elements
+                .iter()
+                .map(|name| name.as_str().to_string())
+                .collect(),
+            svelte_loose: false,
+        },
+        // The registered grammar authority has no loose-mode concept yet —
+        // every registered Svelte source requests strict parsing.
+        CarrierGrammarConfig::Svelte => ParseOptions::default(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn registered_artifact_for_tests(
+    artifact: &Arc<UnregisteredFrameworkParseArtifact>,
+    inventory: Arc<CarrierBlockInventory>,
+    carrier: Arc<dyn CarrierParse>,
+) -> Arc<FrameworkParseArtifact> {
+    let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
+    Arc::new(FrameworkParseArtifact {
+        adapter_id: artifact.adapter_id.clone(),
+        language_id: artifact.language_id.clone(),
+        parse_key: Arc::clone(&artifact.parse_key),
+        syntax_profile: Arc::clone(&artifact.syntax_profile),
+        common: FrameworkParseCommon {
+            inventory,
+            diagnostics: artifact.diagnostics.clone(),
+        },
+        carrier_structure_hash,
+        carrier: RegisteredCarrierPayload::new(
+            carrier,
+            artifact.adapter_id.clone(),
+            artifact.language_id.clone(),
+        ),
+        _geometry: super::registered_geometry_state::RegisteredGeometry { _private: () },
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn parse_registered_source_for_tests(
+    language: verter_language::FileLanguage,
+    config: CarrierGrammarConfig,
+    source: &str,
+) -> Arc<FrameworkParseArtifact> {
+    use verter_language::carrier_grammar::{
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+    };
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
+
+    let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+    let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
+    grammar_authority
+        .register_carrier_grammar(
+            language.clone(),
+            FrameworkAdapterSemanticVersion::new(1).unwrap(),
+            CarrierParserGrammarVersion::new(1).unwrap(),
+            config.clone(),
+        )
+        .expect("register grammar");
+    let snapshot = source_authority
+        .register_source(
+            CanonicalFileId::new("file:///fixture.carrier"),
+            FileIncarnation::new(1),
+            SourceGeneration::new(1),
+            language,
+            Arc::from(source),
+        )
+        .expect("register source");
+    let accepted = grammar_authority
+        .accept_registered_source(&source_authority, &snapshot, &config)
+        .expect("accept source");
+    Arc::new(
+        super::registry::CarrierCompilerRegistry::built_in()
+            .project_registered(&accepted)
+            .expect("fixture source parses")
+            .into_framework_parse_artifact(),
+    )
+}
+
+impl std::fmt::Debug for FrameworkParseArtifact {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameworkParseArtifact")
+            .field("adapter_id", &self.adapter_id)
+            .field("language_id", &self.language_id)
+            .field("parse_key", &self.parse_key)
+            .field("common", &self.common)
+            .finish_non_exhaustive()
+    }
 }
 
 struct RegisteredCarrierPayloadInner {
     carrier: Arc<dyn CarrierParse>,
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,
-    parser_version: u32,
 }
 
 impl RegisteredCarrierPayload {
@@ -36,14 +357,12 @@ impl RegisteredCarrierPayload {
         carrier: Arc<dyn CarrierParse>,
         adapter_id: FrameworkAdapterId,
         language_id: LanguageId,
-        parser_version: u32,
     ) -> Self {
         Self {
             inner: Arc::new(RegisteredCarrierPayloadInner {
                 carrier,
                 adapter_id,
                 language_id,
-                parser_version,
             }),
         }
     }
@@ -60,15 +379,12 @@ impl RegisteredCarrierPayload {
         &self.inner.language_id
     }
 
-    /// Parser version that produced the retained parse.
-    #[must_use]
-    pub fn parser_version(&self) -> u32 {
-        self.inner.parser_version
-    }
-
+    /// Whether `self` and `other` retain the SAME inner Arc (identity, not
+    /// structural equality) — the test-only witness that a value threaded
+    /// through unchanged rather than being rebuilt.
     #[cfg(test)]
-    fn points_to(&self, carrier: &Arc<dyn CarrierParse>) -> bool {
-        Arc::ptr_eq(&self.inner.carrier, carrier)
+    pub(super) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
@@ -77,187 +393,162 @@ pub struct RegisteredCarrierProjection {
     carrier: RegisteredCarrierPayload,
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
+    diagnostics: Vec<LanguageDiagnostic>,
+    parse_key: Arc<verter_language::ParseKey>,
+    syntax_profile: Arc<verter_language::SyntaxProfileId>,
 }
 
 impl RegisteredCarrierProjection {
     #[cfg(test)]
-    fn carrier(&self) -> &RegisteredCarrierPayload {
+    pub(super) fn carrier(&self) -> &RegisteredCarrierPayload {
         &self.carrier
     }
 
     #[cfg(test)]
-    fn inventory(&self) -> &Arc<CarrierBlockInventory> {
+    pub(super) fn inventory(&self) -> &Arc<CarrierBlockInventory> {
         &self.inventory
     }
 
     /// Consume the exact projector result into the registered artifact.
     #[doc(hidden)]
-    pub fn into_framework_parse_artifact(self) -> verter_language::FrameworkParseArtifact {
+    pub fn into_framework_parse_artifact(self) -> FrameworkParseArtifact {
         let Self {
             carrier,
             inventory,
             carrier_structure_hash,
+            diagnostics,
+            parse_key,
+            syntax_profile,
         } = self;
-        verter_language::FrameworkParseArtifact::__from_registered_projection(
-            carrier.inner.adapter_id.clone(),
-            carrier.inner.language_id.clone(),
-            carrier.inner.parser_version,
-            inventory,
+        debug_assert_eq!(
+            compute_carrier_structure_hash(&inventory),
             carrier_structure_hash,
-            Arc::clone(&carrier.inner.carrier),
-        )
+        );
+        FrameworkParseArtifact {
+            adapter_id: carrier.inner.adapter_id.clone(),
+            language_id: carrier.inner.language_id.clone(),
+            parse_key,
+            syntax_profile,
+            common: FrameworkParseCommon {
+                inventory,
+                diagnostics,
+            },
+            carrier_structure_hash,
+            carrier,
+            _geometry: super::registered_geometry_state::RegisteredGeometry { _private: () },
+        }
     }
 }
 
-/// Capability-sealed registered projection entry. Architecture guards restrict
-/// its sole non-test caller to the elected session store leader.
-#[doc(hidden)]
-pub fn __project_registered_carrier_for_store_leader(
-    compiler: &dyn CarrierCompiler,
-    accepted: &AcceptedRegisteredCarrierSource,
-) -> RegisteredCarrierProjection {
-    let seal = super::registered_projector_seal::mint_registered_projector_seal_for_store_leader();
-    project_registered_carrier(compiler, accepted, &seal)
+/// The registered compilers this crate knows how to project — a closed,
+/// exhaustive dispatch set for the registered-projection path.
+///
+/// There is no external `&dyn CarrierCompiler` entry point into registered
+/// projection: a bogus third-party `CarrierCompiler` implementation cannot
+/// reach a projection arm at all, because it is not a variant of this
+/// enum — the match below is exhaustive by construction, with no
+/// wildcard arm and no `unreachable!()`.
+#[derive(Clone)]
+pub(super) enum KnownRegisteredCompiler {
+    Vue(Arc<VueCarrierCompiler>),
+    Svelte(Arc<SvelteCarrierCompiler>),
 }
 
-fn project_registered_carrier(
-    compiler: &dyn CarrierCompiler,
-    accepted: &AcceptedRegisteredCarrierSource,
-    _seal: &RegisteredProjectorSeal,
-) -> RegisteredCarrierProjection {
-    project_registered_carrier_with_witness(compiler, accepted, _seal).0
+impl KnownRegisteredCompiler {
+    pub(super) fn adapter_id(&self) -> FrameworkAdapterId {
+        match self {
+            Self::Vue(compiler) => compiler.adapter_id(),
+            Self::Svelte(compiler) => compiler.adapter_id(),
+        }
+    }
+
+    fn carrier_language_id(&self) -> LanguageId {
+        match self {
+            Self::Vue(compiler) => compiler.carrier_language_id(),
+            Self::Svelte(compiler) => compiler.carrier_language_id(),
+        }
+    }
+
+    fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+        match self {
+            Self::Vue(compiler) => compiler.parse(source, opts),
+            Self::Svelte(compiler) => compiler.parse(source, opts),
+        }
+    }
 }
 
-fn project_registered_carrier_with_witness(
-    compiler: &dyn CarrierCompiler,
+/// The registered projection entry, dispatched over the closed compiler
+/// enum. Its sole cross-crate caller is
+/// [`CarrierCompilerRegistry::project_registered`](super::registry::CarrierCompilerRegistry::project_registered).
+///
+/// `Err(SyntaxReject)` means the carrier frontend refused the request before
+/// producing an artifact — no geometry or publishable diagnostic product exists.
+pub(super) fn project_registered_carrier(
+    known: &KnownRegisteredCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
-    _seal: &RegisteredProjectorSeal,
-) -> (RegisteredCarrierProjection, Arc<dyn CarrierParse>) {
+) -> Result<RegisteredCarrierProjection, SyntaxReject> {
     let language = accepted.source().resolved_file_language();
     assert_eq!(
-        compiler.adapter_id(),
+        known.adapter_id(),
         *language.adapter_id().expect("accepted carrier adapter")
     );
     assert_eq!(
-        compiler.carrier_language_id(),
+        known.carrier_language_id(),
         *language
             .carrier_language_id()
             .expect("accepted carrier language")
     );
-    let options = match accepted.grammar().canonical_config() {
-        CarrierGrammarConfig::Vue {
-            delimiters,
-            custom_elements,
-        } => ParseOptions {
-            delimiters: Some((
-                delimiters.open().to_string(),
-                delimiters.close().to_string(),
-            )),
-            custom_elements: Some(
-                custom_elements
-                    .iter()
-                    .map(|name| name.as_str().to_string())
-                    .collect(),
-            ),
-        },
-        CarrierGrammarConfig::Svelte => ParseOptions::default(),
+    let options = parse_options_for_accepted(accepted);
+    let artifact = known.parse(accepted.source().bytes(), &options)?;
+    assert_eq!(artifact.adapter_id, known.adapter_id());
+    assert_eq!(artifact.language_id, known.carrier_language_id());
+    let diagnostics = artifact.diagnostics.clone();
+    let parse_key = Arc::clone(&artifact.parse_key);
+    let syntax_profile = Arc::clone(&artifact.syntax_profile);
+    let (inventory, parsed_carrier): (CarrierBlockInventory, Arc<dyn CarrierParse>) = match known {
+        KnownRegisteredCompiler::Vue(vue) => (
+            project_vue(vue, accepted, &artifact).map_err(|error| {
+                SyntaxReject::InvalidCarrierGeometry {
+                    parse_key: Arc::clone(&parse_key),
+                    syntax_profile: Arc::clone(&syntax_profile),
+                    error: Arc::new(error),
+                }
+            })?,
+            vue.unregistered_carrier_arc(&artifact)
+                .expect("Vue carrier payload"),
+        ),
+        KnownRegisteredCompiler::Svelte(svelte) => (
+            project_svelte(svelte, accepted, &artifact).map_err(|error| {
+                SyntaxReject::InvalidCarrierGeometry {
+                    parse_key: Arc::clone(&parse_key),
+                    syntax_profile: Arc::clone(&syntax_profile),
+                    error: Arc::new(error),
+                }
+            })?,
+            svelte
+                .unregistered_carrier_arc(&artifact)
+                .expect("Svelte carrier payload"),
+        ),
     };
-    let artifact = compiler.parse(accepted.source().bytes(), &options);
-    assert_eq!(artifact.adapter_id, compiler.adapter_id());
-    assert_eq!(artifact.language_id, compiler.carrier_language_id());
-    let (inventory, parsed_carrier): (CarrierBlockInventory, Arc<dyn CarrierParse>) =
-        if let Some(vue) = compiler
-            .__verter_as_any()
-            .downcast_ref::<VueCarrierCompiler>()
-        {
-            (
-                project_vue(vue, accepted, &artifact),
-                vue.carrier_arc(&artifact).expect("Vue carrier payload"),
-            )
-        } else if let Some(svelte) = compiler
-            .__verter_as_any()
-            .downcast_ref::<SvelteCarrierCompiler>()
-        {
-            (
-                project_svelte(svelte, accepted, &artifact),
-                svelte
-                    .carrier_arc(&artifact)
-                    .expect("Svelte carrier payload"),
-            )
-        } else {
-            panic!("registered compiler lacks a closed carrier inventory projector")
-        };
     let inventory = Arc::new(inventory);
     let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
     let carrier = RegisteredCarrierPayload::new(
-        Arc::clone(&parsed_carrier),
+        parsed_carrier,
         artifact.adapter_id.clone(),
         artifact.language_id.clone(),
-        artifact.parser_version,
     );
-    (
-        RegisteredCarrierProjection {
-            carrier,
-            inventory,
-            carrier_structure_hash,
-        },
-        parsed_carrier,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn project_registered_carrier_for_tests(
-    compiler: &dyn CarrierCompiler,
-    accepted: &AcceptedRegisteredCarrierSource,
-    seal: &RegisteredProjectorSeal,
-) -> (
-    RegisteredCarrierPayload,
-    Arc<CarrierBlockInventory>,
-    CarrierStructureHash,
-    bool,
-) {
-    let (projection, parsed_carrier) =
-        project_registered_carrier_with_witness(compiler, accepted, seal);
-    let same_carrier_arc = projection.carrier().points_to(&parsed_carrier);
-    let RegisteredCarrierProjection {
+    Ok(RegisteredCarrierProjection {
         carrier,
         inventory,
         carrier_structure_hash,
-    } = projection;
-    (carrier, inventory, carrier_structure_hash, same_carrier_arc)
-}
-
-#[cfg(test)]
-pub(super) fn materialize_registered_carrier_for_tests(
-    compiler: &dyn CarrierCompiler,
-    accepted: &AcceptedRegisteredCarrierSource,
-    seal: &RegisteredProjectorSeal,
-) -> (bool, bool) {
-    let (projection, parsed_carrier) =
-        project_registered_carrier_with_witness(compiler, accepted, seal);
-    let inventory = Arc::clone(projection.inventory());
-    let artifact = projection.into_framework_parse_artifact();
-    let inventory_is_exact = Arc::ptr_eq(&inventory, &artifact.common.inventory);
-    let materialized_carrier: Arc<dyn CarrierParse> = if let Some(vue) = compiler
-        .__verter_as_any()
-        .downcast_ref::<VueCarrierCompiler>(
-    ) {
-        vue.carrier_arc(&artifact)
-            .expect("materialized Vue carrier")
-    } else if let Some(svelte) = compiler
-        .__verter_as_any()
-        .downcast_ref::<SvelteCarrierCompiler>()
-    {
-        svelte
-            .carrier_arc(&artifact)
-            .expect("materialized Svelte carrier")
-    } else {
-        panic!("test compiler lacks carrier witness")
-    };
-    (
-        Arc::ptr_eq(&parsed_carrier, &materialized_carrier),
-        inventory_is_exact,
-    )
+        diagnostics,
+        parse_key,
+        syntax_profile,
+    })
 }
 
 struct Builder<'a> {
@@ -310,7 +601,7 @@ impl<'a> Builder<'a> {
         self,
         accepted: &AcceptedRegisteredCarrierSource,
         blocks: Vec<CarrierBlock>,
-    ) -> CarrierBlockInventory {
+    ) -> Result<CarrierBlockInventory, InventoryValidationError> {
         CarrierBlockInventory::new_registered(
             Arc::from([SourceSpaceDescriptor::registered(
                 SourceSpaceId(0),
@@ -327,7 +618,6 @@ impl<'a> Builder<'a> {
             }),
             &[accepted.source()],
         )
-        .expect("compiler projector must produce a valid inventory")
     }
     fn add_node(
         &mut self,
@@ -354,10 +644,10 @@ impl<'a> Builder<'a> {
 fn project_vue(
     vue: &VueCarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
-    artifact: &verter_language::FrameworkParseArtifact,
-) -> CarrierBlockInventory {
+    artifact: &UnregisteredFrameworkParseArtifact,
+) -> Result<CarrierBlockInventory, InventoryValidationError> {
     use verter_parser::parser::types::RootNodeKind;
-    let parsed = vue.parsed_sfc(artifact).expect("Vue artifact");
+    let parsed = vue.unregistered_parsed_sfc(artifact).expect("Vue artifact");
     enum Root<'a> {
         Script(&'a verter_parser::parser::types::RootNodeScript),
         Template(&'a verter_parser::ast::types::TemplateAst),
@@ -1081,9 +1371,11 @@ fn attribute_full_end(source: &str, p: &verter_parser::types::NodeProp) -> u32 {
 fn project_svelte(
     svelte: &SvelteCarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
-    artifact: &verter_language::FrameworkParseArtifact,
-) -> CarrierBlockInventory {
-    let parsed = svelte.parsed_svelte(artifact).expect("Svelte artifact");
+    artifact: &UnregisteredFrameworkParseArtifact,
+) -> Result<CarrierBlockInventory, InventoryValidationError> {
+    let parsed = svelte
+        .unregistered_parsed_svelte(artifact)
+        .expect("Svelte artifact");
     enum Root<'a> {
         Script(&'a crate::svelte::parser::SvelteScript),
         Style(&'a crate::svelte::parser::SvelteStyle),

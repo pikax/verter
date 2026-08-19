@@ -412,8 +412,8 @@ pub struct NapiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
-    pub spanStart: Option<u32>,
-    pub spanEnd: Option<u32>,
+    pub spanStart: u32,
+    pub spanEnd: u32,
 }
 
 #[napi(object)]
@@ -953,8 +953,8 @@ fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
         },
         code: d.code.clone(),
         message: d.message.clone(),
-        spanStart: d.span.map(|s| s.start),
-        spanEnd: d.span.map(|s| s.end),
+        spanStart: d.span.start,
+        spanEnd: d.span.end,
     }
 }
 

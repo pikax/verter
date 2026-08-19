@@ -662,7 +662,7 @@ impl Engine {
     /// behind every `FileSourceEnv` observation.
     ///
     /// Its own domain, deliberately NOT folded into the content counter.
-    /// `FileSourceEnv` carries `parse_env_hash` / `parser_version` /
+    /// `FileSourceEnv` carries `parse_env_hash` / `parse_key` /
     /// `file_language_id`, and the production paths that move them —
     /// `publish_snapshot`, `rebuild_and_publish` (both reached through
     /// `configure_projects` / `configure_resolver`) and

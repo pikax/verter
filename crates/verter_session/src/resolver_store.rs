@@ -717,7 +717,7 @@ struct PreBuildTokenInputs {
     /// when the workspace tracks no such producer.
     ///
     /// Deliberately NOT a [`StoreViewValidationToken`] dimension. Of the
-    /// three dimensions a `FileSourceEnv` fact carries, `parser_version`
+    /// three dimensions a `FileSourceEnv` fact carries, `parse_key`
     /// is a compile-time constant and `file_language_id` cannot move at
     /// runtime, so `parse_env_hash` is the only one that can actually
     /// change — and it is already folded into the token's `env_hash_fold`.
@@ -1411,7 +1411,7 @@ pub(crate) struct StoreViewSnapshot {
 }
 
 /// The view-current source-env identity of one canonical's artifact:
-/// `parser_version` / `file_language_id` from the
+/// `parse_key` / `file_language_id` from the
 /// [`crate::file_artifact_store::FileArtifactKey`] identity, plus the
 /// canonical's LIVE `parse_env_hash` dimension (content validity stays
 /// on the `FileWholeHash` rail). Snapshot value backing the strict
@@ -1419,7 +1419,7 @@ pub(crate) struct StoreViewSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceEnvIdentity {
     pub(crate) parse_env_hash: crate::locator_identity::ParseEnvHash,
-    pub(crate) parser_version: u32,
+    pub(crate) parse_key: verter_language::ParseKey,
     pub(crate) file_language_id: verter_language::FileLanguage,
 }
 
@@ -1432,7 +1432,7 @@ impl SourceEnvIdentity {
     /// so record and validate compare the same dimensions by
     /// construction.
     ///
-    /// `parser_version` / `file_language_id` come from the artifact KEY
+    /// `parse_key` / `file_language_id` come from the artifact KEY
     /// itself (the exact identity of the artifact the read served
     /// from). The `parse_env_hash` dimension is the canonical's LIVE
     /// per-canonical parse env
@@ -1453,7 +1453,7 @@ impl SourceEnvIdentity {
                 host.host_view_env_hashes_for(key.canonical.as_ref())
                     .parse_env_hash,
             ),
-            parser_version: key.parser_version,
+            parse_key: key.parse_key.clone(),
             file_language_id: key.file_language_id.clone(),
         }
     }
@@ -2814,7 +2814,7 @@ impl HostStoreView {
             crate::resolver_core::FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
-                parser_version,
+                parse_key,
                 file_language_id,
             } => {
                 if self.is_tombstoned(canonical_id) {
@@ -2823,20 +2823,20 @@ impl HostStoreView {
                 match self.canonical_view(canonical_id).source_env.as_ref() {
                     Some(live)
                         if live.parse_env_hash == *parse_env_hash
-                            && live.parser_version == *parser_version
+                            && live.parse_key == *parse_key
                             && live.file_language_id == *file_language_id =>
                     {
                         None
                     }
                     Some(live) => Some(format!(
                         "FileSourceEnv mismatch canonical={canonical_id} \
-                         expected=({parse_env_hash:?}, v{parser_version}, {file_language_id:?}) \
-                         actual=({:?}, v{}, {:?})",
-                        live.parse_env_hash, live.parser_version, live.file_language_id
+                         expected=({parse_env_hash:?}, {parse_key:?}, {file_language_id:?}) \
+                         actual=({:?}, {:?}, {:?})",
+                        live.parse_env_hash, live.parse_key, live.file_language_id
                     )),
                     None => Some(format!(
                         "FileSourceEnv missing canonical={canonical_id} \
-                         expected=({parse_env_hash:?}, v{parser_version}, {file_language_id:?})"
+                         expected=({parse_env_hash:?}, {parse_key:?}, {file_language_id:?})"
                     )),
                 }
             }
@@ -3335,13 +3335,13 @@ impl crate::resolver_core::StoreView for HostStoreView {
             crate::resolver_core::FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
-                parser_version,
+                parse_key,
                 file_language_id,
             } => crate::resolver_core::StoreView::validates_file_source_env(
                 self,
                 canonical_id,
                 *parse_env_hash,
-                *parser_version,
+                parse_key,
                 file_language_id,
             ),
             // Project-generation fact: the cached value observed the
@@ -3423,7 +3423,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     /// Strict contributor source-env identity validation.
     ///
-    /// Compares the recorded `(parse_env_hash, parser_version,
+    /// Compares the recorded `(parse_env_hash, parse_key,
     /// file_language_id)` against the view-current artifact identity
     /// resolved for `canonical_id` through the artifact root via the
     /// shared
@@ -3439,7 +3439,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         &self,
         canonical_id: &str,
         parse_env_hash: crate::locator_identity::ParseEnvHash,
-        parser_version: u32,
+        parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
         if self.is_tombstoned(canonical_id) {
@@ -3448,7 +3448,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         match self.canonical_view(canonical_id).source_env.as_ref() {
             Some(live) => {
                 live.parse_env_hash == parse_env_hash
-                    && live.parser_version == parser_version
+                    && live.parse_key == *parse_key
                     && live.file_language_id == *file_language_id
             }
             None => false,

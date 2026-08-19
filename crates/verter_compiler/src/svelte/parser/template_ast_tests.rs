@@ -646,6 +646,25 @@ fn supported_special_elements_parse() {
 }
 
 #[test]
+fn head_title_retains_non_text_children_for_analysis() {
+    let parsed =
+        parse_clean("<svelte:head><title><b>x</b>{#if a}y{/if}<!--c--></title></svelte:head>");
+    let SvelteNode::Element(head) = &parsed.template[0] else {
+        panic!("expected the root svelte:head element");
+    };
+    let SvelteNode::Element(title) = &head.children[0] else {
+        panic!("expected the title child");
+    };
+    assert!(matches!(title.children[0], SvelteNode::Element(_)));
+    assert!(matches!(title.children[1], SvelteNode::Block(_)));
+    assert!(matches!(title.children[2], SvelteNode::Comment(_)));
+    assert!(
+        parsed.strict_parse_errors.is_empty(),
+        "title children are analyze-phase facts, not strict parse errors"
+    );
+}
+
+#[test]
 fn dynamic_self_and_fragment_special_elements_parse() {
     let src = "<svelte:component this={Comp} /><svelte:self /><svelte:fragment slot=\"x\">y</svelte:fragment>";
     let p = parse_clean(src);
@@ -1046,6 +1065,23 @@ fn lang_scan_unquoted_ts_is_ts() {
 }
 
 #[test]
+fn typescript_fixture_template_expressions_do_not_mint_js_parse_errors() {
+    let source = include_str!(
+        "../../../tests/svelte_oracle_corpus/fixtures/matrix/typescript_script.svelte"
+    );
+    let parsed = parse_svelte(source);
+    assert_eq!(
+        script_body_grammar_for_source(source),
+        ScriptBodyGrammar::Ts
+    );
+    assert!(
+        parsed.strict_parse_errors.is_empty(),
+        "TypeScript carrier expressions must use the parser-wide TS grammar: {:?}",
+        parsed.strict_parse_errors
+    );
+}
+
+#[test]
 fn lang_scan_uppercase_ts_is_js() {
     assert_grammar(
         "<script lang=\"TS\">let a: number = 1;</script>",
@@ -1384,4 +1420,35 @@ fn options_custom_element_text_tag_retention_negatives() {
         parsed.options_custom_element_text_tags.is_empty(),
         "no options element retains no text-tag descriptor"
     );
+}
+
+#[test]
+fn official_valid_lexical_edges_do_not_mint_parse_defects() {
+    let sources = [
+        "<!doctype html>",
+        "<textarea>not </textar ally> text</textarea\n>",
+        "<button on:click={// comment\n() => { fn(); }}>x</button>\n{/* comment */ value}",
+        "{#each x as { y = `${`\"`}` }}{/each}",
+        "<svelte:options runes={false} /><div>{ #if true}<p>hi</p>{/if}</div>",
+    ];
+    for source in sources {
+        let parsed = parse_svelte(source);
+        assert!(
+            parsed.strict_parse_errors.is_empty(),
+            "valid source minted strict defects: {source:?}: {:?}",
+            parsed.strict_parse_errors
+        );
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "valid source minted recovery diagnostics: {source:?}: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.span.end as usize <= source.len()),
+            "diagnostic geometry escaped the source: {source:?}"
+        );
+    }
 }
