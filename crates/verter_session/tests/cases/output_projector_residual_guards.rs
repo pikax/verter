@@ -14806,6 +14806,16 @@ fn hot_materialize_violations_in_src(
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
+    hot_materialize_violations_in_file(rel, &file, index, returns_mat, returns_typeexpr)
+}
+
+fn hot_materialize_violations_in_file(
+    rel: &str,
+    file: &syn::File,
+    index: &HotFnIndex,
+    returns_mat: &std::collections::HashSet<usize>,
+    returns_typeexpr: &std::collections::HashSet<String>,
+) -> Vec<String> {
     let mut scanner = HotMaterializeScanner {
         scan_rel: rel,
         mod_path: hot_mod_path_from_rel(rel),
@@ -14819,7 +14829,7 @@ fn hot_materialize_violations_in_src(
         self_policing: false,
         per_fn: BTreeMap::new(),
     };
-    syn::visit::Visit::visit_file(&mut scanner, &file);
+    syn::visit::Visit::visit_file(&mut scanner, file);
 
     let mut out = Vec::new();
     for (key, sig) in &scanner.per_fn {
@@ -14878,24 +14888,24 @@ fn hot_scan_snippet(rel: &str, src: &str) -> Vec<String> {
 /// cloned + injected copy. Source ACQUISITION is the only difference between
 /// the two entry points — there is no parallel scanner clone, so the probe's
 /// RED proof exercises exactly the pipeline the fence trusts.
-fn hot_materialize_offenders_in_sources(sources: &[(String, String)]) -> Vec<String> {
-    let parsed: Vec<(String, syn::File)> = sources
+fn parse_hot_sources(sources: &[(String, String)]) -> Vec<(String, syn::File)> {
+    sources
         .iter()
         .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
         .filter_map(|(rel, src)| syn::parse_file(src).ok().map(|f| (rel.clone(), f)))
-        .collect();
-    let index = build_hot_index(&parsed);
+        .collect()
+}
+
+fn hot_materialize_offenders_in_parsed(parsed: &[(String, syn::File)]) -> Vec<String> {
+    let index = build_hot_index(parsed);
     let returns_mat = hot_returns_materialized(&index);
     let returns_typeexpr = hot_returns_typeexpr_bare(&index);
 
     let mut offenders: Vec<String> = Vec::new();
-    for (rel, src) in sources {
-        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
-            continue;
-        }
-        offenders.extend(hot_materialize_violations_in_src(
+    for (rel, file) in parsed {
+        offenders.extend(hot_materialize_violations_in_file(
             rel,
-            src,
+            file,
             &index,
             &returns_mat,
             &returns_typeexpr,
@@ -14903,6 +14913,10 @@ fn hot_materialize_offenders_in_sources(sources: &[(String, String)]) -> Vec<Str
     }
     offenders.sort();
     offenders
+}
+
+fn hot_materialize_offenders_in_sources(sources: &[(String, String)]) -> Vec<String> {
+    hot_materialize_offenders_in_parsed(&parse_hot_sources(sources))
 }
 
 /// A terminal-sink fn's self-policing summary (its `TypeExpr` params seeded
@@ -15049,35 +15063,43 @@ fn hot_path_never_calls_materialize_type_expr() {
 #[test]
 fn hot_materialize_scanner_flags_in_memory_injected_offender() {
     let sources = production_src_files();
+    let parsed = parse_hot_sources(&sources);
 
     // (1) GREEN on the real tree through the shared factored scan path.
-    let baseline = hot_materialize_offenders_in_sources(&sources);
+    let baseline = hot_materialize_offenders_in_parsed(&parsed);
     assert!(
         baseline.is_empty(),
         "probe step 1: the real production tree must scan green through the factored scan path; \
          got: {baseline:#?}"
     );
 
-    // (2) RED: clone in memory, inject a synthetic hot materialize-then-decide
-    //     fn into ONE real production source (a direct mint via the sealed
-    //     accessor, then a `matches!` decide on the minted value).
+    // (2) RED: clone the already-parsed corpus in memory and re-parse ONLY the
+    //     injected file. The other ~695 ASTs are shared with steps 1 and 3.
     const PROBE_FN: &str = "in_memory_probe_materializes_then_decides";
     let target_rel = "src/lib.rs";
-    let mut injected: Vec<(String, String)> = sources.clone();
-    let slot = injected
-        .iter_mut()
+    let target_src = sources
+        .iter()
         .find(|(rel, _)| rel == target_rel)
+        .map(|(_, src)| src.clone())
         .unwrap_or_else(|| panic!("`{target_rel}` must exist in the production tree"));
-    slot.1.push_str(&format!(
-        r#"
+    let injected_src = format!(
+        r#"{target_src}
 fn {PROBE_FN}(x: &TypeExpr) -> bool {{
     let cap = ProbeCap::new();
     let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap));
     matches!(minted, Some(TypeExpr::Object(_)))
 }}
 "#
-    ));
-    let offenders = hot_materialize_offenders_in_sources(&injected);
+    );
+    let injected_file = syn::parse_file(&injected_src)
+        .unwrap_or_else(|error| panic!("injected `{target_rel}` must parse: {error}"));
+    let mut injected_parsed = parsed.clone();
+    let slot = injected_parsed
+        .iter_mut()
+        .find(|(rel, _)| rel == target_rel)
+        .unwrap_or_else(|| panic!("`{target_rel}` must exist in the parsed production corpus"));
+    slot.1 = injected_file;
+    let offenders = hot_materialize_offenders_in_parsed(&injected_parsed);
     let expected_key = {
         let mut parts = hot_mod_path_from_rel(target_rel);
         parts.push(PROBE_FN.to_string());
@@ -15092,8 +15114,9 @@ fn {PROBE_FN}(x: &TypeExpr) -> bool {{
          by the SAME factored scan path the fence uses; got: {offenders:#?}"
     );
 
-    // (3) GREEN again on the untouched sources — the probe was purely in-memory.
-    let restored = hot_materialize_offenders_in_sources(&sources);
+    // (3) GREEN again on the untouched parsed corpus — the probe never
+    //     re-reads disk and never mutates `parsed`.
+    let restored = hot_materialize_offenders_in_parsed(&parsed);
     assert!(
         restored.is_empty(),
         "probe step 3: the unmodified sources must scan green again (the probe never touches \
@@ -15217,10 +15240,11 @@ fn hot_terminal_allowlist_accounting_failures(
 /// terminal that decides on a materialized value cannot hide on the allowlist.
 #[test]
 fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
-    let parsed: Vec<(String, syn::File)> = production_src_files()
-        .into_iter()
+    let sources = production_src_files();
+    let parsed: Vec<(String, syn::File)> = sources
+        .iter()
         .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
-        .filter_map(|(rel, src)| syn::parse_file(&src).ok().map(|f| (rel, f)))
+        .filter_map(|(rel, src)| syn::parse_file(src).ok().map(|f| (rel.clone(), f)))
         .collect();
     let index = build_hot_index(&parsed);
     let returns_mat = hot_returns_materialized(&index);
@@ -15241,12 +15265,12 @@ fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
 
     let mut failures: Vec<String> = Vec::new();
     for (suf, fname) in HOT_TERMINAL_SINKS {
-        for (rel, src) in production_src_files() {
+        for (rel, src) in &sources {
             if !rel.ends_with(suf) {
                 continue;
             }
             for summary in
-                hot_self_policing_summaries(&rel, &src, &index, &returns_mat, &returns_typeexpr)
+                hot_self_policing_summaries(rel, src, &index, &returns_mat, &returns_typeexpr)
             {
                 if &summary.innermost != fname {
                     continue;

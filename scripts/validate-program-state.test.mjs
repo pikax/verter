@@ -10,7 +10,9 @@
 // the block-set match, the status-dependent review/identity gates (including
 // the NOT_REQUIRED class gate, the diverged-accepted-identity
 // landing-equivalence gate, and the PRIVATE_CHECKPOINT class/proof gates), the
-// live-mode status = "ACTIVE" and program_dag_digest bindings, the DAG-root
+// live-mode status = "ACTIVE" and program_dag_digest bindings, evidence_digest
+// content binding (unresolvable evidence_root, mismatched/missing artifact),
+// the DAG-root
 // entry-lock digest gate (empty/missing rejected at the gated statuses; a bound
 // digest passes), the fail-closed PRIVATE_CHECKPOINT-predecessor rejection
 // (both stackless and with otherwise-perfect stack fields — the stacked variant
@@ -23,7 +25,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -179,7 +181,14 @@ function checkpointBlock(id, overrides = {}) {
   });
 }
 
-function header({ status, current, repoSha, dagDigest = DAG_DIGEST }) {
+function header({ status, current, repoSha, dagDigest = DAG_DIGEST, evidenceRoot }) {
+  const orchestration =
+    evidenceRoot === undefined
+      ? ""
+      : `
+[orchestration]
+evidence_root = "${evidenceRoot}"
+`;
   return `schema = 1
 revision = 11
 status = "${status}"
@@ -202,8 +211,7 @@ head_sha = "${repoSha}"
 head_tree = "${repoSha}"
 dirty = false
 untracked_count = 0
-
-`;
+${orchestration}`;
 }
 
 test("template mode: template-shaped state with REQUIRED_ placeholders passes", () => {
@@ -875,4 +883,128 @@ test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT 
     r.err,
     /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
   );
+});
+
+function writeLandingRecord(root, id, body) {
+  const blockDir = join(root, id);
+  mkdirSync(blockDir, { recursive: true });
+  const artifact = join(blockDir, "landing-record.md");
+  writeFileSync(artifact, body);
+  return artifact;
+}
+
+test("live mode: a well-formed but WRONG program_dag_digest is a violation", () => {
+  const dag = write("dag-dagdigest-mismatch.toml", DAG);
+  const state = write(
+    "state-dagdigest-mismatch.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, dagDigest: DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "mismatched program_dag_digest must fail");
+  assert.match(
+    r.err,
+    /state program_dag_digest .* does not match the SHA-256 of the DAG file/,
+  );
+});
+
+test("live mode: an unresolvable evidence_root cannot bind evidence_digest — fail closed", () => {
+  const dag = write("dag-evroot-placeholder.toml", DAG);
+  const state = write(
+    "state-evroot-placeholder.toml",
+    header({
+      status: "ACTIVE",
+      current: "A1",
+      repoSha: SHA,
+      evidenceRoot: "<EVIDENCE>",
+    }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(
+    r.status,
+    0,
+    "unresolvable evidence_root with a bound evidence_digest must fail, not print OK",
+  );
+  assert.match(
+    r.err,
+    /live state orchestration\.evidence_root "<EVIDENCE>" is not a resolvable directory — evidence_digest bindings cannot be verified/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("live mode: a well-formed evidence_digest that does not match the bound artifact is a violation", () => {
+  const evidenceRoot = join(dir, "evidence-mismatch");
+  const artifact = writeLandingRecord(evidenceRoot, "A0", "landing record body\n");
+  const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+  assert.notEqual(actual, DIGEST, "fixture digest must differ from the artifact hash");
+
+  const dag = write("dag-evbind-mismatch.toml", DAG);
+  const state = write(
+    "state-evbind-mismatch.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "mismatched evidence_digest must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A0 evidence_digest ${DIGEST} does not match the SHA-256 of .*landing-record\\.md \\(${actual}\\)`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("live mode: a bound evidence_digest with no artifact under evidence_root is a violation", () => {
+  const evidenceRoot = join(dir, "evidence-missing");
+  mkdirSync(evidenceRoot, { recursive: true });
+  const dag = write("dag-evbind-missing.toml", DAG);
+  const state = write(
+    "state-evbind-missing.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "missing evidence artifact must fail");
+  assert.match(
+    r.err,
+    /state block A0 has evidence_digest .* but no evidence artifact under/,
+  );
+});
+
+test("live mode: an evidence_digest that matches the bound landing-record artifact passes", () => {
+  const evidenceRoot = join(dir, "evidence-match");
+  const artifact = writeLandingRecord(evidenceRoot, "A0", "exact landing record\n");
+  const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+  const dag = write("dag-evbind-ok.toml", DAG);
+  const state = write(
+    "state-evbind-ok.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0", { evidence_digest: digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
 });

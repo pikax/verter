@@ -24,6 +24,7 @@ export default defineConfig({
       // leaves every one of them collected exactly as before.
       "scripts/validate-program-state.test.mjs",
       "scripts/validate-performance-gates.test.mjs",
+      "scripts/probe-bundler-route-isolation.test.mjs",
       ".integration-tests/**",
       "packages/playground/**",
       // packages/types has its own vitest.config.ts with typecheck: { only: true }
