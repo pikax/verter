@@ -166,14 +166,20 @@ function checkpointBlock(id, overrides = {}) {
   });
 }
 
-function header({ status, current, repoSha, dagDigest = DAG_DIGEST, evidenceRoot }) {
-  const orchestration =
-    evidenceRoot === undefined
-      ? ""
-      : `
+function header({ status, current, repoSha, dagDigest = DAG_DIGEST, evidenceRoot, evidenceRoots }) {
+  let orchestration = "";
+  if (evidenceRoots !== undefined) {
+    const list = evidenceRoots.map((r) => `"${r}"`).join(", ");
+    orchestration = `
+[orchestration]
+evidence_roots = [${list}]
+`;
+  } else if (evidenceRoot !== undefined) {
+    orchestration = `
 [orchestration]
 evidence_root = "${evidenceRoot}"
 `;
+  }
   return `schema = 1
 revision = 11
 status = "${status}"
@@ -985,4 +991,293 @@ test("live mode: an evidence_digest that matches the bound landing-record artifa
   const r = run(dag, state, "live");
   assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
   assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+test("multiple evidence roots: a block's artifact resolves from the second declared root when the first root does not carry it", () => {
+  const rootA = join(dir, "roots-resolve-a");
+  const rootB = join(dir, "roots-resolve-b");
+  mkdirSync(rootA, { recursive: true }); // exists, but has no A0 subdirectory at all
+  const artifact = writeLandingRecord(rootB, "A0", "second-root landing record\n");
+  const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+  const dag = write("dag-roots-resolve.toml", DAG);
+  const state = write(
+    "state-roots-resolve.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoots: [rootA, rootB] }) +
+      acceptedBlock("A0", { evidence_digest: digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+test("multiple evidence roots: a mismatched digest against the resolved artifact still fails", () => {
+  const rootA = join(dir, "roots-mismatch-a");
+  const rootB = join(dir, "roots-mismatch-b");
+  const artifact = writeLandingRecord(rootA, "A0", "root-a landing record\n");
+  const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+  assert.notEqual(actual, DIGEST, "fixture digest must differ from the artifact hash");
+  mkdirSync(rootB, { recursive: true });
+
+  const dag = write("dag-roots-mismatch.toml", DAG);
+  const state = write(
+    "state-roots-mismatch.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoots: [rootA, rootB] }) +
+      acceptedBlock("A0") + // acceptedBlock() carries evidence_digest = DIGEST, which differs from `actual`
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "mismatched evidence_digest under a multi-root declaration must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A0 evidence_digest ${DIGEST} does not match the SHA-256 of .*landing-record\\.md \\(${actual}\\)`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("multiple evidence roots: a block with no artifact under ANY declared root still fails", () => {
+  const rootA = join(dir, "roots-none-a");
+  const rootB = join(dir, "roots-none-b");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+
+  const dag = write("dag-roots-none.toml", DAG);
+  const state = write(
+    "state-roots-none.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoots: [rootA, rootB] }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "an artifact absent from every declared root must fail");
+  assert.match(r.err, /state block A0 has evidence_digest .* but no evidence artifact under \[.*roots-none-a.*roots-none-b.*\]/);
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("multiple evidence roots: one unresolvable declared root still fails closed even when another root resolves the artifact", () => {
+  const rootA = join(dir, "roots-unresolvable-a"); // deliberately never created
+  const rootB = join(dir, "roots-unresolvable-b");
+  const artifact = writeLandingRecord(rootB, "A0", "root-b landing record\n");
+  const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+  const dag = write("dag-roots-unresolvable.toml", DAG);
+  const state = write(
+    "state-roots-unresolvable.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoots: [rootA, rootB] }) +
+      acceptedBlock("A0", { evidence_digest: digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(
+    r.status,
+    0,
+    "a declared-but-unresolvable root must fail even though a later root resolves the block's artifact",
+  );
+  assert.match(
+    r.err,
+    new RegExp(
+      `live state orchestration\\.evidence_roots\\[0\\] ${JSON.stringify(rootA)} is not a resolvable directory`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+// -- Extended artifact-name convention: <id>-summary.md, landing-equivalence.md,
+// and one nested level (<root>/<id>/*/landing-record.md). Each fixture writer
+// below deliberately writes ONLY its own named file into a fresh block dir, so
+// a passing test proves that specific name resolves — not that some other
+// convention member happened to also be present.
+
+function writeNamedArtifact(root, id, filename, body) {
+  const blockDir = join(root, id);
+  mkdirSync(blockDir, { recursive: true });
+  const artifact = join(blockDir, filename);
+  writeFileSync(artifact, body);
+  return artifact;
+}
+
+function writeNestedLandingRecord(root, id, subdir, body) {
+  const nestedDir = join(root, id, subdir);
+  mkdirSync(nestedDir, { recursive: true });
+  const artifact = join(nestedDir, "landing-record.md");
+  writeFileSync(artifact, body);
+  return artifact;
+}
+
+// Root-level sibling to the block dir (<root>/<id>-summary.md, NOT
+// <root>/<id>/<id>-summary.md) — the real on-disk shape for A4/A5/A6.
+function writeSiblingArtifact(root, id, body) {
+  mkdirSync(root, { recursive: true });
+  const artifact = join(root, `${id}-summary.md`);
+  writeFileSync(artifact, body);
+  return artifact;
+}
+
+test("extended artifact convention: root-level sibling <id>-summary.md (not nested under <id>/) resolves", () => {
+  const evidenceRoot = join(dir, "evidence-sibling-summary");
+  const artifact = writeSiblingArtifact(evidenceRoot, "A0", "sibling summary body\n");
+  const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+  const dag = write("dag-sibling-summary.toml", DAG);
+  const state = write(
+    "state-sibling-summary.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0", { evidence_digest: digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("extended artifact convention: root-level sibling <id>-summary.md with a mismatched digest still fails", () => {
+  const evidenceRoot = join(dir, "evidence-sibling-summary-mismatch");
+  const artifact = writeSiblingArtifact(evidenceRoot, "A0", "sibling summary body, wrong digest\n");
+  const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+  assert.notEqual(actual, DIGEST, "fixture digest must differ from the artifact hash");
+
+  const dag = write("dag-sibling-summary-mismatch.toml", DAG);
+  const state = write(
+    "state-sibling-summary-mismatch.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0") + // carries DIGEST, which differs from `actual`
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a mismatched digest against the sibling summary must still fail");
+  assert.match(
+    r.err,
+    /state block A0 evidence_digest .* does not match the SHA-256 of .*A0-summary\.md/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+for (const [label, filename] of [
+  ["<id>-summary.md", "A0-summary.md"],
+  ["landing-equivalence.md", "landing-equivalence.md"],
+]) {
+  test(`extended artifact convention: ${label} resolves and its digest matches`, () => {
+    const evidenceRoot = join(dir, `evidence-${filename}`);
+    const artifact = writeNamedArtifact(evidenceRoot, "A0", filename, `${label} body\n`);
+    const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+    const dag = write(`dag-${filename}.toml`, DAG);
+    const state = write(
+      `state-${filename}.toml`,
+      header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+        acceptedBlock("A0", { evidence_digest: digest }) +
+        "\n" +
+        block("A1", "IN_PROGRESS") +
+        "\n" +
+        block("A2", "LOCKED"),
+    );
+    const r = run(dag, state, "live");
+    assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+    assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+  });
+
+  test(`extended artifact convention: ${label} with a mismatched digest still fails`, () => {
+    const evidenceRoot = join(dir, `evidence-mismatch-${filename}`);
+    const artifact = writeNamedArtifact(evidenceRoot, "A0", filename, `${label} body, wrong digest\n`);
+    const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+    assert.notEqual(actual, DIGEST, "fixture digest must differ from the artifact hash");
+
+    const dag = write(`dag-mismatch-${filename}.toml`, DAG);
+    const state = write(
+      `state-mismatch-${filename}.toml`,
+      header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+        acceptedBlock("A0") + // carries DIGEST, which differs from `actual`
+        "\n" +
+        block("A1", "IN_PROGRESS") +
+        "\n" +
+        block("A2", "LOCKED"),
+    );
+    const r = run(dag, state, "live");
+    assert.notEqual(r.status, 0, `a mismatched digest against ${label} must still fail`);
+    assert.match(
+      r.err,
+      new RegExp(
+        `state block A0 evidence_digest ${DIGEST} does not match the SHA-256 of .*${filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(${actual}\\)`,
+      ),
+    );
+    assert.doesNotMatch(r.out, /^OK:/);
+  });
+}
+
+test("extended artifact convention: one nested match (<root>/<id>/*/landing-record.md) resolves", () => {
+  const evidenceRoot = join(dir, "evidence-nested-single");
+  const a0Artifact = writeLandingRecord(evidenceRoot, "A0", "A0 landing record\n");
+  const a0Digest = createHash("sha256").update(readFileSync(a0Artifact)).digest("hex");
+  const artifact = writeNestedLandingRecord(evidenceRoot, "A2", "reopen4", "nested landing record\n");
+  const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+
+  const dag = write("dag-nested-single.toml", DAG);
+  const state = write(
+    "state-nested-single.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0", { evidence_digest: a0Digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      // LOCKED (not ACCEPTED): keeps this test isolated to the evidence-digest
+      // content-binding check, which runs over every well-formed evidence_digest
+      // regardless of status, without also having to satisfy A2's own
+      // ACCEPTED-predecessor sequencing (A1 is only IN_PROGRESS here).
+      block("A2", "LOCKED", { evidence_digest: digest }),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("extended artifact convention: MULTIPLE nested matches are ambiguous and fail closed", () => {
+  const evidenceRoot = join(dir, "evidence-nested-ambiguous");
+  const a0Artifact = writeLandingRecord(evidenceRoot, "A0", "A0 landing record\n");
+  const a0Digest = createHash("sha256").update(readFileSync(a0Artifact)).digest("hex");
+  const a1 = writeNestedLandingRecord(evidenceRoot, "A2", "reopen1", "first nested landing record\n");
+  const a2 = writeNestedLandingRecord(evidenceRoot, "A2", "reopen4", "second nested landing record\n");
+  // Deliberately no named candidate (landing-record.md / *-exact-candidate-record.md /
+  // *-summary.md / landing-equivalence.md) at the block-dir level — otherwise that
+  // would resolve first and the nested search would never run.
+  const digest = createHash("sha256").update(readFileSync(a2)).digest("hex");
+
+  const dag = write("dag-nested-ambiguous.toml", DAG);
+  const state = write(
+    "state-nested-ambiguous.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
+      acceptedBlock("A0", { evidence_digest: a0Digest }) +
+      "\n" +
+      block("A1", "IN_PROGRESS") +
+      "\n" +
+      block("A2", "LOCKED", { evidence_digest: digest }),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "multiple nested matches must fail closed, never silently pick one");
+  assert.match(
+    r.err,
+    /state block A2 has evidence_digest .* but multiple nested evidence artifacts resolve for it, ambiguous: \[.*reopen1.*landing-record\.md.*reopen4.*landing-record\.md.*\]/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+  // Sanity: both fixture files are real and distinct, so this isn't an
+  // artifact of one write clobbering the other.
+  assert.notEqual(readFileSync(a1, "utf8"), readFileSync(a2, "utf8"));
 });

@@ -10,7 +10,7 @@
 // unreadable input. No deps beyond node:fs / path / process. Unknown TOML
 // is a loud failure, never a silent skip.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
@@ -161,19 +161,54 @@ function resolveExistingDir(raw, statePath) {
   return null;
 }
 
+// Named candidates, searched in this order, plus one nested-level fallback
+// (`<root>/<id>/*/landing-record.md`) for artifacts one directory deeper
+// than the block dir (e.g. a reopen subfolder). Only WHICH file gets hashed
+// is decided here — the digest comparison at the call site still has to
+// match, so a wrong pick fails exactly like a missing one. Returns:
+//   { path }            — a single artifact resolved
+//   { ambiguous: [...] } — more than one nested match; caller must fail
+//                          closed rather than silently pick one
+//   null                 — nothing resolved under this root
 function resolveEvidenceArtifact(root, id) {
-  const candidates = [
+  const named = [
     join(root, id, "landing-record.md"),
     join(root, id, `${id}-exact-candidate-record.md`),
+    join(root, id, `${id}-summary.md`),
+    join(root, id, "landing-equivalence.md"),
+    // Root-level sibling to the block dir, not nested inside it — some
+    // blocks' summary lives at <root>/<id>-summary.md rather than
+    // <root>/<id>/<id>-summary.md.
+    join(root, `${id}-summary.md`),
   ];
-  for (const candidate of candidates) {
+  for (const candidate of named) {
     if (!existsSync(candidate)) continue;
     try {
-      if (statSync(candidate).isFile()) return candidate;
+      if (statSync(candidate).isFile()) return { path: candidate };
     } catch {
       // skip
     }
   }
+  const blockDir = join(root, id);
+  let entries;
+  try {
+    entries = readdirSync(blockDir, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  const nested = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = join(blockDir, entry.name, "landing-record.md");
+    try {
+      if (statSync(candidate).isFile()) nested.push(candidate);
+    } catch {
+      // skip
+    }
+  }
+  nested.sort();
+  if (nested.length > 1) return { ambiguous: nested };
+  if (nested.length === 1) return { path: nested[0] };
   return null;
 }
 
@@ -847,36 +882,102 @@ function main() {
     // Evidence-digest content binding. Shape-checking a digest proves only
     // that a binding was recorded, not that it binds the right bytes — a
     // well-formed but WRONG evidence_digest previously printed OK. When the
-    // ledger claims an evidence_root, that root must be a real directory and
-    // every resolved evidence_digest must match an artifact under it.
-    const evidenceRootRaw =
-      state.orchestration && typeof state.orchestration === "object"
-        ? state.orchestration.evidence_root
-        : undefined;
-    if (typeof evidenceRootRaw === "string" && evidenceRootRaw !== "") {
-      const resolvedRoot = resolveExistingDir(evidenceRootRaw, opts.state);
-      if (resolvedRoot === null) {
+    // ledger claims evidence root(s), every declared root must be a real
+    // directory and every resolved evidence_digest must match an artifact
+    // under one of them (searched in declaration order — evidence for
+    // different block series can live under different roots).
+    //
+    // `evidence_roots` (an array) is the plural form; `evidence_root` (a
+    // single string) keeps working unchanged for a lone root. Declaring both
+    // with evidence_root non-empty is ambiguous and rejected rather than
+    // guessing precedence. An absent/empty declaration (no key, an empty
+    // array, or evidence_root = "") is the documented skip: no evidence root
+    // is claimed, so nothing here can be verified — not a violation. A root
+    // that IS declared must still resolve, and an unresolvable declared root
+    // is a violation, not a silent skip of that root.
+    const orchestrationTable =
+      state.orchestration && typeof state.orchestration === "object" ? state.orchestration : {};
+    const hasRoots = "evidence_roots" in orchestrationTable;
+    const hasRoot = "evidence_root" in orchestrationTable;
+    let declaredRoots = null; // [{raw, field}] — null means nothing declared, skip silently
+    if (hasRoots) {
+      const val = orchestrationTable.evidence_roots;
+      if (!Array.isArray(val)) {
+        v(`live state orchestration.evidence_roots is not an array: ${JSON.stringify(val)}`);
+      } else if (
+        hasRoot &&
+        typeof orchestrationTable.evidence_root === "string" &&
+        orchestrationTable.evidence_root !== ""
+      ) {
         v(
-          `live state orchestration.evidence_root ${JSON.stringify(evidenceRootRaw)} is not a resolvable directory — evidence_digest bindings cannot be verified`,
+          `live state orchestration declares both evidence_root (${JSON.stringify(orchestrationTable.evidence_root)}) and evidence_roots — ambiguous, declare exactly one`,
         );
       } else {
-        for (const [id, b] of stateById) {
-          if (!(typeof b.evidence_digest === "string" && DIGEST_RE.test(b.evidence_digest))) {
-            continue;
+        declaredRoots = val.map((raw, idx) => ({ raw, field: `evidence_roots[${idx}]` }));
+      }
+    } else if (hasRoot) {
+      const val = orchestrationTable.evidence_root;
+      if (typeof val !== "string") {
+        v(`live state orchestration.evidence_root is not a string: ${JSON.stringify(val)}`);
+      } else if (val !== "") {
+        declaredRoots = [{ raw: val, field: "evidence_root" }];
+      }
+    }
+    if (declaredRoots !== null && declaredRoots.length > 0) {
+      const resolvedRoots = [];
+      for (const { raw, field } of declaredRoots) {
+        if (typeof raw !== "string" || raw === "") {
+          v(
+            `live state orchestration.${field} is not a non-empty string: ${JSON.stringify(raw)}`,
+          );
+          continue;
+        }
+        const resolved = resolveExistingDir(raw, opts.state);
+        if (resolved === null) {
+          v(
+            `live state orchestration.${field} ${JSON.stringify(raw)} is not a resolvable directory — evidence_digest bindings cannot be verified`,
+          );
+          continue;
+        }
+        resolvedRoots.push(resolved);
+      }
+      for (const [id, b] of stateById) {
+        if (!(typeof b.evidence_digest === "string" && DIGEST_RE.test(b.evidence_digest))) {
+          continue;
+        }
+        let artifact = null;
+        let ambiguous = null;
+        for (const root of resolvedRoots) {
+          const result = resolveEvidenceArtifact(root, id);
+          if (result === null) continue;
+          if (result.ambiguous) {
+            ambiguous = result.ambiguous;
+            break; // fail closed on ambiguity — do not fall through to another root
           }
-          const artifact = resolveEvidenceArtifact(resolvedRoot, id);
-          if (artifact === null) {
-            v(
-              `state block ${id} has evidence_digest ${b.evidence_digest} but no evidence artifact under ${resolvedRoot}`,
-            );
-            continue;
-          }
-          const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
-          if (actual !== b.evidence_digest) {
-            v(
-              `state block ${id} evidence_digest ${b.evidence_digest} does not match the SHA-256 of ${artifact} (${actual})`,
-            );
-          }
+          artifact = result.path;
+          break;
+        }
+        if (ambiguous !== null) {
+          v(
+            `state block ${id} has evidence_digest ${b.evidence_digest} but multiple nested evidence artifacts resolve for it, ambiguous: [${ambiguous.join(", ")}]`,
+          );
+          continue;
+        }
+        if (artifact === null) {
+          // Every declared root already failed to resolve — that is reported
+          // once per bad root above; do not pile on a second, less precise
+          // violation per block for the same underlying cause.
+          if (resolvedRoots.length === 0) continue;
+          v(
+            `state block ${id} has evidence_digest ${b.evidence_digest} but no evidence artifact under [${resolvedRoots.join(", ")}]`,
+          );
+          continue;
+        }
+        const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
+        if (actual !== b.evidence_digest) {
+          v(
+            `state block ${id} evidence_digest ${b.evidence_digest} does not match the SHA-256 of ${artifact} (${actual})`,
+          );
         }
       }
     }
