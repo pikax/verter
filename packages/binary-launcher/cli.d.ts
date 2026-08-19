@@ -10,6 +10,12 @@ export interface RunLauncherCliOptions {
   readonly launcher: Launcher;
   /** Arguments after the node executable and script, i.e. `argv.slice(2)`. */
   readonly argv: readonly string[];
+  /**
+   * The calling `bin/run.js`'s own path (pass `__filename`). Used to refuse
+   * spawning a resolved candidate that turns out to be this launcher's own
+   * script — see the self-spawn guard in `runLauncherCli`.
+   */
+  readonly selfPath?: string;
   readonly stderr?: NodeJS.WritableStream;
   readonly stdout?: NodeJS.WritableStream;
 }

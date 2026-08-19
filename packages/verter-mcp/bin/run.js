@@ -14,7 +14,7 @@ const { runLauncherCli } = require("@verter/binary-launcher/cli");
 const { launcher } = require("../index.js");
 
 function main(argv) {
-  return runLauncherCli({ launcher, argv });
+  return runLauncherCli({ launcher, argv, selfPath: __filename });
 }
 
 if (require.main === module) {
