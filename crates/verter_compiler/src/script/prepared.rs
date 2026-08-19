@@ -120,6 +120,15 @@ impl<'alloc> PreparedSetup<'alloc> {
         self.content_str
     }
 
+    /// Authored setup content range in carrier coordinates.
+    pub fn content_span(&self) -> crate::common::Span {
+        crate::common::Span::new(
+            self.content_start,
+            self.content_start
+                .saturating_add(self.content_str.len() as u32),
+        )
+    }
+
     pub fn parse_result(&self) -> &ScriptParseResult<'alloc> {
         &self.parse_result
     }

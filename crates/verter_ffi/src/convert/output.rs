@@ -6,7 +6,7 @@ use verter_session as host;
 
 use crate::types::*;
 
-use super::offset::maybe_utf16_offset;
+use super::offset::mandatory_utf16_offset;
 use super::string_helpers::{
     host_module_reference_analyzability_to_string, host_module_reference_semantics_to_string,
     host_module_reference_syntax_to_string,
@@ -166,10 +166,8 @@ pub fn host_diagnostics_to_ffi(
                 },
                 code: d.code.clone(),
                 message: d.message.clone(),
-                span_start: d
-                    .span
-                    .and_then(|s| maybe_utf16_offset(Some(s.start), source)),
-                span_end: d.span.and_then(|s| maybe_utf16_offset(Some(s.end), source)),
+                span_start: mandatory_utf16_offset(d.span.start, source),
+                span_end: mandatory_utf16_offset(d.span.end, source),
             })
             .collect(),
         has_errors: input.has_errors,

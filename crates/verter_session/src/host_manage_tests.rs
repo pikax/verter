@@ -9664,9 +9664,7 @@ const label = 'plain'
     // fork and the test would prove nothing about the cold classification.
     let whole_hash = current_whole_hash(&host, zero_subject);
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(zero_subject, whole_hash)
+        host.exact_current_indexed_for_test(zero_subject, whole_hash)
             .is_none(),
         "fixture invariant: no IndexedReady may be cached at the file's current \
          whole_hash before the lazy lane runs",
@@ -9761,9 +9759,7 @@ fn lazy_template_lane_arm(
         );
     }
     assert_eq!(
-        host.project_type_store()
-            .indexed()
-            .get(canonical, whole_hash)
+        host.exact_current_indexed_for_test(canonical, whole_hash)
             .is_some(),
         prewarm_indexed,
         "arm invariant: the artifact store's warmth for this whole_hash must be \
@@ -10068,9 +10064,7 @@ const variant: Variant = 'primary'
         // consulted.
         let whole_hash = current_whole_hash(&host, canonical);
         assert!(
-            host.project_type_store()
-                .indexed()
-                .get(canonical, whole_hash)
+            host.exact_current_indexed_for_test(canonical, whole_hash)
                 .is_none(),
             "arm 2 invariant: the artifact store must be cold so the lane takes \
              the cold-seed fork",

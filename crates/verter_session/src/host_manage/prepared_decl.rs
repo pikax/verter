@@ -1892,15 +1892,14 @@ impl VerterHost {
         // the fresh content's entry; gating on the scheduler's
         // current hash forces the cache to serve the authoritative
         // version per R1 (content-addressed identity).
-        let current_whole_hash = self
-            .effective_file_state(canonical_id, None)
-            .map(|state| state.whole_hash);
-        if let Some(current_hash) = current_whole_hash {
-            if let Some(indexed) = self
-                .project_type_store
-                .indexed()
-                .get(canonical_id, current_hash)
-            {
+        let current_key = self.authoritative_current_artifact_key(canonical_id);
+        if let Some(current_key) = current_key {
+            if let Some(indexed) = self.project_type_store.indexed().get(
+                canonical_id,
+                current_key.content_hash,
+                &current_key.parse_key,
+                &current_key.file_language_id,
+            ) {
                 // A content-current artifact is reusable while its parse
                 // environment is unchanged. A moved parse env means the
                 // retained `framework_parse` / `shallow_state` /
@@ -1985,7 +1984,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, framework_parse, whole_hash) = {
+            let (raw_source, file_language, framework_parse, whole_hash) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -2006,10 +2005,13 @@ impl VerterHost {
                 if !self.store_view_allows_current_whole_hash(canonical_id, state.whole_hash) {
                     return None;
                 }
-                (state.source, state.framework_parse, state.whole_hash)
+                (
+                    state.source,
+                    state.file_language,
+                    state.framework_parse,
+                    state.whole_hash,
+                )
             };
-
-            let file_language = self.language_classifier.classify(canonical_id);
 
             // A carrier canonical (`.vue`, `.svelte`, …) the scheduler has not
             // parsed yet runs the carrier parser ONCE here through the counted
@@ -2151,7 +2153,7 @@ impl VerterHost {
                             &job_canonical,
                             job_raw_source.as_ref(),
                             job_scope,
-                            parsed_sfc,
+                            &parsed_sfc,
                             job_framework_parse
                                 .as_deref()
                                 .expect("Vue parse came from this framework artifact"),
@@ -2311,6 +2313,7 @@ impl VerterHost {
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
                 whole_hash,
+                file_language,
                 shallow_state,
                 built_at_content_generation: flight_workspace_generation,
                 parse_env_hash: flight_parse_env_hash,
@@ -2402,19 +2405,19 @@ impl VerterHost {
             // `evict_canonical` retired, a stale candidate could
             // coexist with the fresh entry and `get_any` is not
             // content-discriminating.
-            let current_whole_hash = self
-                .effective_file_state(canonical_id, None)
-                .map(|state| state.whole_hash);
+            let current_key = self.authoritative_current_artifact_key(canonical_id);
             // Content-current candidate (the scheduler-pinned `get` arm, or
             // the artifact-current authority for a genuinely artifact-only
             // canonical — the NON-recursing `artifact_current_indexed_raw`,
             // so there is no back-edge into the re-indexing
             // `artifact_current_indexed`).
-            let content_current_candidate = match current_whole_hash {
-                Some(current_hash) => self
-                    .project_type_store
-                    .indexed()
-                    .get(canonical_id, current_hash),
+            let content_current_candidate = match current_key {
+                Some(current_key) => self.project_type_store.indexed().get(
+                    canonical_id,
+                    current_key.content_hash,
+                    &current_key.parse_key,
+                    &current_key.file_language_id,
+                ),
                 None => self.artifact_current_indexed_raw(canonical_id),
             };
             if let Some(candidate) = content_current_candidate {
@@ -2780,11 +2783,23 @@ impl VerterHost {
                             // round-trips; when the artifact is absent, the
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
-                            if let Some(indexed) = self
-                                .project_type_store
-                                .indexed()
-                                .get(dep_canonical, source_data.parse.whole_hash)
-                            {
+                            let dep_key =
+                                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                                    Arc::from(dep_canonical),
+                                    source_data.parse.whole_hash,
+                                    source_snapshot.as_ref()?.source.as_ref(),
+                                    source_data.file_language.clone(),
+                                    source_data.framework_parse.as_deref(),
+                                    crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+                                );
+                            if let Some(indexed) = dep_key.as_ref().and_then(|key| {
+                                self.project_type_store.indexed().get(
+                                    dep_canonical,
+                                    key.content_hash,
+                                    &key.parse_key,
+                                    &key.file_language_id,
+                                )
+                            }) {
                                 if self.indexed_surface_is_current(dep_canonical, &indexed)
                                     && indexed.shallow_state.has_resolvable_surface()
                                 {

@@ -171,6 +171,7 @@ pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};
 pub use ir::BindingId;
+pub(crate) use official_reject::deferred_parse_defects_excluding_css;
 pub use official_reject::official_reject_gate;
 pub use official_rule::{CoreOfficialValidationRule, OfficialRejection};
 pub use reactive_fold_tristate::{live_fallback_ledger, LiveFallbackLedgerRow};

@@ -62,14 +62,13 @@ fn constructors(prop: &RuntimeProp) -> &[RuntimeConstructor] {
 fn missing_root_dependency_is_typed_and_demand_invariant() {
     let host = VerterHost::new_standalone(HostConfig::default());
     const FILE: &str = "/src/MissingRoot.vue";
-    upsert(
-        &host,
-        FILE,
-        r#"<script setup lang="ts">
+    let source = r#"<script setup lang="ts">
 import type { Props } from './missing'
 defineProps<Props>()
-</script>"#,
-    );
+</script>"#;
+    upsert(&host, FILE, source);
+    let macro_start = source.find("defineProps<Props>()").unwrap() as u32;
+    let macro_end = macro_start + "defineProps<Props>()".len() as u32;
 
     let outputs = [
         VueMacroCodegenDemand::Runtime,
@@ -85,6 +84,7 @@ defineProps<Props>()
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 import_source: "./missing".to_string(),
                 type_name: "Props".to_string(),
+                macro_span: (macro_start, macro_end),
             }],
             "the missing root must ride as one typed, deterministic failure"
         );

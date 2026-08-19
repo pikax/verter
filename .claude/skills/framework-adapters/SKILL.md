@@ -35,8 +35,7 @@ skill is the module map + contract reference behind it.
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
 | `verter_compiler/src/framework_common/carrier_compiler.rs` | The `CarrierCompiler` trait (compiler-domain: `adapter_id`, `parse`, `eval_source`, `compile_ide`, `template_data`) + its neutral I/O vocabulary (`ParseOptions`, `IdeCompileOptions`, `IdeOutput`, `CompileUnsupported`, `TemplateFacts`). NO script-fact method — script facts go through the one `ScriptFactProvider` seam. |
 | `verter_compiler/src/framework_common/registry.rs` | `CarrierCompilerRegistry` (built once; the host's carrier parse dispatch looks the file's adapter compiler up here). |
-| `verter_compiler/src/framework_common/ctx.rs` | `CarrierCompilerCtx` — the compiler-side blessed carrier downcast (D-m) + `receive_vue_carrier_token` (the compiler's sanctioned carrier-proof receipt site). |
-| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference `CarrierCompiler`, delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. |
+| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference `CarrierCompiler`, delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
 | `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
 
 ## Descriptor + virtual-file naming column
@@ -229,9 +228,13 @@ compiler-side `CarrierCompilerRegistry` owns the carrier COMPILER per
 adapter. `CarrierCompiler` is one trait every carrier framework
 implements, exposing EXACTLY four compiler-domain ops:
 
-- `parse(source, opts) -> Arc<FrameworkParseArtifact>` — produce the
-  framework-neutral artifact (infallible; tokenizers collect diagnostics
-  inline).
+- `parse(source, opts) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>`
+  — produce the framework-neutral artifact. Ordinary malformed input still
+  returns `Ok` (tokenizers collect diagnostics inline on the artifact's
+  mapped diagnostic channel); `Err(SyntaxReject)` is reserved for a request
+  the frontend cannot honor at all (an unsupported parse-option combination,
+  or a non-recoverable construction failure) and is returned before any
+  artifact is constructed.
 - `eval_source(source, artifact) -> Arc<str>` — the position-preserving
   blank: script bytes at raw offsets, every other byte whitespace-blanked,
   line terminators preserved; output length == input length.
@@ -316,10 +319,12 @@ members use protobuf kind 6 for spread (`OBJECT_MEMBER_KIND_SPREAD`). Vue keeps
 its two-way bindings in `v_models` and leaves these empty. Pinned by
 `svelte_template_data_producer_is_typed_ir_only` and the carrier unit tests.
 
-The compiler-side `CarrierCompilerCtx::carrier_for::<T>` is the third
-blessed carrier-downcast home (D-m); `receive_vue_carrier_token` is the
-compiler's sanctioned carrier-proof receipt site (the bridge reaches its
-own `VueParseCarrier` back out of the type-erased artifact through it).
+Each adapter's own bridge module (`vue_bridge.rs`, `svelte/carrier.rs`) calls
+the raw `verter_language::__carrier_downcast_ref`/`__carrier_downcast_arc`
+helpers directly to reach its own typed carrier back out of the type-erased
+artifact — no capability token: a foreign artifact's erased payload is a
+DIFFERENT concrete `CarrierParse` type, so the `Any` downcast already fails
+structurally for it.
 
 ## Host RUNTIME-compile routing + the IDE-ensure path
 

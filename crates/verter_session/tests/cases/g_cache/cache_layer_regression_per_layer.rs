@@ -20,6 +20,13 @@ use std::sync::Arc;
 
 use verter_session::request_context::{RequestContext, RequestContextGuard};
 
+fn script_parse_identity() -> (verter_language::ParseKey, verter_session::FileLanguage) {
+    let language = verter_session::FileLanguage::script_ts();
+    let (_, parse_key) = verter_language::default_parse_identity_for("", &language)
+        .expect("TypeScript has a registered syntax profile");
+    (parse_key, language)
+}
+
 fn make_ctx() -> Arc<RequestContext> {
     RequestContext::new(42, Arc::from("/test.vue"), false, None)
 }
@@ -32,10 +39,11 @@ fn layer_indexed_get_misses_increment_per_request_counter() {
     let db = FileArtifactStore::new();
     let ctx = make_ctx();
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
+    let (parse_key, language) = script_parse_identity();
 
     // Three misses on an empty DB.
-    let _ = db.get("/missing-1", Hash16::default());
-    let _ = db.get("/missing-2", Hash16::default());
+    let _ = db.get("/missing-1", Hash16::default(), &parse_key, &language);
+    let _ = db.get("/missing-2", Hash16::default(), &parse_key, &language);
     let _ = db.get_any("/missing-any");
 
     let hits = ctx.cache_counters.indexed.hits.load(Ordering::Relaxed);
@@ -167,7 +175,8 @@ fn no_request_context_means_no_bump() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
     let db = FileArtifactStore::new();
-    let _ = db.get("/missing", Hash16::default());
+    let (parse_key, language) = script_parse_identity();
+    let _ = db.get("/missing", Hash16::default(), &parse_key, &language);
     let _ = db.get_any("/missing-any");
     // Reaching this point without panic is the assertion.
 }
@@ -180,10 +189,11 @@ fn cross_layer_non_leakage_indexed_to_analysis() {
     let db = FileArtifactStore::new();
     let ctx = make_ctx();
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
+    let (parse_key, language) = script_parse_identity();
 
     // Hit only the indexed layer.
     for _ in 0..5 {
-        let _ = db.get("/some-path", Hash16::default());
+        let _ = db.get("/some-path", Hash16::default(), &parse_key, &language);
     }
 
     // The indexed layer's misses must be 5; ALL other layers must

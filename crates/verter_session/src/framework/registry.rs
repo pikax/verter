@@ -17,7 +17,8 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_language::{CarrierAccessToken, FrameworkAdapterId, LanguageId};
+use verter_compiler::framework_common::FrameworkParseArtifact;
+use verter_language::{CarrierParse, FrameworkAdapterId, LanguageId};
 use verter_protocol::typeinfo::graph::FrameworkTag;
 
 use crate::framework::api_projector::ComponentApiProjector;
@@ -26,15 +27,26 @@ use crate::framework::synth::ComponentDefaultSynth;
 use crate::typeinfo::framework_surface::FrameworkSurfaceAdapter;
 use verter_semantic::analysis::framework_facts::{ScriptFactProvider, ScriptFactSyntaxGate};
 
-/// One framework's carrier leg — the received carrier registration proof.
+/// One framework's carrier leg — a monomorphic opener installed at
+/// registry-build time.
 ///
-/// The token is RECEIVED from `verter_language`'s carrier-row registration
-/// channel, never minted here (`verter_language` is the sole minting
-/// authority). A carrier-less adapter has no leg (`carrier: None`).
-#[derive(Debug, Clone)]
+/// `open` recovers the ERASED carrier from a registered
+/// [`FrameworkParseArtifact`], returning `None` for a foreign artifact
+/// (adapter-id-gated inside the opener itself — see `vue_bridge::open_vue_carrier`
+/// / `svelte::carrier::open_svelte_carrier`). No capability token: the opener
+/// installed on a given adapter's leg only ever opens that adapter's own
+/// artifacts, by construction. A carrier-less adapter has no leg
+/// (`carrier: None`).
+#[derive(Clone, Copy)]
 pub struct CarrierLeg {
-    /// The adapter's carrier registration proof.
-    pub token: CarrierAccessToken,
+    /// The registered-projector opener for this adapter.
+    pub(crate) open: fn(&FrameworkParseArtifact) -> Option<Arc<dyn CarrierParse>>,
+}
+
+impl std::fmt::Debug for CarrierLeg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CarrierLeg").finish_non_exhaustive()
+    }
 }
 
 /// How an adapter resolves its component surfaces.
@@ -273,24 +285,11 @@ pub struct FrameworkAdapterRegistry {
 
 impl FrameworkAdapterRegistry {
     /// Build the registry with the production adapter rows.
-    ///
-    /// The carrier tokens are the carrier registration proofs RECEIVED from
-    /// `verter_language`'s carrier-row channel (cloned from the blessed carrier
-    /// accessors' held tokens — the same minted values, never a second mint).
     #[must_use]
-    pub fn built_in(
-        vue_carrier_token: CarrierAccessToken,
-        svelte_carrier_token: CarrierAccessToken,
-    ) -> Self {
+    pub fn built_in() -> Self {
         let mut registrations = FxHashMap::default();
-        registrations.insert(
-            FrameworkAdapterId::vue(),
-            vue_registration(vue_carrier_token),
-        );
-        registrations.insert(
-            FrameworkAdapterId::svelte(),
-            svelte_registration(svelte_carrier_token),
-        );
+        registrations.insert(FrameworkAdapterId::vue(), vue_registration());
+        registrations.insert(FrameworkAdapterId::svelte(), svelte_registration());
         Self::finish(registrations)
     }
 
@@ -461,7 +460,7 @@ impl FrameworkAdapterRegistry {
 }
 
 /// The Vue adapter registration row.
-fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration {
+fn vue_registration() -> FrameworkRegistration {
     let store: Arc<dyn ErasedFrameworkSurfaceStore> =
         Arc::new(crate::framework::surface_store::FrameworkSurfaceStore::<
             crate::typeinfo::framework_surface::VueSurfaceKey,
@@ -470,7 +469,7 @@ fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration 
     FrameworkRegistration {
         descriptor: crate::framework::descriptor::vue_descriptor(),
         carrier: Some(CarrierLeg {
-            token: carrier_token,
+            open: verter_compiler::framework_common::vue_bridge::open_vue_carrier,
         }),
         synth: Some(Arc::new(crate::framework::synth::VueComponentDefaultSynth)),
         api_projector: Some(Arc::new(
@@ -490,7 +489,7 @@ fn vue_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration 
 /// the real `SvelteFrameworkAdapter` SURFACE leg. The surface store is keyed by
 /// the Svelte adapter remainder ([`SvelteSurfaceKey`](crate::typeinfo::framework_surface::SvelteSurfaceKey)
 /// — one source family per row).
-fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistration {
+fn svelte_registration() -> FrameworkRegistration {
     let store: Arc<dyn ErasedFrameworkSurfaceStore> =
         Arc::new(crate::framework::surface_store::FrameworkSurfaceStore::<
             crate::typeinfo::framework_surface::SvelteSurfaceKey,
@@ -499,7 +498,7 @@ fn svelte_registration(carrier_token: CarrierAccessToken) -> FrameworkRegistrati
     FrameworkRegistration {
         descriptor: crate::framework::descriptor::svelte_descriptor(),
         carrier: Some(CarrierLeg {
-            token: carrier_token,
+            open: verter_compiler::svelte::carrier::open_svelte_carrier,
         }),
         synth: Some(Arc::new(
             crate::framework::synth::SvelteComponentDefaultSynth,
@@ -522,10 +521,7 @@ mod tests {
     use super::*;
 
     fn built_in() -> FrameworkAdapterRegistry {
-        FrameworkAdapterRegistry::built_in(
-            crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
-            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
-        )
+        FrameworkAdapterRegistry::built_in()
     }
 
     /// COMPLETENESS GUARD: every wire framework tag maps to a registered

@@ -7,7 +7,7 @@ pub(crate) fn publish_carrier_fixture(
     source: &str,
     file_language: &verter_language::FileLanguage,
     provenance: &crate::types::MetaProvenance,
-) -> Option<Arc<verter_language::FrameworkParseArtifact>> {
+) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
     use verter_language::carrier_grammar::{
         CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
         FrameworkAdapterSemanticVersion,

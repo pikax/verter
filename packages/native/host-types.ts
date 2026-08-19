@@ -184,8 +184,8 @@ export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
-  spanStart?: number;
-  spanEnd?: number;
+  spanStart: number;
+  spanEnd: number;
 }
 
 export interface HostDiagnosticsSnapshot {

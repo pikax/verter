@@ -1,40 +1,17 @@
-//! Blessed token-gated carrier access for session-side adapters.
+//! Facts/carrier-only context for session-side adapters.
 //!
-//! The ONLY session home of the raw `verter_language` carrier downcast
-//! (`__carrier_downcast_ref` / `__carrier_downcast_arc` — see the
-//! `carrier_downcast_confined_to_owning_adapter` architecture guard).
-//! Adapter accessors (the Vue adapter's `vue_parse()`, the adapter
-//! registry's `FrameworkAdapterCtx::carrier_for`) route through the
-//! bare helpers below; nothing else calls the raw downcast.
+//! [`FrameworkAdapterCtx::carrier_for`] reaches an adapter's typed carrier
+//! through its registration's [`CarrierLeg`](crate::framework::registry::CarrierLeg)
+//! opener — a monomorphic fn pointer installed at registry-build time, no
+//! capability token.
 
 use std::sync::Arc;
 
-use verter_language::{CarrierAccessToken, CarrierParse, FrameworkParseArtifact};
+use verter_language::CarrierParse;
 use verter_semantic::analysis::framework_facts::FrameworkScriptFactPayload;
 
 use crate::framework::registry::FrameworkRegistration;
 use crate::VerterHost;
-
-/// Token-gated typed carrier access (reference form).
-///
-/// Returns the typed carrier ONLY when `token` is the artifact's own
-/// adapter's registration proof (minted by `verter_language` during
-/// `LanguageRegistry` carrier-row construction) AND the erased payload
-/// is a `T`.
-pub(crate) fn carrier_for<'a, T: CarrierParse>(
-    artifact: &'a FrameworkParseArtifact,
-    token: &CarrierAccessToken,
-) -> Option<&'a T> {
-    verter_language::__carrier_downcast_ref::<T>(artifact, token)
-}
-
-/// Token-gated typed carrier access (`Arc` form).
-pub(crate) fn carrier_for_arc<T: CarrierParse>(
-    artifact: &FrameworkParseArtifact,
-    token: &CarrierAccessToken,
-) -> Option<std::sync::Arc<T>> {
-    verter_language::__carrier_downcast_arc::<T>(artifact, token)
-}
 
 /// The facts/carrier-only context the framework-surface executor hands a
 /// [`FrameworkSurfaceAdapter`](crate::typeinfo::framework_surface::FrameworkSurfaceAdapter).
@@ -70,14 +47,17 @@ impl<'a> FrameworkAdapterCtx<'a> {
     /// carrier-less framework), when `canonical` carries no framework parse
     /// artifact, or when the artifact's carrier is not a `T`. Drives the
     /// parse-domain artifact materialization internally (ensure-loaded → read
-    /// the `framework_parse` slot → token-gated downcast) and hands back ONLY
-    /// the typed carrier — never the neutral `FrameworkParseArtifact`, never
-    /// `IndexedReady`.
+    /// the `framework_parse` slot → the leg's opener, then the typed
+    /// downcast) and hands back ONLY the typed carrier — never the neutral
+    /// `FrameworkParseArtifact`, never `IndexedReady`.
     pub fn carrier_for<T: CarrierParse>(&self, canonical: &str) -> Option<Arc<T>> {
         let leg = self.registration.carrier.as_ref()?;
         let (_source, framework_parse, _whole_hash) = self.host.current_eval_state(canonical)?;
         let artifact = framework_parse?;
-        carrier_for_arc::<T>(&artifact, &leg.token)
+        (leg.open)(&artifact)?
+            .__verter_as_any_arc()
+            .downcast::<T>()
+            .ok()
     }
 
     /// The adapter's resolved framework script-fact evidence of type `T` for
@@ -108,7 +88,7 @@ mod tests {
     use crate::framework::surface_store::{ErasedFrameworkSurfaceStore, FrameworkSurfaceStore};
 
     /// A fixture carrier type — its `CarrierParse` impl proves a carrier-less
-    /// ctx never opens it (and never forges a token).
+    /// ctx never opens it.
     struct FixtureCarrier;
     impl CarrierParse for FixtureCarrier {
         fn __verter_as_any(&self) -> &dyn Any {
@@ -153,12 +133,12 @@ mod tests {
     }
 
     #[test]
-    fn carrier_less_ctx_returns_none_never_forges_a_token() {
+    fn carrier_less_ctx_returns_none_without_a_leg() {
         let host = VerterHost::new_standalone(crate::HostConfig::default());
         let registration = carrier_less_registration();
         let ctx = FrameworkAdapterCtx::new(&registration, &host);
         // The carrier-less leg returns None BEFORE touching the host — no
-        // forged token, no panic.
+        // panic.
         assert!(ctx.carrier_for::<FixtureCarrier>("/whatever.vue").is_none());
     }
 

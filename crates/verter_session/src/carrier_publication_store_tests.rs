@@ -33,6 +33,20 @@ fn vue_grammar() -> CarrierGrammarConfig {
     CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap()
 }
 
+fn svelte_authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAuthority>) {
+    let source = Arc::new(RegisteredSourceAuthority::new().expect("source authority"));
+    let grammar = Arc::new(CarrierGrammarAuthority::new().expect("grammar authority"));
+    grammar
+        .register_carrier_grammar(
+            verter_language::FileLanguage::svelte(),
+            FrameworkAdapterSemanticVersion::new(1).unwrap(),
+            CarrierParserGrammarVersion::new(1).unwrap(),
+            CarrierGrammarConfig::Svelte,
+        )
+        .expect("register Svelte grammar");
+    (source, grammar)
+}
+
 fn accepted(
     source: &RegisteredSourceAuthority,
     grammar: &CarrierGrammarAuthority,
@@ -63,6 +77,98 @@ fn request(
         verter_scheduler::cancellation::CancellationToken::new(),
         accepted.source().snapshot_id().clone(),
     )
+}
+
+/// A strict-parse Svelte defect (here, an unterminated trailing comment)
+/// stays PUBLISHABLE at the carrier boundary: the tokenizer is intentionally
+/// infallible and always produces a faithful, structurally usable tree — a
+/// mid-typing document. The CLIENT-runtime "Verter emits a `Main` ⇔ official
+/// ACCEPTS" contract is a SEPARATE, later gate (`official_reject_gate`,
+/// reached at compile time through `compile_client`), not a reason to refuse
+/// carrier publication and leak no product at all — the IDE (hover, hover
+/// completion, hover diagnostics, cursor-context features) needs a usable
+/// artifact for exactly this kind of transiently-broken document.
+///
+/// This mirrors what used to be
+/// `strict_syntax_rejection_publishes_no_product_family`: refusing
+/// publication for any retained strict-parse fact broke the LSP's own
+/// recovery test suite (an unclosed `<script>`, a truncated open tag) by
+/// making the WHOLE document unusable while the user is still typing it.
+#[test]
+fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
+    use crate::carrier_publication_store::PublicationAuditKind;
+
+    let strict_source = "<script>let x = 1;</script><div>{x}</div><style>.x{color:red}</style><!--";
+    let (source, grammar) = svelte_authorities();
+    let snapshot = source
+        .register_source(
+            CanonicalFileId::new("file:///workspace/App.svelte"),
+            FileIncarnation::new(7),
+            SourceGeneration::new(1),
+            verter_language::FileLanguage::svelte(),
+            Arc::from(strict_source),
+        )
+        .expect("register source");
+    let accepted = grammar
+        .accept_registered_source(&source, &snapshot, &CarrierGrammarConfig::Svelte)
+        .expect("accept source");
+    let store = CarrierPublicationStore::new(source, grammar);
+
+    let outcome = store.publish_or_get(&accepted, request(1, &accepted));
+    // The strict-parse fact (the unterminated `<!--`) does NOT reach the
+    // carrier's own mapped-diagnostic channel — marking the artifact
+    // `has_errors` here would break IDE serving for exactly the mid-typing
+    // states this seam must stay usable for (see `svelte_parse_diagnostics`'s
+    // doc). This test proves the STRUCTURAL claim instead: the artifact
+    // still PUBLISHES, real downstream product and all.
+    match outcome.clone().into_envelope() {
+        Some(_) => {}
+        None => panic!("a recoverable strict-parse defect must still publish, got {outcome:?}"),
+    };
+
+    let events = store.audit_events();
+    assert!(events
+        .iter()
+        .any(|event| event.kind == PublicationAuditKind::ParserStarted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == PublicationAuditKind::ParserFinished));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == PublicationAuditKind::PublishFencePassed));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == PublicationAuditKind::Published));
+
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let update = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some("/Strict.svelte".into()),
+            input_id: "/Strict.svelte".into(),
+            source: Arc::from(strict_source),
+            file_language: verter_language::FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("a recoverable strict-parse defect must still admit the document");
+    // The upsert's OWN parse-phase diagnostics (populated from the published
+    // carrier, never from a refused publication) surface the parser's plain
+    // inline diagnostic for the unterminated comment — proving the document
+    // was actually admitted and parsed, not silently swallowed. (The
+    // strict-parse fact itself stays off the carrier's mapped-diagnostic
+    // channel — see `svelte_parse_diagnostics`'s doc.)
+    assert!(
+        update
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "unterminated-comment"),
+        "the admitted document's own diagnostics must carry the parse defect: {:?}",
+        update.diagnostics
+    );
 }
 
 #[test]
@@ -137,7 +243,7 @@ fn registered_file_structure_is_the_envelope_owner() {
         structure.artifact()
     ));
     assert!(Arc::ptr_eq(
-        &structure.artifact().common.inventory,
+        structure.artifact().inventory(),
         structure.envelope().inventory()
     ));
 }
@@ -236,7 +342,7 @@ impl crate::carrier_publication_store::persistence::CarrierPersistence for Block
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-        _artifact: &Arc<verter_language::FrameworkParseArtifact>,
+        _artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         _cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
     ) {
     }
@@ -479,6 +585,110 @@ struct CorruptingPersistence {
     corrupt_next: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Default)]
+struct ProducerDriftPersistence {
+    inner: crate::carrier_publication_store::persistence::InMemoryCarrierPersistence,
+    replacement:
+        std::sync::Mutex<Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>>,
+}
+
+impl crate::carrier_publication_store::persistence::CarrierPersistence
+    for ProducerDriftPersistence
+{
+    fn take_candidate(
+        &self,
+        id: &crate::carrier_publication_store::FrameworkArtifactId,
+        accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+    ) -> Option<crate::carrier_publication_store::persistence::PersistedCarrierCandidate> {
+        let mut candidate =
+            crate::carrier_publication_store::persistence::CarrierPersistence::take_candidate(
+                &self.inner,
+                id,
+                accepted,
+            )?;
+        if let Some(replacement) = self.replacement.lock().unwrap().take() {
+            candidate.replace_artifact_for_test(replacement);
+        }
+        Some(candidate)
+    }
+
+    fn store_success(
+        &self,
+        id: &crate::carrier_publication_store::FrameworkArtifactId,
+        accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+        cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+    ) {
+        crate::carrier_publication_store::persistence::CarrierPersistence::store_success(
+            &self.inner,
+            id,
+            accepted,
+            artifact,
+            cohort,
+        );
+    }
+}
+
+#[test]
+fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
+    let (wrong_source, wrong_grammar) = authorities();
+    let wrong = accepted(
+        &wrong_source,
+        &wrong_grammar,
+        1,
+        "<template><p>wrong</p></template>",
+    );
+    let wrong_store = CarrierPublicationStore::new(wrong_source, wrong_grammar);
+    let wrong_artifact = wrong_store
+        .publish_or_get(&wrong, request(1, &wrong))
+        .into_envelope()
+        .expect("wrong fixture publishes")
+        .artifact()
+        .clone();
+
+    let persistence = Arc::new(ProducerDriftPersistence::default());
+    let source_text = "<template><p>right</p></template>";
+    assert_eq!(
+        wrong.source().bytes().len(),
+        source_text.len(),
+        "fixture must defeat length-only adoption"
+    );
+    let (first_source, first_grammar) = authorities();
+    let first = accepted(&first_source, &first_grammar, 1, source_text);
+    let first_store = CarrierPublicationStore::with_dependencies(
+        first_source,
+        first_grammar,
+        persistence.clone(),
+        Arc::new(crate::types::MetaProvenance::default()),
+    );
+    assert!(matches!(
+        first_store.publish_or_get(&first, request(2, &first)),
+        PublicationOutcome::Published(_)
+    ));
+    *persistence.replacement.lock().unwrap() = Some(wrong_artifact);
+
+    let (second_source, second_grammar) = authorities();
+    let second = accepted(&second_source, &second_grammar, 1, source_text);
+    let second_store = CarrierPublicationStore::with_dependencies(
+        second_source,
+        second_grammar,
+        persistence,
+        Arc::new(crate::types::MetaProvenance::default()),
+    );
+    assert!(matches!(
+        second_store.publish_or_get(&second, request(3, &second)),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(second_store.audit_snapshot().rejected_candidates, 1);
+    assert_eq!(second_store.audit_snapshot().parser_started, 1);
+    assert!(second_store.audit_events().iter().any(|event| matches!(
+        event.kind,
+        crate::carrier_publication_store::PublicationAuditKind::PersistentAdoptionRejected(
+            crate::carrier_publication_store::PersistentAdoptionRejection::ParserValidationFailed
+        )
+    )));
+}
+
 impl crate::carrier_publication_store::persistence::CarrierPersistence for CorruptingPersistence {
     fn take_candidate(
         &self,
@@ -503,7 +713,7 @@ impl crate::carrier_publication_store::persistence::CarrierPersistence for Corru
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
         accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-        artifact: &Arc<verter_language::FrameworkParseArtifact>,
+        artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
     ) {
         crate::carrier_publication_store::persistence::CarrierPersistence::store_success(
@@ -581,7 +791,7 @@ impl crate::carrier_publication_store::persistence::CarrierPersistence for Panic
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-        _artifact: &Arc<verter_language::FrameworkParseArtifact>,
+        _artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         _cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
     ) {
     }

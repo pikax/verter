@@ -70,12 +70,12 @@ impl StoreView for TestView {
             FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
-                parser_version,
+                parse_key,
                 file_language_id,
             } => self.validates_file_source_env(
                 canonical_id,
                 *parse_env_hash,
-                *parser_version,
+                parse_key,
                 file_language_id,
             ),
             FactVersionRef::FileWholeHash { .. }

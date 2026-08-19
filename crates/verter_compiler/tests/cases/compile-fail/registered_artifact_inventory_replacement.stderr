@@ -1,0 +1,5 @@
+error[E0616]: field `common` of struct `FrameworkParseArtifact` is private
+ --> tests/cases/compile-fail/registered_artifact_inventory_replacement.rs:5:14
+  |
+5 |     artifact.common = FrameworkParseCommon::default();
+  |              ^^^^^^ private field

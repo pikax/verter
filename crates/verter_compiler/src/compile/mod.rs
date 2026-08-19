@@ -80,7 +80,7 @@ fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
 
 fn push_style_rewrite_diagnostic(
     diagnostics: &mut Vec<Diagnostic>,
-    content_start: u32,
+    content_span: crate::common::Span,
     error: &StyleRewriteFailure,
 ) {
     diagnostics.push(Diagnostic {
@@ -88,8 +88,12 @@ fn push_style_rewrite_diagnostic(
         code: CompilerErrorCode::XCssParseError,
         plugin: "style-planner",
         message: error.to_string(),
-        span: error.span.map(|span| {
-            crate::common::Span::new(content_start + span.start, content_start + span.end)
+        arguments: Vec::new(),
+        span: error.span.map_or(content_span, |span| {
+            crate::common::Span::new(
+                content_span.start + span.start,
+                content_span.start + span.end,
+            )
         }),
     });
 }
@@ -141,7 +145,69 @@ pub(crate) fn parse_sfc(
         tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
     }
 
-    syntax.into_parsed_sfc()
+    let mut parsed = syntax.into_parsed_sfc();
+    // Official Vue's SFC parser (`packages/compiler-sfc/src/parse.ts`)
+    // unconditionally rejects a carrier with no `<template>`, `<script>`, or
+    // `<script setup>` block — see the `# 6676` regression test in
+    // `parse.spec.ts` ("should throw error if no <template> or <script> is
+    // present"). Verter deliberately narrows that one rule: a block-less,
+    // trivia-only carrier (empty, or whitespace/comments only) is still
+    // admitted as an empty component shell — pre-existing base behavior
+    // (`empty_sfc_compiles_to_empty_component_shell`) for a freshly created
+    // blank file. Any other block-less content (styles, custom blocks,
+    // malformed comments, arbitrary top-level text) is still diagnosed.
+    if parsed.template_ast.is_none()
+        && parsed.script_node.is_none()
+        && parsed.script_setup_node.is_none()
+        && (!parsed.style_nodes.is_empty()
+            || !parsed.unknown_nodes.is_empty()
+            || !is_empty_sfc_trivia(input))
+    {
+        parsed.diagnostics.push(Diagnostic::error(
+            "syntax",
+            CompilerErrorCode::MissingSfcEntryBlock,
+            crate::common::Span::new(0, input.len() as u32),
+        ));
+    }
+    if let Some(template) = parsed.template_ast.as_ref() {
+        if let Some(attribute) = template.root.attributes.iter().find(|attribute| {
+            input[attribute.start as usize..attribute.name_end as usize]
+                .eq_ignore_ascii_case("functional")
+        }) {
+            parsed.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::TemplateFunctionalUnsupported,
+                crate::common::Span::new(attribute.start, attribute.name_end),
+            ));
+        }
+    }
+    verter_parser::diagnostics::sort_diagnostics(&mut parsed.diagnostics);
+    parsed.has_errors = parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+    parsed
+}
+
+/// Verter deliberately admits a block-less, trivia-only carrier as an empty
+/// component shell. Vue's parser rejects every carrier without a template or
+/// script, so keep this exception narrower than the structural no-entry test:
+/// styles, custom blocks, malformed comments, and arbitrary top-level text are
+/// still diagnosed as [`CompilerErrorCode::MissingSfcEntryBlock`].
+fn is_empty_sfc_trivia(mut source: &str) -> bool {
+    loop {
+        source = source.trim_start();
+        if source.is_empty() {
+            return true;
+        }
+        let Some(comment_body) = source.strip_prefix("<!--") else {
+            return false;
+        };
+        let Some(comment_end) = comment_body.find("-->") else {
+            return false;
+        };
+        source = &comment_body[comment_end + 3..];
+    }
 }
 
 /// Parse one selected HTML template source space without fabricating an SFC.
@@ -268,42 +334,35 @@ pub(crate) fn template_unit_used_vars(
 /// (v-if/v-else-if conditions, v-for). Regular directive prop values (`:attr="..."`)
 /// are excluded because they may contain HTML entities or template-specific syntax
 /// that fails OXC parsing but is handled by codegen.
-fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<Diagnostic>) {
+fn collect_expression_errors(
+    oxc_ast: &OxcParsedAst<'_>,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+    compile_failures: &mut Vec<CompileDiagnostic>,
+) {
     use crate::template::oxc::types::OxcNodeData;
 
     for node in &oxc_ast.data {
         match node {
             OxcNodeData::Interpolation(expr) => {
-                push_expression_errors(expr, diagnostics);
+                push_expression_errors(expr, source, diagnostics, compile_failures);
             }
             OxcNodeData::Element(el) => {
                 if let Some(ref cond) = el.condition {
-                    push_expression_errors(cond, diagnostics);
+                    push_expression_errors(cond, source, diagnostics, compile_failures);
                 }
                 if let Some(ref v_for) = el.v_for {
                     for err in &v_for.parsed.result.left_errors {
-                        diagnostics.push(
-                            Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
-                                .with_message(err.message.to_string()),
-                        );
+                        push_oxc_error(err, source, diagnostics, compile_failures);
                     }
                     for err in &v_for.parsed.result.right_errors {
-                        diagnostics.push(
-                            Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
-                                .with_message(err.message.to_string()),
-                        );
+                        push_oxc_error(err, source, diagnostics, compile_failures);
                     }
                 }
                 if let Some(ref v_slot) = el.v_slot {
                     if let Some(ref errors) = v_slot.parsed.result.errors {
                         for err in errors {
-                            diagnostics.push(
-                                Diagnostic::warning(
-                                    "template",
-                                    CompilerErrorCode::XInvalidExpression,
-                                )
-                                .with_message(err.message.to_string()),
-                            );
+                            push_oxc_error(err, source, diagnostics, compile_failures);
                         }
                     }
                 }
@@ -324,14 +383,75 @@ fn collect_expression_errors(oxc_ast: &OxcParsedAst<'_>, diagnostics: &mut Vec<D
 /// - Warning severity prevents the host from discarding usable IDE output
 fn push_expression_errors(
     expr: &crate::template::oxc::types::OxcParsedExpression<'_>,
+    source: &str,
     diagnostics: &mut Vec<Diagnostic>,
+    compile_failures: &mut Vec<CompileDiagnostic>,
 ) {
     if let Some(ref errors) = expr.errors {
         for err in errors {
-            diagnostics.push(
-                Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression)
-                    .with_message(err.message.to_string()),
-            );
+            push_oxc_error(err, source, diagnostics, compile_failures);
+        }
+    }
+}
+
+fn push_oxc_error(
+    error: &oxc_diagnostics::OxcDiagnostic,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+    compile_failures: &mut Vec<CompileDiagnostic>,
+) {
+    let span = error.labels.as_ref().and_then(|labels| {
+        labels
+            .iter()
+            .find(|label| label.primary())
+            .or_else(|| labels.first())
+            .and_then(|label| {
+                let start = u32::try_from(label.offset()).ok()?;
+                let end = u32::try_from(label.offset().checked_add(label.len())?).ok()?;
+                ((end as usize) <= source.len()
+                    && source.is_char_boundary(start as usize)
+                    && source.is_char_boundary(end as usize))
+                .then_some(crate::common::Span::new(start, end))
+            })
+    });
+    if let Some(span) = span {
+        diagnostics.push(
+            Diagnostic::warning("template", CompilerErrorCode::XInvalidExpression, span)
+                .with_message(error.message.to_string()),
+        );
+    } else {
+        compile_failures.push(CompileDiagnostic {
+            severity: CompileDiagnosticSeverity::Error,
+            code: format!("{:?}", CompilerErrorCode::XInvalidExpression),
+            message: "Template expression parser returned an unmapped diagnostic.".to_string(),
+            span: None,
+        });
+    }
+}
+
+/// Validate template semantics that belong to compilation rather than the SFC
+/// parse seam. Vue's SFC parser accepts `v-slot` on a native element; the
+/// template compiler (`transformElement`, `X_V_SLOT_MISPLACED`) is the layer
+/// that rejects it — see `packages/compiler-core/src/transforms/transformElement.ts`.
+fn collect_template_compile_diagnostics(parsed: &ParsedSfc, diagnostics: &mut Vec<Diagnostic>) {
+    use crate::ast::types::{AstNodeKind, TagType};
+
+    let Some(template) = parsed.template_ast() else {
+        return;
+    };
+    for node in &template.nodes {
+        let AstNodeKind::Element(element) = &node.kind else {
+            continue;
+        };
+        let Some(v_slot) = element.v_slot.as_ref() else {
+            continue;
+        };
+        if !matches!(element.tag_type, TagType::Component | TagType::Template) {
+            diagnostics.push(Diagnostic::error(
+                "template",
+                CompilerErrorCode::XVSlotMisplaced,
+                crate::common::Span::new(v_slot.start, v_slot.name_end),
+            ));
         }
     }
 }
@@ -451,8 +571,15 @@ fn compile_inner(
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
+    if options.target.needs_template_codegen()
+        || options.target.needs_tsx()
+        || options.target.needs_template_data()
+    {
+        collect_template_compile_diagnostics(parsed, &mut all_diagnostics);
+    }
     let macro_validation =
         collect_macro_semantic_diagnostics(&prepared_script, options.target, macro_semantics);
+    let mut compile_failures = macro_validation.compile_failures;
     all_diagnostics.extend(macro_validation.diagnostics);
     let validated_runtime = macro_validation
         .runtime_valid
@@ -541,7 +668,7 @@ fn compile_inner(
                         all_v_bind_vars.extend(facts.v_bind_vars);
                     }
                     Err(error) => {
-                        push_style_rewrite_diagnostic(&mut all_diagnostics, content.start, &error);
+                        push_style_rewrite_diagnostic(&mut all_diagnostics, *content, &error);
                     }
                 }
 
@@ -559,18 +686,14 @@ fn compile_inner(
                             Err(error) => {
                                 push_style_rewrite_diagnostic(
                                     &mut all_diagnostics,
-                                    content.start,
+                                    *content,
                                     &error,
                                 );
                                 rewritten.clear();
                             }
                         },
                         Err(error) => {
-                            push_style_rewrite_diagnostic(
-                                &mut all_diagnostics,
-                                content.start,
-                                &error,
-                            );
+                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, &error);
                             rewritten.clear();
                         }
                     }
@@ -590,7 +713,7 @@ fn compile_inner(
                                 for refusal in &facts.refusals {
                                     push_style_rewrite_diagnostic(
                                         &mut all_diagnostics,
-                                        content.start,
+                                        *content,
                                         refusal,
                                     );
                                 }
@@ -599,7 +722,7 @@ fn compile_inner(
                                 for refusal in &facts.refusals {
                                     push_style_rewrite_diagnostic(
                                         &mut all_diagnostics,
-                                        content.start,
+                                        *content,
                                         refusal,
                                     );
                                 }
@@ -608,18 +731,14 @@ fn compile_inner(
                             Err(error) => {
                                 push_style_rewrite_diagnostic(
                                     &mut all_diagnostics,
-                                    content.start,
+                                    *content,
                                     &error,
                                 );
                                 rewritten.clear();
                             }
                         },
                         Err(error) => {
-                            push_style_rewrite_diagnostic(
-                                &mut all_diagnostics,
-                                content.start,
-                                &error,
-                            );
+                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, &error);
                             rewritten.clear();
                         }
                     }
@@ -890,7 +1009,7 @@ fn compile_inner(
                 source_type,
                 false,
             );
-            collect_expression_errors(oxc_ast, &mut all_diagnostics);
+            collect_expression_errors(oxc_ast, input, &mut all_diagnostics, &mut compile_failures);
 
             let tpl_options = TemplateCodeGenOptions {
                 mode: CodeGenMode::Vdom,
@@ -1120,193 +1239,194 @@ fn compile_inner(
     let needs_tpl_codegen = options.target.needs_template_codegen();
     let needs_tpl_data = options.target.needs_template_data();
 
-    let (template_block, extracted_template_data) =
-        if has_parse_errors || (!needs_tpl_codegen && !needs_tpl_data) {
-            // Template AST may be invalid after parse errors, or target
-            // doesn't need VDOM/template data — skip codegen.
+    let (template_block, extracted_template_data) = if has_parse_errors
+        || (!needs_tpl_codegen && !needs_tpl_data)
+    {
+        // Template AST may be invalid after parse errors, or target
+        // doesn't need VDOM/template data — skip codegen.
+        (None, None)
+    } else if let Some(template_ast) = template_ast_opt {
+        // Skip codegen for non-HTML template languages (e.g. Pug).
+        // The AST positions are from the raw source and don't represent HTML.
+        let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
+            let lang_val = &input[span.start as usize..span.end as usize];
+            !lang_val.is_empty() && lang_val != "html"
+        });
+        if is_non_html_lang {
             (None, None)
-        } else if let Some(template_ast) = template_ast_opt {
-            // Skip codegen for non-HTML template languages (e.g. Pug).
-            // The AST positions are from the raw source and don't represent HTML.
-            let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
-                let lang_val = &input[span.start as usize..span.end as usize];
-                !lang_val.is_empty() && lang_val != "html"
-            });
-            if is_non_html_lang {
-                (None, None)
-            } else {
-                let tpl_start = Instant::now();
+        } else {
+            let tpl_start = Instant::now();
 
-                // Reuse the runtime overlay — the single `ide_completion = false`
-                // `tsx()` entry the early script-elision lane built (or build it
-                // cold here when this is the first runtime consumer). Runtime
-                // (VDOM/Vapor) codegen keeps completion-prefix matching off so
-                // partial identifiers stay real references.
-                let oxc_ast = expr_store.get_or_build(
+            // Reuse the runtime overlay — the single `ide_completion = false`
+            // `tsx()` entry the early script-elision lane built (or build it
+            // cold here when this is the first runtime consumer). Runtime
+            // (VDOM/Vapor) codegen keeps completion-prefix matching off so
+            // partial identifiers stay real references.
+            let oxc_ast = expr_store.get_or_build(
+                template_ast,
+                input,
+                allocator,
+                template_region_span(template_ast),
+                &parse_options,
+                source_type,
+                false,
+            );
+
+            // Collect OXC expression parse errors as XInvalidExpression diagnostics
+            collect_expression_errors(oxc_ast, input, &mut all_diagnostics, &mut compile_failures);
+
+            // Extract raw template data for cross-file analysis (before bindings are moved)
+            let raw_template_data = if needs_tpl_data {
+                Some(template_data::extract_raw_template_data(
                     template_ast,
+                    oxc_ast,
                     input,
-                    allocator,
-                    template_region_span(template_ast),
-                    &parse_options,
-                    source_type,
-                    false,
-                );
+                    &script_bindings,
+                ))
+            } else {
+                None
+            };
 
-                // Collect OXC expression parse errors as XInvalidExpression diagnostics
-                collect_expression_errors(oxc_ast, &mut all_diagnostics);
-
-                // Extract raw template data for cross-file analysis (before bindings are moved)
-                let raw_template_data = if needs_tpl_data {
-                    Some(template_data::extract_raw_template_data(
-                        template_ast,
-                        oxc_ast,
-                        input,
-                        &script_bindings,
-                    ))
-                } else {
-                    None
-                };
-
-                let template_block_inner = if needs_tpl_codegen && !inline_active {
-                    let tpl_alloc = Allocator::new();
-                    // Use the full SFC input so AST positions (which are absolute) align correctly.
-                    // The CT is initialized with the full SFC so AST positions
-                    // align. Remove the prefix (before <template>) and suffix
-                    // (after </template>) within the CT so build_string() produces
-                    // only the template region with correct sourcemap offsets.
-                    let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
-                    let tpl_tag_start = template_ast.root.tag_open.start as usize;
-                    let tpl_tag_end = template_ast
-                        .root
-                        .tag_close
-                        .as_ref()
-                        .map(|tc| tc.end as usize)
-                        .unwrap_or(
-                            template_ast
-                                .root
-                                .content
-                                .as_ref()
-                                .map(|c| c.end as usize)
-                                .unwrap_or(template_ast.root.tag_open.end as usize),
-                        );
-                    if tpl_tag_start > 0 {
-                        tpl_ct.remove(0, tpl_tag_start as u32);
-                    }
-                    if tpl_tag_end < input.len() {
-                        tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
-                    }
-
-                    let ssr_css_vars = if verter_options.ssr {
-                        // Dedup by var_name (same v-bind may appear in multiple style blocks)
-                        let mut seen = rustc_hash::FxHashSet::default();
-                        all_v_bind_vars
-                            .iter()
-                            .filter(|v| seen.insert(v.var_name.clone()))
-                            .map(|v| (v.var_name.clone(), v.expression.clone()))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let tpl_options = TemplateCodeGenOptions {
-                        mode: if verter_options.ssr {
-                            CodeGenMode::Ssr
-                        } else if use_vapor {
-                            CodeGenMode::Vapor
-                        } else {
-                            CodeGenMode::Vdom
-                        },
-                        is_inline: verter_options.runtime_inline_template_chunk,
-                        is_production: options.is_production,
-                        comments: options.comments.unwrap_or(!options.is_production),
-                        force_js: verter_options.force_js,
-                        self_name: to_pascal_case(&component_name),
-                        const_props: verter_options
-                            .prop_constness_overrides
-                            .clone()
-                            .or_else(|| transferred_bindings.and_then(|m| m.const_props.clone())),
-                        // Full 6-param render signature only when the SFC has a
-                        // script block (official: `bindingMetadata && !inline`).
-                        has_script: parsed.script().is_some()
-                            || parsed.script_setup().is_some()
-                            || transferred_bindings.is_some_and(|metadata| metadata.has_script),
-                        ref_bindable_imports: ref_bindable_imports.clone(),
-                        has_scoped_style,
-                        hoist_static: options.resolve_hoist_static(),
-                        scope_id: if has_scoped_style {
-                            scope_id_full.clone()
-                        } else {
-                            String::new()
-                        },
-                        ssr_css_vars,
-                    };
-
-                    let tpl_imports = generate_template(
-                        template_ast,
-                        oxc_ast,
-                        input,
-                        &mut tpl_ct,
-                        &tpl_alloc,
-                        script_bindings,
-                        &tpl_options,
+            let template_block_inner = if needs_tpl_codegen && !inline_active {
+                let tpl_alloc = Allocator::new();
+                // Use the full SFC input so AST positions (which are absolute) align correctly.
+                // The CT is initialized with the full SFC so AST positions
+                // align. Remove the prefix (before <template>) and suffix
+                // (after </template>) within the CT so build_string() produces
+                // only the template region with correct sourcemap offsets.
+                let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
+                let tpl_tag_start = template_ast.root.tag_open.start as usize;
+                let tpl_tag_end = template_ast
+                    .root
+                    .tag_close
+                    .as_ref()
+                    .map(|tc| tc.end as usize)
+                    .unwrap_or(
+                        template_ast
+                            .root
+                            .content
+                            .as_ref()
+                            .map(|c| c.end as usize)
+                            .unwrap_or(template_ast.root.tag_open.end as usize),
                     );
+                if tpl_tag_start > 0 {
+                    tpl_ct.remove(0, tpl_tag_start as u32);
+                }
+                if tpl_tag_end < input.len() {
+                    tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
+                }
 
-                    // Strip TypeScript syntax from template expressions when force_js is set.
-                    if verter_options.force_js {
-                        for expr in oxc_ast.iter_expressions() {
-                            if let Some(ref expression) = expr.expression {
-                                crate::strip_types::typescript::strip_typescript_from_expression(
-                                    expression,
-                                    &mut tpl_ct,
-                                    expr.offset,
-                                    &input[expr.offset as usize..],
-                                );
-                            }
-                        }
-                    }
-
-                    // Prefix and suffix were removed via CT operations above,
-                    // so build_string() produces only the template region.
-                    let tpl_code = tpl_ct.build_string();
-                    let tpl_sourcemap_start = Instant::now();
-                    let tpl_source_map = if verter_options.source_map {
-                        let sm_opts = SourceMapOptions {
-                            source: options.filename.as_deref(),
-                            file: options.filename.as_deref(),
-                            include_content: true,
-                        };
-                        tpl_ct.generate_map_json(sm_opts)
+                let ssr_css_vars = if verter_options.ssr {
+                    // Dedup by var_name (same v-bind may appear in multiple style blocks)
+                    let mut seen = rustc_hash::FxHashSet::default();
+                    all_v_bind_vars
+                        .iter()
+                        .filter(|v| seen.insert(v.var_name.clone()))
+                        .map(|v| (v.var_name.clone(), v.expression.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let tpl_options = TemplateCodeGenOptions {
+                    mode: if verter_options.ssr {
+                        CodeGenMode::Ssr
+                    } else if use_vapor {
+                        CodeGenMode::Vapor
+                    } else {
+                        CodeGenMode::Vdom
+                    },
+                    is_inline: verter_options.runtime_inline_template_chunk,
+                    is_production: options.is_production,
+                    comments: options.comments.unwrap_or(!options.is_production),
+                    force_js: verter_options.force_js,
+                    self_name: to_pascal_case(&component_name),
+                    const_props: verter_options
+                        .prop_constness_overrides
+                        .clone()
+                        .or_else(|| transferred_bindings.and_then(|m| m.const_props.clone())),
+                    // Full 6-param render signature only when the SFC has a
+                    // script block (official: `bindingMetadata && !inline`).
+                    has_script: parsed.script().is_some()
+                        || parsed.script_setup().is_some()
+                        || transferred_bindings.is_some_and(|metadata| metadata.has_script),
+                    ref_bindable_imports: ref_bindable_imports.clone(),
+                    has_scoped_style,
+                    hoist_static: options.resolve_hoist_static(),
+                    scope_id: if has_scoped_style {
+                        scope_id_full.clone()
                     } else {
                         String::new()
-                    };
-                    let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
-                    let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
-                    if let Some(observer) = verter_audit::current_observer() {
-                        let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
-                        observer.record_phase_timing("compile.codegen", codegen_only_ms);
-                        if verter_options.source_map {
-                            observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
-                        }
-                    }
-
-                    let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
-
-                    Some(VerterTemplateBlock {
-                        code: tpl_code,
-                        source_map: tpl_source_map,
-                        imports: tpl_imports.vue,
-                        ssr_imports: tpl_imports.ssr,
-                        duration_ms: tpl_duration_ms,
-                        attrs: tpl_attrs,
-                    })
-                } else {
-                    None
+                    },
+                    ssr_css_vars,
                 };
 
-                (template_block_inner, raw_template_data)
-            } // close `else` for is_non_html_lang
-        } else {
-            (None, None)
-        };
+                let tpl_imports = generate_template(
+                    template_ast,
+                    oxc_ast,
+                    input,
+                    &mut tpl_ct,
+                    &tpl_alloc,
+                    script_bindings,
+                    &tpl_options,
+                );
+
+                // Strip TypeScript syntax from template expressions when force_js is set.
+                if verter_options.force_js {
+                    for expr in oxc_ast.iter_expressions() {
+                        if let Some(ref expression) = expr.expression {
+                            crate::strip_types::typescript::strip_typescript_from_expression(
+                                expression,
+                                &mut tpl_ct,
+                                expr.offset,
+                                &input[expr.offset as usize..],
+                            );
+                        }
+                    }
+                }
+
+                // Prefix and suffix were removed via CT operations above,
+                // so build_string() produces only the template region.
+                let tpl_code = tpl_ct.build_string();
+                let tpl_sourcemap_start = Instant::now();
+                let tpl_source_map = if verter_options.source_map {
+                    let sm_opts = SourceMapOptions {
+                        source: options.filename.as_deref(),
+                        file: options.filename.as_deref(),
+                        include_content: true,
+                    };
+                    tpl_ct.generate_map_json(sm_opts)
+                } else {
+                    String::new()
+                };
+                let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
+                let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
+                if let Some(observer) = verter_audit::current_observer() {
+                    let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
+                    observer.record_phase_timing("compile.codegen", codegen_only_ms);
+                    if verter_options.source_map {
+                        observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
+                    }
+                }
+
+                let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
+
+                Some(VerterTemplateBlock {
+                    code: tpl_code,
+                    source_map: tpl_source_map,
+                    imports: tpl_imports.vue,
+                    ssr_imports: tpl_imports.ssr,
+                    duration_ms: tpl_duration_ms,
+                    attrs: tpl_attrs,
+                })
+            } else {
+                None
+            };
+
+            (template_block_inner, raw_template_data)
+        } // close `else` for is_non_html_lang
+    } else {
+        (None, None)
+    };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
     // Produces a single combined `.tsx` or `.jsx` file for LSP type checking.
@@ -1775,7 +1895,7 @@ fn compile_inner(
                 generated_template_chunk: None,
             }),
             Err(error) => {
-                all_diagnostics.push(tsc_generation_diagnostic(error));
+                compile_failures.push(tsc_generation_diagnostic(error));
                 None
             }
         }
@@ -1798,7 +1918,12 @@ fn compile_inner(
         styles: style_blocks,
         custom_blocks,
         scope_id: scope_id_result,
-        errors: convert_diagnostics(&all_diagnostics),
+        errors: {
+            crate::diagnostics::sort_diagnostics(&mut all_diagnostics);
+            let mut errors = convert_diagnostics(&all_diagnostics);
+            errors.append(&mut compile_failures);
+            errors
+        },
         parse_duration_ms,
         total_duration_ms,
         tsx: tsx_block,

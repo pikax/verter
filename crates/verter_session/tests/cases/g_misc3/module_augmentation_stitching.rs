@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the artifact-index substrate used by the live semantic
 //! augmentation stitcher: project/session isolation, lifecycle invalidation,
-//! exact-key self-healing, parser-version filtering, and lock-safe resolver
+//! exact-key self-healing, parse-key filtering, and lock-safe resolver
 //! callbacks. Semantic merge behavior is covered through the production
 //! `ProjectSemanticDispatch` path in the session unit suites.
 
@@ -15,7 +15,7 @@ use verter_semantic::facts::registry::InternedSpecifier;
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity, CURRENT_PARSER_VERSION,
+    FileArtifacts, ProjectIdentity,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
@@ -83,13 +83,7 @@ fn insert_artifact_from_fixture(
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     });
-    let key = FileArtifactKey {
-        canonical: Arc::from(canonical),
-        content_hash,
-        parse_env_hash: [0u8; 16],
-        parser_version: CURRENT_PARSER_VERSION,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
-    };
+    let key = FileArtifactKey::base_for_test(Arc::from(canonical), content_hash);
     store.insert_artifacts(key.clone(), artifacts);
     key
 }
@@ -111,13 +105,7 @@ fn insert_artifact_with_raw_source(
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     });
-    let key = FileArtifactKey {
-        canonical: Arc::from(canonical),
-        content_hash,
-        parse_env_hash: [0u8; 16],
-        parser_version: CURRENT_PARSER_VERSION,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
-    };
+    let key = FileArtifactKey::base_for_test(Arc::from(canonical), content_hash);
     store.insert_artifacts(key.clone(), artifacts);
     key
 }
@@ -247,13 +235,11 @@ pub(crate) fn session_overlay_augmenter_isolated_from_base_index() {
     let indexed = build_indexed_with_source("/aug-overlay.ts", &raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
-    let overlay_key = FileArtifactKey {
-        canonical: Arc::from("/aug-overlay.ts"),
-        content_hash: [99u8; 16],
-        parse_env_hash: overlay_discriminator,
-        parser_version: CURRENT_PARSER_VERSION,
-        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
-    };
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
+        Arc::from("/aug-overlay.ts"),
+        [99u8; 16],
+        overlay_discriminator,
+    );
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
@@ -341,13 +327,11 @@ fn seed_base_and_overlay_augmenters(
     let indexed = build_indexed_with_source("/aug-overlay.ts", &raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
-    let overlay_key = FileArtifactKey {
-        canonical: Arc::from("/aug-overlay.ts"),
-        content_hash: [99u8; 16],
-        parse_env_hash: overlay_discriminator,
-        parser_version: CURRENT_PARSER_VERSION,
-        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
-    };
+    let overlay_key = FileArtifactKey::overlay_scoped_for_test(
+        Arc::from("/aug-overlay.ts"),
+        [99u8; 16],
+        overlay_discriminator,
+    );
     store.insert_artifacts(
         overlay_key,
         Arc::new(FileArtifacts {
@@ -920,20 +904,13 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
         // — including the one the iterator currently read-locks — is
         // written. Reuses one payload `Arc` (no per-key re-parse).
         for j in 0..1024u32 {
-            let key = FileArtifactKey {
-                canonical: Arc::from(format!("/dir/reentrant-{n}-{j}.ts").as_str()),
-                content_hash: {
-                    let mut h = [0u8; 16];
-                    h[0..4].copy_from_slice(&j.to_le_bytes());
-                    h[4] = n as u8;
-                    h
-                },
-                parse_env_hash: [0u8; 16],
-                parser_version: 1,
-                file_language_id: FileArtifactKey::derived_file_language_id(
-                    format!("/dir/reentrant-{n}-{j}.ts").as_str(),
-                ),
-            };
+            let canonical = Arc::<str>::from(format!("/dir/reentrant-{n}-{j}.ts"));
+            let key = FileArtifactKey::base_for_test(canonical, {
+                let mut h = [0u8; 16];
+                h[0..4].copy_from_slice(&j.to_le_bytes());
+                h[4] = n as u8;
+                h
+            });
             store.insert_artifacts(key, Arc::clone(&reentrant_payload));
         }
         if augmenter == augmenter_canonical && specifier == "./local" {
@@ -991,19 +968,19 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// parser_version invalidation — a base augmenter stamped at a STALE
-// parser_version is EXCLUDED from the stitched augmentation surface.
+// parse_key invalidation — a base augmenter stamped at a STALE
+// parse_key is EXCLUDED from the stitched augmentation surface.
 //
 // The augmentation-index base scan filters candidates on `key.is_base()`,
 // and `is_base()` is `parse_env_hash == BASE_PARSE_ENV_HASH &&
-// parser_version == CURRENT_PARSER_VERSION`. So an artifact whose
-// `parser_version` is stale (a pre-bump entry that survived in the store)
+// parse_key == current build fingerprint`. So an artifact whose
+// `parse_key` is stale (a pre-bump entry that survived in the store)
 // is NOT a base candidate and contributes ZERO augmenters, even though its
 // `parse_env_hash` is the base sentinel and its source carries a matching
 // `declare module "vue" {}`.
 //
 // - **Against a hypothetical regression** where `is_base()` ignored
-//   `parser_version` (folded only `parse_env_hash`): BOTH the
+//   `parse_key` (folded only `parse_env_hash`): BOTH the
 //   current-version augmenter AND the stale-version augmenter would pass the
 //   base filter, the scan would return TWO entries, and the
 //   `assert_eq!(canonicals, vec!["/aug-current.ts"])` below would FAIL.
@@ -1011,15 +988,15 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
 //   returns exactly the current-version augmenter — PASSES.
 // ────────────────────────────────────────────────────────────────
 
-/// Insert a file artifact stamped with an explicit `parser_version`
+/// Insert a file artifact stamped with an explicit `parse_key`
 /// (every other dimension matches the base helper). Used to plant a
-/// stale-parser-version augmenter the base scan must exclude.
-fn insert_artifact_at_parser_version(
+/// stale-parse-key augmenter the base scan must exclude.
+fn insert_artifact_at_build_fingerprint(
     store: &FileArtifactStore,
     canonical: &str,
     fixture_name: &str,
     content_hash: [u8; 16],
-    parser_version: u32,
+    fingerprint_marker: u8,
 ) -> FileArtifactKey {
     let raw = fixture(fixture_name);
     let indexed = build_indexed_with_source(canonical, &raw, content_hash);
@@ -1032,23 +1009,16 @@ fn insert_artifact_at_parser_version(
         augmentations: Arc::new(emission.augmentations),
     });
     let key = FileArtifactKey {
-        canonical: Arc::from(canonical),
-        content_hash,
-        parse_env_hash: [0u8; 16],
-        parser_version,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
+        build_toolchain_fingerprint:
+            verter_session::build_toolchain_fingerprint::fingerprint_for_test(fingerprint_marker),
+        ..FileArtifactKey::base_for_test(Arc::from(canonical), content_hash)
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
 }
 
 #[test]
-fn stale_parser_version_augmenter_excluded_current_version_contributes() {
-    // Stamp the stale augmenter one parser version BELOW current
-    // (`CURRENT_PARSER_VERSION` is >= 1, so this never underflows — a 0
-    // current version would itself fail to compile this subtraction).
-    let stale_parser_version = CURRENT_PARSER_VERSION - 1;
-
+fn stale_build_fingerprint_augmenter_is_excluded() {
     let store = FileArtifactStore::new();
 
     // (a) current-version augmenter — a true base candidate.
@@ -1059,23 +1029,24 @@ fn stale_parser_version_augmenter_excluded_current_version_contributes() {
         [71u8; 16],
     );
     assert_eq!(
-        current_key.parser_version, CURRENT_PARSER_VERSION,
-        "the current-version augmenter MUST be stamped CURRENT_PARSER_VERSION"
+        current_key.build_toolchain_fingerprint,
+        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
     );
 
     // (b) stale-version augmenter — same base `parse_env_hash` sentinel,
     // same matching `declare module "vue" {}` source, DIFFERENT canonical,
-    // but stamped at the PRIOR parser version. It is NOT `is_base()`.
-    let stale_key = insert_artifact_at_parser_version(
+    // but stamped at the PRIOR parse key. It is NOT `is_base()`.
+    let stale_key = insert_artifact_at_build_fingerprint(
         &store,
         "/aug-stale.ts",
         "module_augmentation_external.ts",
         [72u8; 16],
-        stale_parser_version,
+        99,
     );
     assert_ne!(
-        stale_key.parser_version, CURRENT_PARSER_VERSION,
-        "the stale augmenter MUST carry a non-current parser_version"
+        stale_key.build_toolchain_fingerprint,
+        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        "the stale augmenter MUST carry a non-current build fingerprint"
     );
     // The two artifacts coexist in the store (the stale one is not drained
     // by the current-version insert — distinct content hash + version key).
@@ -1105,13 +1076,13 @@ fn stale_parser_version_augmenter_excluded_current_version_contributes() {
         .collect();
 
     // DISCRIMINATING assertion: ONLY the current-version augmenter
-    // contributes. A regression ignoring parser_version would also admit
+    // contributes. A regression ignoring parse_key would also admit
     // `/aug-stale.ts` and this exact-vector equality would fail.
     assert_eq!(
         canonicals,
         vec!["/aug-current.ts"],
-        "the stale-parser-version augmenter MUST be EXCLUDED from the base \
-         augmentation surface; only the CURRENT_PARSER_VERSION augmenter \
+        "the stale-parse-key augmenter MUST be EXCLUDED from the base \
+         augmentation surface; only the current build fingerprint augmenter \
          contributes"
     );
     assert_eq!(
@@ -1121,7 +1092,7 @@ fn stale_parser_version_augmenter_excluded_current_version_contributes() {
     );
     assert!(
         !canonicals.contains(&"/aug-stale.ts"),
-        "the stale-parser-version augmenter contributes ZERO to the stitched \
+        "the stale-parse-key augmenter contributes ZERO to the stitched \
          surface"
     );
 }

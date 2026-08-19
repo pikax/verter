@@ -56,7 +56,7 @@ fn assemble_inline_vapor_module(source: &str) -> String {
     );
 
     let allocator = Allocator::new();
-    let compiled = VueCarrierCompiler::default()
+    let compiled = VueCarrierCompiler
         .compile_bundle(
             source,
             &artifact,

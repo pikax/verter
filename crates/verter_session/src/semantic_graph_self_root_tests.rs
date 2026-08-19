@@ -2162,27 +2162,36 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     // Publish the overlay `IndexedReady` + `FileArtifacts` candidate
     // under the overlay-scoped key (multi-candidate sibling of the
     // base).
-    let _overlay_indexed = host
+    let overlay_indexed = host
         .materialize_overlay_indexed_ready_with_view(canonical, &view)
         .expect("overlay IndexedReady must materialise");
 
-    // Recover the `SyntacticExportSet` parse-fact hash for each content
-    // version directly from the content-addressed artifact store —
-    // exactly as `parse_fact_ref_for_observed_current_content` does for
-    // a cold build (provenance-pure, content-addressed at the observed
-    // hash). `base_ctx` is the plain host (any `ResolverContext` works —
-    // the helper is content-addressed, not view-dependent).
+    // Establish the same request-bound authorities production uses. A plain
+    // host sees the base content; the SessionResolverContext sees the overlay
+    // and owns its exact source/language/parse identity.
     let base_ctx: &dyn ResolverContext = host.as_ref();
-    let base_parse_fact =
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
-            base_ctx,
-            canonical,
-            base_hash,
-            FactKey::SyntacticExportSet,
-            FactLane::Semantic,
-        )
+    let session_store_view = host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .with_session_overlay(&host, &view);
+    let session_ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &session_store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // Recover both parse facts through the production
+    // `observe_materialize_scope` path. The observation pins its IndexedReady
+    // and parse fact to one authority-visible content version.
+    let base_observation = base_ctx
+        .observe_materialize_scope(canonical)
+        .expect("base materialize-scope observation must resolve");
+    assert_eq!(base_observation.whole_hash(), base_hash);
+    let base_parse_fact = base_observation
+        .syntactic_export_set
         .expect("base SyntacticExportSet parse fact must resolve");
-    let overlay_parse_fact =
+    assert!(
         crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             base_ctx,
             canonical,
@@ -2190,6 +2199,19 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             FactKey::SyntacticExportSet,
             FactLane::Semantic,
         )
+        .is_none(),
+        "a plain-host context must refuse a parse fact for overlay-only current content"
+    );
+    let overlay_observation = session_ctx
+        .observe_materialize_scope(canonical)
+        .expect("overlay materialize-scope observation must resolve");
+    assert_eq!(overlay_observation.whole_hash(), overlay_hash);
+    assert!(
+        Arc::ptr_eq(&overlay_observation.indexed, &overlay_indexed),
+        "the production session observation must retain the exact published overlay artifact"
+    );
+    let overlay_parse_fact = overlay_observation
+        .syntactic_export_set
         .expect("overlay SyntacticExportSet parse fact must resolve");
     assert_ne!(
         base_parse_fact.expected_hash, overlay_parse_fact.expected_hash,
@@ -2258,16 +2280,6 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     {
         let graph = SemanticGraphStore::new();
         let published = publish_entry(&graph, overlay_hash, &overlay_parse_fact);
-        let session_store_view = host
-            .resolver_store_view_read()
-            .into_owned_view()
-            .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
-            &host,
-            &view,
-            &session_store_view,
-            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-        );
         let (cold_ran, value, _recompute) = drive(&graph, &session_ctx);
         assert!(
             !cold_ran,
@@ -2305,16 +2317,6 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             expected_hash: base_parse_fact.expected_hash,
         };
         let _published = publish_entry(&graph, overlay_hash, &stale_parse_fact);
-        let session_store_view = host
-            .resolver_store_view_read()
-            .into_owned_view()
-            .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
-            &host,
-            &view,
-            &session_store_view,
-            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-        );
         let (cold_ran, value, recompute) = drive(&graph, &session_ctx);
         assert!(
             cold_ran,

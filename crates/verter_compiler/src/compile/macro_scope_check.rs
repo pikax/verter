@@ -425,14 +425,12 @@ fn check_scope_references(
             // runs over the content slice), already the content-local
             // shape the public diagnostics use.
             let local_span = Span::new(span.start, span.end);
-            diagnostics.push(
-                Diagnostic::error_with_message(
-                    "script",
-                    CompilerErrorCode::XInvalidMacroScopeReference,
-                    scope_message(macro_name),
-                )
-                .with_span(local_span),
-            );
+            diagnostics.push(Diagnostic::error_with_message(
+                "script",
+                CompilerErrorCode::XInvalidMacroScopeReference,
+                scope_message(macro_name),
+                local_span,
+            ));
         }
     }
 }

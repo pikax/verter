@@ -1435,10 +1435,9 @@ are:
   shallow import targets may retain a resolved canonical beside the authored
   specifier. Schema 7 added call-signature emit declaration spans; schema 5
   was the CREO migration; schema 4 was the exact-owner cutover.
-- `CURRENT_PARSER_VERSION = 5` rejects ordinary/base artifacts whose shallow
-  import targets may retain that second import-resolution authority.
-- `LEGACY_PARSER_VERSION = 6` rejects carrier-script candidates with that same
-  pre-authored-only import-target shape.
+- The session-owned `BuildToolchainFingerprint` rejects ordinary/base artifacts,
+  carrier-script candidates, and flow slices whose private in-memory shape may
+  predate authored-only import targets. It is not a syntax compatibility epoch.
 - `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
   defining declaration owner.
 - `SvelteScriptProvider::VERSION = 12` independently rejects Svelte candidate
@@ -1480,10 +1479,10 @@ composition table. Summary:
 
 | Layer | Family | Key dimensions |
 |---|---|---|
-| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version, file_language_id` — the authoritative per-file storage layer; stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations`. `file_language_id` is the file's `FileLanguage` row (the per-file classification dimension; every key producer currently derives it from the static registry resolution, identical to the host-resolved row while no gated rows exist; the first gated row's producer wiring threads the host-resolved row so a capability flip misses ONLY the affected files' slots) |
+| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parse_key, build_toolchain_fingerprint, file_language_id` — `parse_key` canonically identifies exact bytes, language, syntax profile, and compatibility domain/epoch; the single session-owned fingerprint invalidates private DTO shape without pretending syntax changed. `IndexedReady` retains the scheduler/runtime-authoritative `FileLanguage` used to parse those bytes, and every exact writer keys from that retained row. The store retains its existing per-store lanes. |
 | `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`) |
 | `ResolvedImportFacts` | Content-addressed | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21) |
-| Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |
+| Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, build_toolchain_fingerprint` |
 | `MemberSemanticFactStore` | Content-addressed | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space` |
 | `MemberDisplayFactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space` |
 | `BinderIdentityFactsStore` (family A, the binder-identity substrate) | Content-addressed | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate). |
@@ -1494,6 +1493,19 @@ composition table. Summary:
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
 | `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`. |
+
+Every production `FileArtifactStore` read that can return a content candidate
+must carry the authoritative `ParseKey` and `FileLanguage`. A content hash is
+not an exact read identity: equal bytes parsed with distinct syntax profiles
+coexist, and a convenience read must not select whichever sibling was inserted
+first. Base reads recover the accepted source-stage identity. Overlay reads
+retain the scheduler/runtime language for an existing canonical; only a
+genuinely overlay-only canonical uses the shared classifier fallback. The
+post-parse `IndexedReady.file_language` row and its actual `raw_source` bytes
+are the writer authority, so `FileArtifactKey::for_indexed` is byte-identical
+to `for_source_identity` for the same canonical bytes, parse environment, and
+toolchain fingerprint. A path extension never overrides an explicit runtime
+language.
 
 CREO event rows are cached only as values derived from the stored canonical
 resolved surface stream. Resolved callable identities carry the exact

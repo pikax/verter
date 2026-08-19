@@ -2,7 +2,7 @@
 //!
 //! Hosts the per-framework carrier bridges between the parser's typed
 //! parse results and the framework-neutral
-//! [`verter_language::FrameworkParseArtifact`]. The compiler is the one
+//! [`verter_compiler::framework_common::FrameworkParseArtifact`]. The compiler is the one
 //! crate BOTH producers (parse pipelines) and the session (carrier
 //! consumers) can name without dependency cycles, so the concrete
 //! `CarrierParse` wrappers live here rather than in `verter_parser`
@@ -11,20 +11,18 @@
 //!
 //! On top of the carrier wrappers it owns the compiler-side carrier
 //! framework substrate: the [`CarrierCompiler`] trait (parse / eval /
-//! IDE / template), the [`CarrierCompilerRegistry`] the host's carrier
-//! dispatch looks up, and the blessed [`CarrierCompilerCtx`] downcast.
-//! Vue is the reference implementation
+//! IDE / template) and the [`CarrierCompilerRegistry`] the host's carrier
+//! dispatch looks up. Vue is the reference implementation
 //! ([`vue_bridge::VueCarrierCompiler`]), delegating call-for-call to the
 //! existing Vue pipeline with ZERO edits to any Vue parser/codegen
 //! module.
 
 pub mod carrier_compiler;
-pub mod ctx;
 pub(crate) mod generated_chunk;
 pub mod generated_identifier;
 #[doc(hidden)]
 pub mod registered_carrier_projection;
-mod registered_projector_seal;
+mod registered_geometry_state;
 pub mod registry;
 pub mod vue_bridge;
 
@@ -38,13 +36,13 @@ pub mod sourcemap_e2e_helpers;
 
 pub use carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
-    ParseOptions, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
 };
-pub use ctx::CarrierCompilerCtx;
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
 #[doc(hidden)]
+pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;

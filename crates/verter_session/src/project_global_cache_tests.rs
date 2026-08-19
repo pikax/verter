@@ -65,6 +65,18 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+fn upsert_with_language(host: &VerterHost, id: &str, source: &str, file_language: FileLanguage) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_language,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+}
+
 /// Force IndexedReady materialization for a canonical. Consumers normally
 /// trigger this implicitly through a query; tests need an explicit hook
 /// because the upsert path evicts on content change and `FileArtifactStore`
@@ -83,9 +95,7 @@ fn indexed_whole_hash(host: &VerterHost, canonical_id: &str) -> Option<[u8; 16]>
     let whole_hash = host
         .ensure_indexed_ready(canonical_id)
         .map(|indexed| indexed.whole_hash)?;
-    host.project_type_store()
-        .indexed()
-        .get(canonical_id, whole_hash)
+    host.exact_current_indexed_for_test(canonical_id, whole_hash)
         .map(|ir| ir.whole_hash)
 }
 
@@ -137,13 +147,13 @@ fn edit_replaces_entry_without_in_place_mutation() {
     assert_ne!(hash_v1, hash_v2);
 
     // Looking up under v1 now misses — the live entry is under v2.
-    let miss = host.project_type_store().indexed().get("/w/t.ts", hash_v1);
+    let miss = host.exact_current_indexed_for_test("/w/t.ts", hash_v1);
     assert!(
         miss.is_none(),
         "after an edit, IndexedReady must reject stale whole_hash lookups"
     );
 
-    let live = host.project_type_store().indexed().get("/w/t.ts", hash_v2);
+    let live = host.exact_current_indexed_for_test("/w/t.ts", hash_v2);
     assert!(live.is_some(), "live entry under new hash must be present");
 }
 
@@ -171,9 +181,7 @@ fn content_change_publishes_new_indexed_entry_under_new_hash() {
     // store is content-addressed and may keep it as an inert candidate;
     // current reads key on the new hash.
     assert!(host
-        .project_type_store()
-        .indexed()
-        .get("/w/t.ts", hash_v2)
+        .exact_current_indexed_for_test("/w/t.ts", hash_v2)
         .is_some());
 }
 
@@ -206,14 +214,10 @@ fn indexed_lookup_rejects_stale_hash_without_a_request_view() {
     };
 
     assert!(host
-        .project_type_store()
-        .indexed()
-        .get("/w/t.ts", wrong_hash)
+        .exact_current_indexed_for_test("/w/t.ts", wrong_hash)
         .is_none());
     assert!(host
-        .project_type_store()
-        .indexed()
-        .get("/w/t.ts", hash)
+        .exact_current_indexed_for_test("/w/t.ts", hash)
         .is_some());
 }
 
@@ -231,6 +235,64 @@ fn vue_sfc_upsert_publishes_indexed_ready() {
     assert_ne!(hash, [0u8; 16]);
 }
 
+/// Runtime language is the artifact identity authority even when it disagrees
+/// with the canonical path. Both override directions must publish one exact
+/// candidate that the source-stage reader can recover.
+#[test]
+fn runtime_language_override_publishes_one_exact_indexed_artifact() {
+    let host = host();
+
+    let extensionless = "/w/extensionless-carrier";
+    let vue_source =
+        "<script setup lang=\"ts\">const x = 1</script>\n<template><div /></template>\n";
+    upsert_with_language(&host, extensionless, vue_source, FileLanguage::vue());
+    let extensionless_indexed = host
+        .ensure_indexed_ready(extensionless)
+        .expect("extensionless Vue carrier must materialize");
+    let extensionless_key = host
+        .authoritative_current_artifact_key(extensionless)
+        .expect("runtime Vue source identity");
+    let extensionless_hit = host.project_type_store().indexed().get(
+        extensionless,
+        extensionless_indexed.whole_hash,
+        &extensionless_key.parse_key,
+        &extensionless_key.file_language_id,
+    );
+
+    let script_path = "/w/plain-script.vue";
+    let script_source = "export type Plain = { value: number };\n";
+    upsert_with_language(&host, script_path, script_source, FileLanguage::script_ts());
+    let script_indexed = host
+        .ensure_indexed_ready(script_path)
+        .expect("plain script with a .vue path must materialize");
+    let script_key = host
+        .authoritative_current_artifact_key(script_path)
+        .expect("runtime script source identity");
+    let script_hit = host.project_type_store().indexed().get(
+        script_path,
+        script_indexed.whole_hash,
+        &script_key.parse_key,
+        &script_key.file_language_id,
+    );
+
+    assert!(
+        extensionless_hit.is_some(),
+        "an extensionless canonical loaded as Vue must publish under Vue identity"
+    );
+    assert!(
+        script_hit.is_some(),
+        "a .vue canonical loaded as Script must publish under Script identity"
+    );
+    assert!(
+        Arc::ptr_eq(extensionless_hit.as_ref().unwrap(), &extensionless_indexed),
+        "the exact Vue read must recover the one materialized artifact"
+    );
+    assert!(
+        Arc::ptr_eq(script_hit.as_ref().unwrap(), &script_indexed),
+        "the exact Script read must recover the one materialized artifact"
+    );
+}
+
 /// The project-global `FileArtifactStore` accessor returns the same `Arc`
 /// instance across repeated lookups — so concurrent warm readers never
 /// clone the payload.
@@ -239,9 +301,12 @@ fn repeated_indexed_lookups_return_same_arc() {
     let host = host();
     upsert_ts(&host, "/w/t.ts", "export type T = {}");
     let hash = indexed_whole_hash(&host, "/w/t.ts").expect("IndexedReady must exist");
-    let store = host.project_type_store();
-    let a = store.indexed().get("/w/t.ts", hash).unwrap();
-    let b = store.indexed().get("/w/t.ts", hash).unwrap();
+    let a = host
+        .exact_current_indexed_for_test("/w/t.ts", hash)
+        .unwrap();
+    let b = host
+        .exact_current_indexed_for_test("/w/t.ts", hash)
+        .unwrap();
     assert!(Arc::ptr_eq(&a, &b), "warm lookups must share one Arc");
 }
 
@@ -1226,9 +1291,7 @@ fn project_type_store_exposes_stable_route_and_imported_root_handles() {
 fn unseen_canonical_returns_none_from_indexed_db() {
     let host = host();
     assert!(host
-        .project_type_store()
-        .indexed()
-        .get("/w/never-seen.ts", [0u8; 16])
+        .exact_current_indexed_for_test("/w/never-seen.ts", [0u8; 16])
         .is_none());
 }
 

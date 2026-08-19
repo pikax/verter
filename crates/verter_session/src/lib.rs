@@ -61,6 +61,7 @@ pub mod binder_identity_facts;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
 mod block_content;
+pub mod build_toolchain_fingerprint;
 mod cache;
 pub mod cache_schema;
 pub mod carrier_artifact_cohort;

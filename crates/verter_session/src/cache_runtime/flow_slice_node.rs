@@ -15,7 +15,7 @@
 //! Both nodes are CONTENT-ADDRESSED memory-side [`ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
 //! body-sensitive / cosmetic-insensitive `flow_body_stable_hash`, the
-//! EXACT per-function byte hash, the parse-env hash, the parser version,
+//! EXACT per-function byte hash, the parse-env hash, the parse key,
 //! and the demand identity, so key identity IS validity and no fact rail
 //! is required — the entries' signatures stay EMPTY, and no slice
 //! identity ever enters `ReadSetSignature.facts` (slice hashes and
@@ -111,7 +111,7 @@ pub(crate) struct FlowSliceFunctionKey {
     /// Parse-domain env hash.
     pub parse_env_hash: Hash16,
     /// Parser version.
-    pub parser_version: u32,
+    pub build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
 }
 
 /// The demand identity of one slice: the demanded return-projection
@@ -212,7 +212,7 @@ pub(crate) struct FlowGraphBundle {
 
 /// The once-per-content-version graph store: `FunctionFlowGraph` (and
 /// its skeleton) is built ONCE per `(canonical, function,
-/// flow_body_stable_hash, parse_env_hash, parser_version)` and every
+/// flow_body_stable_hash, parse_env_hash, parse_key)` and every
 /// subsequent demand only re-plans reachability over the memoized
 /// graph. Memory-side; evicted per canonical through
 /// [`Self::remove_canonical`].
@@ -398,7 +398,7 @@ impl ArtifactNode for FlowSliceHashNode {
 
     /// Content-addressed warm validity: the key pins the canonical, the
     /// function identity, the body content hash, the parse env, the
-    /// parser version, and the demand — key identity IS validity, so a
+    /// parse key, and the demand — key identity IS validity, so a
     /// published entry serves across generations (like every
     /// content-addressed artifact family).
     fn validate(

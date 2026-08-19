@@ -166,9 +166,11 @@ fn host_internal_diagnostic_spans_remain_byte_offsets() {
     let result = upsert_vue(&host, "Comp.vue", source);
     let expected_div_start = source.find("<div>").unwrap() as u32;
 
-    let matches_byte_span = result.diagnostics.diagnostics.iter().any(|d| {
-        d.code.contains("XMissingEndTag") && d.span.map(|s| s.start) == Some(expected_div_start)
-    });
+    let matches_byte_span = result
+        .diagnostics
+        .diagnostics
+        .iter()
+        .any(|d| d.code.contains("XMissingEndTag") && d.span.start == expected_div_start);
 
     assert!(
         matches_byte_span,
@@ -178,11 +180,7 @@ fn host_internal_diagnostic_spans_remain_byte_offsets() {
             .diagnostics
             .diagnostics
             .iter()
-            .map(|d| (
-                d.code.clone(),
-                d.span.map(|s| s.start),
-                d.span.map(|s| s.end)
-            ))
+            .map(|d| (d.code.clone(), d.span.start, d.span.end))
             .collect::<Vec<_>>()
     );
 }

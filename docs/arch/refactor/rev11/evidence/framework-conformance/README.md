@@ -27,5 +27,5 @@ as an accepted conformance pack.
 Generation from the exact clean upstream trees produced 2,003 Vue test declarations
 across the five compiler packages and 3,457 Svelte sample/suite rows. The committed
 manifest SHA-256 values are respectively
-`30123a6d88e1e7382afdcc752b5438c3486dd462e59ce831742ad0a3a3dd95bd` and
-`c251be5b8b1de3e58c526700c426e2502e8bd1eb1dd622e22119b667adee7a8e`.
+`76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba` and
+`09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e`.

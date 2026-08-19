@@ -334,7 +334,7 @@ pub struct ResolvedTextEdit {
 /// ([`crate::traits::TypeProvider::provider_wire_witness`]) — per-engine
 /// normalization INTO the neutral protocol is the producer's job, once, at the
 /// IPC boundary, and this token is what marks that boundary. The field is
-/// non-public (the `CarrierAccessToken { _private: () }` precedent), so an
+/// non-public (the standard `_private: ()` sealed-field pattern), so an
 /// out-of-crate struct literal does not compile.
 pub struct DisplaySignatureWireWitness {
     _private: (),

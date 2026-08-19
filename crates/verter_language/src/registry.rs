@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 
 use crate::ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 use crate::language::{FileLanguage, ScriptSourceType};
-use crate::parse_artifact::CarrierAccessToken;
 
 /// The Svelte rune-module language id (the [`FileLanguage::adapter_script_language`]
 /// id for a `.svelte.ts` / `.svelte.js` standalone rune module).
@@ -66,33 +65,19 @@ impl LanguageRow {
         }
     }
 
-    /// A framework CARRIER row. The SOLE [`CarrierAccessToken`] minting
-    /// point: the row's token is minted here, during carrier-row
-    /// construction, and returned exactly ONCE to the
-    /// registry-construction caller as the carrier row's registration
-    /// proof. Consumers (adapter descriptors, the session's blessed
-    /// `vue_parse()` accessor) RECEIVE that token; none constructs one.
-    ///
-    /// Crate-private: carrier rows are static built-in registration
-    /// data owned by this crate. Keeping the minting row constructor
-    /// out of the public API means downstream crates cannot mint a
-    /// token for an ARBITRARY adapter id — the public receipt channel
-    /// ([`LanguageRegistry::__built_in_with_carrier_tokens`]) hands out
-    /// proofs only for the fixed built-in carrier rows.
+    /// A framework CARRIER row.
     ///
     /// # Panics
     ///
     /// Panics when `language` is not a framework carrier — carrier rows
     /// are static built-in registration data, so a non-carrier language
     /// here is a programming error, not an input condition.
-    pub(crate) fn carrier(extension: &str, language: FileLanguage) -> (Self, CarrierAccessToken) {
-        let adapter_id = language
-            .adapter_id()
-            .cloned()
-            .filter(|_| language.is_framework_carrier())
-            .expect("LanguageRow::carrier requires a framework CARRIER language");
-        let token = crate::parse_artifact::mint_carrier_access_token(adapter_id);
-        (Self::fixed(extension, language), token)
+    pub(crate) fn carrier(extension: &str, language: FileLanguage) -> Self {
+        assert!(
+            language.is_framework_carrier() && language.adapter_id().is_some(),
+            "LanguageRow::carrier requires a framework CARRIER language"
+        );
+        Self::fixed(extension, language)
     }
 }
 
@@ -146,41 +131,17 @@ impl LanguageRegistry {
     }
 
     /// The built-in rows: the TS/JS script family plus the `.vue` and
-    /// `.svelte` framework carriers. Carrier registration proofs are
-    /// dropped; the blessed adapter receipt sites use the hidden
-    /// [`Self::__built_in_with_carrier_tokens`] channel.
+    /// `.svelte` framework carriers.
     pub fn built_in() -> Self {
-        Self::__built_in_with_carrier_tokens().0
-    }
-
-    /// The built-in rows plus the carrier rows' registration proofs
-    /// ([`CarrierAccessToken`]s, one per carrier row, in row order).
-    ///
-    /// The tokens are minted during carrier-row construction
-    /// ([`LanguageRow::carrier`]) and returned exactly once, here, to
-    /// the registry-construction caller. The host receives its adapter
-    /// tokens through this channel at host construction; there is no
-    /// by-id token lookup and no arbitrary-id mint channel.
-    ///
-    /// Hidden, not `pub(crate)`: the sanctioned receipt site lives in
-    /// `verter_session` (the Vue adapter's `vue_parse()` accessor), so
-    /// the channel must cross the crate seam — a literal `pub(crate)`
-    /// cannot compile there. Carrier privacy is public-hidden +
-    /// token-gated + statically guarded: the
-    /// `carrier_access_token_minted_only_in_verter_language` guard
-    /// confines every call site of this channel to the blessed receipt
-    /// allowlist, exactly like the `__carrier_downcast_*` helpers.
-    #[doc(hidden)]
-    pub fn __built_in_with_carrier_tokens() -> (Self, Vec<CarrierAccessToken>) {
-        let (vue_row, vue_token) = LanguageRow::carrier("vue", FileLanguage::vue());
-        let (svelte_row, svelte_token) = LanguageRow::carrier("svelte", FileLanguage::svelte());
+        let vue_row = LanguageRow::carrier("vue", FileLanguage::vue());
+        let svelte_row = LanguageRow::carrier("svelte", FileLanguage::svelte());
         // Svelte 5 standalone rune modules. These are NOT carriers — they are
         // adapter-module SCRIPTS (`FileLanguage::adapter_module`), matched
         // BEFORE the plain `.ts` / `.js` rows by the longest-suffix-first sort
         // (`.svelte.ts` (8) beats `.ts` (3)), so a `.svelte.ts` path resolves
         // to the rune-module row rather than falling through to a plain script.
         let svelte_rune_lang = || LanguageId::new(SVELTE_RUNE_MODULE_LANGUAGE_ID);
-        let registry = Self::new(vec![
+        Self::new(vec![
             vue_row,
             svelte_row,
             LanguageRow::fixed(
@@ -210,8 +171,7 @@ impl LanguageRegistry {
             LanguageRow::fixed("mjs", FileLanguage::script(ScriptSourceType::mjs())),
             LanguageRow::fixed("cjs", FileLanguage::script(ScriptSourceType::cjs())),
             LanguageRow::fixed("jsx", FileLanguage::script(ScriptSourceType::jsx())),
-        ]);
-        (registry, vec![vue_token, svelte_token])
+        ])
     }
 
     /// The process-wide built-in registry.

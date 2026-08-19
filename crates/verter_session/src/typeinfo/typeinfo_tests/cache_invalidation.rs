@@ -16,7 +16,7 @@
 //! Cache layers being characterised:
 //!
 //!   * `FileArtifactStore` — per-file `IndexedReady` keyed by
-//!     `(canonical_id, content_hash, parse_env_hash, parser_version)`.
+//!     `(canonical_id, content_hash, parse_env_hash, parse_key)`.
 //!     Editing a file via `upsert_ts` bumps `content_hash` and forces a
 //!     rebuild of that file's artifacts.
 //!   * `ResolvedImportFacts` — content-addressed import-route facts

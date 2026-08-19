@@ -32,12 +32,20 @@ use verter_compiler::framework_common::{
 /// not the code without a map, not the code with an empty map. Both would be
 /// the unmapped successful result this path exists to prevent, and both callers
 /// of the assembler require code and map together.
-fn assembled_map_failure_diagnostics(failure: AssembleMapFailure) -> DiagnosticsSnapshot {
+///
+/// The failure concerns the whole assembled module, not one authored
+/// location, so `source_len` anchors the diagnostic to the whole document —
+/// an honest "somewhere in this file" span rather than a fabricated point.
+fn assembled_map_failure_diagnostics(
+    failure: AssembleMapFailure,
+    source_len: u32,
+) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
         severity: HostSeverity::Error,
         code: "HOST_UNCOMPOSABLE_MAIN_SOURCE_MAP".to_string(),
         message: failure.to_string(),
-        span: None,
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
     }])
 }
 
@@ -3154,12 +3162,13 @@ impl VerterHost {
                         "no framework parse artifact for '{}' — cannot route the runtime compile",
                         snapshot.canonical_id
                     ),
-                    span: None,
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
                 }])),
             );
         };
         let Some(compiler) = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(&artifact.adapter_id, &artifact.language_id)
+            .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
         else {
             return Err(
                 diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
@@ -3167,10 +3176,11 @@ impl VerterHost {
                     code: "HOST_NO_CARRIER_COMPILER".to_string(),
                     message: format!(
                         "no carrier compiler for adapter '{}' / language '{}'",
-                        artifact.adapter_id.as_str(),
-                        artifact.language_id.as_str()
+                        artifact.adapter_id().as_str(),
+                        artifact.language_id().as_str()
                     ),
-                    span: None,
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
                 }])),
             );
         };
@@ -3192,7 +3202,8 @@ impl VerterHost {
                     severity: HostSeverity::Error,
                     code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
                     message: "compile profile grammar differs from registered grammar".to_string(),
-                    span: None,
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
                 }])),
             );
         }
@@ -3221,10 +3232,11 @@ impl VerterHost {
                         code: code.to_string(),
                         message: format!(
                             "carrier '{}' cannot produce a runtime bundle for '{}'",
-                            artifact.adapter_id.as_str(),
+                            artifact.adapter_id().as_str(),
                             snapshot.canonical_id
                         ),
-                        span: None,
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
                     },
                 ])));
             }
@@ -3250,6 +3262,7 @@ impl VerterHost {
                         },
                         code: d.code.clone(),
                         message: d.message.clone(),
+                        arguments: Vec::new(),
                         span: d.span,
                     })
                     .collect();
@@ -3260,6 +3273,7 @@ impl VerterHost {
                     severity: HostSeverity::Warning,
                     code: refusal.diagnostic_code.clone(),
                     message: refusal.message.clone(),
+                    arguments: Vec::new(),
                     span: refusal.span,
                 });
                 refusal_diags = refusal_diags.merge(DiagnosticsSnapshot::from_vec(lifted));
@@ -3290,6 +3304,7 @@ impl VerterHost {
                         },
                         code: d.code.clone(),
                         message: d.message.clone(),
+                        arguments: Vec::new(),
                         span: d.span,
                     })
                     .collect(),
@@ -3342,7 +3357,9 @@ impl VerterHost {
                         &snapshot.meta,
                         profile,
                     )
-                    .map_err(assembled_map_failure_diagnostics)?;
+                    .map_err(|failure| {
+                        assembled_map_failure_diagnostics(failure, snapshot.source.len() as u32)
+                    })?;
                     (assembled.code, assembled.source_map.map(Arc::from))
                 }
             };
@@ -3650,7 +3667,8 @@ impl VerterHost {
                         "no framework parse artifact for '{}' — cannot route the runtime compile",
                         snapshot.canonical_id
                     ),
-                        span: None,
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
                     },
                 ])),
                 requested_mode: profile.requested_mode,
@@ -3659,7 +3677,7 @@ impl VerterHost {
             }));
         };
         let Some(compiler) = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(&artifact.adapter_id, &artifact.language_id)
+            .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
         else {
             return Err(HostError::CompileError(CompileFailure {
                 diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
@@ -3668,10 +3686,11 @@ impl VerterHost {
                         code: "HOST_NO_CARRIER_COMPILER".to_string(),
                         message: format!(
                             "no carrier compiler for adapter '{}' / language '{}'",
-                            artifact.adapter_id.as_str(),
-                            artifact.language_id.as_str()
+                            artifact.adapter_id().as_str(),
+                            artifact.language_id().as_str()
                         ),
-                        span: None,
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
                     },
                 ])),
                 requested_mode: profile.requested_mode,
@@ -3696,7 +3715,8 @@ impl VerterHost {
                         code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
                         message: "compile profile grammar differs from registered grammar"
                             .to_string(),
-                        span: None,
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
                     },
                 ])),
                 requested_mode: profile.requested_mode,
@@ -3741,10 +3761,11 @@ impl VerterHost {
                             code: code.to_string(),
                             message: format!(
                                 "carrier '{}' cannot produce a runtime bundle for '{}'",
-                                artifact.adapter_id.as_str(),
+                                artifact.adapter_id().as_str(),
                                 snapshot.canonical_id
                             ),
-                            span: None,
+                            arguments: Vec::new(),
+                            span: verter_span::Span::new(0, snapshot.source.len() as u32),
                         },
                     ])),
                     requested_mode: profile.requested_mode,
@@ -3769,6 +3790,7 @@ impl VerterHost {
                 severity,
                 code: d.code.clone(),
                 message: d.message.clone(),
+                arguments: Vec::new(),
                 span: d.span,
             });
         }
@@ -3811,7 +3833,10 @@ impl VerterHost {
                 )
                 .map_err(|failure| {
                     HostError::CompileError(CompileFailure {
-                        diagnostics: assembled_map_failure_diagnostics(failure),
+                        diagnostics: assembled_map_failure_diagnostics(
+                            failure,
+                            snapshot.source.len() as u32,
+                        ),
                         requested_mode: profile.requested_mode,
                         actual_mode: profile.requested_mode,
                         downgrade_reason: None,

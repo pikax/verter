@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
 
-use crate::types::Hash16;
 use crate::VerterHost;
 
 use super::is_raw_import_specifier_id;
@@ -67,6 +66,15 @@ pub(crate) struct OverlayArtifactIdentity {
 }
 
 impl OverlayArtifactIdentity {
+    /// Runtime language for this overlay identity. An existing scheduler
+    /// canonical keeps its explicit language override; path classification is
+    /// used only when the overlay introduces a canonical with no runtime row.
+    fn file_language(&self, host: &VerterHost) -> verter_language::FileLanguage {
+        host.effective_file_state(&self.analysis_canonical, None)
+            .map(|state| state.file_language)
+            .unwrap_or_else(|| host.language_classifier.classify(&self.analysis_canonical))
+    }
+
     /// The raw overlay owner canonical — keys `SessionView` overlay
     /// state (`source`, `content_hash_for`, `overlay_content_hash_for`,
     /// `overlay_artifact_discriminator`, tombstones).
@@ -82,6 +90,29 @@ impl OverlayArtifactIdentity {
         &self.analysis_canonical
     }
 
+    /// Reconstruct the exact key used by the current view without consulting
+    /// another candidate from the artifact store.
+    pub(crate) fn current_read_key(
+        &self,
+        host: &VerterHost,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        let source = view.source(&self.raw_overlay_owner)?;
+        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
+        let file_language = self.file_language(host);
+        let parse_env_hash = view
+            .overlay_artifact_discriminator(&self.raw_overlay_owner)
+            .unwrap_or(crate::file_artifact_store::BASE_PARSE_ENV_HASH);
+        crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::from(self.analysis_canonical.as_str()),
+            content_hash,
+            source.as_ref(),
+            file_language,
+            None,
+            parse_env_hash,
+        )
+    }
+
     /// Build the exact overlay artifact [`FileArtifactKey`](crate::file_artifact_store::FileArtifactKey)
     /// for this identity under `view`.
     ///
@@ -94,14 +125,6 @@ impl OverlayArtifactIdentity {
     /// is `overlay_scoped`; otherwise (a base-passthrough view) it is
     /// `base`. Returns `None` when the view reports no current content
     /// hash for the raw owner (unloaded / evicted / tombstoned).
-    fn overlay_artifact_key(
-        &self,
-        view: &dyn crate::session_view::SessionView,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
-        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
-        Some(self.overlay_artifact_key_for_content(view, content_hash))
-    }
-
     /// Build the artifact key for a CALLER-SUPPLIED content hash. READ
     /// paths use it via [`Self::overlay_artifact_key`]; the publish path
     /// uses the gated [`Self::overlay_publish_key_for_content`] instead.
@@ -110,24 +133,6 @@ impl OverlayArtifactIdentity {
     /// is the base-passthrough READ shape: a view with no overlay for
     /// the owner reads — and a fully overlay-FREE view publishes —
     /// the base artifact under its base key.
-    fn overlay_artifact_key_for_content(
-        &self,
-        view: &dyn crate::session_view::SessionView,
-        content_hash: Hash16,
-    ) -> crate::file_artifact_store::FileArtifactKey {
-        match view.overlay_artifact_discriminator(&self.raw_overlay_owner) {
-            Some(discriminator) => crate::file_artifact_store::FileArtifactKey::overlay_scoped(
-                Arc::from(self.analysis_canonical.as_str()),
-                content_hash,
-                discriminator,
-            ),
-            None => crate::file_artifact_store::FileArtifactKey::base(
-                Arc::from(self.analysis_canonical.as_str()),
-                content_hash,
-            ),
-        }
-    }
-
     /// PUBLISH-side artifact key — the gated variant of
     /// [`Self::overlay_artifact_key_for_content`].
     ///
@@ -165,10 +170,10 @@ impl OverlayArtifactIdentity {
     /// exactly when they report an overlay content hash. The gate
     /// enforces that invariant at the write boundary instead of
     /// trusting caller discipline.
-    fn overlay_publish_key_for_content(
+    fn overlay_publish_key_for_indexed(
         &self,
         view: &dyn crate::session_view::SessionView,
-        content_hash: Hash16,
+        indexed: &crate::project_type_store::IndexedReady,
     ) -> Option<crate::file_artifact_store::FileArtifactKey> {
         if view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
@@ -177,7 +182,14 @@ impl OverlayArtifactIdentity {
         {
             return None;
         }
-        Some(self.overlay_artifact_key_for_content(view, content_hash))
+        let parse_env_hash = view
+            .overlay_artifact_discriminator(&self.raw_overlay_owner)
+            .unwrap_or(crate::file_artifact_store::BASE_PARSE_ENV_HASH);
+        Some(crate::file_artifact_store::FileArtifactKey::for_indexed(
+            Arc::from(self.analysis_canonical.as_str()),
+            indexed,
+            parse_env_hash,
+        ))
     }
 
     /// Read the published overlay [`FileArtifacts`](crate::file_artifact_store::FileArtifacts)
@@ -195,8 +207,28 @@ impl OverlayArtifactIdentity {
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        let key = self.overlay_artifact_key(view)?;
-        host.project_type_store().indexed().get_artifacts(&key)
+        let key = self.current_read_key(host, view)?;
+        match view.overlay_artifact_discriminator(&self.raw_overlay_owner) {
+            Some(discriminator) => host
+                .project_type_store()
+                .indexed()
+                .get_overlay_artifacts_scoped(
+                    &self.analysis_canonical,
+                    key.content_hash,
+                    discriminator,
+                    &key.parse_key,
+                    &key.file_language_id,
+                ),
+            None => host
+                .project_type_store()
+                .indexed()
+                .get_base_artifacts_for_content(
+                    &self.analysis_canonical,
+                    key.content_hash,
+                    &key.parse_key,
+                    &key.file_language_id,
+                ),
+        }
     }
 }
 
@@ -293,6 +325,35 @@ impl VerterHost {
             raw_overlay_owner: raw_canonical.to_string(),
             analysis_canonical,
         }
+    }
+
+    /// Test-only exact read of the artifact keyed by the supplied session
+    /// view. The key is rebuilt through the same mixed raw/analysis identity
+    /// authority as production overlay reads.
+    #[cfg(test)]
+    pub(crate) fn exact_overlay_artifacts_for_test(
+        &self,
+        raw_canonical: &str,
+        expected_whole_hash: crate::types::Hash16,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        let identity = self.overlay_artifact_identity(raw_canonical);
+        let key = identity.current_read_key(self, view)?;
+        (key.content_hash == expected_whole_hash)
+            .then(|| self.project_type_store.indexed().get_artifacts(&key))?
+    }
+
+    /// Test-only indexed projection of
+    /// [`Self::exact_overlay_artifacts_for_test`].
+    #[cfg(test)]
+    pub(crate) fn exact_overlay_indexed_for_test(
+        &self,
+        raw_canonical: &str,
+        expected_whole_hash: crate::types::Hash16,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.exact_overlay_artifacts_for_test(raw_canonical, expected_whole_hash, view)
+            .map(|artifacts| Arc::clone(&artifacts.indexed))
     }
 
     /// View-aware overlay materialiser.
@@ -583,25 +644,26 @@ impl VerterHost {
         let overlay_source = view.source(canonical_id)?;
         let overlay_whole_hash = view.content_hash_for(canonical_id)?;
         let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        let overlay_file_language = self.language_classifier.classify(analysis_canonical_id);
+        let overlay_file_language = identity.file_language(self);
         // The overlay source never carries a scheduler carrier parse; a carrier
         // overlay (`.vue` / `.svelte`) runs the carrier parser ONCE here through
         // the counted chokepoint (the carrier-neutral producer) and everything
         // downstream reuses its framework-neutral artifact.
-        let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> =
-            if overlay_file_language.is_framework_carrier() {
-                Some(Arc::clone(
-                    self.registered_overlay_structure(
-                        analysis_canonical_id,
-                        Arc::clone(&raw_source),
-                        &overlay_file_language,
-                        view,
-                    )?
-                    .artifact(),
-                ))
-            } else {
-                None
-            };
+        let framework_parse: Option<
+            Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+        > = if overlay_file_language.is_framework_carrier() {
+            Some(Arc::clone(
+                self.registered_overlay_structure(
+                    analysis_canonical_id,
+                    Arc::clone(&raw_source),
+                    &overlay_file_language,
+                    view,
+                )?
+                .artifact(),
+            ))
+        } else {
+            None
+        };
         let whole_hash = overlay_whole_hash;
 
         // `eval_is_extracted_script` records whether the eval source is
@@ -719,7 +781,7 @@ impl VerterHost {
                         &job_canonical,
                         job_raw_source.as_ref(),
                         job_scope,
-                        parsed_sfc,
+                        &parsed_sfc,
                         job_framework_parse
                             .as_deref()
                             .expect("Vue parse came from this framework artifact"),
@@ -861,6 +923,7 @@ impl VerterHost {
 
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
             whole_hash,
+            file_language: overlay_file_language,
             shallow_state: Arc::clone(&shallow_state),
             built_at_content_generation: flight_workspace_generation,
             parse_env_hash: flight_parse_env_hash,
@@ -973,7 +1036,7 @@ impl VerterHost {
         // declines (serve ReturnOnly, publish nothing); production
         // callers gate on `overlay_content_hash_for(owner)` and never
         // reach the decline.
-        let Some(key) = identity.overlay_publish_key_for_content(view, indexed.whole_hash) else {
+        let Some(key) = identity.overlay_publish_key_for_indexed(view, &indexed) else {
             return Some(crate::project_type_store::IndexedFlightOutcome {
                 indexed,
                 published: false,

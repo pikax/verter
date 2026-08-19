@@ -3,7 +3,7 @@
 //! This module owns the Svelte-specific compiler surface: the byte parser
 //! ([`parser`]) producing a [`parser::ParsedSvelte`], and the
 //! [`carrier::SvelteCarrierCompiler`] that lifts it into the framework-neutral
-//! [`FrameworkParseArtifact`](verter_language::FrameworkParseArtifact) and
+//! [`FrameworkParseArtifact`](verter_compiler::framework_common::FrameworkParseArtifact) and
 //! drives the four [`CarrierCompiler`](crate::framework_common::CarrierCompiler)
 //! operations.
 //!

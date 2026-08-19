@@ -62,12 +62,6 @@ impl SvelteParser<'_> {
         self.record_strict_parse_error(SvelteStrictParseErrorKind::ElementInvalidClosingTag, span);
     }
 
-    /// Strict fact: an element / raw block left open at EOF, or a raw-block close carrying
-    /// a trailing token (the close is not recognised) — official `element_unclosed`.
-    pub(super) fn record_element_unclosed(&mut self, span: Span) {
-        self.record_strict_parse_error(SvelteStrictParseErrorKind::ElementUnclosed, span);
-    }
-
     /// Strict fact: an end of input reached mid-construct (an unterminated quoted
     /// attribute value, a `<` at EOF, a `</` at EOF) — official `unexpected_eof`.
     pub(super) fn record_unexpected_eof(&mut self, span: Span) {
@@ -78,5 +72,32 @@ impl SvelteParser<'_> {
     /// inside a rule) — official `css_expected_identifier`.
     pub(super) fn record_css_expected_identifier(&mut self, span: Span) {
         self.record_strict_parse_error(SvelteStrictParseErrorKind::CssExpectedIdentifier, span);
+    }
+
+    pub(super) fn record_block_invalid_continuation(&mut self, span: Span) {
+        self.record_strict_parse_error(
+            SvelteStrictParseErrorKind::BlockInvalidContinuationPlacement,
+            span,
+        );
+    }
+
+    pub(super) fn record_block_invalid_placement(&mut self, span: Span) {
+        self.record_strict_parse_error(SvelteStrictParseErrorKind::BlockInvalidPlacement, span);
+    }
+
+    pub(super) fn record_js_parse_error(&mut self, span: Span) {
+        self.record_strict_parse_error(SvelteStrictParseErrorKind::JsParseError, span);
+    }
+
+    pub(super) fn record_block_unexpected_character(&mut self, span: Span) {
+        self.record_strict_parse_error(SvelteStrictParseErrorKind::BlockUnexpectedCharacter, span);
+    }
+
+    pub(super) fn record_declaration_tag_invalid_type(&mut self, span: Span) {
+        self.record_strict_parse_error(SvelteStrictParseErrorKind::DeclarationTagInvalidType, span);
+    }
+
+    pub(super) fn record_unexpected_reserved_word(&mut self, span: Span) {
+        self.record_strict_parse_error(SvelteStrictParseErrorKind::UnexpectedReservedWord, span);
     }
 }

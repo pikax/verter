@@ -134,12 +134,12 @@ pub fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
     source.len() as u32
 }
 
-pub(super) fn maybe_utf16_offset(raw: Option<u32>, source: Option<&str>) -> Option<u32> {
-    raw.map(|offset| {
-        source
-            .map(|s| byte_offset_to_utf16(s, offset))
-            .unwrap_or(offset)
-    })
+/// Convert a mandatory byte offset to UTF-16 when a source string is
+/// available, otherwise pass the byte offset through unconverted.
+pub(super) fn mandatory_utf16_offset(byte_offset: u32, source: Option<&str>) -> u32 {
+    source
+        .map(|s| byte_offset_to_utf16(s, byte_offset))
+        .unwrap_or(byte_offset)
 }
 
 // ── Offset encoding conversion ──────────────────────────────────

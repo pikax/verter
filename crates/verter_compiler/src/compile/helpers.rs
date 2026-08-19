@@ -135,7 +135,7 @@ pub(crate) fn convert_diagnostics(diagnostics: &[Diagnostic]) -> Vec<CompileDiag
             },
             code: format!("{:?}", d.code),
             message: d.message.clone(),
-            span: d.span,
+            span: Some(d.span),
         })
         .collect()
 }

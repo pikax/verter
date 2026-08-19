@@ -535,7 +535,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     let FactVersionRef::FileSourceEnv {
         canonical_id,
         parse_env_hash,
-        parser_version,
+        parse_key,
         file_language_id,
     } = source_env_fact.clone()
     else {
@@ -546,7 +546,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     // contributor's registry row (never re-derived from another canonical).
     assert_eq!(
         file_language_id,
-        FileArtifactKey::derived_file_language_id("/aug.ts"),
+        FileArtifactKey::synthetic_file_language_for_test("/aug.ts"),
         "the recorded source-env identity must carry the contributor's own language row"
     );
 
@@ -567,7 +567,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
             "/aug.ts".to_string(),
             SourceEnvIdentity {
                 parse_env_hash,
-                parser_version,
+                parse_key: parse_key.clone(),
                 file_language_id: file_language_id.clone(),
             },
         )]),
@@ -593,7 +593,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
             "/aug.ts".to_string(),
             SourceEnvIdentity {
                 parse_env_hash: moved,
-                parser_version,
+                parse_key,
                 file_language_id,
             },
         )]),
@@ -654,17 +654,19 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
         panic!("the traced resolve must seal a fact signature (no overflow)");
     };
-    let (recorded_parse_env, recorded_parser_version, recorded_language) = signature
+    let (recorded_parse_env, recorded_parse_key, recorded_language) = signature
         .iter()
         .find_map(|fact| match fact {
             FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
-                parser_version,
+                parse_key,
                 file_language_id,
-            } if canonical_id == "/aug.ts" => {
-                Some((*parse_env_hash, *parser_version, file_language_id.clone()))
-            }
+            } if canonical_id == "/aug.ts" => Some((
+                parse_env_hash.to_owned(),
+                parse_key.clone(),
+                file_language_id.clone(),
+            )),
             _ => None,
         })
         .expect(
@@ -723,7 +725,7 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         "/aug.ts",
         SourceEnvIdentity {
             parse_env_hash: moved_parse_env,
-            parser_version: recorded_parser_version,
+            parse_key: recorded_parse_key,
             file_language_id: recorded_language,
         },
     );
@@ -853,7 +855,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
         };
         assert_eq!(
             *file_language_id,
-            FileArtifactKey::derived_file_language_id(augmenter),
+            FileArtifactKey::synthetic_file_language_for_test(augmenter),
             "the {augmenter} source-env identity must be recorded from the contributor's \
              own artifact key, never re-derived from another canonical"
         );
@@ -1719,7 +1721,7 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     // fingerprint a one-augmenter set would produce, so the assertion above is
     // not satisfied by an all-zero / constant hash.
     let one_augmenter = [AugmenterEntry {
-        artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [0u8; 16]),
+        artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0u8; 16]),
         parse_stable_hash: [7u8; 16],
     }];
     assert_ne!(

@@ -75,7 +75,6 @@ const STRICT_FACT_TOKENS: &[&str] = &[
     "record_expected_token",
     "record_empty_attribute_value",
     "record_nameless_close",
-    "record_element_unclosed",
     "record_unexpected_eof",
     "record_css_expected_identifier",
     "strict_parse_errors.push",

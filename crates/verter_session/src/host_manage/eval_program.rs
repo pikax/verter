@@ -92,7 +92,7 @@ impl VerterHost {
     pub(crate) fn build_eval_script_source(
         canonical_id: &str,
         source: &str,
-        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     ) -> String {
         Self::build_eval_script_source_with_extraction(canonical_id, source, framework_parse).0
     }
@@ -126,7 +126,7 @@ impl VerterHost {
     pub(crate) fn build_eval_script_source_with_extraction(
         canonical_id: &str,
         source: &str,
-        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     ) -> (String, bool) {
         // A NON-Vue framework carrier blanks NEUTRALLY from the producer's
         // recorded `script_regions` (BOTH the instance and module script blocks)
@@ -139,7 +139,7 @@ impl VerterHost {
             let is_vue = crate::typeinfo::adapters::vue::vue_parse(artifact).is_some();
             if !is_vue {
                 let mut spans: Vec<(u32, u32)> = artifact
-                    .common
+                    .common()
                     .script_regions()
                     .iter()
                     .map(|region| (region.span.start, region.span.end))
@@ -239,7 +239,7 @@ impl VerterHost {
     pub(crate) fn imported_eval_source_type_for(
         &self,
         canonical_id: &str,
-        framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     ) -> oxc_span::SourceType {
         {
             if let Some(st) = self.authoritative_source_type_for(canonical_id) {

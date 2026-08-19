@@ -9811,10 +9811,11 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
     let facts = [crate::resolver_core::FactVersionRef::FileSourceEnv {
         canonical_id: "/contrib.d.ts".to_string(),
         parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash([3u8; 16]),
-        parser_version: 2,
-        file_language_id: crate::file_artifact_store::FileArtifactKey::derived_file_language_id(
-            "/contrib.d.ts",
-        ),
+        parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
+        file_language_id:
+            crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(
+                "/contrib.d.ts",
+            ),
     }];
     assert!(
         carrier_facts_reference_canonical(&facts, "/contrib.d.ts"),

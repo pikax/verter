@@ -455,6 +455,20 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         self.inner.current_content_pinned_indexed(canonical)
     }
 
+    fn artifact_key_for_current_content(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        if self.view.overlay_content_hash_for(canonical).is_some() {
+            return self
+                .inner
+                .host_for_fact_tracer_install()
+                .overlay_artifact_identity(canonical)
+                .current_read_key(self.inner.host_for_fact_tracer_install(), self.view);
+        }
+        self.inner.artifact_key_for_current_content(canonical)
+    }
+
     /// Owned-view variant — preserves the pre-6.c semantics of building
     /// a fresh overlay-rooted snapshot per call. Retained for cold-path
     /// callers that need an owned snapshot; production hot-path callers

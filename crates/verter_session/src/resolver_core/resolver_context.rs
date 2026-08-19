@@ -343,6 +343,15 @@ pub(crate) trait ResolverContext: sealed::Sealed {
             .current_content_pinned_indexed(canonical)
     }
 
+    /// Exact artifact identity for the authority-visible current source.
+    fn artifact_key_for_current_content(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        self.host_for_fact_tracer_install()
+            .authoritative_current_artifact_key(canonical)
+    }
+
     /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical.
     ///

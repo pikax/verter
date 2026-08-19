@@ -27,7 +27,7 @@ pub enum CompactionDomain {
     /// `FileWholeHash`, `DerivedFactHash`, `Parse` — everything whose
     /// validity moves with file CONTENT.
     Content,
-    /// `FileSourceEnv` — `parse_env_hash` / `parser_version` /
+    /// `FileSourceEnv` — `parse_env_hash` / `parse_key` /
     /// `file_language_id`. Deliberately NOT [`Self::Content`]: the two
     /// production paths that move these (`publish_snapshot` via
     /// `configure_projects`, and `WorkspaceChange::ConfigChanged`) do not
@@ -919,7 +919,7 @@ pub enum FactVersionRef {
     FileSourceEnv {
         canonical_id: String,
         parse_env_hash: ParseEnvHash,
-        parser_version: u32,
+        parse_key: verter_language::ParseKey,
         file_language_id: verter_language::FileLanguage,
     },
     ProjectGeneration {
@@ -1271,6 +1271,15 @@ mod compaction_domain_tests {
             .static_resolution()
     }
 
+    fn test_parse_key(marker: u8) -> verter_language::ParseKey {
+        verter_language::default_parse_identity_for(
+            &format!("/* source-env test {marker} */"),
+            &ts_language(),
+        )
+        .unwrap()
+        .1
+    }
+
     fn parse_fact() -> FactVersionRef {
         FactVersionRef::Parse(ParseFactRef {
             canonical_id: "/p/a.ts".to_string(),
@@ -1316,7 +1325,7 @@ mod compaction_domain_tests {
     /// terminal-domain table folds `FileSourceEnv` into the content
     /// domain; the errata's MANDATORY correction splits it, because the
     /// two production paths that move `parse_env_hash` /
-    /// `parser_version` / `file_language_id` (`publish_snapshot` /
+    /// `parse_key` / `file_language_id` (`publish_snapshot` /
     /// `rebuild_and_publish`, and `WorkspaceChange::ConfigChanged`)
     /// deliberately leave `content_generation` alone. Without this
     /// assertion, reverting to the plan's table is invisible: no
@@ -1364,7 +1373,7 @@ mod compaction_domain_tests {
                 FactVersionRef::FileSourceEnv {
                     canonical_id: "/p/a.ts".to_string(),
                     parse_env_hash: ParseEnvHash::from_env_hash([4; 16]),
-                    parser_version: 1,
+                    parse_key: test_parse_key(1),
                     file_language_id: ts_language(),
                 },
                 CompactionDomain::SourceEnv,
@@ -1387,12 +1396,12 @@ mod compaction_domain_tests {
             compaction_domain(&FactVersionRef::FileSourceEnv {
                 canonical_id: "/p/a.ts".to_string(),
                 parse_env_hash: ParseEnvHash::from_env_hash([4; 16]),
-                parser_version: 1,
+                parse_key: test_parse_key(1),
                 file_language_id: ts_language(),
             }),
             CompactionDomain::Content,
             "SOURCE-ENV IS NOT CONTENT. `publish_snapshot` / `rebuild_and_publish` and \
-             `WorkspaceChange::ConfigChanged` move parse_env_hash / parser_version / \
+             `WorkspaceChange::ConfigChanged` move parse_env_hash / parse_key / \
              file_language_id WITHOUT bumping content_generation, so a source-env fact \
              compacted into the content domain would survive an env change"
         );

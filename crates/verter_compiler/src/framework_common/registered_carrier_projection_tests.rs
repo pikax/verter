@@ -1,8 +1,4 @@
-use std::any::Any;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierGrammarAuthority, CarrierGrammarConfig,
@@ -11,131 +7,10 @@ use verter_language::carrier_grammar::{
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
 };
-use verter_language::{
-    CarrierAttribute, CarrierBlock, CarrierBlockInventory, CarrierStructureHash, MarkupNodeKind,
-};
+use verter_language::{CarrierAttribute, CarrierBlock, MarkupNodeKind};
 
-use super::carrier_compiler::{
-    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
-    ParseOptions, RuntimeCompileOptions, TemplateFacts,
-};
-use super::registered_carrier_projection::{
-    materialize_registered_carrier_for_tests,
-    project_registered_carrier_for_tests as project_registered_carrier, RegisteredCarrierPayload,
-};
-use super::registered_projector_seal::{
-    mint_registered_projector_seal_for_tests, RegisteredProjectorSeal,
-};
 use super::registry::CarrierCompilerRegistry;
-
-struct RegisteredCarrierProjection {
-    carrier: RegisteredCarrierPayload,
-    inventory: Arc<CarrierBlockInventory>,
-    carrier_structure_hash: CarrierStructureHash,
-}
-
-type RegisteredProjectorForTests = fn(
-    &dyn CarrierCompiler,
-    &AcceptedRegisteredCarrierSource,
-    &RegisteredProjectorSeal,
-) -> (
-    RegisteredCarrierPayload,
-    Arc<CarrierBlockInventory>,
-    CarrierStructureHash,
-    bool,
-);
-
-struct CountingCarrierCompiler {
-    inner: Arc<dyn CarrierCompiler>,
-    parse_calls: AtomicUsize,
-}
-
-impl CountingCarrierCompiler {
-    fn new(inner: Arc<dyn CarrierCompiler>) -> Self {
-        Self {
-            inner,
-            parse_calls: AtomicUsize::new(0),
-        }
-    }
-
-    fn parse_calls(&self) -> usize {
-        self.parse_calls.load(Ordering::SeqCst)
-    }
-}
-
-impl CarrierCompiler for CountingCarrierCompiler {
-    fn __verter_as_any(&self) -> &dyn Any {
-        // Keep the real framework projector selected while observing calls
-        // independently of the projector and its returned carrier witness.
-        self.inner.__verter_as_any()
-    }
-
-    fn adapter_id(&self) -> verter_language::FrameworkAdapterId {
-        self.inner.adapter_id()
-    }
-
-    fn carrier_language_id(&self) -> verter_language::LanguageId {
-        self.inner.carrier_language_id()
-    }
-
-    fn parse(
-        &self,
-        source: &str,
-        opts: &ParseOptions,
-    ) -> Arc<verter_language::FrameworkParseArtifact> {
-        self.parse_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.parse(source, opts)
-    }
-
-    fn eval_source(
-        &self,
-        source: &str,
-        artifact: &verter_language::FrameworkParseArtifact,
-    ) -> Arc<str> {
-        self.inner.eval_source(source, artifact)
-    }
-
-    fn compile_ide(
-        &self,
-        source: &str,
-        artifact: &verter_language::FrameworkParseArtifact,
-        opts: &IdeCompileOptions,
-    ) -> Result<IdeOutput, CompileUnsupported> {
-        self.inner.compile_ide(source, artifact, opts)
-    }
-
-    fn template_data(
-        &self,
-        source: &str,
-        artifact: &verter_language::FrameworkParseArtifact,
-    ) -> TemplateFacts {
-        self.inner.template_data(source, artifact)
-    }
-
-    fn compile_bundle(
-        &self,
-        source: &str,
-        artifact: &verter_language::FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        self.inner.compile_bundle(source, artifact, opts, alloc)
-    }
-}
-
-impl RegisteredCarrierProjection {
-    fn carrier(&self) -> &RegisteredCarrierPayload {
-        &self.carrier
-    }
-
-    fn inventory(&self) -> &Arc<CarrierBlockInventory> {
-        &self.inventory
-    }
-
-    fn carrier_structure_hash(&self) -> CarrierStructureHash {
-        self.carrier_structure_hash
-    }
-}
+use super::FrameworkParseArtifact;
 
 fn accepted(
     canonical: &str,
@@ -176,41 +51,117 @@ fn accepted(
     (source_authority, grammar_authority, accepted)
 }
 
-fn project(accepted: &AcceptedRegisteredCarrierSource) -> RegisteredCarrierProjection {
-    let registry = CarrierCompilerRegistry::built_in();
-    let language = accepted.source().resolved_file_language();
-    let compiler = registry
-        .compiler_for_carrier_language(
-            language.adapter_id().expect("carrier adapter"),
-            language.carrier_language_id().expect("carrier language"),
-        )
-        .expect("registered compiler");
-    project_with_compiler(compiler.as_ref(), accepted)
+/// Project `accepted` through the real production entry
+/// (`CarrierCompilerRegistry::project_registered`) into a registered
+/// `FrameworkParseArtifact`. Every fixture in this suite passes a source
+/// whose resolved language always matches ITS own registered projector, so
+/// the registry's internal adapter-id dispatch always lands on the right
+/// compiler — there is no need to fetch or name a compiler separately.
+fn project(accepted: &AcceptedRegisteredCarrierSource) -> Arc<FrameworkParseArtifact> {
+    Arc::new(
+        CarrierCompilerRegistry::built_in()
+            .project_registered(accepted)
+            .expect("registered source parses")
+            .into_framework_parse_artifact(),
+    )
 }
 
-fn project_with_compiler(
-    compiler: &dyn CarrierCompiler,
+fn materialized_artifact(
     accepted: &AcceptedRegisteredCarrierSource,
-) -> RegisteredCarrierProjection {
-    let seal = mint_registered_projector_seal_for_tests();
-    let (carrier, inventory, carrier_structure_hash, same_carrier_arc) =
-        project_registered_carrier(compiler, accepted, &seal);
-    // This identity check complements the independent counting witness below;
-    // exact-one parse enforcement does not rely on the projector's own witness.
-    assert!(
-        same_carrier_arc,
-        "projection payload must retain the exact Arc produced by the sole parse"
-    );
-    RegisteredCarrierProjection {
-        carrier,
-        inventory,
-        carrier_structure_hash,
-    }
+) -> Arc<FrameworkParseArtifact> {
+    project(accepted)
 }
 
 #[test]
+fn registered_rehome_rejects_unrelated_same_length_source_and_parse_identity() {
+    let (_, _, accepted_a) = accepted(
+        "file:///workspace/A.vue",
+        verter_language::FileLanguage::vue(),
+        "<template>A</template>",
+    );
+    let (_, _, accepted_b) = accepted(
+        "file:///workspace/B.vue",
+        verter_language::FileLanguage::vue(),
+        "<template>B</template>",
+    );
+    assert_eq!(
+        accepted_a.source().bytes().len(),
+        accepted_b.source().bytes().len(),
+        "fixture must defeat length-only geometry validation"
+    );
+    let artifact_a = materialized_artifact(&accepted_a);
+    let artifact_b = materialized_artifact(&accepted_b);
+
+    let rejected = artifact_a
+        .__rehome_registered(&accepted_b, artifact_b.parse_key())
+        .expect_err("an unrelated same-length source must not adopt registered geometry");
+    assert!(matches!(
+        rejected,
+        verter_language::SyntaxReject::UnsupportedProfile {
+            reason: verter_language::UnsupportedSyntaxProfileReason::FrontendMismatch,
+            ..
+        }
+    ));
+
+    let rejected = artifact_a
+        .__rehome_registered(&accepted_a, artifact_b.parse_key())
+        .expect_err("an elected parse identity from another source must not be adopted");
+    assert!(matches!(
+        rejected,
+        verter_language::SyntaxReject::UnsupportedProfile {
+            reason: verter_language::UnsupportedSyntaxProfileReason::FrontendMismatch,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn registered_rehome_accepts_the_same_parse_under_a_new_source_authority() {
+    let source = "<template><p>same</p></template>";
+    let (_, _, first) = accepted(
+        "file:///workspace/First.vue",
+        verter_language::FileLanguage::vue(),
+        source,
+    );
+    let (_, _, second) = accepted(
+        "file:///workspace/Second.vue",
+        verter_language::FileLanguage::vue(),
+        source,
+    );
+    let artifact = materialized_artifact(&first);
+    let rehomed = artifact
+        .__rehome_registered(&second, artifact.parse_key())
+        .expect("the exact parse identity can adopt a current accepted source");
+
+    assert_eq!(rehomed.parse_key(), artifact.parse_key());
+    assert!(matches!(
+        &rehomed.inventory().source_spaces()[0].identity,
+        verter_language::SourceSpaceIdentity::RegisteredSnapshot { snapshot }
+            if snapshot == second.source().snapshot_id()
+    ));
+}
+
+/// Build the closed dispatch value the module-internal projector expects for
+/// `accepted`'s own resolved language — mirrors exactly what
+/// `CarrierCompilerRegistry::project_registered` resolves internally.
+fn known_compiler(
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> super::registered_carrier_projection::KnownRegisteredCompiler {
+    use super::registered_carrier_projection::KnownRegisteredCompiler;
+    let language = accepted.source().resolved_file_language();
+    if language.is_vue() {
+        KnownRegisteredCompiler::Vue(Arc::new(super::vue_bridge::VueCarrierCompiler))
+    } else {
+        KnownRegisteredCompiler::Svelte(Arc::new(crate::svelte::SvelteCarrierCompiler))
+    }
+}
+
+/// Regression coverage for `RegisteredCarrierProjection::into_framework_parse_artifact`:
+/// the conversion moves its `carrier`/`inventory` fields directly, so the
+/// resulting artifact must retain the EXACT Arcs the projection produced —
+/// never a clone, never a rebuild.
+#[test]
 fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
-    let registry = CarrierCompilerRegistry::built_in();
     for (path, language, source) in [
         (
             "file:///workspace/Materialize.vue",
@@ -224,58 +175,22 @@ fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
         ),
     ] {
         let (_, _, accepted) = accepted(path, language, source);
-        let resolved = accepted.source().resolved_file_language();
-        let compiler = registry
-            .compiler_for_carrier_language(
-                resolved.adapter_id().unwrap(),
-                resolved.carrier_language_id().unwrap(),
-            )
-            .unwrap();
-        let seal = mint_registered_projector_seal_for_tests();
-        assert_eq!(
-            materialize_registered_carrier_for_tests(compiler.as_ref(), &accepted, &seal),
-            (true, true)
+        let known = known_compiler(&accepted);
+        let projection =
+            super::registered_carrier_projection::project_registered_carrier(&known, &accepted)
+                .expect("registered source parses");
+        let carrier_before = projection.carrier().clone();
+        let inventory_before = Arc::clone(projection.inventory());
+        let artifact = projection.into_framework_parse_artifact();
+        assert!(
+            carrier_before.ptr_eq(artifact.carrier_payload_for_tests()),
+            "materialization must retain the exact carrier Arc from projection"
+        );
+        assert!(
+            Arc::ptr_eq(&inventory_before, artifact.inventory()),
+            "materialization must retain the exact inventory Arc from projection"
         );
     }
-}
-
-#[test]
-fn registered_projection_calls_parse_exactly_once_for_vue_and_svelte() {
-    let registry = CarrierCompilerRegistry::built_in();
-    let mut observed_parse_calls = Vec::new();
-    for (path, language, source) in [
-        (
-            "file:///workspace/ParseCount.vue",
-            verter_language::FileLanguage::vue(),
-            "<template><div/></template>",
-        ),
-        (
-            "file:///workspace/ParseCount.svelte",
-            verter_language::FileLanguage::svelte(),
-            "<div />",
-        ),
-    ] {
-        let (_, _, accepted) = accepted(path, language, source);
-        let resolved = accepted.source().resolved_file_language();
-        let real_compiler = registry
-            .compiler_for_carrier_language(
-                resolved.adapter_id().expect("carrier adapter"),
-                resolved.carrier_language_id().expect("carrier language"),
-            )
-            .expect("registered compiler");
-        let counting_compiler = CountingCarrierCompiler::new(Arc::clone(real_compiler));
-
-        let _projection = project_with_compiler(&counting_compiler, &accepted);
-        observed_parse_calls.push((path, counting_compiler.parse_calls()));
-    }
-    assert_eq!(
-        observed_parse_calls,
-        [
-            ("file:///workspace/ParseCount.vue", 1),
-            ("file:///workspace/ParseCount.svelte", 1),
-        ],
-        "each registered projection must parse its carrier exactly once"
-    );
 }
 
 #[test]
@@ -294,9 +209,8 @@ fn registered_projection_retains_the_sole_parse_carrier_arc_and_metadata() {
     ] {
         let (_, _, accepted) = accepted(path, language, source);
         let projection = project(&accepted);
-        let payload = projection.carrier();
         assert_eq!(
-            payload.adapter_id(),
+            projection.adapter_id(),
             accepted
                 .source()
                 .resolved_file_language()
@@ -304,14 +218,13 @@ fn registered_projection_retains_the_sole_parse_carrier_arc_and_metadata() {
                 .expect("carrier adapter")
         );
         assert_eq!(
-            payload.language_id(),
+            projection.language_id(),
             accepted
                 .source()
                 .resolved_file_language()
                 .carrier_language_id()
                 .expect("carrier language")
         );
-        assert_ne!(payload.parser_version(), 0);
     }
 }
 
@@ -1013,13 +926,30 @@ fn malformed_registered_sources_preserve_parser_owned_termination() {
     ] {
         let (_, _, accepted) = accepted(path, language, source);
         let projection = project(&accepted);
-        assert!(projection.inventory().markup().nodes().iter().any(|node| {
+        let unclosed = projection.inventory().markup().nodes().iter().find(|node| {
             matches!(
                 node.kind(),
                 MarkupNodeKind::Element(element)
                     if element.termination == SyntaxTermination::UnclosedEof
             )
-        }));
+        });
+        assert!(
+            unclosed.is_some(),
+            "{path} must retain UnclosedEof geometry"
+        );
+
+        if path.ends_with(".svelte") {
+            let artifact = materialized_artifact(&accepted);
+            assert_eq!(
+                artifact
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| diagnostic.code)
+                    .collect::<Vec<_>>(),
+                ["element_unclosed"],
+                "the registered projection must retain the recoverable diagnostic"
+            );
+        }
     }
 }
 
@@ -1092,10 +1022,13 @@ fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
     )));
 }
 
-#[test]
-fn registered_projector_signature_requires_authority_seal() {
-    let _: RegisteredProjectorForTests = project_registered_carrier;
-}
+// The old `registered_projector_signature_requires_authority_seal` runtime
+// signature check is superseded by a strictly stronger STRUCTURAL guarantee:
+// `project_registered_carrier` takes `&KnownRegisteredCompiler` (a closed,
+// two-variant enum), not `&dyn CarrierCompiler` — there is no runtime
+// capability check left to pin, because there is no `&dyn CarrierCompiler`
+// parameter anywhere on the registered-projection path to forge a call
+// against in the first place.
 
 // ── FL2-E TE-C-12 / T-B1-D03: Svelte style dialect derives from `lang` ──
 

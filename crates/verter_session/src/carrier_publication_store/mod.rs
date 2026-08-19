@@ -8,19 +8,16 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierAcceptanceError, CarrierGrammarAuthority,
     CarrierGrammarFingerprint, GrammarAuthorityNamespaceId,
-};
-use verter_language::carrier_versions::{
-    CarrierParserVersion, FrameworkParseArtifactSchemaVersion,
-    FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION,
 };
 use verter_language::registered_source_authority::{
     FileIncarnation, RegisteredSourceAuthority, RegisteredSourceSnapshot,
     RegisteredSourceSnapshotId, SourceAuthorityNamespaceId, SourceGeneration,
 };
-use verter_language::{FrameworkAdapterId, FrameworkParseArtifact, LanguageId};
+use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
 use verter_scheduler::cancellation::CancellationToken;
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
@@ -108,9 +105,9 @@ pub enum RegistryMismatch {
     ProducerVersionMismatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CarrierParseFailure {
-    ParserRejected,
+    ParserRejected(Arc<verter_language::SyntaxReject>),
     InvalidProjectedArtifact,
     RecoveryInvariantViolation,
 }
@@ -161,15 +158,11 @@ pub struct FrameworkArtifactId {
     grammar_fingerprint: CarrierGrammarFingerprint,
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,
-    carrier_parser_version: CarrierParserVersion,
-    artifact_schema_version: FrameworkParseArtifactSchemaVersion,
+    parse_key: ParseKey,
 }
 
 impl FrameworkArtifactId {
-    fn derive(
-        accepted: &AcceptedRegisteredCarrierSource,
-        carrier_parser_version: CarrierParserVersion,
-    ) -> Self {
+    fn derive(accepted: &AcceptedRegisteredCarrierSource, parse_key: ParseKey) -> Self {
         Self {
             authority: accepted.source().authority(),
             source: accepted.source().snapshot_id().clone(),
@@ -177,8 +170,7 @@ impl FrameworkArtifactId {
             grammar_fingerprint: accepted.grammar().fingerprint(),
             adapter_id: accepted.grammar().adapter_id().clone(),
             language_id: accepted.grammar().language_id().clone(),
-            carrier_parser_version,
-            artifact_schema_version: FRAMEWORK_PARSE_ARTIFACT_SCHEMA_VERSION,
+            parse_key,
         }
     }
 }
@@ -348,7 +340,7 @@ impl FrameworkArtifactEnvelope {
     pub fn inventory(
         &self,
     ) -> &Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory> {
-        &self.artifact.common.inventory
+        self.artifact.inventory()
     }
 }
 
@@ -747,8 +739,8 @@ impl CarrierPublicationStore {
                 accepted.grammar().language_id(),
             )
             .cloned();
-        let parser_version = parser_version_for(accepted.grammar().adapter_id());
-        let artifact_id = FrameworkArtifactId::derive(accepted, parser_version);
+        let parse_key = parse_key_for_accepted(accepted);
+        let artifact_id = FrameworkArtifactId::derive(accepted, parse_key);
         self.audit.push(
             &request,
             &artifact_id,
@@ -900,26 +892,59 @@ impl CarrierPublicationStore {
                 artifact_id,
                 PublicationAuditKind::PersistentCandidateFound,
             );
-            let rejection =
-                match candidate.validate(accepted, current_persisted_carrier_artifact_cohort()) {
-                    Ok(()) => {
-                        let artifact = candidate.artifact.__rehome_registered(accepted.source());
-                        let envelope = Arc::new(FrameworkArtifactEnvelope {
-                            id: artifact_id.clone(),
-                            source: accepted.source().clone(),
-                            artifact: Arc::new(artifact),
-                        });
-                        self.audit.push(
-                            request,
-                            artifact_id,
-                            PublicationAuditKind::PersistentAdoptionAccepted,
-                        );
-                        self.audit
-                            .push(request, artifact_id, PublicationAuditKind::Adopted);
-                        return PublicationOutcome::Adopted(envelope);
-                    }
-                    Err(rejection) => rejection,
-                };
+            let rejection = match candidate.validate(
+                accepted,
+                artifact_id,
+                current_persisted_carrier_artifact_cohort(),
+            ) {
+                Ok(()) => {
+                    let artifact = match candidate
+                        .artifact
+                        .__rehome_registered(accepted, &artifact_id.parse_key)
+                    {
+                        Ok(artifact) => artifact,
+                        // Exhaustive: every `SyntaxReject` arm means the persisted
+                        // candidate no longer matches `accepted`'s live identity —
+                        // fall back to fresh production. Matched by name (not `_`)
+                        // so a new `SyntaxReject` variant forces a decision here
+                        // instead of silently inheriting the fallback.
+                        Err(
+                            verter_language::SyntaxReject::UnsupportedProfile { .. }
+                            | verter_language::SyntaxReject::RejectedSyntax { .. }
+                            | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
+                            | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+                        ) => {
+                            self.audit.push(
+                                request,
+                                artifact_id,
+                                PublicationAuditKind::PersistentAdoptionRejected(
+                                    PersistentAdoptionRejection::ParserValidationFailed,
+                                ),
+                            );
+                            self.audit.push(
+                                request,
+                                artifact_id,
+                                PublicationAuditKind::PersistentCandidateDiscarded,
+                            );
+                            return self.produce_fresh(compiler, accepted, request, artifact_id);
+                        }
+                    };
+                    let envelope = Arc::new(FrameworkArtifactEnvelope {
+                        id: artifact_id.clone(),
+                        source: accepted.source().clone(),
+                        artifact: Arc::new(artifact),
+                    });
+                    self.audit.push(
+                        request,
+                        artifact_id,
+                        PublicationAuditKind::PersistentAdoptionAccepted,
+                    );
+                    self.audit
+                        .push(request, artifact_id, PublicationAuditKind::Adopted);
+                    return PublicationOutcome::Adopted(envelope);
+                }
+                Err(rejection) => rejection,
+            };
             self.audit.push(
                 request,
                 artifact_id,
@@ -932,6 +957,16 @@ impl CarrierPublicationStore {
             );
         }
 
+        self.produce_fresh(compiler, accepted, request, artifact_id)
+    }
+
+    fn produce_fresh(
+        &self,
+        compiler: &Arc<dyn verter_compiler::framework_common::CarrierCompiler>,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> PublicationOutcome {
         use std::sync::atomic::Ordering::Relaxed;
         self.provenance.carrier_parses.fetch_add(1, Relaxed);
         if compiler.adapter_id().is_vue() {
@@ -939,13 +974,30 @@ impl CarrierPublicationStore {
         }
         self.audit
             .push(request, artifact_id, PublicationAuditKind::ParserStarted);
-        let projection = verter_compiler::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
-            compiler.as_ref(),
-            accepted,
-        );
+        let projection =
+            match crate::parse::carrier_compiler_registry().project_registered(accepted) {
+                Ok(projection) => projection,
+                Err(reject) => {
+                    // A reject is a COMPLETED parse attempt (the frontend ran and
+                    // produced a definitive typed answer), not an abandoned one —
+                    // `ParserFinished` brackets `ParserStarted` on both the
+                    // success and the reject path.
+                    self.audit
+                        .push(request, artifact_id, PublicationAuditKind::ParserFinished);
+                    return PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(
+                        Arc::new(reject),
+                    ));
+                }
+            };
         let artifact = Arc::new(projection.into_framework_parse_artifact());
         self.audit
             .push(request, artifact_id, PublicationAuditKind::ParserFinished);
+        if artifact.parse_key() != &artifact_id.parse_key
+            || artifact.adapter_id() != &artifact_id.adapter_id
+            || artifact.language_id() != &artifact_id.language_id
+        {
+            return PublicationOutcome::RegistryMismatch(RegistryMismatch::ProducerVersionMismatch);
+        }
         if self
             .grammar_authority
             .validate_accepted_current(&self.source_authority, accepted)
@@ -994,13 +1046,47 @@ impl CarrierPublicationStore {
     }
 }
 
-fn parser_version_for(adapter: &FrameworkAdapterId) -> CarrierParserVersion {
-    let cohort = current_persisted_carrier_artifact_cohort();
-    if adapter.is_vue() {
-        cohort.vue_parser_version()
+fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKey {
+    use verter_language::carrier_grammar::CarrierGrammarConfig;
+    let options = match accepted.grammar().canonical_config() {
+        CarrierGrammarConfig::Vue { delimiters, .. } => verter_language::ParseOptions {
+            delimiters: (
+                delimiters.open().to_string(),
+                delimiters.close().to_string(),
+            ),
+            custom_elements: accepted
+                .grammar()
+                .canonical_config()
+                .custom_element_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            svelte_loose: false,
+        },
+        CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
+    };
+    let language = accepted.source().resolved_file_language();
+    let syntax_profile = verter_language::syntax_profile_id_for(language, &options)
+        .expect("accepted carrier grammar has a supported syntax profile");
+    let (domain, epoch) = if language.is_vue() {
+        (
+            verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+            verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
     } else {
-        cohort.svelte_parser_version()
-    }
+        (
+            verter_language::SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            verter_language::SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    };
+    verter_language::parse_key_for(
+        accepted.source().bytes(),
+        language,
+        domain,
+        epoch,
+        &syntax_profile,
+    )
+    .expect("accepted carrier source has a supported parse identity")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

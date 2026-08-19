@@ -251,11 +251,6 @@ impl VerterHost {
         // subsequent host constructions.
         crate::request_context::install_clear_tls_hook();
 
-        // Receive the Vue adapter's carrier registration proof (the
-        // `.vue` `LanguageRegistry` carrier-row token) at host
-        // construction; the blessed `vue_parse()` accessor reuses it.
-        crate::typeinfo::adapters::vue::receive_vue_carrier_token();
-
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
         // honours the host policy from the start.
@@ -313,15 +308,9 @@ impl VerterHost {
             crate::framework::ProjectCapabilitySnapshot::empty(),
         );
 
-        // The framework adapter registry, built ONCE here. The Vue carrier leg
-        // receives a clone of the SAME minted carrier proof the blessed
-        // `vue_parse()` accessor holds (received just above) — one mint channel,
-        // value-equal receipt, no second mint.
+        // The framework adapter registry, built ONCE here.
         let framework_registry =
-            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in(
-                crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
-                crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
-            ));
+            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in());
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
@@ -976,7 +965,7 @@ impl VerterHost {
         state: &mut crate::resolver_core::ShallowFileState,
         macros: &[verter_semantic::analysis::types::AnalyzedMacro],
         eval_source: Option<&str>,
-        framework_parse: Option<&Arc<verter_language::FrameworkParseArtifact>>,
+        framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     ) {
         // Userland `default` always wins — never overwrite it. Probe via the
         // header-only `has_value_symbol` accessor: it must not materialize a

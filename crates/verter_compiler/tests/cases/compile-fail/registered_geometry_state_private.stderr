@@ -1,0 +1,11 @@
+error[E0603]: module `registered_geometry_state` is private
+ --> tests/cases/compile-fail/registered_geometry_state_private.rs:1:40
+  |
+1 | use verter_compiler::framework_common::registered_geometry_state::RegisteredGeometry;
+  |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `registered_geometry_state` is defined here
+ --> src/framework_common/mod.rs
+  |
+  | mod registered_geometry_state;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

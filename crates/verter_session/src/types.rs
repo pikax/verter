@@ -2327,8 +2327,13 @@ pub struct HostDiagnostic {
     pub code: String,
     /// Human-readable diagnostic message.
     pub message: String,
-    /// SFC-absolute byte offset span, if available.
-    pub span: Option<verter_span::Span>,
+    /// Canonically comparable semantic values used to render the message.
+    pub arguments: Vec<verter_language::DiagnosticArg>,
+    /// SFC-absolute byte offset span. Mandatory: a producer that cannot
+    /// derive a real mapped location must fail closed at its own seam
+    /// (a typed rejection or an internal invariant failure) rather than
+    /// construct this diagnostic with a fabricated position.
+    pub span: verter_span::Span,
 }
 
 /// Collection of diagnostics with a precomputed `has_errors` flag.
@@ -2341,7 +2346,8 @@ pub struct DiagnosticsSnapshot {
 }
 
 impl DiagnosticsSnapshot {
-    pub(crate) fn from_vec(diagnostics: Vec<HostDiagnostic>) -> Self {
+    pub(crate) fn from_vec(mut diagnostics: Vec<HostDiagnostic>) -> Self {
+        sort_host_diagnostics(&mut diagnostics);
         let has_errors = diagnostics
             .iter()
             .any(|d| d.severity == HostSeverity::Error);
@@ -2353,8 +2359,31 @@ impl DiagnosticsSnapshot {
 
     pub(crate) fn merge(mut self, mut other: DiagnosticsSnapshot) -> Self {
         self.diagnostics.append(&mut other.diagnostics);
+        sort_host_diagnostics(&mut self.diagnostics);
         self.has_errors = self.has_errors || other.has_errors;
         self
+    }
+}
+
+fn sort_host_diagnostics(diagnostics: &mut [HostDiagnostic]) {
+    diagnostics.sort_by(|left, right| {
+        left.span
+            .start
+            .cmp(&right.span.start)
+            .then_with(|| left.span.end.cmp(&right.span.end))
+            .then_with(|| {
+                host_severity_rank(&left.severity).cmp(&host_severity_rank(&right.severity))
+            })
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.arguments.cmp(&right.arguments))
+    });
+}
+
+const fn host_severity_rank(severity: &HostSeverity) -> u8 {
+    match severity {
+        HostSeverity::Error => 0,
+        HostSeverity::Warning => 1,
+        HostSeverity::Info => 2,
     }
 }
 
@@ -2612,7 +2641,8 @@ pub(crate) struct VueTemplateInputs {
     /// The framework-neutral carrier parse artifact of `source`. `None`
     /// routes the computation through one counted carrier parse of its
     /// own — a single parse, never a duplicate of one the caller ran.
-    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    pub(crate) framework_parse:
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Publication status of the state these inputs were captured
     /// from, flowed BY VALUE (the gate works with or without an
     /// installed `RequestContext`): live scheduler/workspace reads are
@@ -2999,7 +3029,8 @@ pub(crate) struct CompileInput {
     pub(crate) script_vue_api_calls: Vec<verter_semantic::analysis::types::VueApiCallSite>,
     /// Framework-neutral parse artifact from upsert, reused during
     /// compilation to avoid re-parsing.
-    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    pub(crate) framework_parse:
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Binding names referenced in style `v-bind()` expressions.
     /// Extracted from `FileEntry.style_analyses` at cache-miss time.
     pub(crate) style_v_bind_vars: Vec<String>,
@@ -3428,12 +3459,14 @@ pub struct DependencyState {
 #[allow(dead_code)] // Fields read progressively as accessors migrate
 pub(crate) struct EffectiveFileState {
     pub(crate) source: std::sync::Arc<str>,
+    pub(crate) file_language: FileLanguage,
     pub(crate) meta: FileMeta,
     /// Shared immutable script analysis — an `Arc::clone` of the snapshot the
     /// scheduler (or the content override) holds. Reading it is a refcount
     /// bump; consumers that need an owned copy call `.as_ref().clone()`.
     pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) framework_parse: Option<std::sync::Arc<verter_language::FrameworkParseArtifact>>,
+    pub(crate) framework_parse:
+        Option<std::sync::Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
 }
 
@@ -4537,7 +4570,8 @@ mod tests {
                 severity,
                 code: code.to_string(),
                 message: String::new(),
-                span: None,
+                arguments: Vec::new(),
+                span: verter_span::Span::new(0, 1),
             }]),
             requested_mode: CompileCacheMode::Content,
             actual_mode: CompileCacheMode::Content,
@@ -4638,6 +4672,9 @@ mod tests {
                 | XVSlotDuplicateSlotNames
                 | XVModelNoExpression
                 | XVModelMalformedExpression
+                | DuplicateTemplate
+                | MissingSfcEntryBlock
+                | TemplateFunctionalUnsupported
                 | DuplicateScriptSetup
                 | DuplicateScript
                 | ScriptLangMismatch
@@ -4686,6 +4723,9 @@ mod tests {
             CompilerErrorCode::XVSlotDuplicateSlotNames,
             CompilerErrorCode::XVModelNoExpression,
             CompilerErrorCode::XVModelMalformedExpression,
+            CompilerErrorCode::DuplicateTemplate,
+            CompilerErrorCode::MissingSfcEntryBlock,
+            CompilerErrorCode::TemplateFunctionalUnsupported,
             CompilerErrorCode::DuplicateScriptSetup,
             CompilerErrorCode::DuplicateScript,
             CompilerErrorCode::ScriptLangMismatch,

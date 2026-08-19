@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `new` found for struct `FrameworkParseArtifact` in the current scope
+  --> tests/cases/compile-fail/registered_artifact_direct_construction.rs:22:37
+   |
+22 |     let _ = FrameworkParseArtifact::new(
+   |                                     ^^^ associated function or constant not found in `FrameworkParseArtifact`

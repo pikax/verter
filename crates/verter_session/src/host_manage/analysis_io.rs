@@ -138,12 +138,16 @@ impl VerterHost {
         scope: crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope,
     ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
     {
+        let current_key = self.authoritative_current_artifact_key(canonical);
         if scope.is_base_publishable()
-            && self
-                .project_type_store()
-                .indexed()
-                .get(canonical, whole_hash)
-                .is_some()
+            && current_key.as_ref().is_some_and(|key| {
+                key.content_hash == whole_hash
+                    && self
+                        .project_type_store()
+                        .indexed()
+                        .get(canonical, whole_hash, &key.parse_key, &key.file_language_id)
+                        .is_some()
+            })
         {
             // Cold-seed binding, the same shape every other base-lane request
             // entry uses: a known-stale (`ReturnOnly`) read fails every nested
@@ -206,7 +210,7 @@ impl VerterHost {
         whole_hash: verter_semantic::analysis::Hash16,
         file_language: &FileLanguage,
         source: &Arc<str>,
-        framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+        framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
         script_analysis: &verter_semantic::analysis::types::ScriptAnalysisSnapshot,
@@ -341,7 +345,7 @@ impl VerterHost {
         let (src_blocks, external_requests) = framework_parse
             .as_deref()
             .and_then(crate::typeinfo::adapters::vue::vue_parse)
-            .map(|parsed| crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), parsed))
+            .map(|parsed| crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), &parsed))
             .unwrap_or_default();
 
         if !src_blocks.is_empty() || !external_requests.is_empty() {
@@ -986,6 +990,58 @@ impl VerterHost {
         Some(hd.parse.whole_hash)
     }
 
+    /// Exact base artifact key for the scheduler-authoritative source stage.
+    pub(crate) fn authoritative_current_artifact_key(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        let analysis_canonical = self.normalized_analysis_canonical(canonical);
+        let analysis_canonical = analysis_canonical.as_ref();
+        if self
+            .derived_raw_cache()
+            .get(analysis_canonical)
+            .is_some_and(|derived| derived.evicted)
+        {
+            return None;
+        }
+        let state = self.effective_file_state(analysis_canonical, None)?;
+        crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::from(analysis_canonical),
+            state.whole_hash,
+            state.source.as_ref(),
+            state.file_language,
+            state.framework_parse.as_deref(),
+            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+        )
+    }
+
+    /// Test-only exact read of the scheduler-authoritative base artifact.
+    /// Unlike the synthetic empty-source store helpers, this reconstructs the
+    /// full key from the current runtime source, language, parse artifact, and
+    /// toolchain identity.
+    #[cfg(test)]
+    pub(crate) fn exact_current_artifacts_for_test(
+        &self,
+        canonical: &str,
+        expected_whole_hash: Hash16,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        let key = self.authoritative_current_artifact_key(canonical)?;
+        (key.content_hash == expected_whole_hash)
+            .then(|| self.project_type_store.indexed().get_artifacts(&key))?
+    }
+
+    /// Test-only exact indexed projection of
+    /// [`Self::exact_current_artifacts_for_test`].
+    #[cfg(test)]
+    pub(crate) fn exact_current_indexed_for_test(
+        &self,
+        canonical: &str,
+        expected_whole_hash: Hash16,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.exact_current_artifacts_for_test(canonical, expected_whole_hash)
+            .map(|artifacts| Arc::clone(&artifacts.indexed))
+    }
+
     /// Content-pinned [`crate::project_type_store::IndexedReady`] lookup.
     ///
     /// Resolves the canonical's authoritative current content hash via
@@ -1030,11 +1086,13 @@ impl VerterHost {
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
-        let current_hash = self.authoritative_current_content_hash(analysis_canonical)?;
-        let indexed = self
-            .project_type_store
-            .indexed()
-            .get_for_current_content(analysis_canonical, current_hash)?;
+        let current_key = self.authoritative_current_artifact_key(analysis_canonical)?;
+        let indexed = self.project_type_store.indexed().get_for_current_content(
+            analysis_canonical,
+            current_key.content_hash,
+            &current_key.parse_key,
+            &current_key.file_language_id,
+        )?;
         // The content pin keys on the owner's content hash. Parse artifacts
         // retain authored routing shape only; resolved canonicals and their
         // currency live in the request's captured resolution world. This base
@@ -1075,11 +1133,13 @@ impl VerterHost {
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
-        match self.authoritative_current_content_hash(analysis_canonical) {
-            Some(current_hash) => self
-                .project_type_store
-                .indexed()
-                .get_for_current_content(analysis_canonical, current_hash),
+        match self.authoritative_current_artifact_key(analysis_canonical) {
+            Some(current_key) => self.project_type_store.indexed().get_for_current_content(
+                analysis_canonical,
+                current_key.content_hash,
+                &current_key.parse_key,
+                &current_key.file_language_id,
+            ),
             None => self.artifact_current_indexed_raw(analysis_canonical),
         }
     }
@@ -1382,12 +1442,16 @@ impl VerterHost {
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
-        if let Some(current_hash) = self.authoritative_current_content_hash(analysis_canonical) {
-            let key = crate::file_artifact_store::FileArtifactKey::base(
-                Arc::from(analysis_canonical),
-                current_hash,
-            );
-            return self.project_type_store.indexed().get_artifacts(&key);
+        if let Some(current_key) = self.authoritative_current_artifact_key(analysis_canonical) {
+            return self
+                .project_type_store
+                .indexed()
+                .get_base_artifacts_for_content(
+                    analysis_canonical,
+                    current_key.content_hash,
+                    &current_key.parse_key,
+                    &current_key.file_language_id,
+                );
         }
         // Genuinely artifact-only canonical — no scheduler authority, so
         // the single retained `FileArtifacts` is the current one. Gated

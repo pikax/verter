@@ -6162,8 +6162,8 @@ async fn did_change_preserves_dependency_receipt_only_when_import_frontier_is_un
         let second_path = format!("src/SecondChild.{extension}");
         let (_temp, service, drain_handle, _provider, workspace_id) =
             make_definition_test_server(&[
-                (&first_path, language_id, "<div />"),
-                (&second_path, language_id, "<div />"),
+                (&first_path, language_id, "<template><div /></template>"),
+                (&second_path, language_id, "<template><div /></template>"),
                 (&app_path, language_id, first_source),
             ])
             .await;

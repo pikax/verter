@@ -16,9 +16,13 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_language::FrameworkAdapterId;
+use verter_language::carrier_grammar::AcceptedRegisteredCarrierSource;
+use verter_language::{FrameworkAdapterId, SyntaxReject};
 
 use super::carrier_compiler::CarrierCompiler;
+use super::registered_carrier_projection::{
+    self, KnownRegisteredCompiler, RegisteredCarrierProjection,
+};
 use super::vue_bridge::VueCarrierCompiler;
 use crate::svelte::SvelteCarrierCompiler;
 
@@ -29,6 +33,12 @@ use crate::svelte::SvelteCarrierCompiler;
 #[derive(Clone)]
 pub struct CarrierCompilerRegistry {
     compilers: FxHashMap<FrameworkAdapterId, Arc<dyn CarrierCompiler>>,
+    /// The closed subset of `compilers` this crate itself knows how to
+    /// project into registered geometry. Populated ONLY by [`Self::built_in`]
+    /// — a registry built from `from_compilers` (test-fixture compilers) has
+    /// no registered-projection capability, since a fixture compiler is not
+    /// a known variant of [`KnownRegisteredCompiler`].
+    known_registered: FxHashMap<FrameworkAdapterId, KnownRegisteredCompiler>,
 }
 
 impl std::fmt::Debug for CarrierCompilerRegistry {
@@ -48,22 +58,73 @@ impl CarrierCompilerRegistry {
     /// vertical adds its row here.
     #[must_use]
     pub fn built_in() -> Self {
+        let vue = Arc::new(VueCarrierCompiler);
+        let svelte = Arc::new(SvelteCarrierCompiler);
         let mut compilers: FxHashMap<FrameworkAdapterId, Arc<dyn CarrierCompiler>> =
             FxHashMap::default();
-        Self::register(&mut compilers, Arc::new(VueCarrierCompiler::default()));
-        Self::register(&mut compilers, Arc::new(SvelteCarrierCompiler::default()));
-        Self { compilers }
+        Self::register(&mut compilers, Arc::clone(&vue) as Arc<dyn CarrierCompiler>);
+        Self::register(
+            &mut compilers,
+            Arc::clone(&svelte) as Arc<dyn CarrierCompiler>,
+        );
+        let mut known_registered = FxHashMap::default();
+        known_registered.insert(vue.adapter_id(), KnownRegisteredCompiler::Vue(vue));
+        known_registered.insert(svelte.adapter_id(), KnownRegisteredCompiler::Svelte(svelte));
+        Self {
+            compilers,
+            known_registered,
+        }
     }
 
     /// Build a registry from explicit compiler rows. Used by the in-tree
-    /// `CarrierCompiler` contract tests (a fixture compiler).
+    /// `CarrierCompiler` contract tests (a fixture compiler). A registry
+    /// built this way has NO registered-projection capability — see
+    /// [`Self::project_registered`].
     #[must_use]
     pub fn from_compilers(compilers: impl IntoIterator<Item = Arc<dyn CarrierCompiler>>) -> Self {
         let mut map: FxHashMap<FrameworkAdapterId, Arc<dyn CarrierCompiler>> = FxHashMap::default();
         for compiler in compilers {
             Self::register(&mut map, compiler);
         }
-        Self { compilers: map }
+        Self {
+            compilers: map,
+            known_registered: FxHashMap::default(),
+        }
+    }
+
+    /// Project `accepted` into registered carrier geometry.
+    ///
+    /// Dispatches over the closed [`KnownRegisteredCompiler`] set — there is
+    /// no `&dyn CarrierCompiler` entry point here, so a third-party
+    /// `CarrierCompiler` implementation cannot publish a registered
+    /// `FrameworkParseArtifact` even if it reports one of the known adapter
+    /// ids. `Err(SyntaxReject)` covers both an unrecognized adapter and a
+    /// frontend refusal.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `accepted`'s resolved language names an adapter this
+    /// registry has no known registered projector for. The grammar
+    /// authority that mints an `AcceptedRegisteredCarrierSource` only ever
+    /// accepts a registered Vue/Svelte grammar, so for a `built_in()`
+    /// registry this is a wiring defect, never a reachable input — the same
+    /// invariant class as the `assert_eq!`s inside
+    /// [`registered_carrier_projection::project_registered_carrier`].
+    pub fn project_registered(
+        &self,
+        accepted: &AcceptedRegisteredCarrierSource,
+    ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
+        let language = accepted.source().resolved_file_language();
+        let adapter_id = language
+            .adapter_id()
+            .expect("an accepted registered carrier source resolves to a carrier adapter");
+        let known = self.known_registered.get(adapter_id).unwrap_or_else(|| {
+            panic!(
+                "accepted carrier source resolved to adapter {adapter_id:?}, which has no \
+                 known registered projector"
+            )
+        });
+        registered_carrier_projection::project_registered_carrier(known, accepted)
     }
 
     /// Insert a compiler under its own adapter id (its registration key).

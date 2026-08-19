@@ -16,11 +16,8 @@ fn make_artifacts(hash_marker: u8) -> Arc<FileArtifacts> {
 
 fn make_key(canonical: &str, content_hash: u8, parse_env_hash: u8) -> FileArtifactKey {
     FileArtifactKey {
-        canonical: Arc::from(canonical),
-        content_hash: [content_hash; 16],
         parse_env_hash: [parse_env_hash; 16],
-        parser_version: 1,
-        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
+        ..FileArtifactKey::base_for_test(Arc::from(canonical), [content_hash; 16])
     }
 }
 

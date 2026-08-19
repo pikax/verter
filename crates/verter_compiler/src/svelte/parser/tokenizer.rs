@@ -13,6 +13,12 @@
 //! interpolation early. Element nesting is tracked so the parser pairs open and
 //! close tags and recovers on a mismatch.
 
+use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType};
+use verter_language::{
+    compare_language_diagnostic_fields, LanguageDiagnosticOrderKey, LanguageDiagnosticSeverity,
+};
 use verter_span::Span;
 
 use super::options_custom_element::{CustomElementDescriptor, CustomElementShadow};
@@ -39,6 +45,32 @@ pub fn parse_svelte(source: &str) -> ParsedSvelte {
     let mut parser = SvelteParser::new(source);
     parser.parse_root();
     parser.finish()
+}
+
+fn template_source_type(grammar: ScriptBodyGrammar) -> SourceType {
+    match grammar {
+        ScriptBodyGrammar::Js => SourceType::mjs(),
+        ScriptBodyGrammar::Ts => SourceType::ts(),
+    }
+}
+
+fn valid_template_expression(source: &str, grammar: ScriptBodyGrammar) -> bool {
+    let alloc = Allocator::default();
+    let Ok(expression) =
+        Parser::new(&alloc, source, template_source_type(grammar)).parse_expression()
+    else {
+        return false;
+    };
+    super::options_custom_element::is_only_expression_trivia(
+        &source[expression.span().end as usize..],
+    )
+}
+
+fn valid_binding_pattern(source: &str, grammar: ScriptBodyGrammar) -> bool {
+    let alloc = Allocator::default();
+    let wrapped = format!("const {source} = null;");
+    let parsed = Parser::new(&alloc, &wrapped, template_source_type(grammar)).parse();
+    !parsed.panicked && parsed.errors.is_empty()
 }
 
 /// The well-formedness classification of a close tag's boundary (the bytes after `</`),
@@ -148,6 +180,9 @@ pub(super) struct SvelteParser<'a> {
     /// parses the whole component as TS, and `lang="TS"` / `lang="tsx"` / `lang="typescript"`
     /// (not the exact `ts` value) stays JS. NOT a per-script `script.lang` choice.
     script_body_grammar: ScriptBodyGrammar,
+    /// Explicit mode learned from a root `<svelte:options>` already consumed by
+    /// the same forward parse. Used for the legacy whitespace-before-block-sigil rule.
+    forced_runes_hint: Option<bool>,
 }
 
 impl<'a> SvelteParser<'a> {
@@ -175,6 +210,7 @@ impl<'a> SvelteParser<'a> {
             // Compute the parser-wide TS flag ONCE over the whole source, exactly as upstream's
             // `Parser` constructor does (the first lowercase `<script … lang="ts">` scan).
             script_body_grammar: script_body_grammar_for_source(source),
+            forced_runes_hint: None,
         }
     }
 
@@ -190,18 +226,103 @@ impl<'a> SvelteParser<'a> {
     }
 
     fn finish(mut self) -> ParsedSvelte {
-        // Order BOTH parse-defect rails by their monotonic `encounter_order` (the single
-        // forward-pass DISCOVERY order — NOT source position, since an `Unclosed` is
-        // proven at EOF yet anchors at its earlier open tag). The values are pushed in
-        // discovery order already, so these sorts are stable identities; they are kept
-        // explicit so the gate's `.first()`-is-earliest-discovered invariant is visible.
-        self.close_tag_violations.sort_by_key(|v| v.encounter_order);
-        self.strict_parse_errors.sort_by_key(|e| e.encounter_order);
-        self.parse_reject_facts.sort_by_key(|f| f.encounter_order);
-        self.script_body_probes.sort_by_key(|p| p.encounter_order);
-        self.style_body_probes.sort_by_key(|p| p.encounter_order);
-        self.options_custom_element_probes
-            .sort_by_key(|p| p.encounter_order);
+        // Order every parse-defect rail by monotonic discovery order, then by the
+        // shared source-local diagnostic key when a test or imported fact supplies
+        // equal discovery orders. Source position never outranks a distinct order.
+        self.close_tag_violations.sort_by(|left, right| {
+            left.encounter_order
+                .cmp(&right.encounter_order)
+                .then_with(|| {
+                    compare_language_diagnostic_fields(
+                        LanguageDiagnosticOrderKey::new(
+                            left.span,
+                            LanguageDiagnosticSeverity::Error,
+                            close_tag_violation_code(left.kind),
+                            &[],
+                        ),
+                        LanguageDiagnosticOrderKey::new(
+                            right.span,
+                            LanguageDiagnosticSeverity::Error,
+                            close_tag_violation_code(right.kind),
+                            &[],
+                        ),
+                    )
+                })
+        });
+        self.strict_parse_errors.sort_by(|left, right| {
+            left.encounter_order
+                .cmp(&right.encounter_order)
+                .then_with(|| {
+                    compare_language_diagnostic_fields(
+                        LanguageDiagnosticOrderKey::new(
+                            left.span,
+                            LanguageDiagnosticSeverity::Error,
+                            left.official_code,
+                            &[],
+                        ),
+                        LanguageDiagnosticOrderKey::new(
+                            right.span,
+                            LanguageDiagnosticSeverity::Error,
+                            right.official_code,
+                            &[],
+                        ),
+                    )
+                })
+        });
+        self.parse_reject_facts.sort_by(|left, right| {
+            left.encounter_order
+                .cmp(&right.encounter_order)
+                .then_with(|| {
+                    compare_language_diagnostic_fields(
+                        LanguageDiagnosticOrderKey::new(
+                            left.span,
+                            LanguageDiagnosticSeverity::Error,
+                            left.official_code,
+                            &[],
+                        ),
+                        LanguageDiagnosticOrderKey::new(
+                            right.span,
+                            LanguageDiagnosticSeverity::Error,
+                            right.official_code,
+                            &[],
+                        ),
+                    )
+                })
+        });
+        self.script_body_probes.sort_by(|left, right| {
+            left.encounter_order
+                .cmp(&right.encounter_order)
+                .then_with(|| {
+                    compare_language_diagnostic_fields(
+                        LanguageDiagnosticOrderKey::new(
+                            left.body_span,
+                            LanguageDiagnosticSeverity::Error,
+                            "js_parse_error",
+                            &[],
+                        ),
+                        LanguageDiagnosticOrderKey::new(
+                            right.body_span,
+                            LanguageDiagnosticSeverity::Error,
+                            "js_parse_error",
+                            &[],
+                        ),
+                    )
+                })
+        });
+        self.style_body_probes
+            .sort_by_key(|probe| (probe.encounter_order, probe.content_start));
+        self.options_custom_element_probes.sort_by(|left, right| {
+            left.encounter_order
+                .cmp(&right.encounter_order)
+                .then_with(|| left.expr_span.start.cmp(&right.expr_span.start))
+                .then_with(|| left.expr_span.end.cmp(&right.expr_span.end))
+                .then_with(|| {
+                    left.resolution
+                        .as_ref()
+                        .err()
+                        .cmp(&right.resolution.as_ref().err())
+                })
+        });
         let forced_runes = super::template_ast::forced_runes_option(self.text, &self.template);
         ParsedSvelte {
             instance_script: self.instance_script,
@@ -674,6 +795,22 @@ impl<'a> SvelteParser<'a> {
     fn diag(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
         self.diagnostics.push(SvelteParseDiagnostic {
             code,
+            official_code: None,
+            message: message.into(),
+            span,
+        });
+    }
+
+    fn diag_official(
+        &mut self,
+        code: &'static str,
+        official_code: &'static str,
+        message: impl Into<String>,
+        span: Span,
+    ) {
+        self.diagnostics.push(SvelteParseDiagnostic {
+            code,
+            official_code: Some(official_code),
             message: message.into(),
             span,
         });
@@ -714,6 +851,10 @@ impl<'a> SvelteParser<'a> {
                     // ROOT-scope element scan: a root-only `<svelte:*>` meta tag here is at the
                     // component root (placement-valid).
                     let node = self.parse_element_or_recover(true);
+                    if let Some(value) = super::template_ast::forced_runes_option(self.text, &node)
+                    {
+                        self.forced_runes_hint = Some(value);
+                    }
                     self.template.extend(node);
                 }
                 text_start = self.pos;
@@ -915,10 +1056,17 @@ impl<'a> SvelteParser<'a> {
                     "unterminated <script> block",
                     tag_open,
                 );
-                // No recognised `</script>` close before EOF (an unterminated block, or a
-                // `</script x>` close official does not recognise) — official
+                // A raw script that simply reaches EOF is `unexpected_eof`; a malformed
+                // close token was present but not recognisable as a close tag, so it is
                 // `element_unclosed`.
-                self.record_element_unclosed(tag_open);
+                let kind = if self.text[content_start..].contains("</script")
+                    || self.text[..open_start].trim().is_empty()
+                {
+                    SvelteStrictParseErrorKind::ElementUnclosed
+                } else {
+                    SvelteStrictParseErrorKind::UnexpectedEof
+                };
+                self.record_strict_parse_error(kind, tag_open);
                 self.pos = self.len();
                 Some(SvelteScript {
                     is_module,
@@ -1123,6 +1271,12 @@ impl<'a> SvelteParser<'a> {
     /// malformed tag.
     fn parse_element_or_recover(&mut self, at_root: bool) -> Vec<SvelteNode> {
         let start = self.pos;
+        if self.starts_with_ci_at(start, b"<!doctype") {
+            if let Some(relative_end) = self.src[start..].iter().position(|byte| *byte == b'>') {
+                self.pos = start + relative_end + 1;
+                return vec![SvelteNode::Text(Span::new(start as u32, self.pos as u32))];
+            }
+        }
         if self.at(self.pos + 1) == b'/' {
             // A close tag reached at this scope. The element-child scan
             // (`parse_children_until_close`) handles a matching / ancestor close
@@ -1176,6 +1330,9 @@ impl<'a> SvelteParser<'a> {
         let name_span = Span::new(name_start as u32, p as u32);
         let name = self.slice(name_span).to_string();
         let kind = classify_element(&name);
+        if self.at(p) == b'[' {
+            self.record_tag_invalid_name(Span::new(p as u32, (p + 1) as u32));
+        }
 
         // A DUPLICATE root-only `<svelte:*>` meta element (a second `<svelte:options>` /
         // `<svelte:head>` / …) — official `svelte_meta_duplicate`, minted right after the tag
@@ -1254,6 +1411,20 @@ impl<'a> SvelteParser<'a> {
             }
         }
 
+        if matches!(
+            kind,
+            SvelteElementKind::Special(
+                SvelteSpecialKind::Window | SvelteSpecialKind::Document | SvelteSpecialKind::Body
+            )
+        ) && !children.is_empty()
+        {
+            self.record_parse_reject(
+                SvelteParseRejectKind::SvelteMetaInvalidContent,
+                "svelte_meta_invalid_content",
+                open_span,
+            );
+        }
+
         vec![SvelteNode::Element(SvelteElement {
             name,
             name_span,
@@ -1284,11 +1455,30 @@ impl<'a> SvelteParser<'a> {
         open_span: Span,
     ) -> (Vec<SvelteNode>, Option<Span>) {
         self.open_stack.push(name.to_string());
+        // Official Svelte gives only `<textarea>` HTML-RCDATA parsing. A `<title>` under
+        // `<svelte:head>` is a `TitleElement` whose children stay structural so analysis can
+        // reject nested elements, comments, and blocks as `title_invalid_content`; an ordinary
+        // `<title>` is parsed structurally as a regular element too.
+        let rcdata = name.eq_ignore_ascii_case("textarea");
         let mut children = Vec::new();
         let mut text_start = self.pos;
         while !self.eof() {
             let b = self.cur();
             if b == b'<' {
+                if rcdata {
+                    let matching_clean_close = self.at(self.pos + 1) == b'/'
+                        && self
+                            .close_tag_name_bytes(self.pos + 2)
+                            .is_some_and(|close| close.eq_ignore_ascii_case(name))
+                        && matches!(
+                            self.classify_close_boundary(self.pos + 2),
+                            CloseBoundary::Clean
+                        );
+                    if !matching_clean_close {
+                        self.pos += 1;
+                        continue;
+                    }
+                }
                 // A close tag at this scope? Recognise the close by NAME (independent of
                 // boundary well-formedness) so a MALFORMED-boundary close of THIS element
                 // (`</div/>` while parsing `<div>`) is still recognised as this element's
@@ -1395,8 +1585,20 @@ impl<'a> SvelteParser<'a> {
                 // A block-closing/clause token belongs to an enclosing block —
                 // stop child scan so the block parser sees it.
                 if self.is_block_close_or_clause() {
+                    if self.at(self.pos + 1) == b':' {
+                        self.record_block_invalid_continuation(Span::new(
+                            self.pos as u32,
+                            self.pos as u32,
+                        ));
+                    }
                     self.open_stack.pop();
                     return (children, None);
+                }
+                if rcdata && self.at(self.pos + 1) == b'#' {
+                    self.record_block_invalid_placement(Span::new(
+                        self.pos as u32,
+                        self.pos as u32,
+                    ));
                 }
                 let nodes = self.parse_brace_construct();
                 children.extend(nodes);
@@ -1634,6 +1836,21 @@ impl<'a> SvelteParser<'a> {
                 p = (q + 3).min(self.len());
                 continue;
             }
+            if self.starts_with_at(p, b"//") {
+                p += 2;
+                while p < self.len() && !matches!(self.at(p), b'\n' | b'\r') {
+                    p += 1;
+                }
+                continue;
+            }
+            if self.starts_with_at(p, b"/*") {
+                p += 2;
+                while p < self.len() && !self.starts_with_at(p, b"*/") {
+                    p += 1;
+                }
+                p = (p + 2).min(self.len());
+                continue;
+            }
             if p >= self.len() {
                 return None;
             }
@@ -1720,6 +1937,9 @@ impl<'a> SvelteParser<'a> {
         let inner = Span::new(inner_start as u32, end as u32);
         let span = Span::new(from as u32, (end + 1).min(self.len()) as u32);
         let body = self.slice(inner).trim_start();
+        if body.trim_end() == "this" {
+            self.record_unexpected_reserved_word(inner);
+        }
         let attr = if body.starts_with("...") {
             SvelteAttribute {
                 kind: SvelteAttributeKind::Spread(inner),
@@ -1794,6 +2014,13 @@ impl<'a> SvelteParser<'a> {
         }
         let name_span = Span::new(from as u32, p as u32);
         let raw_name = self.slice(name_span).to_string();
+        if let Some(offset) = raw_name
+            .bytes()
+            .position(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            let quote = from + offset;
+            self.record_expected_token(Span::new(quote as u32, quote as u32));
+        }
 
         // Optional value.
         let mut value: Option<SvelteAttributeValue> = None;
@@ -1917,6 +2144,9 @@ impl<'a> SvelteParser<'a> {
                     }
                     let expression_start = p + 1;
                     let expression_end = self.find_matching_brace(expression_start);
+                    if self.at(expression_start) == b'#' {
+                        self.record_block_invalid_placement(Span::new(p as u32, p as u32));
+                    }
                     mixed_parts.push(SvelteMixedAttributePart::Expression(Span::new(
                         expression_start as u32,
                         expression_end as u32,
@@ -2000,12 +2230,30 @@ impl<'a> SvelteParser<'a> {
     fn parse_brace_construct(&mut self) -> Vec<SvelteNode> {
         let start = self.pos;
         let next = self.at(self.pos + 1);
+        if next.is_ascii_whitespace() {
+            let mut sigil = self.pos + 1;
+            while sigil < self.len() && self.at(sigil).is_ascii_whitespace() {
+                sigil += 1;
+            }
+            if self.at(sigil) == b'#' {
+                if self.forced_runes_hint == Some(false) {
+                    return self.parse_block_at(sigil);
+                }
+                self.record_block_unexpected_character(Span::new(
+                    self.pos as u32,
+                    sigil.saturating_add(1) as u32,
+                ));
+            }
+        }
         match next {
             b'#' => self.parse_block(),
             b'@' => vec![self.parse_at_tag()],
-            b'/' => {
+            b'/' if !matches!(self.at(self.pos + 2), b'*' | b'/') => {
                 // Stray block-close at this scope — consume it and warn.
-                let end = self.find_matching_brace(self.pos + 1);
+                // Start after the block-close sigil. Starting on `/` would let
+                // the JavaScript-aware scanner classify it as a regex opener
+                // after `{` and run to EOF, producing an out-of-bounds span.
+                let end = self.find_matching_brace(self.pos + 2);
                 self.diag(
                     "unexpected-block-close",
                     "unexpected block-closing tag",
@@ -2017,8 +2265,9 @@ impl<'a> SvelteParser<'a> {
             b':' => {
                 // Stray clause at this scope — consume it and warn.
                 let end = self.find_matching_brace(self.pos + 1);
-                self.diag(
+                self.diag_official(
                     "unexpected-clause",
+                    "block_invalid_continuation_placement",
                     "unexpected block clause",
                     Span::new(start as u32, (end + 1) as u32),
                 );
@@ -2035,6 +2284,9 @@ impl<'a> SvelteParser<'a> {
                 let trimmed = body.trim_start();
                 self.pos = (end + 1).min(self.len());
                 if let Some(kind) = declaration_tag_kind(trimmed) {
+                    if end >= self.len() && trimmed.trim_end().ends_with('/') {
+                        self.record_unexpected_eof(Span::new(self.len() as u32, self.len() as u32));
+                    }
                     let keyword_len = if matches!(kind, SvelteTagKind::Const) {
                         5
                     } else {
@@ -2056,6 +2308,18 @@ impl<'a> SvelteParser<'a> {
                         ),
                     })]
                 } else {
+                    let invalid_declaration = ["var", "type"].into_iter().any(|keyword| {
+                        trimmed
+                            .strip_prefix(keyword)
+                            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                    });
+                    if !valid_template_expression(body, self.script_body_grammar) {
+                        if invalid_declaration {
+                            self.record_declaration_tag_invalid_type(inner);
+                        } else {
+                            self.record_js_parse_error(inner);
+                        }
+                    }
                     vec![SvelteNode::Interpolation(inner)]
                 }
             }
@@ -2064,8 +2328,12 @@ impl<'a> SvelteParser<'a> {
 
     /// Parse a `{#...}` block.
     fn parse_block(&mut self) -> Vec<SvelteNode> {
+        self.parse_block_at(self.pos + 1)
+    }
+
+    fn parse_block_at(&mut self, sigil: usize) -> Vec<SvelteNode> {
         let start = self.pos;
-        let head_inner_start = self.pos + 2; // skip `{#`
+        let head_inner_start = sigil + 1; // skip the `#`, including admitted legacy whitespace
         let head_end = self.find_matching_brace(head_inner_start);
         let head = self.slice(Span::new(head_inner_start as u32, head_end as u32));
         self.pos = (head_end + 1).min(self.len());
@@ -2122,6 +2390,11 @@ impl<'a> SvelteParser<'a> {
     ) -> Vec<SvelteNode> {
         let head_span = Span::new(start as u32, self.pos as u32);
         let head_expr = nonempty_span(head_rest_start, head_rest);
+        if let Some(span) = head_expr {
+            if !valid_template_expression(self.slice(span), self.script_body_grammar) {
+                self.record_js_parse_error(span);
+            }
+        }
         let children = self.parse_block_children(&["else", "/if"]);
         let mut clauses = Vec::new();
         loop {
@@ -2163,6 +2436,20 @@ impl<'a> SvelteParser<'a> {
         // `expr as item, index (key)` — `as`/item optional (the no-item form).
         let (list_expr, item, index, key) =
             super::block_head::parse_each_head(head_rest_start, head_rest);
+        if let Some(span) = list_expr {
+            if !valid_template_expression(self.slice(span), self.script_body_grammar) {
+                self.record_js_parse_error(span);
+            }
+        }
+        if let Some(span) = item {
+            if !valid_binding_pattern(self.slice(span), self.script_body_grammar) {
+                if matches!(self.slice(span).trim(), "case" | "class" | "this") {
+                    self.record_unexpected_reserved_word(span);
+                } else {
+                    self.record_js_parse_error(span);
+                }
+            }
+        }
         let children = self.parse_block_children(&["else", "/each"]);
         let mut clauses = Vec::new();
         if matches!(self.peek_clause_keyword().as_deref(), Some("else")) {
@@ -2197,6 +2484,11 @@ impl<'a> SvelteParser<'a> {
         let trimmed = head_rest.trim();
         let (promise_expr, inline_branch) =
             super::block_head::parse_await_head(head_rest_start, head_rest);
+        if let Some(span) = promise_expr {
+            if !valid_template_expression(self.slice(span), self.script_body_grammar) {
+                self.record_js_parse_error(span);
+            }
+        }
         let _ = trimmed;
         let mut then_binding = match inline_branch {
             SvelteAwaitInline::Then { binding, .. } => binding,
@@ -2257,6 +2549,11 @@ impl<'a> SvelteParser<'a> {
     ) -> Vec<SvelteNode> {
         let head_span = Span::new(start as u32, self.pos as u32);
         let head_expr = nonempty_span(head_rest_start, head_rest);
+        if let Some(span) = head_expr {
+            if !valid_template_expression(self.slice(span), self.script_body_grammar) {
+                self.record_js_parse_error(span);
+            }
+        }
         let children = self.parse_block_children(&["/key"]);
         let close_tag = self.consume_block_close("key");
         vec![SvelteNode::Block(SvelteBlock {
@@ -2280,6 +2577,10 @@ impl<'a> SvelteParser<'a> {
         // `name(params)`
         let (name_span, name_text, params) =
             super::block_head::parse_snippet_head(head_rest_start, head_rest);
+        if (head_rest.contains('(') && !head_rest.contains(')')) || head_rest.contains("{/snippet")
+        {
+            self.record_expected_token(head_span);
+        }
         let children = self.parse_block_children(&["/snippet"]);
         let close_tag = self.consume_block_close("snippet");
         vec![SvelteNode::Block(SvelteBlock {
@@ -2356,7 +2657,9 @@ impl<'a> SvelteParser<'a> {
     /// Whether the brace at `self.pos` opens a block clause (`{:`) or close
     /// (`{/`).
     fn is_block_close_or_clause(&self) -> bool {
-        self.cur() == b'{' && (self.at(self.pos + 1) == b':' || self.at(self.pos + 1) == b'/')
+        self.cur() == b'{'
+            && (self.at(self.pos + 1) == b':'
+                || (self.at(self.pos + 1) == b'/' && !matches!(self.at(self.pos + 2), b'*' | b'/')))
     }
 
     /// Peek the keyword of a `{:keyword ...}` clause at `self.pos`, without
@@ -2402,6 +2705,11 @@ impl<'a> SvelteParser<'a> {
         } else {
             (SvelteClauseKind::Else, None)
         };
+        if let Some(span) = expr {
+            if !valid_template_expression(self.slice(span), self.script_body_grammar) {
+                self.record_js_parse_error(span);
+            }
+        }
         let body = self.parse_block_children(&["else", "/if", "/each"]);
         (kind, expr, tag_span, body)
     }
@@ -2442,8 +2750,14 @@ impl<'a> SvelteParser<'a> {
                 return Some(Span::new(close_start as u32, self.pos as u32));
             }
         }
-        self.diag(
+        let official_code = if self.eof() {
+            "block_unclosed"
+        } else {
+            "expected_token"
+        };
+        self.diag_official(
             "unterminated-block",
+            official_code,
             format!("missing `{{/{keyword}}}` close"),
             Span::new(
                 self.pos.min(self.len()) as u32,
@@ -2476,8 +2790,9 @@ impl<'a> SvelteParser<'a> {
             _ => SvelteTagKind::Unknown,
         };
         if matches!(kind, SvelteTagKind::Unknown) {
-            self.diag(
+            self.diag_official(
                 "unknown-tag",
+                "expected_whitespace",
                 format!("unknown tag `{{@{keyword}}}`"),
                 Span::new(start as u32, self.pos as u32),
             );
@@ -2509,6 +2824,14 @@ impl<'a> SvelteParser<'a> {
     /// runtime mixed-attribute lowering (no second hand-rolled brace scanner).
     fn find_matching_brace(&self, inner_start: usize) -> usize {
         find_matching_brace_in(self.src, inner_start)
+    }
+}
+
+fn close_tag_violation_code(kind: CloseTagViolationKind) -> &'static str {
+    match kind {
+        CloseTagViolationKind::Unclosed => "element_unclosed",
+        CloseTagViolationKind::InvalidClosingTag => "element_invalid_closing_tag",
+        CloseTagViolationKind::VoidElementInvalidContent => "void_element_invalid_content",
     }
 }
 

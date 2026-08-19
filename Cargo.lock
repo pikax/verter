@@ -4066,6 +4066,7 @@ dependencies = [
  "getrandom 0.2.17",
  "serde",
  "trybuild",
+ "verter_identity",
  "verter_span",
 ]
 
@@ -4260,6 +4261,7 @@ dependencies = [
  "serde_repr",
  "sha2",
  "smallvec",
+ "verter_language",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",

@@ -885,9 +885,7 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
     // The fenced leader published NOTHING (ReturnOnly never publishes);
     // the store's current artifact is the follower's re-run product.
     let published = host
-        .project_type_store()
-        .indexed()
-        .get(owner, follower_result.whole_hash)
+        .exact_current_indexed_for_test(owner, follower_result.whole_hash)
         .expect("the follower's re-run must have published a current artifact");
     assert!(
         Arc::ptr_eq(&published, &follower_result),
@@ -938,6 +936,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
     // the reuse gate consults.
     let forge = |parse_env_hash: crate::types::Hash16| crate::project_type_store::IndexedReady {
         whole_hash: built.whole_hash,
+        file_language: built.file_language.clone(),
         shallow_state: Arc::clone(&built.shallow_state),
         built_at_content_generation: built.built_at_content_generation,
         parse_env_hash,
@@ -2591,9 +2590,7 @@ fn unmasked_owner_with_overlay_only_helper_route_never_publishes_base_key() {
     // `whole_hash` IS the base content hash — exactly the key a base
     // content-pinned read would use.
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(owner, served.whole_hash)
+        host.exact_current_indexed_for_test(owner, served.whole_hash)
             .is_none(),
         "a view-influenced artifact for an unmasked owner must not be \
          published under the owner's base key — base reads would observe \
@@ -2704,9 +2701,7 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
         .get_whole_hash(owner)
         .expect("owner tracked by the scheduler");
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(owner, current_hash)
+        host.exact_current_indexed_for_test(owner, current_hash)
             .is_none(),
         "choreography: the parked flight must have been fenced (nothing \
          published for the owner's current content)",
@@ -2910,9 +2905,7 @@ fn owner_import_surface_from_fenced_route_walk_is_served_but_not_admitted() {
         .get_whole_hash(barrel)
         .expect("barrel tracked by the scheduler");
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(barrel, barrel_hash)
+        host.exact_current_indexed_for_test(barrel, barrel_hash)
             .is_none(),
         "choreography: the parked barrel flight must have been fenced \
          (nothing published for the barrel's current content)",
@@ -3379,10 +3372,7 @@ fn augmentation_probe_fails_closed_on_fenced_serve() {
         .get_whole_hash(aug)
         .expect("augmenter tracked by the scheduler");
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(aug, aug_hash)
-            .is_none(),
+        host.exact_current_indexed_for_test(aug, aug_hash).is_none(),
         "choreography: the parked augmenter flight must have been fenced \
          (nothing published for the augmenter's current content)",
     );
@@ -3487,9 +3477,7 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
         .get_whole_hash(owner)
         .expect("owner tracked by the scheduler");
     assert!(
-        host.project_type_store()
-            .indexed()
-            .get(owner, owner_hash)
+        host.exact_current_indexed_for_test(owner, owner_hash)
             .is_none(),
         "choreography: the parked owner flight must have been fenced \
          (nothing published for the owner's current content)",

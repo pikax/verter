@@ -22,21 +22,23 @@ use std::time::Instant;
 use web_time::Instant;
 
 use verter_language::{
-    CarrierParse, FrameworkAdapterId, FrameworkParseArtifact, FrameworkParseCommon, JsModuleKind,
-    LanguageId, ScriptSourceType,
+    parse_key_for, sort_language_diagnostics, syntax_profile_id_for, CarrierParse, FileLanguage,
+    FrameworkAdapterId, JsModuleKind, LanguageDiagnostic, LanguageDiagnosticSeverity, LanguageId,
+    ParseKey, ParseOptions, ScriptSourceType, SyntaxProfileId, SyntaxReject,
+    UnregisteredFrameworkParseArtifact, SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+    SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 use verter_span::Span;
 
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
-    ParseOptions, RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity, RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity,
-    TemplateFacts,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity, TemplateFacts,
 };
-use crate::framework_common::ctx::{receive_svelte_carrier_token, CarrierCompilerCtx};
+use crate::framework_common::FrameworkParseArtifact;
 
 use super::attribute_expressions::SvelteAttributeExpressions;
-use super::parser::{parse_svelte, ParsedSvelte, SvelteScript};
+use super::parser::{parse_svelte, CloseTagViolationKind, ParsedSvelte, SvelteScript};
 
 /// The concrete Svelte carrier: the parsed component behind the erasure seam,
 /// plus the typed lowering of its plain-attribute `{expr}` values.
@@ -101,38 +103,107 @@ pub(crate) fn svelte_script_source_type(script: Option<&SvelteScript>) -> Script
 }
 
 /// The Svelte carrier parser version stamped on produced artifacts.
-pub const SVELTE_CARRIER_PARSER_VERSION: u32 = 2;
-pub const SVELTE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::CarrierParserVersion =
-    match verter_language::carrier_versions::CarrierParserVersion::new(
-        SVELTE_CARRIER_PARSER_VERSION,
-    ) {
-        Some(version) => version,
-        None => panic!("Svelte carrier parser version must be nonzero"),
-    };
+/// Map the parser's own diagnostic rails onto the framework-neutral mapped
+/// channel.
+///
+/// This is the diagnostic stream for publishable parser recovery. Close-tag
+/// and parse-reject facts are mapped from their typed parser rails; no
+/// code-string classification or raw-source inference is involved. Every
+/// entry carries a real retained span.
+///
+/// STRICT-parse facts (`ParsedSvelte::strict_parse_errors`) are deliberately
+/// NOT mapped here, even though — like every other recovery point — they no
+/// longer refuse carrier publication (see `parse`'s doc). A mapped diagnostic
+/// on this channel marks the carrier's own `DiagnosticsSnapshot` as
+/// `has_errors`, and host-side IDE serving currently fails closed on that
+/// flag even for an IDE-only request — so surfacing a strict fact here would
+/// silently break hover/completion for the exact mid-typing states (an empty
+/// `{}` interpolation, an unclosed `<script>`) this carrier is supposed to
+/// stay usable for. The CLIENT-runtime "Verter emits a `Main` ⇔ official
+/// ACCEPTS" contract still sees every strict fact, at `official_reject_gate`
+/// (compile time) — this channel just isn't where that contract is enforced.
+fn svelte_parse_diagnostics(
+    source: &str,
+    parsed: &ParsedSvelte,
+    parse_key: &ParseKey,
+) -> Vec<LanguageDiagnostic> {
+    let mut diagnostics = parsed
+        .diagnostics
+        .iter()
+        .map(|diagnostic| LanguageDiagnostic {
+            span: diagnostic.span,
+            severity: LanguageDiagnosticSeverity::Error,
+            code: diagnostic.official_code.unwrap_or(diagnostic.code),
+            arguments: Vec::new(),
+            message: diagnostic.message.clone(),
+        })
+        .collect::<Vec<_>>();
+    diagnostics.extend(parsed.close_tag_violations.iter().map(|violation| {
+        let code = match violation.kind {
+            CloseTagViolationKind::Unclosed => "element_unclosed",
+            CloseTagViolationKind::InvalidClosingTag => "element_invalid_closing_tag",
+            CloseTagViolationKind::VoidElementInvalidContent => "void_element_invalid_content",
+        };
+        recovered_svelte_diagnostic(violation.span, code)
+    }));
+    diagnostics.extend(
+        parsed
+            .parse_reject_facts
+            .iter()
+            .map(|fact| recovered_svelte_diagnostic(fact.span, fact.official_code)),
+    );
+    // Non-CSS deferred parse-phase defects only (script-body parse faults,
+    // `<svelte:options customElement>` resolution faults). CSS style-body
+    // parsing/rejection is runtime-gate territory
+    // (`official_reject::deferred_parse_defects`), never the carrier's
+    // mapped-diagnostic channel: carrier geometry recognizes a `<style>`
+    // block's byte boundaries and stops there.
+    diagnostics.extend(
+        super::runtime::deferred_parse_defects_excluding_css(source, parsed)
+            .into_iter()
+            .map(|defect| recovered_svelte_diagnostic(defect.span, defect.rejection.official_code)),
+    );
+    sort_language_diagnostics(parse_key, &mut diagnostics);
+    diagnostics
+}
+
+fn recovered_svelte_diagnostic(span: Span, code: &'static str) -> LanguageDiagnostic {
+    LanguageDiagnostic {
+        span,
+        severity: LanguageDiagnosticSeverity::Error,
+        code,
+        arguments: Vec::new(),
+        message: format!("Svelte recovered from `{code}`"),
+    }
+}
 
 /// Wrap a parsed Svelte component for the registered projector.
 #[must_use]
 pub fn build_svelte_parse_artifact(
     source: &str,
     parsed: Arc<ParsedSvelte>,
-    parser_version: u32,
-) -> Arc<FrameworkParseArtifact> {
-    Arc::new(FrameworkParseArtifact::new(
+    parse_key: Arc<ParseKey>,
+    syntax_profile: Arc<SyntaxProfileId>,
+) -> Arc<UnregisteredFrameworkParseArtifact> {
+    let diagnostics = svelte_parse_diagnostics(source, &parsed, &parse_key);
+    Arc::new(UnregisteredFrameworkParseArtifact::new(
         FrameworkAdapterId::svelte(),
         LanguageId::new("svelte"),
-        parser_version,
-        FrameworkParseCommon {
-            inventory: Arc::default(),
-            diagnostics: Vec::new(),
-        },
+        parse_key,
+        syntax_profile,
+        diagnostics,
         Arc::new(SvelteParseCarrier::new(parsed, source)),
     ))
 }
 
 /// The Svelte carrier compiler — the second [`CarrierCompiler`].
-pub struct SvelteCarrierCompiler {
-    ctx: CarrierCompilerCtx,
-}
+///
+/// Reaches its parsed component back out of the type-erased artifact
+/// through its own inherent downcast — no capability token, since only
+/// this adapter's own inherent methods call the raw carrier downcast on
+/// its own artifacts.
+#[derive(Default)]
+pub struct SvelteCarrierCompiler;
 
 impl std::fmt::Debug for SvelteCarrierCompiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -141,20 +212,21 @@ impl std::fmt::Debug for SvelteCarrierCompiler {
     }
 }
 
-impl Default for SvelteCarrierCompiler {
-    fn default() -> Self {
-        Self {
-            ctx: CarrierCompilerCtx::new(receive_svelte_carrier_token()),
-        }
-    }
+/// The registered-projector opener installed on the Svelte framework leg
+/// (`CarrierLeg::open`). Returns the artifact's erased carrier ONLY for a
+/// Svelte-adapter artifact — the sole cross-crate entry point for reaching
+/// a Svelte registered artifact's typed carrier.
+#[doc(hidden)]
+pub fn open_svelte_carrier(artifact: &FrameworkParseArtifact) -> Option<Arc<dyn CarrierParse>> {
+    artifact.erased_carrier_for_adapter(&FrameworkAdapterId::svelte())
 }
 
 impl SvelteCarrierCompiler {
-    pub(crate) fn carrier_arc(
+    pub(crate) fn unregistered_carrier_arc(
         &self,
-        artifact: &FrameworkParseArtifact,
+        artifact: &UnregisteredFrameworkParseArtifact,
     ) -> Option<Arc<SvelteParseCarrier>> {
-        self.ctx.carrier_for_arc::<SvelteParseCarrier>(artifact)
+        verter_language::__carrier_downcast_arc::<SvelteParseCarrier>(artifact)
     }
 
     /// Reach the parsed component back out of a Svelte artifact, or `None` when
@@ -168,6 +240,14 @@ impl SvelteCarrierCompiler {
             .map(SvelteParseCarrier::parsed)
     }
 
+    pub(crate) fn unregistered_parsed_svelte<'a>(
+        &self,
+        artifact: &'a UnregisteredFrameworkParseArtifact,
+    ) -> Option<&'a ParsedSvelte> {
+        verter_language::__carrier_downcast_ref::<SvelteParseCarrier>(artifact)
+            .map(SvelteParseCarrier::parsed)
+    }
+
     /// Reach the Svelte carrier payload — the parse plus its retained typed
     /// attribute-value lowering — or `None` for a foreign artifact.
     #[must_use]
@@ -175,7 +255,7 @@ impl SvelteCarrierCompiler {
         &self,
         artifact: &'a FrameworkParseArtifact,
     ) -> Option<&'a SvelteParseCarrier> {
-        self.ctx.carrier_for::<SvelteParseCarrier>(artifact)
+        artifact.carrier_ref::<SvelteParseCarrier>()
     }
 
     /// Run the Svelte IDE projection once and return BOTH the rendered
@@ -221,7 +301,7 @@ impl SvelteCarrierCompiler {
                 },
                 code: d.code.to_string(),
                 message: d.message.clone(),
-                span: Some(d.span),
+                span: d.span,
             })
             .collect();
 
@@ -247,10 +327,6 @@ impl SvelteCarrierCompiler {
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {
-    fn __verter_as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::svelte()
     }
@@ -259,9 +335,54 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         LanguageId::new("svelte")
     }
 
-    fn parse(&self, source: &str, _opts: &ParseOptions) -> Arc<FrameworkParseArtifact> {
+    fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+        let language = FileLanguage::svelte();
+        let syntax_profile = syntax_profile_id_for(&language, opts)
+            .expect("the built-in Svelte language has a syntax profile");
+        let parse_key = parse_key_for(
+            source,
+            &language,
+            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+            &syntax_profile,
+        )
+        .expect("the built-in Svelte language has a parse identity");
+        let syntax_profile = Arc::new(syntax_profile);
+        let parse_key = Arc::new(parse_key);
+        // Svelte's official `loose` parse mode is not implemented by this
+        // frontend (capability-matrix: `SVELTE-PARSE-LOCAL` is "strict
+        // parser diagnostics/recovery only; ... loose is unsupported
+        // fail-closed"). Reject before parsing — never silently downgrade
+        // to strict parsing.
+        if opts.svelte_loose {
+            return Err(SyntaxReject::UnsupportedProfile {
+                parse_key,
+                syntax_profile,
+                reason: verter_language::UnsupportedSyntaxProfileReason::UnsupportedOption,
+            });
+        }
+        // Every OTHER strict-parse / close-tag defect is a parser-owned
+        // RECOVERY point: the tokenizer is intentionally infallible and
+        // always produces a faithful tree, which is correct for the IDE
+        // projection (it owns its own error recovery) — see
+        // `SvelteStrictParseError`'s doc. Refusing publication here would
+        // make the carrier unusable for exactly the states an editor spends
+        // most of its time in (an unclosed `<script>` mid-typing, a stray
+        // close tag). The CLIENT-runtime "Verter emits a `Main` ⇔ official
+        // ACCEPTS" contract is enforced separately and later, at
+        // `official_reject_gate` (compile time) — never at this parse/publish
+        // seam.
         let parsed = Arc::new(parse_svelte(source));
-        build_svelte_parse_artifact(source, parsed, SVELTE_CARRIER_PARSER_VERSION)
+        Ok(build_svelte_parse_artifact(
+            source,
+            parsed,
+            parse_key,
+            syntax_profile,
+        ))
     }
 
     fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
@@ -437,7 +558,12 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                             rejection.rule.message(),
                             rejection.official_code
                         ),
-                        span: None,
+                        // The OFFICIAL-REJECT oracle is a whole-component
+                        // validity judgment, not a located defect — the
+                        // whole-source span IS this diagnostic's own span,
+                        // decided here where `source` is known, not defaulted
+                        // downstream.
+                        span: verter_span::Span::new(0, source.len() as u32),
                     });
                 }
             }
@@ -481,7 +607,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                     RuntimeSurfaceRefusal {
                         diagnostic_code: surface.diagnostic_code().to_string(),
                         message: surface.message(),
-                        span: Some(surface.span()),
+                        span: surface.span(),
                         diagnostics: std::mem::take(&mut bundle.diagnostics),
                     },
                 ));
@@ -490,32 +616,23 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 // A genuine lowering failure (a malformed construct) ALSO
                 // produces no `Main`, so it is a runtime refusal too. The first
                 // recorded problem is the structural reason; the rest ride
-                // along as non-fatal diagnostics.
+                // along as non-fatal diagnostics. `RuntimeLoweringErrors` is
+                // non-empty by construction (`lower_parsed_svelte_to_ir` only
+                // returns `Err` behind an `!ctx.errors.is_empty()` guard), so
+                // `first()` is always `Some` here.
                 let mut diagnostics = std::mem::take(&mut bundle.diagnostics);
-                let (code, message, span) = errors
+                let (first, rest) = errors
                     .diagnostics
-                    .first()
-                    .map(|diag| {
-                        (
-                            diag.code.to_string(),
-                            diag.message.clone(),
-                            Some(diag.span),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            "svelte-runtime-lowering-failed".to_string(),
-                            "The native Svelte backend could not lower the component; runtime output was refused."
-                                .to_string(),
-                            None,
-                        )
-                    });
-                for diag in errors.diagnostics.iter().skip(1) {
+                    .split_first()
+                    .expect("RuntimeLoweringErrors is non-empty by construction");
+                let (code, message, span) =
+                    (first.code.to_string(), first.message.clone(), first.span);
+                for diag in rest {
                     diagnostics.push(RuntimeDiagnostic {
                         severity: RuntimeDiagnosticSeverity::Warning,
                         code: diag.code.to_string(),
                         message: diag.message.clone(),
-                        span: Some(diag.span),
+                        span: diag.span,
                     });
                 }
                 return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
@@ -533,7 +650,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                         diagnostic_code: "svelte-runtime-generated-module-invalid".to_string(),
                         message: "The native Svelte backend generated invalid JavaScript; runtime output was refused."
                             .to_string(),
-                        span: Some(Span::new(0, 0)),
+                        span: Span::new(0, 0),
                         diagnostics: std::mem::take(&mut bundle.diagnostics),
                     },
                 ));
@@ -544,7 +661,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                         diagnostic_code: "svelte-runtime-generated-source-map-invalid".to_string(),
                         message: "The native Svelte backend could not safely generate the client source map; runtime output was refused."
                             .to_string(),
-                        span: Some(Span::new(0, 0)),
+                        span: Span::new(0, 0),
                         diagnostics: std::mem::take(&mut bundle.diagnostics),
                     },
                 ));
@@ -553,7 +670,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 // The component is MALFORMED Svelte official ALSO compile-errors
                 // — fail closed with the typed official-reject reason (the
                 // rule's stable code + a message naming the EXACT official code
-                // the rejection mirrors).
+                // the rejection mirrors). The OFFICIAL-REJECT oracle judges the
+                // whole component, not a located construct, so the whole-source
+                // span IS this refusal's own span — decided here, not defaulted
+                // downstream.
                 return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
                     RuntimeSurfaceRefusal {
                         diagnostic_code: rejection.rule.diagnostic_code().to_string(),
@@ -562,7 +682,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                             rejection.rule.message(),
                             rejection.official_code
                         ),
-                        span: None,
+                        span: Span::new(0, source.len() as u32),
                         diagnostics: std::mem::take(&mut bundle.diagnostics),
                     },
                 ));
@@ -644,12 +764,54 @@ mod tests {
             .accept_registered_source(&source_authority, &snapshot, &config)
             .unwrap();
         Arc::new(
-            crate::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
-                &SvelteCarrierCompiler::default(),
-                &accepted,
-            )
-            .into_framework_parse_artifact(),
+            crate::framework_common::CarrierCompilerRegistry::built_in()
+                .project_registered(&accepted)
+                .expect("fixture source parses")
+                .into_framework_parse_artifact(),
         )
+    }
+
+    fn expected_parse_key(source: &str) -> ParseKey {
+        let language = FileLanguage::svelte();
+        let profile = syntax_profile_id_for(&language, &ParseOptions::default()).unwrap();
+        parse_key_for(
+            source,
+            &language,
+            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+            &profile,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn malformed_svelte_source_still_publishes() {
+        // An unterminated `<style>` block is a parser-recoverable STRICT
+        // defect: the carrier still publishes (the IDE keeps a usable
+        // structure while the user is mid-edit) rather than refusing the
+        // whole artifact. Strict facts stay off the carrier's own mapped-
+        // diagnostic channel (see `svelte_parse_diagnostics`'s doc) — the
+        // official-reject-parity diagnostic for this defect surfaces later,
+        // at compile time.
+        let source = "<style>div{color:red}";
+        let artifact = SvelteCarrierCompiler
+            .parse(source, &ParseOptions::default())
+            .expect("a recoverable strict-parse defect must still publish");
+        assert!(artifact
+            .diagnostics
+            .iter()
+            .all(|d| d.span.end as usize <= source.len()));
+    }
+
+    #[test]
+    fn well_formed_svelte_source_surfaces_zero_parse_diagnostics() {
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+        let artifact = artifact_for(source);
+        assert!(
+            artifact.diagnostics().is_empty(),
+            "well-formed input must not surface false-positive parse diagnostics, got: {:?}",
+            artifact.diagnostics()
+        );
     }
 
     #[test]
@@ -657,7 +819,7 @@ mod tests {
         // A SUPPORTED runes component populates `main.body_code` (Svelte client JS)
         // so `has_runtime_surface()` becomes true. DISCRIMINATING: the body is the
         // client module, not empty.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -698,7 +860,7 @@ mod tests {
         // `$.prop` prop-source substrate (legacy base flags 8, accessor-call
         // reads) and the bundle carries a real Main — the former per-surface
         // export refusal is gone.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script>export let label;</script>\n<p>{label}</p>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -739,7 +901,7 @@ mod tests {
 
     #[test]
     fn runtime_main_carries_the_demanded_client_source_map() {
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         // Keep the rune genuinely reactive: the runtime's supported-surface
         // classifier intentionally rejects a demoted/static interpolation.
         // The click write makes this a valid Main carrier and therefore a
@@ -806,7 +968,7 @@ mod tests {
         // `RuntimeCompileOptions.source_map` flag is the map demand — it
         // reaches the css RENDER through `compile_client`, and the produced
         // map + the `:global` fact ride the neutral style block.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -869,7 +1031,7 @@ mod tests {
         // map: {...} }`. An EXISTING `<style>` block always publishes the external
         // artifact, even when the rendered `css.code` is empty; only the ABSENCE
         // of a style block publishes none (`compiled.css === null`).
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<style></style><p>hi</p>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -917,7 +1079,7 @@ mod tests {
         // there is NO bundle to hold a `tsx` beside it — the atomicity is
         // structural, not asserted over a flag. The precise reason travels on
         // the refusal itself, not recovered from diagnostic text.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         // A `{#snippet}` declaration is an unsupported runtime surface — the
         // control-flow blocks (`{#if}`/…) ARE supported, so the refused example uses a
         // construct that genuinely still fails closed.
@@ -964,7 +1126,7 @@ mod tests {
         // component, asked ONLY for its IDE product, attempts no runtime compile
         // and therefore cannot be refused one — it publishes its `tsx` normally.
         // Without this, "refuse everything" would satisfy the test above.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source =
             "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
         let artifact = artifact_for(source);
@@ -994,54 +1156,24 @@ mod tests {
     }
 
     #[test]
-    fn an_ide_only_request_still_reports_a_malformed_component() {
-        // A component official Svelte ALSO compile-errors is malformed regardless
-        // of which products the request asked for, so the official-reject gate —
-        // an analysis-domain oracle over the typed parse — runs even when no
-        // runtime product was requested. Its diagnostic stays NON-FATAL and the
-        // IDE projection is still produced, so an IDE-only consumer both sees the
-        // malformed-source report AND keeps type-checking.
-        let compiler = SvelteCarrierCompiler::default();
-        // An invalid closing tag: `official_reject_gate` rejects it with
-        // `element_invalid_closing_tag`.
+    fn malformed_component_still_publishes_a_mapped_diagnostic_for_ide_projection() {
+        // A stray close tag official rejects for the CLIENT runtime, but the
+        // carrier PARSE/PUBLISH seam stays recoverable (an editor spends most
+        // of its time in exactly this kind of transiently-broken state) —
+        // the defect surfaces as a mapped diagnostic instead of refusing
+        // publication.
+        let compiler = SvelteCarrierCompiler;
         let source = "<script>let c = $state(0);</script>\n<div><span></div></span>\n";
-        let artifact = artifact_for(source);
-        let alloc = oxc_allocator::Allocator::default();
-        let bundle = compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    want_runtime: false,
-                    want_ide: true,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect("the outcome is produced-or-refused, never an Err")
-            .into_produced()
-            .expect("an IDE-only request asks for no runtime product, so none can be refused");
+        let artifact = compiler
+            .parse(source, &ParseOptions::default())
+            .expect("a stray close tag is a recoverable parser defect, not a refusal");
         assert!(
-            bundle
+            artifact
                 .diagnostics
                 .iter()
-                .any(|d| d.code.starts_with("svelte-official-reject-")),
-            "an IDE-only request on a MALFORMED component must still report the \
-             official-reject diagnostic — dropping it would silently lose \
-             malformed-source reporting for every IDE-only consumer. Got: {:?}",
-            bundle
-                .diagnostics
-                .iter()
-                .map(|d| d.code.as_str())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !bundle.has_errors(),
-            "the malformed-source report stays NON-FATAL so the IDE projection survives"
-        );
-        assert!(
-            bundle.tsx.is_some(),
-            "the IDE-only request must still project its TSX for a malformed component"
+                .any(|d| d.code == "element_invalid_closing_tag"),
+            "the stray close tag must still surface as a mapped diagnostic: {:?}",
+            artifact.diagnostics
         );
     }
 
@@ -1050,7 +1182,7 @@ mod tests {
         // The negative control: the same IDE-only identity on a WELL-FORMED
         // component reports no official-reject diagnostic, so the assertion above
         // discriminates malformed from clean rather than always finding one.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script>let c = $state(0);</script>\n<div><span>hi</span></div>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -1087,7 +1219,7 @@ mod tests {
     fn a_supported_component_produces_rather_than_refuses() {
         // The success direction: a SUPPORTED runes component takes the PRODUCED
         // arm and emits a Main, so the sum discriminates refusal from success.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source =
             "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
         let artifact = artifact_for(source);
@@ -1108,7 +1240,7 @@ mod tests {
         // The sourcemap e2e (Tests #2): a script-region binding and a template
         // expression each map back to the matching ORIGINAL carrier text. The
         // unmapped prelude shifts no mapped position — the tokens still land.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source =
             "<script lang=\"ts\">let myUniqueBinding = 0;</script>\n<div>{myUniqueBinding}</div>";
         let artifact = artifact_for(source);
@@ -1142,7 +1274,7 @@ mod tests {
         // token-precise). DISCRIMINATING: the params identifier `flyParam` is
         // unique to the directive value, so its mapped token can only come from
         // the original `transition:fly={flyParam}` position.
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script lang=\"ts\">import { fly } from \"svelte/transition\";\n\
              const flyParam = { delay: 0 };</script>\n\
              <div transition:fly={flyParam}>x</div>";
@@ -1170,11 +1302,12 @@ mod tests {
 
     #[test]
     fn artifact_identity_names_the_svelte_adapter() {
-        let artifact = artifact_for("<script>let a = 1;</script>");
-        assert!(!artifact.adapter_id.is_vue());
-        assert_eq!(artifact.adapter_id, FrameworkAdapterId::svelte());
-        assert_eq!(artifact.language_id.as_str(), "svelte");
-        assert_eq!(artifact.parser_version, SVELTE_CARRIER_PARSER_VERSION);
+        let source = "<script>let a = 1;</script>";
+        let artifact = artifact_for(source);
+        assert!(!artifact.adapter_id().is_vue());
+        assert_eq!(artifact.adapter_id(), &FrameworkAdapterId::svelte());
+        assert_eq!(artifact.language_id().as_str(), "svelte");
+        assert_eq!(artifact.parse_key(), &expected_parse_key(source));
     }
 
     #[test]
@@ -1208,7 +1341,7 @@ mod tests {
     #[test]
     fn eval_source_is_position_preserving_with_both_scripts_at_raw_offsets() {
         let source = "<script module>export const x = 1;</script>\n<div>{count}</div>\n<script lang=\"ts\">let count = 0;</script>";
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let artifact = artifact_for(source);
         let eval = compiler.eval_source(source, &artifact);
         assert_eq!(eval.len(), source.len(), "eval source must be same length");
@@ -1227,7 +1360,7 @@ mod tests {
 
     #[test]
     fn compile_ide_projects_a_tsx_artifact_with_the_pragma_prelude() {
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = "<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>";
         let artifact = artifact_for(source);
         let out = compiler
@@ -1249,7 +1382,7 @@ mod tests {
 
     #[test]
     fn compile_ide_projects_a_no_lang_component_as_valid_jsx_with_jsdoc() {
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let source = r#"<script>
 /** @type {{ label: string }} */
 let { label } = $props();
@@ -1284,7 +1417,7 @@ let count = $state(0);
 
     #[test]
     fn compile_ide_declines_a_foreign_artifact() {
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         // A Vue-shaped artifact is not a Svelte carrier — the typed answer.
         let svelte = artifact_for("<div />");
         // Re-wrap is unnecessary; a real foreign carrier is exercised by the
@@ -1294,7 +1427,7 @@ let count = $state(0);
     }
 
     fn facts_for(source: &str) -> crate::compile::RawTemplateData {
-        let compiler = SvelteCarrierCompiler::default();
+        let compiler = SvelteCarrierCompiler;
         let artifact = artifact_for(source);
         compiler.template_data(source, &artifact).data
     }
@@ -1512,7 +1645,7 @@ let count = $state(0);
         // NEGATIVE: intrinsic HTML elements and non-component special elements
         // (`<svelte:head>`) are NOT component usages.
         let source =
-            "<script>let a = 1;</script>\n<div><svelte:head><title>t</title></svelte:head></div>";
+            "<script>let a = 1;</script>\n<svelte:head><title>t</title></svelte:head><div></div>";
         let data = facts_for(source);
         assert!(
             data.components.is_empty(),

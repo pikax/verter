@@ -56,12 +56,19 @@ pub(crate) fn map_projection_limit_diagnostics(
             if !seen.insert((envelope.macro_index, kind)) {
                 continue;
             }
+            // A macro index with no matching entry in `macro_spans` is an
+            // internal inconsistency (the two must stay index-aligned) —
+            // skip rather than fabricate a placeholder span for it.
+            let Some(span) = macro_spans.get(envelope.macro_index).copied() else {
+                continue;
+            };
             diagnostics.push(map_single_diagnostic(
                 &HostDiagnostic {
                     severity: HostSeverity::Warning,
                     code: code.to_string(),
                     message: message.to_string(),
-                    span: macro_spans.get(envelope.macro_index).copied(),
+                    arguments: Vec::new(),
+                    span,
                 },
                 line_index,
             ));
@@ -71,30 +78,22 @@ pub(crate) fn map_projection_limit_diagnostics(
 }
 
 fn map_single_diagnostic(diag: &HostDiagnostic, line_index: &LineIndex) -> Diagnostic {
-    let range = match diag.span {
-        Some(span) => {
-            let start_pos = line_index
-                .offset_to_position(span.start)
-                .unwrap_or(Position {
-                    line: 0,
-                    character: 0,
-                });
-            let end_pos = line_index.offset_to_position(span.end).unwrap_or(start_pos);
-            Range {
-                start: start_pos,
-                end: end_pos,
-            }
-        }
-        None => Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 0,
-            },
-        },
+    // `diag.span` is mandatory — every `HostDiagnostic` carries a real
+    // mapped location. `offset_to_position` clamping (below) only covers a
+    // real offset that falls outside the line index's tracked text, never
+    // a genuinely absent span.
+    let start_pos = line_index
+        .offset_to_position(diag.span.start)
+        .unwrap_or(Position {
+            line: 0,
+            character: 0,
+        });
+    let end_pos = line_index
+        .offset_to_position(diag.span.end)
+        .unwrap_or(start_pos);
+    let range = Range {
+        start: start_pos,
+        end: end_pos,
     };
 
     Diagnostic {
@@ -127,17 +126,15 @@ mod tests {
         severity: HostSeverity,
         code: &str,
         message: &str,
-        start: Option<u32>,
-        end: Option<u32>,
+        start: u32,
+        end: u32,
     ) -> HostDiagnostic {
         HostDiagnostic {
             severity,
             code: code.to_string(),
             message: message.to_string(),
-            span: match (start, end) {
-                (Some(s), Some(e)) => Some(verter_span::Span::new(s, e)),
-                _ => None,
-            },
+            arguments: Vec::new(),
+            span: verter_span::Span::new(start, end),
         }
     }
 
@@ -167,8 +164,8 @@ mod tests {
             HostSeverity::Error,
             "PARSE_ERROR",
             "Unexpected end of template",
-            Some(13), // inside <div>
-            Some(18),
+            13, // inside <div>
+            18,
         )]);
 
         let result = map_diagnostics(&snapshot, &idx);
@@ -191,8 +188,8 @@ mod tests {
             HostSeverity::Warning,
             "WARN_001",
             "A warning",
-            Some(0),
-            Some(5),
+            0,
+            5,
         )]);
 
         let result = map_diagnostics(&snapshot, &idx);
@@ -206,8 +203,8 @@ mod tests {
             HostSeverity::Info,
             "INFO_001",
             "An info",
-            Some(0),
-            Some(5),
+            0,
+            5,
         )]);
 
         let result = map_diagnostics(&snapshot, &idx);
@@ -215,28 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn test_no_span_defaults_to_zero() {
-        let idx = make_line_index("hello");
-        let snapshot = make_snapshot(vec![make_diag(
-            HostSeverity::Error,
-            "ERR",
-            "no span",
-            None,
-            None,
-        )]);
-
-        let result = map_diagnostics(&snapshot, &idx);
-        assert_eq!(result[0].range.start.line, 0);
-        assert_eq!(result[0].range.start.character, 0);
-    }
-
-    #[test]
     fn test_multiple_diagnostics() {
         let source = "line 1\nline 2\nline 3";
         let idx = make_line_index(source);
         let snapshot = make_snapshot(vec![
-            make_diag(HostSeverity::Error, "E1", "err1", Some(0), Some(6)),
-            make_diag(HostSeverity::Warning, "W1", "warn1", Some(7), Some(13)),
+            make_diag(HostSeverity::Error, "E1", "err1", 0, 6),
+            make_diag(HostSeverity::Warning, "W1", "warn1", 7, 13),
         ]);
 
         let result = map_diagnostics(&snapshot, &idx);

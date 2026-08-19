@@ -693,9 +693,18 @@ impl CanonicalCompletionOverlay {
         // artifacts directly; for the base-only path we look them up by
         // content hash here.
         let file_artifacts = file_artifacts.or_else(|| {
+            let key = host.authoritative_current_artifact_key(canonical)?;
+            if key.content_hash != whole_hash {
+                return None;
+            }
             host.project_type_store()
                 .indexed()
-                .get_artifacts_for_content(canonical, whole_hash)
+                .get_artifacts_for_content(
+                    canonical,
+                    whole_hash,
+                    &key.parse_key,
+                    &key.file_language_id,
+                )
         });
         let route_hash = file_artifacts.as_ref().and_then(|file_artifacts| {
             let indexed = &file_artifacts.indexed;
@@ -1026,12 +1035,12 @@ impl<'a> RequestStoreView<'a> {
             FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
-                parser_version,
+                parse_key,
                 file_language_id,
             } => self.validates_file_source_env(
                 canonical_id,
                 *parse_env_hash,
-                *parser_version,
+                parse_key,
                 file_language_id,
             ),
             FactVersionRef::ProjectGeneration { .. } => self.base.validates(fact),
@@ -1304,7 +1313,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         &self,
         canonical_id: &str,
         parse_env_hash: crate::locator_identity::ParseEnvHash,
-        parser_version: u32,
+        parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
         if !self.base_is_current {
@@ -1313,7 +1322,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         self.base.validates_file_source_env(
             canonical_id,
             parse_env_hash,
-            parser_version,
+            parse_key,
             file_language_id,
         )
     }

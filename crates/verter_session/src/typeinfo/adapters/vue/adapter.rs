@@ -181,10 +181,7 @@ mod tests {
         // Build a minimal ctx purely to satisfy the signature; planning ignores
         // it.
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
-        let registry = crate::framework::FrameworkAdapterRegistry::built_in(
-            crate::typeinfo::adapters::vue::vue_carrier_token_clone(),
-            crate::typeinfo::adapters::svelte::svelte_carrier_token_clone(),
-        );
+        let registry = crate::framework::FrameworkAdapterRegistry::built_in();
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::vue())
             .expect("vue registered");

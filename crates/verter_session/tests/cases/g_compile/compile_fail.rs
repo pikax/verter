@@ -60,20 +60,6 @@ fn raw_resolver_entry_points_are_private() {
     t.compile_fail("tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs");
 }
 
-/// API-surface half of `carrier_access_token_minted_only_in_verter_language`:
-/// an out-of-crate `CarrierAccessToken` struct literal must fail
-/// to compile — the `_private: ()` field is the in-language forging
-/// barrier; the static guard is the cross-crate enforcement authority.
-#[test]
-#[cfg_attr(
-    not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail"
-)]
-fn carrier_access_token_not_constructible_outside_verter_language() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/cases/compile-fail/carrier_access_token_struct_literal.rs");
-}
-
 /// Raw registered-carrier parsing is an internal producer capability.
 #[test]
 #[cfg_attr(
@@ -508,4 +494,20 @@ fn member_list_anchor_is_sealed_against_forgery() {
 fn deferred_callable_is_sealed_to_its_two_consumers() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs");
+}
+
+/// `HostDiagnostic.span` is mandatory (`verter_span::Span`, not
+/// `Option<verter_span::Span>`) — a producer that cannot derive a real
+/// mapped location has no way to construct the value at all, and must fail
+/// closed at its own seam instead of fabricating a placeholder position.
+/// If the field regressed back to `Option`, the fixture (which omits it)
+/// would compile and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn host_diagnostic_span_is_mandatory() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/host_diagnostic_span_is_mandatory.rs");
 }

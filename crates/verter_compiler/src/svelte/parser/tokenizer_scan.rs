@@ -161,8 +161,13 @@ pub(crate) fn find_matching_brace_in(src: &[u8], inner_start: usize) -> usize {
             prev_significant = b'/';
             continue;
         }
+        if b == b'`' {
+            p = skip_template_literal(src, p);
+            prev_significant = b'x';
+            continue;
+        }
         match b {
-            b'"' | b'\'' | b'`' => quote = Some(b),
+            b'"' | b'\'' => quote = Some(b),
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
@@ -178,6 +183,25 @@ pub(crate) fn find_matching_brace_in(src: &[u8], inner_start: usize) -> usize {
         p += 1;
     }
     len
+}
+
+fn skip_template_literal(src: &[u8], start: usize) -> usize {
+    let mut pos = start + 1;
+    while pos < src.len() {
+        match src[pos] {
+            b'\\' => pos = (pos + 2).min(src.len()),
+            b'`' => return pos + 1,
+            b'$' if src.get(pos + 1) == Some(&b'{') => {
+                let close = find_matching_brace_in(src, pos + 2);
+                if close >= src.len() {
+                    return src.len();
+                }
+                pos = close + 1;
+            }
+            _ => pos += 1,
+        }
+    }
+    src.len()
 }
 
 /// Whether a `/` in expression text opens a REGEX literal (vs a division).
