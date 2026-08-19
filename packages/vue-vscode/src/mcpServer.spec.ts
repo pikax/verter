@@ -6,12 +6,18 @@
 // break independently: the cross-language readiness-record encoding, the child
 // argv, the binary candidate ordering, and the spawn/readiness lifecycle.
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+
+import { launcher } from "verter-mcp";
 
 import {
   buildMcpServerArgs,
   bundledMcpBinaryCandidate,
   createMcpServerLifecycle,
+  mcpSpawnRefusalReason,
   orderedMcpBinaryCandidates,
   parseMcpHttpReadyRecord,
   resolveMcpEndpointForSetup,
@@ -151,6 +157,72 @@ describe("binary candidate ordering", () => {
   });
 });
 
+// The same self-spawn/re-entrancy guards `verter-mcp`'s own CLI shim enforces
+// on its `PATH` fallback (`@verter/binary-launcher/cli`), applied to the
+// resolved candidate before this module ever spawns it — see the module doc.
+describe("mcpSpawnRefusalReason", () => {
+  const originalPath = process.env.PATH;
+  const originalActive = process.env.VERTER_LAUNCHER_ACTIVE;
+  const scratchDirs: string[] = [];
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    if (originalActive === undefined) delete process.env.VERTER_LAUNCHER_ACTIVE;
+    else process.env.VERTER_LAUNCHER_ACTIVE = originalActive;
+    for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses a path-source candidate PATH resolves to a node shim", () => {
+    delete process.env.VERTER_LAUNCHER_ACTIVE;
+    const binDir = mkdtempSync(join(tmpdir(), "mcp-editor-shim-"));
+    scratchDirs.push(binDir);
+    // What `node_modules/.bin/verter-mcp` looks like for real: a node shim,
+    // not the native server.
+    writeFileSync(join(binDir, launcher.toolName), "#!/usr/bin/env node\nprocess.exit(0);\n", {
+      mode: 0o755,
+    });
+    process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+
+    const reason = mcpSpawnRefusalReason({ path: launcher.toolName, source: "path" });
+
+    expect(reason).toBeDefined();
+    expect(reason).toMatch(new RegExp(launcher.toolName));
+  });
+
+  it("fails closed when the launcher is already active, even for an on-disk candidate", () => {
+    process.env.VERTER_LAUNCHER_ACTIVE = launcher.toolName;
+
+    const reason = mcpSpawnRefusalReason({ path: "/fake/dev-build/verter-mcp", source: "dev-build" });
+
+    expect(reason).toBeDefined();
+    expect(reason).toMatch(/already active/i);
+  });
+
+  it("does not refuse an already-verified non-path candidate (no regression)", () => {
+    delete process.env.VERTER_LAUNCHER_ACTIVE;
+
+    const reason = mcpSpawnRefusalReason({ path: "/fake/dev-build/verter-mcp", source: "dev-build" });
+
+    expect(reason).toBeUndefined();
+  });
+
+  it("does not refuse a path-source candidate PATH resolves to a real native binary", () => {
+    delete process.env.VERTER_LAUNCHER_ACTIVE;
+    const binDir = mkdtempSync(join(tmpdir(), "mcp-editor-native-"));
+    scratchDirs.push(binDir);
+    // A native binary has no node shebang — arbitrary non-shebang bytes stand
+    // in for it; `assertNotSelfSpawn` only inspects the leading bytes.
+    writeFileSync(join(binDir, launcher.toolName), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 0]), {
+      mode: 0o755,
+    });
+    process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+
+    const reason = mcpSpawnRefusalReason({ path: launcher.toolName, source: "path" });
+
+    expect(reason).toBeUndefined();
+  });
+});
+
 // Every test here spawns a real node child whose readiness/exit bounds
 // (`readyTimeoutMs`) are the discriminators; the suite timeout sits above
 // them so a loaded parallel test run cannot fire the 5s framework default
@@ -175,6 +247,24 @@ describe("startMcpServerProcess", { timeout: 30_000 }, () => {
       });
     } finally {
       handle.dispose();
+    }
+  });
+
+  it("marks the launcher active for the child (re-entrancy guard)", async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), "mcp-active-marker-"));
+    const marker = join(markerDir, "active.txt");
+    try {
+      const { command, args } = fakeServer(
+        `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.env.VERTER_LAUNCHER_ACTIVE || "");
+         console.log(JSON.stringify({ verterMcpHttpReady: { port: 43220, url: "http://127.0.0.1:43220/mcp" } }));
+         setInterval(() => {}, 1000);`,
+      );
+      const handle = startMcpServerProcess({ command, args, log: silentLog, readyTimeoutMs: 15_000 });
+      await handle.ready;
+      handle.dispose();
+      expect(readFileSync(marker, "utf8")).toBe(launcher.toolName);
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
     }
   });
 
@@ -571,6 +661,20 @@ describe("createMcpServerLifecycle", () => {
     lifecycle.sync(config(0));
     await lifecycle.settled();
     expect(spawned.length).toBe(1);
+  });
+
+  it("never spawns a resolved binary mcpSpawnRefusalReason refuses", async () => {
+    const originalActive = process.env.VERTER_LAUNCHER_ACTIVE;
+    process.env.VERTER_LAUNCHER_ACTIVE = launcher.toolName;
+    try {
+      const { lifecycle, spawned } = makeLifecycle();
+      lifecycle.sync(config(0));
+      await lifecycle.settled();
+      expect(spawned.length).toBe(0);
+    } finally {
+      if (originalActive === undefined) delete process.env.VERTER_LAUNCHER_ACTIVE;
+      else process.env.VERTER_LAUNCHER_ACTIVE = originalActive;
+    }
   });
 
   it("replaces on config change and never overlaps children", async () => {

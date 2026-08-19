@@ -57,6 +57,7 @@
     "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
+    "@verter/binary-launcher": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
     "verter-mcp": "workspace:^"
   },
