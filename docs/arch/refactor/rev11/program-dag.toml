@@ -178,7 +178,7 @@ predecessors = ["A6", "B1", "B2", "CM1"]
 id = "C2"
 name = "Staged compile transaction and sealed facade"
 class = "foundational"
-predecessors = ["B3", "B5", "C1"]
+predecessors = ["B3", "B6", "C1"]
 
 [[block]]
 id = "C3"

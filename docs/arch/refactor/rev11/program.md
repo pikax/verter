@@ -198,7 +198,7 @@ Preserve correct current resolution/index/fact foundations, remove alternate res
 
 ## C2 — Staged compile transaction and concrete sealed facade
 
-**Predecessors:** `B3`, `B5`, `C1`.
+**Predecessors:** `B3`, `B6`, `C1`.
 
 Implement prepare/plan/project/emit, anti-replay plan/fact tokens, concrete `CompileTypeInfo`, first-party lifecycle modes, no public semantic trait object, no blanket `Send + Sync`, and bounded load/retry behavior.
 

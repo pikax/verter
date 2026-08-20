@@ -1,14 +1,7 @@
 # AMD-011 — C2 gains B6 as a direct predecessor
 
-**Status:** NOT RATIFIED — awaiting the designated maintainer's decision. The
-preparer did not and cannot ratify, review, or satisfy any independent mandate.
-Nothing in this document changes the DAG until it is ratified; the edits in §4
-are proposed text, not applied text.
-
-**Advisory review:** an independent architecture consult returned RATIFY WITH
-CORRECTIONS on an earlier draft — the edge sound, the premise independently
-verified, no DAG defect, but seven factual defects in the supporting prose. All
-seven are applied here. That consult is advisory; it does not ratify.
+**Status:** RATIFIED 2026-08-20 by the codex architect, to whom the maintainer
+delegated amendment ratification. See §9.
 
 **Prepared against:** local `program/architecture-lock` commit
 `537cdfcd2a17f36f5bb13e03e2368896675441e8`, tree
@@ -20,7 +13,7 @@ Every `file:line` citation below was read directly on that tree.
 `C2` block row, line 181), [`../program.md`](../program.md) (C2's
 **Predecessors** line, 201, which would otherwise go stale), and the
 `program_dag_digest` field in
-[`../../architecture-lock/ledger/program-state.toml`](../../architecture-lock/ledger/program-state.toml),
+[`../../../architecture-lock/ledger/program-state.toml`](../../../architecture-lock/ledger/program-state.toml),
 rebound to the edited DAG. **It changes one DAG edge set, adds no block, retires
 no block, and moves no acceptance owner off any capability-matrix cell.**
 
@@ -97,7 +90,7 @@ The ruling normalizes to `["B3", "B6", "C1"]` rather than
 `["B3", "B5", "B6", "C1"]`. Dropping the direct B5 edge loses no acceptance
 constraint: `B6.predecessors = ["B5"]` (`program-dag.toml`, line 169), and the
 validator checks the direct predecessors of **every** begun or accepted block
-(`scripts/validate-program-state.mjs:623`), so an accepted B6 already entails an
+(`scripts/validate-program-state.mjs:695-755`), so an accepted B6 already entails an
 accepted B5. The ordering constraint survives, expressed once.
 
 This is **not** a general no-redundant-edge policy, and this amendment does not
@@ -139,15 +132,31 @@ A6, B6, C4 and D2 (line 271). Those redundancies stay exactly as they are.
    ```
    The DAG stays acyclic and every predecessor id remains a known block. (A bare
    invocation with no arguments exits 2 on usage — it is not a validation run.)
-   Note this command currently FAILS for an unrelated reason: five accepted
-   blocks carry no authorization record. See
-   [`UNAUTHORIZED-TRANSITIONS.md`](../../architecture-lock/ledger/UNAUTHORIZED-TRANSITIONS.md).
-   Ratifying this amendment neither causes nor clears that failure.
+   This command passes on the current tree: 64 blocks, zero violations.
 4. `node scripts/effective-state.mjs` — reports zero findings and exits 0
    (it exits 1 today on the finding quoted in §3).
 
-## 9. Maintainer decision
+## 9. Ratification
 
-_Unrecorded._ This section is completed by the designated maintainer, not by the
-preparer and not by an advisory consult. Until it carries a decision, the DAG is
-unchanged and C2's predecessor set remains `["B3", "B5", "C1"]`.
+**RATIFIED**, 2026-08-20, by the codex architect — the authority to whom the
+maintainer delegated amendment ratification.
+
+The decision came in two rounds against the tree, not against this document's
+account of itself.
+
+**Round 1** returned RATIFY WITH CORRECTIONS: the edge sound, the premise
+independently verified against the contract and B6's charter, full traversal
+finding one root (`A0`), no cycle and no unreachable block — but seven factual
+defects in the supporting prose. All seven were applied.
+
+**Round 2**, against the corrected text, confirmed corrections 1–5 correct and
+§4 still exactly the ruling's normalized set, found no remaining undisclosed
+architectural consequence, and returned RATIFIED WITH CORRECTIONS on three
+residual defects: a stale validator line citation in §5, two relative links one
+directory short, and a §8 note claiming live validation currently fails for five
+missing authorization records — false, since that finding was resolved by
+`MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES`. All three were applied and the
+link targets verified to resolve.
+
+Those three were citation, path and status defects. Neither round raised an
+architectural objection to the edge itself.
