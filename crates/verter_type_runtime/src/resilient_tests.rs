@@ -1028,20 +1028,31 @@ impl RealRecoveryHarness {
     }
 
     pub(crate) async fn assert_carriers_answer_typed(&self) {
+        // The crash monitor's own backoff before the 3rd (successful) spawn
+        // attempt is a DETERMINISTIC 1s + 2s + 4s = 7s
+        // (`spawn_crash_monitor`'s `(1u64 << (attempt - 1)).min(4)` schedule)
+        // — and that 7s elapses BEFORE the real tsserver process even starts
+        // spawning. On top of it, a genuine child-process spawn + IPC
+        // handshake + carrier replay costs real, load-variable time. The
+        // previous hardcoded poll schedule (`[0, 250, 500, 1000, 2000, 4000,
+        // 2000]`, ~9.75s total) left almost no slack past that 7s floor, so
+        // under any contention (concurrent cargo/test processes competing
+        // for fork/exec and CPU) the real spawn routinely missed the
+        // remaining ~2.75s and this assertion flaked. The poll itself — a
+        // real `get_hover` succeeding — IS the completion signal; only the
+        // total deadline needs a load-tolerant margin.
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
         for carrier in &self.carriers {
-            let mut last = None;
-            for delay_ms in [0u64, 250, 500, 1000, 2000, 4000, 2000] {
-                if delay_ms != 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-                last = match self
+            let mut last;
+            let started = tokio::time::Instant::now();
+            loop {
+                last = self
                     .provider
                     .get_hover(&carrier.companion_path, carrier.hover_offset)
                     .await
-                {
-                    Ok(hover) => hover,
-                    Err(_) => continue,
-                };
+                    .unwrap_or_default();
                 if let Some(hover) = &last {
                     if hover.contents.contains(carrier.expected_hover)
                         && !hover.contents.contains(": any")
@@ -1049,6 +1060,10 @@ impl RealRecoveryHarness {
                         break;
                     }
                 }
+                if started.elapsed() >= DEADLINE {
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
             let hover = last.unwrap_or_else(|| {
                 panic!(

@@ -195,6 +195,15 @@ pub(super) fn create_test_project_with_workspace_node_modules(dir: &Path) -> std
     Ok(())
 }
 
+/// A per-PROCESS temp directory under `name`. Bare
+/// `std::env::temp_dir().join(name)` is a shared OS path with no
+/// per-process component: two concurrent invocations of this test suite on
+/// the same machine (e.g. two worktrees) would `remove_dir_all` and rewrite
+/// the SAME project directory into each other, producing spurious failures.
+fn unique_temp_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+}
+
 fn refresh_generated_verter_types_stub(node_modules_root: &Path) -> std::io::Result<()> {
     let types_dir = node_modules_root.join("@verter/types");
     let index_path = types_dir.join("index.d.ts");
@@ -231,7 +240,7 @@ async fn test_e2e_tsserver_scoped_slot_types_from_generated_vue_outputs() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsserver_slot_types");
+    let tmp = unique_temp_dir("verter_tsserver_slot_types");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");
@@ -417,7 +426,7 @@ async fn test_e2e_tsserver_scoped_slot_types_with_in_memory_child_api() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_in_memory");
+    let tmp = unique_temp_dir("verter_tsserver_slot_types_in_memory");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");
@@ -566,7 +575,7 @@ async fn test_e2e_tsserver_scoped_slot_types_with_plugin_and_open_child_ide() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsserver_slot_types_plugin_child_ide");
+    let tmp = unique_temp_dir("verter_tsserver_slot_types_plugin_child_ide");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");
@@ -739,7 +748,7 @@ async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output(
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsserver_fixture_vfor_member_access");
+    let tmp = unique_temp_dir("verter_tsserver_fixture_vfor_member_access");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");
@@ -855,7 +864,7 @@ async fn test_e2e_tsserver_semantic_tokens_map_to_verter_legend() {
         "node and the workspace tsserver.js are required for the live semantic-token discriminator",
     );
 
-    let tmp = std::env::temp_dir().join("verter_tsserver_semtok_legend");
+    let tmp = unique_temp_dir("verter_tsserver_semtok_legend");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project_with_workspace_node_modules(&tmp)
         .expect("the live semantic-token fixture project must be materialized");

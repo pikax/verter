@@ -574,9 +574,18 @@ fn detect_shell_path() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A per-PROCESS temp directory under `name`. Bare
+    /// `std::env::temp_dir().join(name)` is a shared OS path with no
+    /// per-process component: two concurrent invocations of this test suite
+    /// on the same machine (e.g. two worktrees) would write and read the
+    /// SAME `package.json`, racing each other's version content.
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+    }
+
     #[test]
     fn test_detect_ts_major_version_parses_5() {
-        let tmp = std::env::temp_dir().join("verter_runtime_test_ts_version");
+        let tmp = unique_temp_dir("verter_runtime_test_ts_version");
         let lib_dir = tmp.join("lib");
         std::fs::create_dir_all(&lib_dir).unwrap();
 
@@ -596,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_detect_ts_major_version_parses_6() {
-        let tmp = std::env::temp_dir().join("verter_runtime_test_ts_version_6");
+        let tmp = unique_temp_dir("verter_runtime_test_ts_version_6");
         let lib_dir = tmp.join("lib");
         std::fs::create_dir_all(&lib_dir).unwrap();
 
