@@ -797,6 +797,9 @@ importers:
 
   packages/vue-vscode:
     dependencies:
+      '@verter/binary-launcher':
+        specifier: workspace:^
+        version: link:../binary-launcher
       '@verter/typescript-plugin':
         specifier: workspace:^
         version: link:../typescript-plugin
