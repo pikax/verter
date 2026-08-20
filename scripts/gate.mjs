@@ -318,6 +318,12 @@ import {
   buildShippedCfgFilter,
   SHIPPED_CFG_EXTRA_PACKAGES,
   checkPackagesPresentInArchive,
+  // trybuild exclusion (interim, pending maintainer disposition) — filter builder + per-surface coverage
+  // guard, shared by every surface so a stale row fails loud instead of silently under/over-excluding
+  TRYBUILD_EXCLUDED_SUITES,
+  buildTrybuildExclusionFilterExpr,
+  trybuildSkipArgsForPackage,
+  countTrybuildExclusionMatches,
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
   pnpmInstallCommand,
@@ -888,6 +894,40 @@ const VARIANT_SHIPPED_CFG = {
 // filter string and the presence guard below can never drift apart.
 const SHIPPED_CFG_FILTER = buildShippedCfgFilter();
 
+// TRYBUILD EXCLUSION — interim, pending maintainer disposition (see TRYBUILD_EXCLUDED_SUITES in
+// gate-internals.mjs for why). Applied to every surface: SURFACE 1 ANDs this bare filter onto its
+// otherwise-unfiltered `--workspace` selection; SURFACE 3 ANDs it onto SHIPPED_CFG_FILTER; SURFACE 2 uses
+// the per-package `--skip` form directly (it runs a libtest binary, not nextest, so it has no `-E`).
+const TRYBUILD_EXCLUSION_FILTER = buildTrybuildExclusionFilterExpr();
+const SHIPPED_CFG_FILTER_NO_TRYBUILD = `(${SHIPPED_CFG_FILTER}) and (${TRYBUILD_EXCLUSION_FILTER})`;
+
+// Shared coverage guard: verify every registered trybuild row matches real work in THIS archive's own
+// listing, log the exclusion LOUDLY (count + reason + filter string, never a silent skip), and return the
+// verified counts. Returns `{ error }` when a row went stale (zero matches) — the caller must fail closed.
+function verifyTrybuildExclusionCoverage(allSuites, surfaceLabel) {
+  const trybuild = countTrybuildExclusionMatches(allSuites);
+  if (trybuild.missing.length > 0) {
+    return {
+      error:
+        `TRYBUILD EXCLUSION SETUP FAILURE (${surfaceLabel}): the following registered row(s) matched ZERO ` +
+        "tests in this archive's own listing — a trybuild file was renamed, moved, or removed without " +
+        "updating TRYBUILD_EXCLUDED_SUITES in scripts/gate-internals.mjs: " +
+        trybuild.missing.map((m) => `package(${m.package}) test(/^${m.modulePrefix}/)`).join(", ") +
+        ". Refusing to run an exclusion filter that cannot prove it still excludes real tests.",
+    };
+  }
+  log(
+    `TRYBUILD EXCLUSION (${surfaceLabel}, INTERIM — pending maintainer disposition, not deletion): ` +
+      `excluding ${trybuild.total} trybuild compile-fail harness test(s) across ${TRYBUILD_EXCLUDED_SUITES.length} ` +
+      "registered file(s) in 6 crates (one trybuild::TestCases::new() invocation spawns a cargo build of " +
+      "the crate's full dependency closure — 98s cold / 0.8s warm measured, not a unit test). Still runnable " +
+      "directly; not deleted, not feature-gated. filter: '" +
+      TRYBUILD_EXCLUSION_FILTER +
+      "'",
+  );
+  return { trybuild };
+}
+
 // ----------------------------------------------------------------------------------------------------
 // Archive + list — the shared front half of the gate, --prepare, and surface 3. Returns the parsed list
 // JSON + the extract dir, or an `{ error }` on setup/build failure. `variant` selects the Cargo profile
@@ -1183,6 +1223,12 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
       `${SHIPPED_CFG_EXTRA_PACKAGES.map((pkg) => `${pkg} (${extra.counts[pkg]} suites)`).join(" + ")}`,
   );
 
+  const trybuildCov = verifyTrybuildExclusionCoverage(allSuites, "SURFACE 3");
+  if (trybuildCov.error) {
+    err(trybuildCov.error);
+    return { exit: EXIT_USAGE };
+  }
+
   const runArgs = [
     "nextest",
     "run",
@@ -1194,7 +1240,7 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
     "--workspace-remap",
     repoRealpath,
     "-E",
-    SHIPPED_CFG_FILTER,
+    SHIPPED_CFG_FILTER_NO_TRYBUILD,
   ];
   if (opts.noFailFast) runArgs.push("--no-fail-fast");
   runArgs.push("--test-threads", String(opts.testThreads));
@@ -1220,8 +1266,8 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
   );
   if (s3.summary.runCount === 0) {
     err(
-      `SURFACE 3 SETUP FAILURE: the filterset '${SHIPPED_CFG_FILTER}' selected ZERO tests to run in the ` +
-        "shipped-cfg archive. A surface that executes nothing proves nothing; refusing to pass it.",
+      `SURFACE 3 SETUP FAILURE: the filterset '${SHIPPED_CFG_FILTER_NO_TRYBUILD}' selected ZERO tests to ` +
+        "run in the shipped-cfg archive. A surface that executes nothing proves nothing; refusing to pass it.",
     );
     return { exit: EXIT_USAGE };
   }
@@ -1429,6 +1475,12 @@ async function runGate(opts, ctx) {
     `archive lists ${allSuites.length} suites; build-meta target-directory=${buildMetaTargetDir || "?"}`,
   );
 
+  const trybuildCov1 = verifyTrybuildExclusionCoverage(allSuites, "SURFACE 1+2 (dev archive)");
+  if (trybuildCov1.error) {
+    err(trybuildCov1.error);
+    return EXIT_USAGE;
+  }
+
   // Aggregate verdict accumulators.
   const failures = []; // { surface, name }
   let toleratedOccurred = false;
@@ -1446,6 +1498,8 @@ async function runGate(opts, ctx) {
     "--extract-overwrite",
     "--workspace-remap",
     repoRealpath,
+    "-E",
+    TRYBUILD_EXCLUSION_FILTER,
   ];
   if (opts.noFailFast) runArgs.push("--no-fail-fast");
   runArgs.push("--test-threads", String(opts.testThreads));
@@ -1530,7 +1584,13 @@ async function runGate(opts, ctx) {
     );
     // Use the same explicit finite concurrency as the nextest surfaces. The suites still run sequentially;
     // this caps the worker threads within the currently active shared-process libtest binary.
-    const binArgs = [`--test-threads=${opts.testThreads}`];
+    // `--skip <prefix>` (NOT `--exact`, verified: `--exact` also makes `--skip` require exact equality and
+    // stops it matching a module-path prefix) removes the trybuild exclusion rows for this package from a
+    // DIRECT libtest run — this binary is invoked without nextest, so it never sees `-E`.
+    const binArgs = [
+      `--test-threads=${opts.testThreads}`,
+      ...trybuildSkipArgsForPackage("verter_session"),
+    ];
     const res = await runContainedStep({
       cmd: bin,
       args: binArgs,
@@ -1579,6 +1639,15 @@ async function runGate(opts, ctx) {
   if (s3.exit !== undefined) return s3.exit;
   for (const f of s3.failures) failures.push({ surface: `shipped-cfg/${f.surface}`, name: f.name });
   if (s3.tolerated) toleratedOccurred = true;
+
+  // Always stated at the tail of the run, regardless of verdict, so a reader who only reads the last few
+  // lines cannot mistake a green gate for full coverage: this run excluded a named, counted test class from
+  // every surface — see the earlier "TRYBUILD EXCLUSION" lines for the per-surface counts and filter.
+  log(
+    "NOTE: this gate run excluded the trybuild compile-fail harness class (INTERIM, pending maintainer " +
+      "disposition — not deleted, not feature-gated, still runnable directly) from all three surfaces; " +
+      `see the "TRYBUILD EXCLUSION" lines above for exact counts.`,
+  );
 
   // ---------- Aggregate verdict ----------
   if (hardSetupFail) {

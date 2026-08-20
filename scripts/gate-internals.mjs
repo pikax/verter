@@ -1578,6 +1578,91 @@ export function checkPackagesPresentInArchive(allSuites, packages) {
   }
   return { counts, missing };
 }
+
+// ----------------------------------------------------------------------------------------------------
+// TRYBUILD EXCLUSION — INTERIM, pending maintainer disposition. Do not delete this section without a
+// ruling: their permanent disposition (drop them for good, keep this exclusion permanently, or restore
+// them once the trybuild target dir is cached) is an open decision, not settled by this exclusion.
+//
+// A `trybuild::TestCases::new()` harness SPAWNS a real `cargo` build against a generated crate and, cold,
+// compiles the crate's ENTIRE dependency closure before checking a single fixture — not a unit test.
+// Measured here: 98s cold, 0.8s warm. Two of them tripped the gate's own 360s budget in a real run while
+// passing 3/3 in isolation (already-raised once). `.config/nextest.toml` carries a `slow-timeout` override
+// for the same class (see the "trybuild compile-fail tests" comment there) — that override is UNCHANGED
+// and still applies to anyone running these tests directly; this exclusion only removes them from the
+// three canonical gate surfaces.
+//
+// One row per file that actually calls `trybuild::TestCases::new()` — verified against a real
+// `cargo nextest list --workspace --message-format json` listing, not guessed from filenames. A
+// substring match on "compile_fail" also catches two UNRELATED tests that must stay in the gate and are
+// deliberately NOT rows here: verter_lsp's
+// `external_ts::membership_reconciler::tests::absent_compile_failed_removes` and verter_session's
+// `types::tests::compile_failure_code_classification`. Each row's `modulePrefix` is the exact source-order
+// module path (no trailing test name) so it covers every test in that file, present or future, including
+// ones already marked `#[ignore]` (most of the verter_session rows are — they cost nothing today because
+// no surface passes `--run-ignored`, but a future un-ignore must not silently reintroduce the cost without
+// this exclusion already covering it).
+// ----------------------------------------------------------------------------------------------------
+export const TRYBUILD_EXCLUDED_SUITES = Object.freeze([
+  { package: "verter_session", modulePrefix: "cases::g_compile::compile_fail::" },
+  { package: "verter_language", modulePrefix: "cases::compile_fail::" },
+  { package: "verter_identity", modulePrefix: "cases::compile_fail::" },
+  { package: "verter_compiler", modulePrefix: "cases::assembly::assemble_sequence_compile_fail::" },
+  { package: "verter_compiler", modulePrefix: "cases::pending_nav_request_compile_fail::" },
+  { package: "verter_compiler", modulePrefix: "cases::registered_geometry_compile_fail::" },
+  { package: "verter_compiler", modulePrefix: "cases::segmented_overwrite_compile_fail::" },
+  { package: "verter_audit", modulePrefix: "cases::attribution_compile_fail::" },
+  { package: "verter_type_runtime", modulePrefix: "cases::compile_fail::" },
+]);
+
+// Builds the nextest filterset expression (see https://nexte.st/docs/filtersets) that excludes every row
+// above. `test(/^prefix/)` anchors at the start of the fully-qualified test name so it never matches a
+// same-named module nested deeper, and pairing each `test()` arm with its own `package()` arm means a
+// module path that happens to collide across two packages cannot cross-exclude the wrong crate's tests.
+export function buildTrybuildExclusionFilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
+  const arms = suites.map((s) => `(package(${s.package}) and test(/^${s.modulePrefix}/))`);
+  return `not (${arms.join(" or ")})`;
+}
+
+// Per-row skip args for a DIRECTLY-executed libtest binary (SURFACE 2), which never sees a nextest
+// filterset. `--skip <prefix>` is a plain (non-`--exact`) substring filter, verified to remove every test
+// under the prefix from BOTH `--list` and a real run while leaving unrelated same-named tests untouched.
+export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITES) {
+  const args = [];
+  for (const s of suites) {
+    if (s.package !== pkg) continue;
+    args.push("--skip", s.modulePrefix);
+  }
+  return args;
+}
+
+// Counts, from a REAL (unfiltered) nextest list JSON's suites, how many testcases each registered row
+// actually matches in the archive under test. A row that matches ZERO tests means its file was renamed,
+// moved, or deleted without updating this registry — the exclusion has silently gone stale (either it now
+// excludes nothing for that file, letting the cargo-spawning cost back into the gate unnoticed, or worse,
+// a differently-named module drifted under the same prefix). The caller must treat `missing.length > 0` as
+// a hard setup failure, never a silent pass — this is the same "selectors matched non-zero work" contract
+// `checkPackagesPresentInArchive` enforces for SURFACE 3's package filter, applied per-row here.
+export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLUDED_SUITES) {
+  const perRow = suites.map(() => 0);
+  let total = 0;
+  for (const suite of allSuites || []) {
+    const pkg = suite["package-name"];
+    const testcases = suite.testcases || {};
+    for (let i = 0; i < suites.length; i++) {
+      if (suites[i].package !== pkg) continue;
+      for (const name of Object.keys(testcases)) {
+        if (name.startsWith(suites[i].modulePrefix)) {
+          perRow[i]++;
+          total++;
+        }
+      }
+    }
+  }
+  const missing = suites.filter((_, i) => perRow[i] === 0);
+  return { total, perRow, missing };
+}
+
 // ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the

@@ -258,6 +258,11 @@ import {
   SHIPPED_CFG_EXTRA_PACKAGES,
   buildShippedCfgFilter,
   checkPackagesPresentInArchive,
+  // trybuild exclusion (interim, pending maintainer disposition) — GB13.
+  TRYBUILD_EXCLUDED_SUITES,
+  buildTrybuildExclusionFilterExpr,
+  trybuildSkipArgsForPackage,
+  countTrybuildExclusionMatches,
 } from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -7586,6 +7591,175 @@ async function main() {
           "buildShippedCfgFilter name verter_scheduler and the conformance crates and verter_compiler " +
           "(ruling §10); checkPackagesPresentInArchive discriminates a listing missing one required " +
           "package's suites from a complete one.",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB13) TRYBUILD EXCLUSION (interim, pending maintainer disposition) — the registry, the filter/skip-arg
+  // builders, and the per-row zero-match LOUD-failure discriminator that `verifyTrybuildExclusionCoverage`
+  // in gate.mjs gates every surface on.
+  //
+  // THE REGRESSION THIS CATCHES: a trybuild file is renamed/moved/deleted and TRYBUILD_EXCLUDED_SUITES is
+  // not updated — the exclusion silently stops covering it (SILENT SKIP of the exclusion itself, not of a
+  // test) while every OTHER row still matches, so a naive "total > 0" check would stay green. The per-row
+  // `missing` discriminator is what makes that a hard, named setup failure instead.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB13) TRYBUILD EXCLUSION (interim)\n");
+  {
+    let ok = true;
+
+    // The registry: one row per file that actually calls trybuild::TestCases::new(), across all 6 crates.
+    const wantPackages = [
+      "verter_session",
+      "verter_language",
+      "verter_identity",
+      "verter_compiler",
+      "verter_compiler",
+      "verter_compiler",
+      "verter_compiler",
+      "verter_audit",
+      "verter_type_runtime",
+    ];
+    if (TRYBUILD_EXCLUDED_SUITES.length !== wantPackages.length) {
+      fail(
+        `(GB13.1) TRYBUILD_EXCLUDED_SUITES must have ${wantPackages.length} rows (one per trybuild file ` +
+          `across the 6 owning crates); got ${TRYBUILD_EXCLUDED_SUITES.length}: ` +
+          JSON.stringify(TRYBUILD_EXCLUDED_SUITES),
+      );
+      ok = false;
+    }
+    const gotPackages = TRYBUILD_EXCLUDED_SUITES.map((s) => s.package).sort();
+    if (JSON.stringify(gotPackages) !== JSON.stringify([...wantPackages].sort())) {
+      fail(
+        `(GB13.1) TRYBUILD_EXCLUDED_SUITES packages must be exactly ${JSON.stringify([...wantPackages].sort())} ` +
+          `(order-independent); got ${JSON.stringify(gotPackages)}`,
+      );
+      ok = false;
+    }
+    for (const row of TRYBUILD_EXCLUDED_SUITES) {
+      if (!row.modulePrefix.startsWith("cases::") || !row.modulePrefix.endsWith("::")) {
+        fail(
+          `(GB13.1) every row's modulePrefix must be a "cases::...::" module path (so it anchors a whole ` +
+            `module, not a partial name); got ${JSON.stringify(row)}`,
+        );
+        ok = false;
+      }
+    }
+
+    // The filterset: `not (...)`, one `(package(pkg) and test(/^prefix/))` arm per row, parenthesized so
+    // composing it with another filter (Surface 3's SHIPPED_CFG_FILTER) via `and` cannot change precedence.
+    const filterExpr = buildTrybuildExclusionFilterExpr();
+    if (!filterExpr.startsWith("not (") || !filterExpr.endsWith(")")) {
+      fail(`(GB13.2) the filter must be a single negated group "not (...)"; got '${filterExpr}'`);
+      ok = false;
+    }
+    for (const row of TRYBUILD_EXCLUDED_SUITES) {
+      const arm = `(package(${row.package}) and test(/^${row.modulePrefix}/))`;
+      if (!filterExpr.includes(arm)) {
+        fail(`(GB13.2) the filter must contain the arm ${arm}; got '${filterExpr}'`);
+        ok = false;
+      }
+    }
+
+    // Per-package skip args (SURFACE 2's direct-libtest mechanism — it has no `-E`, only `--skip <prefix>`).
+    const sessionSkip = trybuildSkipArgsForPackage("verter_session");
+    if (
+      sessionSkip.length !== 2 ||
+      sessionSkip[0] !== "--skip" ||
+      sessionSkip[1] !== "cases::g_compile::compile_fail::"
+    ) {
+      fail(
+        `(GB13.3) trybuildSkipArgsForPackage("verter_session") must be exactly ["--skip", ` +
+          `"cases::g_compile::compile_fail::"]; got ${JSON.stringify(sessionSkip)}`,
+      );
+      ok = false;
+    }
+    const noRowsSkip = trybuildSkipArgsForPackage("verter_workspace");
+    if (noRowsSkip.length !== 0) {
+      fail(
+        `(GB13.3) a package with NO registered rows must get zero --skip args (discriminates a real match ` +
+          `from an accidental blanket skip); got ${JSON.stringify(noRowsSkip)}`,
+      );
+      ok = false;
+    }
+
+    // countTrybuildExclusionMatches: build a synthetic archive listing with exactly one real testcase per
+    // registered row, PLUS two adversarial false-positive testcases that must NEVER be counted — mirroring
+    // the two real same-substring, different-module tests this exclusion must never touch
+    // (verter_lsp's external_ts::membership_reconciler::tests::absent_compile_failed_removes and
+    // verter_session's types::tests::compile_failure_code_classification).
+    const completeSuites = [];
+    for (const row of TRYBUILD_EXCLUDED_SUITES) {
+      completeSuites.push({
+        "package-name": row.package,
+        testcases: { [`${row.modulePrefix}some_harness_fn`]: { kind: "test", ignored: false } },
+      });
+    }
+    completeSuites.push({
+      "package-name": "verter_lsp",
+      testcases: {
+        "external_ts::membership_reconciler::tests::absent_compile_failed_removes": {
+          kind: "test",
+          ignored: false,
+        },
+      },
+    });
+    completeSuites.push({
+      "package-name": "verter_session",
+      testcases: { "types::tests::compile_failure_code_classification": { kind: "test", ignored: false } },
+    });
+    const complete = countTrybuildExclusionMatches(completeSuites);
+    if (complete.total !== TRYBUILD_EXCLUDED_SUITES.length) {
+      fail(
+        `(GB13.4) a complete listing must count exactly ${TRYBUILD_EXCLUDED_SUITES.length} trybuild ` +
+          `testcase(s) (one per row) and must NOT count the two adversarial same-substring false positives; ` +
+          `got total=${complete.total}`,
+      );
+      ok = false;
+    }
+    if (complete.missing.length !== 0) {
+      fail(`(GB13.4) a complete listing must report zero missing rows; got ${JSON.stringify(complete.missing)}`);
+      ok = false;
+    }
+
+    // THE ZERO-MATCH LOUD-FAILURE DISCRIMINATOR — a renamed/moved/deleted trybuild file (here: dropping the
+    // verter_audit testcase, modelling `attribution_compile_fail.rs` renamed without updating the registry)
+    // must be reported as exactly that ONE missing row, never silently folded into a still-nonzero total.
+    const staleSuites = completeSuites.filter(
+      (s) => !(s["package-name"] === "verter_audit" && "cases::attribution_compile_fail::some_harness_fn" in (s.testcases || {})),
+    );
+    const stale = countTrybuildExclusionMatches(staleSuites);
+    if (
+      stale.missing.length !== 1 ||
+      stale.missing[0].package !== "verter_audit" ||
+      stale.missing[0].modulePrefix !== "cases::attribution_compile_fail::"
+    ) {
+      fail(
+        "(GB13.5) dropping the verter_audit testcase must report missing=[{package:verter_audit, " +
+          `modulePrefix:'cases::attribution_compile_fail::'}]; got ${JSON.stringify(stale.missing)} ` +
+          "— this is the exact discriminator gate.mjs's verifyTrybuildExclusionCoverage fails the gate on " +
+          "(a stale row is a hard setup failure on every surface, never a silent pass).",
+      );
+      ok = false;
+    }
+    if (stale.total !== TRYBUILD_EXCLUDED_SUITES.length - 1) {
+      fail(
+        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other 8 rows still match); ` +
+          `got total=${stale.total}`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names all 9 trybuild files across the 6 owning " +
+          "crates; buildTrybuildExclusionFilterExpr emits one package+test arm per row inside a single " +
+          "negated group; trybuildSkipArgsForPackage returns the exact --skip pair for verter_session and " +
+          "nothing for an unregistered package; countTrybuildExclusionMatches counts exactly the registered " +
+          "rows against a real listing shape while ignoring two adversarial same-substring lookalikes, and " +
+          "DISCRIMINATES a single stale/renamed row as a named missing entry rather than folding it into a " +
+          "still-nonzero total.",
       );
     }
   }

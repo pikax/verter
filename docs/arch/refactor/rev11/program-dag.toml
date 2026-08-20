@@ -145,10 +145,22 @@ class = "subsystem"
 predecessors = ["B4"]
 
 [[block]]
+id = "BV2"
+name = "Vue post-BV1 runtime-codegen invariant and regression correction"
+class = "subsystem"
+predecessors = ["BV1", "BS1"]
+
+[[block]]
+id = "CM1"
+name = "Component-meta request-view materialization and runtime-prop type regression correction"
+class = "subsystem"
+predecessors = ["BV1", "BS1"]
+
+[[block]]
 id = "B5"
 name = "Accepted framework algorithms through sole direct compiler core"
 class = "foundational-atomic"
-predecessors = ["BV1", "BS1"]
+predecessors = ["BV1", "BS1", "BV2"]
 
 [[block]]
 id = "B6"
@@ -160,7 +172,7 @@ predecessors = ["B5"]
 id = "C1"
 name = "ModuleResolverCore and non-flow TypeInfoCore"
 class = "foundational"
-predecessors = ["A6", "B1", "B2"]
+predecessors = ["A6", "B1", "B2", "CM1"]
 
 [[block]]
 id = "C2"
