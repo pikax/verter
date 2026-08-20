@@ -263,7 +263,23 @@ import {
   buildTrybuildExclusionFilterExpr,
   trybuildSkipArgsForPackage,
   countTrybuildExclusionMatches,
+  // reused by the gate-failure-triage parsing scenarios (GB14) so a nextest recap fixture is read through
+  // the SAME extractor the live gate/triage share — no second nextest-output parser.
+  extractNextestTerminalFailures,
 } from "./gate-internals.mjs";
+// gate-failure-triage's pure parsing/classification helpers (no CLI, no cargo — see its own header). The
+// REAL end-to-end proof (planted tests, real cargo nextest, REAL/FLAKY/INTERACTION classification) lives in
+// the dedicated `triage-gate-failure-selftest.mjs`, which DOES run cargo and is NOT part of this cargo-free
+// suite; here we exercise only the in-process log-parsing/classification contract.
+import {
+  parseGateVerdict,
+  splitGateLogSurfaces,
+  isSyntheticFailureName,
+  buildIsolationFilter,
+  quoteNextestFilterValue,
+  resolveIsolationTargets,
+  classifyAttempts,
+} from "./triage-gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
 // The PRODUCTION gate CLI — exercised ONLY by the U-P0 "no bypass mode" scenario (to assert every removed
@@ -7760,6 +7776,272 @@ async function main() {
           "rows against a real listing shape while ignoring two adversarial same-substring lookalikes, and " +
           "DISCRIMINATES a single stale/renamed row as a named missing entry rather than folding it into a " +
           "still-nonzero total.",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB14) GATE-FAILURE TRIAGE — pure parsing/classification contract of triage-gate-failure.mjs
+  // (triage-gate-internals.mjs). PLATFORM-INDEPENDENT and cargo-free: fixture text in, no spawn, no
+  // filesystem beyond what is already imported. The REAL end-to-end proof — planted REAL/FLAKY/INTERACTION
+  // tests, genuine `cargo nextest` isolation reruns, true classification — is NOT here (this suite runs no
+  // workspace cargo, per its own header); it lives in the dedicated, cargo-using
+  // `triage-gate-failure-selftest.mjs`, run separately.
+  // --------------------------------------------------------------------------------------------------
+  {
+    let ok = true;
+
+    // (GB14.1) VERDICT PARSING discriminates FAIL / PASS / PASS-WITH-TOLERATED / no-verdict-at-all, and
+    // the FAIL block ends at the first non-matching line (never swallows unrelated trailing log text).
+    const failLog =
+      "[gate] some narrative line\n" +
+      "[gate][error] VERDICT: FAIL — 2 non-tolerated failure(s):\n" +
+      "[gate][error]   [nextest] cases::foo::bar\n" +
+      "[gate][error]   [libtest:verter_session::main] cases::baz::qux\n" +
+      "[gate] this line is NOT part of the block\n";
+    const failParsed = parseGateVerdict(failLog);
+    if (
+      failParsed.kind !== "fail" ||
+      failParsed.failures.length !== 2 ||
+      failParsed.failures[0].surface !== "nextest" ||
+      failParsed.failures[0].name !== "cases::foo::bar" ||
+      failParsed.failures[1].surface !== "libtest:verter_session::main" ||
+      failParsed.failures[1].name !== "cases::baz::qux"
+    ) {
+      fail(`(GB14.1) FAIL-verdict parse mismatch: ${JSON.stringify(failParsed)}`);
+      ok = false;
+    }
+    const passParsed = parseGateVerdict("[gate] VERDICT: PASS (all three surfaces green)\n");
+    if (passParsed.kind !== "pass") {
+      fail(`(GB14.1) PASS verdict must parse kind=pass, got ${JSON.stringify(passParsed)}`);
+      ok = false;
+    }
+    const toleratedParsed = parseGateVerdict("[gate] VERDICT: PASS-WITH-TOLERATED (...)\n");
+    if (toleratedParsed.kind !== "pass") {
+      fail(`(GB14.1) PASS-WITH-TOLERATED must parse kind=pass, got ${JSON.stringify(toleratedParsed)}`);
+      ok = false;
+    }
+    const noneParsed = parseGateVerdict("nothing resembling a gate verdict here\n");
+    if (noneParsed.kind !== "none") {
+      fail(`(GB14.1) a log with no VERDICT line must parse kind=none, got ${JSON.stringify(noneParsed)}`);
+      ok = false;
+    }
+    const emptyBlockParsed = parseGateVerdict("[gate][error] VERDICT: FAIL — 0 non-tolerated failure(s):\n");
+    if (emptyBlockParsed.kind !== "fail" || emptyBlockParsed.failures.length !== 0) {
+      fail(
+        `(GB14.1) a FAIL verdict with zero following [surface] lines must parse failures=[] (the CLI, not ` +
+          `this parser, treats that as the zero-selection error) — got ${JSON.stringify(emptyBlockParsed)}`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB14.1) VERDICT PARSING: FAIL/PASS/PASS-WITH-TOLERATED/no-verdict-at-all all discriminate " +
+          "correctly, the FAIL failure block stops at the first non-matching line, and a verdict with zero " +
+          "named failures parses to an empty (not missing) failures array.",
+      );
+    }
+  }
+
+  {
+    let ok = true;
+    // (GB14.2) SYNTHETIC-NAME DETECTION — a `<...>` name is a gate.mjs-manufactured diagnostic (crash
+    // summary / tolerance-refused / unaccounted), never a real test id.
+    if (!isSyntheticFailureName("<run did not complete: 1 of 2 selected test(s) never ran>")) {
+      fail("(GB14.2) a <...>-wrapped name must be classified synthetic");
+      ok = false;
+    }
+    if (isSyntheticFailureName("cases::foo::bar")) {
+      fail("(GB14.2) an ordinary test name must NOT be classified synthetic");
+      ok = false;
+    }
+    // A name that merely CONTAINS angle brackets mid-string (a legitimate, if unusual, Rust test name)
+    // must not be swept up by a substring check — only a full wrap counts.
+    if (isSyntheticFailureName("cases::generic::Foo<Bar>::works")) {
+      fail("(GB14.2) a name with embedded angle brackets that does not WRAP the whole name is not synthetic");
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB14.2) SYNTHETIC-NAME DETECTION: a full `<...>`-wrapped name is synthetic, an ordinary test id " +
+          "is not, and a name merely containing angle brackets (not wrapping it) is not swept up.",
+      );
+    }
+  }
+
+  {
+    let ok = true;
+    // (GB14.3) ISOLATION FILTER/ARGV — binary-id recovery from a real nextest recap segment (reusing the
+    // SAME extractNextestTerminalFailures the live gate uses, not a second parser), surface routing to the
+    // right cargo profile (dev vs shipped-cfg vs libtest's own dev archive), and the caveat set exactly
+    // when binary-id could not be recovered.
+    const surface1Text =
+      "        FAIL [   0.010s] verter_span uri::tests::a\n" +
+      "       PASS [   0.010s] verter_span uri::tests::b\n" +
+      "────────────\n" +
+      "     Summary [   1.000s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
+    const surface3Text =
+      "        FAIL [   0.010s] verter_session::main cases::shared::x\n" +
+      "────────────\n" +
+      "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n";
+    const { targets, unclassifiable } = resolveIsolationTargets({
+      failures: [
+        { surface: "nextest", name: "uri::tests::a" },
+        { surface: "shipped-cfg/nextest", name: "cases::shared::x" },
+        { surface: "libtest:verter_session::main", name: "cases::other::y" },
+        { surface: "nextest", name: "uri::tests::MISSING_FROM_RECAP" },
+        { surface: "nextest", name: "<run did not complete: 1 of 2 never ran>" },
+        { surface: "some-unrecognized-surface", name: "cases::z" },
+      ],
+      surfaces: { surface1: surface1Text, surface3: surface3Text },
+      extractNextestTerminalFailures,
+    });
+    if (targets.length !== 4 || unclassifiable.length !== 2) {
+      fail(
+        `(GB14.3) expected 4 isolatable targets + 2 unclassifiable, got ${targets.length}/${unclassifiable.length}`,
+      );
+      ok = false;
+    }
+    const byName = Object.fromEntries(targets.map((t) => [t.name, t]));
+    if (
+      !byName["uri::tests::a"] ||
+      byName["uri::tests::a"].binaryId !== "verter_span" ||
+      byName["uri::tests::a"].cargoProfile !== null ||
+      byName["uri::tests::a"].caveat !== ""
+    ) {
+      fail(`(GB14.3) SURFACE 1 target should recover binary-id 'verter_span', dev profile, no caveat`);
+      ok = false;
+    }
+    if (
+      !byName["cases::shared::x"] ||
+      byName["cases::shared::x"].binaryId !== "verter_session::main" ||
+      byName["cases::shared::x"].cargoProfile !== "no-debug-assertions"
+    ) {
+      fail(`(GB14.3) SURFACE 3 target should recover binary-id + the shipped-cfg profile`);
+      ok = false;
+    }
+    if (!byName["cases::other::y"] || byName["cases::other::y"].binaryId !== "verter_session::main") {
+      fail(`(GB14.3) libtest-surface target's binary-id comes directly from the surface tag, no recap search`);
+      ok = false;
+    }
+    const missing = byName["uri::tests::MISSING_FROM_RECAP"];
+    if (!missing || missing.binaryId !== null || !missing.caveat) {
+      fail(`(GB14.3) a name absent from its surface's recap must degrade to a name-only filter WITH a caveat`);
+      ok = false;
+    }
+    if (missing && missing.filter !== "test(=uri::tests::MISSING_FROM_RECAP)") {
+      fail(`(GB14.3) the degraded filter must be name-only, got '${missing && missing.filter}'`);
+      ok = false;
+    }
+    if (
+      !unclassifiable.some((u) => u.name.startsWith("<")) ||
+      !unclassifiable.some((u) => u.surface === "some-unrecognized-surface")
+    ) {
+      fail("(GB14.3) both the synthetic name and the unrecognized-surface tag must land in unclassifiable");
+      ok = false;
+    }
+    if (
+      quoteNextestFilterValue("plain_ident::ok") !== "plain_ident::ok" ||
+      quoteNextestFilterValue('has "quote" and \\backslash') !==
+        '"has \\"quote\\" and \\\\backslash"'
+    ) {
+      fail("(GB14.3) quoteNextestFilterValue must pass bare-safe names through and escape unsafe ones");
+      ok = false;
+    }
+    if (buildIsolationFilter(null, "x::y") !== "test(=x::y)") {
+      fail("(GB14.3) buildIsolationFilter with no binary-id must be name-only");
+      ok = false;
+    }
+    if (buildIsolationFilter("pkg::bin", "x::y") !== "binary_id(pkg::bin) & test(=x::y)") {
+      fail("(GB14.3) buildIsolationFilter with a binary-id must AND it with the name filter");
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB14.3) ISOLATION FILTER/ARGV: binary-id recovery is scoped to the failure's OWNING surface " +
+          "segment (never a different surface's), routes to the right cargo profile per surface " +
+          "(nextest=dev, shipped-cfg/nextest=no-debug-assertions, libtest:<id>=dev via the tag directly), " +
+          "degrades to a caveated name-only filter when the recap does not name the test, and both a " +
+          "synthetic diagnostic name and an unrecognized surface tag land in unclassifiable rather than " +
+          "being silently dropped or crashing the resolver.",
+      );
+    }
+  }
+
+  {
+    let ok = true;
+    // (GB14.4) CLASSIFICATION — the exact REAL/FLAKY/INTERACTION/INCONCLUSIVE contract from N isolated
+    // attempt outcomes. Discriminating: each case must reject the OTHER three classifications, not just
+    // accept its own.
+    const attempt = (outcome) => ({ outcome });
+    const cases = [
+      { attempts: [attempt("fail"), attempt("fail"), attempt("fail")], want: "REAL" },
+      { attempts: [attempt("pass"), attempt("pass"), attempt("pass")], want: "INTERACTION" },
+      { attempts: [attempt("pass"), attempt("fail"), attempt("pass")], want: "FLAKY" },
+      { attempts: [attempt("abort"), attempt("abort")], want: "INCONCLUSIVE" },
+      // a MIX of abort + a clean pass/fail split still classifies from the valid subset only.
+      { attempts: [attempt("abort"), attempt("fail"), attempt("fail")], want: "REAL" },
+      { attempts: [attempt("abort"), attempt("pass"), attempt("fail")], want: "FLAKY" },
+    ];
+    for (const c of cases) {
+      const got = classifyAttempts(c.attempts).classification;
+      if (got !== c.want) {
+        fail(
+          `(GB14.4) classifyAttempts(${JSON.stringify(c.attempts.map((a) => a.outcome))}) = ${got}, want ${c.want}`,
+        );
+        ok = false;
+      }
+    }
+    const partial = classifyAttempts([attempt("fail"), attempt("abort"), attempt("fail")]);
+    if (partial.classification !== "REAL" || partial.complete !== false || partial.aborted !== 1) {
+      fail(`(GB14.4) a partially-aborted REAL run must still classify REAL and report complete=false, aborted=1`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB14.4) CLASSIFICATION: N/N fail => REAL, N/N pass => INTERACTION, a genuine mixed split => " +
+          "FLAKY, zero valid attempts => INCONCLUSIVE (never guessed), and aborted attempts are excluded " +
+          "from the vote but still recorded (never silently treated as a pass or a fail).",
+      );
+    }
+  }
+
+  {
+    let ok = true;
+    // (GB14.5) SURFACE SEGMENTATION — a nextest recap for a given test-name is read ONLY from that test's
+    // OWNING surface segment, never from a different surface's (which could name the same test string
+    // under a DIFFERENT profile/outcome and silently cross-contaminate binary-id recovery).
+    const log =
+      "[gate] SURFACE 1: nextest run from the archive (process isolation) …\n" +
+      "        FAIL [   0.010s] pkg_a cases::shared::x\n" +
+      "────────────\n" +
+      "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n" +
+      "[gate] SURFACE 2: directly executing 0 verter_session libtest binaries (lib=true, test=true) in-process from the SAME archive …\n" +
+      "[gate] SURFACE 3: building the shipped-cfg test universe (cargo nextest archive --workspace --cargo-profile no-debug-assertions) …\n" +
+      "        FAIL [   0.010s] pkg_b cases::shared::x\n" +
+      "────────────\n" +
+      "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n" +
+      "[gate][error] VERDICT: FAIL — 2 non-tolerated failure(s):\n";
+    const segs = splitGateLogSurfaces(log);
+    const s1 = extractNextestTerminalFailures(segs.surface1);
+    const s3 = extractNextestTerminalFailures(segs.surface3);
+    if (
+      s1.failures.length !== 1 ||
+      s1.failures[0].binaryId !== "pkg_a" ||
+      s3.failures.length !== 1 ||
+      s3.failures[0].binaryId !== "pkg_b"
+    ) {
+      fail(
+        `(GB14.5) surface1/surface3 segments must each contain ONLY their own surface's recap ` +
+          `(got s1=${JSON.stringify(s1.failures)}, s3=${JSON.stringify(s3.failures)})`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB14.5) SURFACE SEGMENTATION: the SAME test name failing on two different surfaces (dev vs " +
+          "shipped-cfg) resolves to two DIFFERENT binary-ids because each surface's raw recap is searched " +
+          "in isolation — never a cross-surface false match.",
       );
     }
   }
