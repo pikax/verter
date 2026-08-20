@@ -243,6 +243,21 @@ import {
   BUILD_PREREQUISITE_COMMAND,
   BUILD_PREREQUISITE_MARKER,
   TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS,
+  // oracle-cache prerequisite preflight — the offline Svelte/Vue oracle npm cache the bf2-authoritative
+  // conformance suites realize from (GB11).
+  checkOracleCachePrerequisite,
+  runOracleCacheLoadProbe,
+  oracleCacheProbeBudgetMs,
+  ORACLE_CACHE_PREREQUISITE_MARKER,
+  ORACLE_CACHE_PROVISION_COMMAND,
+  ORACLE_CACHE_PROBE_MAX_MS,
+  ORACLE_CACHE_PROBE_MODULE_SEGMENTS,
+  // shipped-cfg archive/filter builders (GB12).
+  ARCHIVE_FEATURES,
+  buildNextestArchiveArgs,
+  SHIPPED_CFG_EXTRA_PACKAGES,
+  buildShippedCfgFilter,
+  checkPackagesPresentInArchive,
 } from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -6937,6 +6952,22 @@ async function main() {
         writeFileSync(join(synthBin, `${tool}.CMD`), "");
       }
 
+      // Oracle-cache shim: this scenario exercises the BUILD-prerequisite preflight, not the (separate)
+      // oracle-cache one — but the real production `gate.mjs` byte-copy runs BOTH in sequence, so leg 6
+      // ("everything built") would otherwise fail the oracle-cache preflight here (no real
+      // `.oracle-npm-cache` in a synthetic root) and never reach the freshness-preflight line this
+      // scenario asserts on. Plant a trivial always-succeeding `ensureOracleDomain` at the exact module
+      // path the real preflight probe imports, so it resolves SATISFIED without any real npm/network work
+      // — this is a stand-in for the ORACLE-CACHE preflight, proven separately and for real by GB11.
+      const oracleCacheStub = join(synthRoot, ...ORACLE_CACHE_PROBE_MODULE_SEGMENTS);
+      mkdirSync(dirname(oracleCacheStub), { recursive: true });
+      writeFileSync(
+        oracleCacheStub,
+        "export function ensureOracleDomain(framework) {\n" +
+          '  return { installDir: "/synthetic-oracle/" + framework, realizedClosureSha256: "stub" };\n' +
+          "}\n",
+      );
+
       // The MINIATURE package graph. Every edge the real chain has, and nothing else:
       //   <probe dir>/package.json  --main-->  <plugin>/dist/index.js
       //   <plugin>/dist/index.js    requires   ./helpers/carrierStore   (an EMITTED sibling)
@@ -7142,6 +7173,419 @@ async function main() {
       fail(
         `(GB10) gate-memory-selftest.mjs exited ${r.status === null ? `signal ${r.signal}` : r.status} — ` +
           `memory-ceiling assertions failed:\n${r.stdout || ""}${r.stderr || ""}`,
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB11) ORACLE-CACHE PREREQUISITE PREFLIGHT — the gate must tell "the offline oracle npm cache is
+  // absent or unusable" apart from "the compiled output genuinely diverges from the pinned oracle".
+  //
+  // THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates 45 tests — including the ENTIRE
+  // `svelte_official_conformance_gate` suite — that realize their Vue/Svelte oracles OFFLINE from a
+  // gitignored `.oracle-npm-cache`. In a fresh checkout that cache does not exist, and the harness does
+  // NOT fail loudly on a missing/unusable cache: it records the affected axis as
+  // `"authoritative mode: link axis skipped (oracle install unavailable: …)"` and keeps comparing every
+  // other axis — an environment absence that reads as a compiled-output DIVERGENCE. Measured on a fresh
+  // worktree: 5 failures that read exactly like conformance regressions with the cache missing, versus 2
+  // real ones with it present.
+  //
+  // HOW IT IS DRIVEN. Leg 1 calls the real `checkOracleCachePrerequisite` in-process against injected
+  // probe outcomes covering all four states the real probe can report (proven for real against this very
+  // repo below, and separately in the commit's own report — missing cache, corrupt/present-but-unusable
+  // cache, valid cache, and an import-time infra failure). Leg 2 drives the REAL
+  // `runOracleCacheLoadProbe` with an injected `spawnFn`, mirroring GB9.1's fail-closed probe-shape matrix
+  // (spawn error, null result, signal kill, unparseable structured failure, unexpected exit, the dual
+  // error+signal ETIMEDOUT timeout shape) plus the two structured-success/structured-failure exit shapes.
+  // Leg 3 pins `oracleCacheProbeBudgetMs`'s cap-and-no-floor contract, the same shape as `probeBudgetMs`.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB11) ORACLE-CACHE PREREQUISITE PREFLIGHT\n");
+  {
+    let ok = true;
+
+    // ---- Leg 1: the real checker, in-process, over injected probe outcomes ----
+    const realized = checkOracleCachePrerequisite({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({
+        ok: true,
+        target: "/synthetic/oracle-install.mjs",
+        realized: {
+          vue: "/synthetic/.oracle-installs/vue",
+          svelte: "/synthetic/.oracle-installs/svelte",
+        },
+      }),
+    });
+    if (!realized.ok || realized.lines.length !== 0 || realized.realized.vue === undefined) {
+      fail(
+        `(GB11.1) a successful realize must report ok with NO report lines and the realized install dirs; ` +
+          `got ok=${realized.ok} lines=${realized.lines.length} realized=${JSON.stringify(realized.realized)}`,
+      );
+      ok = false;
+    }
+
+    // MISSING cache: `OracleCacheUnprovisionedError` — must name the marker, the provisioning command, and
+    // say "not provisioned" (never "invalid"/"unusable" — a missing cache and a corrupt one are DIFFERENT
+    // operator stories, both loud, but distinguishable in the message).
+    const missingReport = checkOracleCachePrerequisite({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({
+        ok: false,
+        target: "/synthetic/oracle-install.mjs",
+        reason: "realize-error",
+        errorName: "OracleCacheUnprovisionedError",
+        framework: "vue",
+        detail:
+          "OracleCacheUnprovisionedError: oracle npm cache not provisioned at /synthetic/.oracle-npm-cache " +
+          "— run `node scripts/provision-oracle-npm-cache.mjs` first",
+      }),
+    }).lines.join("\n");
+    if (
+      !missingReport.includes(ORACLE_CACHE_PREREQUISITE_MARKER) ||
+      !missingReport.includes(ORACLE_CACHE_PROVISION_COMMAND) ||
+      !missingReport.includes("not provisioned") ||
+      missingReport.includes("present but unusable")
+    ) {
+      fail(
+        `(GB11.1) a MISSING cache must report the marker, the provisioning command, and "not provisioned" ` +
+          `(and NOT the "present but unusable" wording) — got:\n${missingReport}`,
+      );
+      ok = false;
+    }
+
+    // CORRUPT/INVALID cache: present but `npm ci --offline` itself fails (e.g. ENOTCACHED), or the
+    // realized tree fails `ensureOracleDomain`'s closure/drift validation (`PackageDriftError`). Must
+    // report the marker, the SAME provisioning command (re-provisioning is the operator remedy either
+    // way), and "present but unusable" — never claim the cache is simply absent.
+    for (const errorName of ["Error", "PackageDriftError"]) {
+      const invalidReport = checkOracleCachePrerequisite({
+        repoRoot: "/synthetic",
+        loadProbe: () => ({
+          ok: false,
+          target: "/synthetic/oracle-install.mjs",
+          reason: "realize-error",
+          errorName,
+          framework: "svelte",
+          detail: `${errorName}: the realized tree does not match the committed lockfile closure`,
+        }),
+      }).lines.join("\n");
+      if (
+        !invalidReport.includes(ORACLE_CACHE_PREREQUISITE_MARKER) ||
+        !invalidReport.includes(ORACLE_CACHE_PROVISION_COMMAND) ||
+        !invalidReport.includes("present but unusable") ||
+        invalidReport.includes("is not provisioned")
+      ) {
+        fail(
+          `(GB11.1) an INVALID cache (errorName=${errorName}) must report the marker, the provisioning ` +
+            `command, and "present but unusable" (and NOT "is not provisioned") — got:\n${invalidReport}`,
+        );
+        ok = false;
+      }
+    }
+
+    // IMPORT-time infra failure (the oracle-install.mjs module itself could not be loaded) — still a loud
+    // refusal naming the marker and the provisioning command, never a silent pass-through.
+    const importReport = checkOracleCachePrerequisite({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({
+        ok: false,
+        target: "/synthetic/oracle-install.mjs",
+        reason: "import-error",
+        errorName: "Error",
+        detail: "Cannot find module '/synthetic/oracle-install.mjs'",
+      }),
+    }).lines.join("\n");
+    if (
+      !importReport.includes(ORACLE_CACHE_PREREQUISITE_MARKER) ||
+      !importReport.includes(ORACLE_CACHE_PROVISION_COMMAND)
+    ) {
+      fail(
+        `(GB11.1) an import-time infra failure must still report the marker and provisioning command — got:\n${importReport}`,
+      );
+      ok = false;
+    }
+
+    // ---- Leg 2: runOracleCacheLoadProbe fail-closed over injected spawn shapes (mirrors GB9.1) ----
+    const probeShapes = [
+      [
+        "a throwing spawn",
+        "spawn-error",
+        () => {
+          throw new Error("EACCES");
+        },
+      ],
+      ["a null result", "spawn-error", () => null],
+      ["a spawn error", "spawn-error", () => ({ error: new Error("ENOENT") })],
+      ["a killed probe", "signalled", () => ({ signal: "SIGKILL", status: null })],
+      [
+        "an unparseable structured failure",
+        "unknown-exit",
+        () => ({ status: 3, stdout: "not json", stderr: "" }),
+      ],
+      [
+        "an unexpected non-zero exit",
+        "unknown-exit",
+        () => ({ status: 9, stdout: "", stderr: "boom" }),
+      ],
+      [
+        "a timeout (dual error+signal ETIMEDOUT)",
+        "timeout",
+        () => ({
+          error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }),
+          signal: "SIGKILL",
+          status: null,
+        }),
+      ],
+    ];
+    for (const [label, wantReason, spawnFn] of probeShapes) {
+      const probe = runOracleCacheLoadProbe({ repoRoot: "/synthetic", spawnFn });
+      if (probe.ok) {
+        fail(`(GB11.2) ${label} must NOT report the cache as realized`);
+        ok = false;
+      }
+      if (probe.reason !== wantReason) {
+        fail(
+          `(GB11.2) ${label} must classify as ${wantReason}; got ${probe.reason} — got: ${probe.detail}`,
+        );
+        ok = false;
+      }
+    }
+    // A budget of 0 must refuse WITHOUT spawning (spawnFn is dead code if invoked).
+    const noBudget = runOracleCacheLoadProbe({
+      repoRoot: "/synthetic",
+      timeoutMs: 0,
+      spawnFn: () => {
+        fail("(GB11.2) a non-positive budget must not spawn the probe at all");
+        ok = false;
+        return { status: 0, stdout: "{}" };
+      },
+    });
+    if (noBudget.ok || noBudget.reason !== "timeout") {
+      fail(
+        `(GB11.2) a 0ms budget must refuse as a timeout WITHOUT spawning; got ok=${noBudget.ok} reason=${noBudget.reason}`,
+      );
+      ok = false;
+    }
+    // Structured success (exit 0, realized JSON on stdout).
+    const okProbe = runOracleCacheLoadProbe({
+      repoRoot: "/synthetic",
+      spawnFn: () => ({
+        status: 0,
+        stdout: JSON.stringify({ ok: true, realized: { vue: "/x/vue", svelte: "/x/svelte" } }),
+        stderr: "",
+      }),
+    });
+    if (
+      !okProbe.ok ||
+      okProbe.realized.vue !== "/x/vue" ||
+      okProbe.realized.svelte !== "/x/svelte"
+    ) {
+      fail(
+        `(GB11.2) a clean exit-0 probe must report ok with the realized install dirs; got ${JSON.stringify(okProbe)}`,
+      );
+      ok = false;
+    }
+    // Structured failure at each `stage` — proves errorName/framework/reason are threaded through, not
+    // just the raw message.
+    const importFail = runOracleCacheLoadProbe({
+      repoRoot: "/synthetic",
+      spawnFn: () => ({
+        status: 3,
+        stdout: JSON.stringify({ stage: "import", name: "Error", message: "Cannot find module" }),
+        stderr: "",
+      }),
+    });
+    if (importFail.ok || importFail.reason !== "import-error" || importFail.errorName !== "Error") {
+      fail(
+        `(GB11.2) a stage:"import" exit-3 must classify as import-error with errorName threaded through; got ${JSON.stringify(importFail)}`,
+      );
+      ok = false;
+    }
+    const realizeFail = runOracleCacheLoadProbe({
+      repoRoot: "/synthetic",
+      spawnFn: () => ({
+        status: 3,
+        stdout: JSON.stringify({
+          stage: "realize",
+          framework: "svelte",
+          name: "OracleCacheUnprovisionedError",
+          message: "oracle npm cache not provisioned",
+        }),
+        stderr: "",
+      }),
+    });
+    if (
+      realizeFail.ok ||
+      realizeFail.reason !== "realize-error" ||
+      realizeFail.errorName !== "OracleCacheUnprovisionedError" ||
+      realizeFail.framework !== "svelte"
+    ) {
+      fail(
+        `(GB11.2) a stage:"realize" exit-3 must classify as realize-error with errorName+framework threaded through; got ${JSON.stringify(realizeFail)}`,
+      );
+      ok = false;
+    }
+
+    // ---- Leg 3: the probe budget contract (mirrors probeBudgetMs's cap-and-no-floor) ----
+    if (oracleCacheProbeBudgetMs(1_000_000, 0) !== ORACLE_CACHE_PROBE_MAX_MS) {
+      fail(
+        `(GB11.3) a huge remaining window must cap at ORACLE_CACHE_PROBE_MAX_MS (${ORACLE_CACHE_PROBE_MAX_MS})`,
+      );
+      ok = false;
+    }
+    if (oracleCacheProbeBudgetMs(1000, 900) !== 100) {
+      fail(
+        `(GB11.3) a small remaining window must pass through uncapped; got ${oracleCacheProbeBudgetMs(1000, 900)}`,
+      );
+      ok = false;
+    }
+    if (oracleCacheProbeBudgetMs(1000, 5000) >= 0) {
+      fail(
+        `(GB11.3) an EXPIRED deadline must yield a NEGATIVE budget (no floor), not a floored positive one`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB11) ORACLE-CACHE PREREQUISITE PREFLIGHT: checkOracleCachePrerequisite distinguishes a MISSING " +
+          "cache from an INVALID (present-but-unusable) one from a successful realization, always naming " +
+          "the marker and the exact (never auto-run) provisioning command; runOracleCacheLoadProbe fails " +
+          "closed on every non-success spawn shape (spawn error, signal, timeout, unparseable output) and " +
+          "correctly threads errorName/framework/stage through both structured exit shapes; the probe " +
+          "budget caps-without-a-floor exactly like the build-prerequisite preflight's. All four REAL cache " +
+          "states (missing / corrupt / valid, plus restore) were additionally proven against this actual " +
+          "repository outside this in-process harness — see the change's own report.",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING — ruling §10: the conformance crates and
+  // `verter_compiler` join `verter_session` + `verter_scheduler` on surface 3, and
+  // `verter_session/bf2-authoritative` is ON for every archive so the 45 gated tests are actually built.
+  //
+  // THE REGRESSION THIS CATCHES: someone drops `"verter_session/bf2-authoritative"` from `ARCHIVE_FEATURES`
+  // (the 45 tests silently vanish from the archive again) or drops a package from
+  // `SHIPPED_CFG_EXTRA_PACKAGES` / lets a package name typo through (surface 3's filterset silently stops
+  // covering it). Both are pinned assertions against the REAL exported constants AND the REAL builder
+  // functions gate.mjs calls — a source edit to either breaks this test, not just gate.mjs's runtime
+  // behavior. `checkPackagesPresentInArchive` is additionally proven to discriminate on a synthetic
+  // archive listing missing one required package.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING\n");
+  {
+    let ok = true;
+
+    // ARCHIVE_FEATURES must name the exact feature the 45 tests are gated behind.
+    if (!ARCHIVE_FEATURES.includes("verter_session/bf2-authoritative")) {
+      fail(
+        `(GB12.1) ARCHIVE_FEATURES must include "verter_session/bf2-authoritative"; got ` +
+          `${JSON.stringify(ARCHIVE_FEATURES)} — the 45 oracle-backed tests would silently vanish from ` +
+          "every archived surface again.",
+      );
+      ok = false;
+    }
+    // The WIRING: buildNextestArchiveArgs (the function gate.mjs actually calls for BOTH the dev and the
+    // shipped-cfg archive) must emit `--features` with the CURRENT ARCHIVE_FEATURES value, for every
+    // cargoProfile — a future refactor that stops threading `features` through would be caught here even
+    // though the constant itself stayed correct.
+    for (const cargoProfile of [null, "no-debug-assertions"]) {
+      const args = buildNextestArchiveArgs({
+        buildJobs: 4,
+        cargoProfile,
+        archiveFile: "/synthetic/a.tar.zst",
+        runnerTarget: "/synthetic/target",
+      });
+      const featIdx = args.indexOf("--features");
+      if (featIdx === -1 || args[featIdx + 1] !== ARCHIVE_FEATURES.join(",")) {
+        fail(
+          `(GB12.1) buildNextestArchiveArgs({cargoProfile:${JSON.stringify(cargoProfile)}}) must emit ` +
+            `--features ${ARCHIVE_FEATURES.join(",")}; got ${JSON.stringify(args)}`,
+        );
+        ok = false;
+      }
+    }
+    // DISCRIMINATION: an EMPTY features list (what "someone dropped the feature" looks like at the
+    // wiring layer) must NOT emit a `--features` flag at all — proving the assertions above are sensitive
+    // to exactly that regression, not vacuously true regardless of `features`.
+    const strippedArgs = buildNextestArchiveArgs({
+      buildJobs: 4,
+      cargoProfile: null,
+      archiveFile: "/synthetic/a.tar.zst",
+      runnerTarget: "/synthetic/target",
+      features: [],
+    });
+    if (strippedArgs.includes("--features")) {
+      fail(
+        `(GB12.1) buildNextestArchiveArgs with an EMPTY features list must NOT emit --features at all ` +
+          `(this is the control that proves the assertions above discriminate); got ${JSON.stringify(strippedArgs)}`,
+      );
+      ok = false;
+    }
+
+    // The filter's required packages: verter_scheduler + the two conformance crates + verter_compiler.
+    const wantExtra = [
+      "verter_scheduler",
+      "verter_svelte_conformance",
+      "verter_vue_conformance",
+      "verter_compiler",
+    ];
+    if (
+      SHIPPED_CFG_EXTRA_PACKAGES.length !== wantExtra.length ||
+      wantExtra.some((pkg) => !SHIPPED_CFG_EXTRA_PACKAGES.includes(pkg))
+    ) {
+      fail(
+        `(GB12.2) SHIPPED_CFG_EXTRA_PACKAGES must be exactly ${JSON.stringify(wantExtra)} (order-independent); ` +
+          `got ${JSON.stringify(SHIPPED_CFG_EXTRA_PACKAGES)}`,
+      );
+      ok = false;
+    }
+    const filter = buildShippedCfgFilter();
+    for (const pkg of ["verter_session", ...wantExtra]) {
+      if (!filter.includes(`package(${pkg})`)) {
+        fail(`(GB12.2) the shipped-cfg filterset must name package(${pkg}); got '${filter}'`);
+        ok = false;
+      }
+    }
+
+    // checkPackagesPresentInArchive: DISCRIMINATION — a listing missing ONE required package's lib/test
+    // suites must report exactly that package as missing (never silently pass), and a complete listing
+    // must report zero missing.
+    const partialSuites = [
+      { "package-name": "verter_scheduler", kind: "lib" },
+      { "package-name": "verter_svelte_conformance", kind: "lib" },
+      { "package-name": "verter_vue_conformance", kind: "test" },
+      // verter_compiler deliberately absent — models a renamed/removed crate or a typo in the filter.
+    ];
+    const partial = checkPackagesPresentInArchive(partialSuites, SHIPPED_CFG_EXTRA_PACKAGES);
+    if (partial.missing.length !== 1 || partial.missing[0] !== "verter_compiler") {
+      fail(
+        `(GB12.3) a listing missing verter_compiler's suites must report missing=["verter_compiler"]; got ` +
+          JSON.stringify(partial.missing),
+      );
+      ok = false;
+    }
+    const completeSuites = SHIPPED_CFG_EXTRA_PACKAGES.map((pkg) => ({
+      "package-name": pkg,
+      kind: "lib",
+    }));
+    const complete = checkPackagesPresentInArchive(completeSuites, SHIPPED_CFG_EXTRA_PACKAGES);
+    if (complete.missing.length !== 0) {
+      fail(
+        `(GB12.3) a complete listing must report zero missing packages; got ${JSON.stringify(complete.missing)}`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING: ARCHIVE_FEATURES names " +
+          "verter_session/bf2-authoritative and buildNextestArchiveArgs actually threads it into the cargo " +
+          "nextest archive argv for every cargo profile (an empty features list, the shape of the exact " +
+          "regression, provably emits no --features flag at all); SHIPPED_CFG_EXTRA_PACKAGES + " +
+          "buildShippedCfgFilter name verter_scheduler and the conformance crates and verter_compiler " +
+          "(ruling §10); checkPackagesPresentInArchive discriminates a listing missing one required " +
+          "package's suites from a complete one.",
       );
     }
   }

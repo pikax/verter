@@ -1230,6 +1230,354 @@ export function checkBuildPrerequisites(opts) {
   );
   return { ok: false, target: probe.target, reason: probe.reason, detail: probe.detail, lines };
 }
+
+// ----------------------------------------------------------------------------------------------------
+// ORACLE-CACHE PREREQUISITE PREFLIGHT (gate mode only; the gate's SECOND step — right after the
+// build-prerequisite preflight above, still before Cargo touches anything).
+//
+// THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates 45 tests that were absent from every
+// canonical gate run (see `ARCHIVE_FEATURES` below, which turns the feature on for the archived suite).
+// Among them is the ENTIRE `compile::map_equality_tests::svelte_official_conformance_gate` /
+// `_matrix` suite — the tests that actually compare Verter's Svelte output against the pinned official
+// `svelte@5.56.8` oracle. Once the feature is on, those tests spawn `node bin/check-candidate.mjs`
+// (`crates/verter_session/src/compile/map_equality_tests/bf2_full_axis_gate.rs`), which calls
+// `ensureOracleDomain(framework)` (`packages/framework-conformance-harness/src/oracle-install.mjs`) to
+// realize each oracle (`vue`, `svelte`) OFFLINE from `.oracle-npm-cache` — a GITIGNORED local cache
+// `scripts/provision-oracle-npm-cache.mjs` warms from the network — into `.oracle-installs`. In a fresh
+// checkout or worktree the cache does not exist, and `check-candidate.mjs` does NOT fail when
+// `ensureOracleDomain` cannot realize an oracle: it records the affected axis as `"authoritative mode:
+// link axis skipped (oracle install unavailable: …)"` and keeps comparing every OTHER axis — an
+// environment absence masquerading as a compiled-output divergence. Measured on a fresh worktree with the
+// cache missing: 5 failures that read exactly like conformance regressions, versus 2 real ones with the
+// cache present.
+//
+// THE ORACLE UNDER TEST IS A REAL REALIZATION, same shape as the build-prerequisite preflight above: not
+// a stat of whether `.oracle-npm-cache` exists, but an actual call to the SAME `ensureOracleDomain` the
+// suite's own `check-candidate.mjs` calls on every axis of every request — which validates the realized
+// `.oracle-installs` tree against the committed lockfile's closure (paths, names, versions, edges) and
+// per-package content digests, not merely "a directory is there". A `.oracle-npm-cache` directory that
+// exists but holds no matching tarballs (or a torn/corrupted `.oracle-installs`) fails this the same way
+// `npm ci --offline` would: loudly, not silently.
+//
+// THIS IS REALIZATION, NOT PROVISIONING. `ensureOracleDomain` is OFFLINE (the cache is the sole package
+// source, `npm ci --offline`) and idempotent — it re-validates and reuses `.oracle-installs` on every
+// call, which is exactly what happens automatically the first time a `bf2-authoritative` test runs
+// regardless of whether this preflight exists. Running it here only makes the SAME automatic step happen
+// loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
+// networked step, `scripts/provision-oracle-npm-cache.mjs`, is never invoked here or anywhere else in the
+// gate — an absent or unusable cache fails setup and names that exact command; the gate does not run it.
+// ----------------------------------------------------------------------------------------------------
+export const ORACLE_CACHE_PREREQUISITE_MARKER = "ORACLE-CACHE PREREQUISITE MISSING";
+
+export const ORACLE_CACHE_PROVISION_COMMAND = "node scripts/provision-oracle-npm-cache.mjs";
+
+// The two oracle domains `bf2-authoritative` tests realize from `.oracle-npm-cache`
+// (`packages/framework-conformance-harness/src/oracle-install.mjs`'s `FRAMEWORKS` map).
+export const ORACLE_CACHE_FRAMEWORKS = Object.freeze(["vue", "svelte"]);
+
+// The module the probe loads `ensureOracleDomain` from — the SAME function `bin/check-candidate.mjs`
+// calls for every axis on every request.
+export const ORACLE_CACHE_PROBE_MODULE_SEGMENTS = [
+  "packages",
+  "framework-conformance-harness",
+  "src",
+  "oracle-install.mjs",
+];
+
+// `node -e` source: dynamic-import the oracle-install module, then call `ensureOracleDomain` for every
+// framework named in argv. Exits 0 with `{ ok: true, realized: { <framework>: installDir } }` on success.
+// Exits 3 with a structured `{ stage, framework, name, message }` JSON on the FIRST framework that fails
+// to realize — `stage` is `"import"` when the module itself could not be loaded, `"realize"` when a
+// specific framework's `ensureOracleDomain` call threw. `name` is the thrown error's `.name`:
+// `OracleCacheUnprovisionedError` for a missing cache, `PackageDriftError` for a validated-but-drifted
+// realized tree, or the generic `Error` an offline `npm ci` itself throws (e.g. `ENOTCACHED`) for a
+// present-but-unusable cache — the caller (`checkOracleCachePrerequisite`) distinguishes "absent" from
+// "invalid" on this field, never on message text.
+export const ORACLE_CACHE_PROBE_SOURCE =
+  "const { pathToFileURL } = require('node:url');\n" +
+  "const target = process.argv[1];\n" +
+  "const frameworks = process.argv.slice(2);\n" +
+  "(async () => {\n" +
+  "  let mod;\n" +
+  "  try {\n" +
+  "    mod = await import(pathToFileURL(target).href);\n" +
+  "  } catch (e) {\n" +
+  "    process.stdout.write(JSON.stringify({ stage: 'import', name: e && e.name, message: String((e && e.message) || e) }));\n" +
+  "    process.exit(3);\n" +
+  "  }\n" +
+  "  const realized = {};\n" +
+  "  for (const framework of frameworks) {\n" +
+  "    try {\n" +
+  "      realized[framework] = mod.ensureOracleDomain(framework).installDir;\n" +
+  "    } catch (e) {\n" +
+  "      process.stdout.write(JSON.stringify({ stage: 'realize', framework, name: e && e.name, message: String((e && e.message) || e) }));\n" +
+  "      process.exit(3);\n" +
+  "    }\n" +
+  "  }\n" +
+  "  process.stdout.write(JSON.stringify({ ok: true, realized }));\n" +
+  "  process.exit(0);\n" +
+  "})();\n";
+
+// SIGKILL: the child may itself have an `npm ci` grandchild in flight; a trappable SIGTERM (spawnSync's
+// default killSignal) can leave the parent blocked until that child chooses to exit — the same hazard
+// documented on `BUILD_PREREQUISITE_PROBE_KILL_SIGNAL` above, and for the same reason: this runs as the
+// gate's SECOND step, still holding the single-flight mutex.
+export const ORACLE_CACHE_PROBE_KILL_SIGNAL = "SIGKILL";
+
+// Upper bound on the probe. Larger than `BUILD_PREREQUISITE_PROBE_MAX_MS`: unlike the tsserver probe (one
+// `require()`), a cold cache genuinely spawns TWO offline `npm ci` realizations (`oracle-install.mjs`
+// bounds its OWN cross-process realize lock at 5 minutes for the same reason — `REALIZE_LOCK_TIMEOUT_MS`).
+// A warm cache is validate-only (no npm spawn) and returns in well under a second — measured ~150ms for
+// both frameworks combined on a realized checkout; measured ~1s for a genuinely COLD two-framework
+// realize from a freshly-provisioned cache.
+export const ORACLE_CACHE_PROBE_MAX_MS = 5 * 60_000;
+
+// The probe budget for a gate whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
+// time, capped at MAX. Deliberately no floor — see `probeBudgetMs` above for why a floor would let an
+// expired deadline buy the probe time past the gate's own wallclock limit.
+export function oracleCacheProbeBudgetMs(deadlineMs, nowMsValue) {
+  const remaining = deadlineMs - nowMsValue;
+  if (!Number.isFinite(remaining)) return ORACLE_CACHE_PROBE_MAX_MS;
+  return Math.min(ORACLE_CACHE_PROBE_MAX_MS, remaining);
+}
+
+// Run the load probe. Same fail-closed contract as `runBuildPrerequisiteLoadProbe`: every non-success
+// shape (spawn error, signal, timeout, unparseable output) reports `ok: false` — "the probe itself did
+// not work" must never read as "the cache is usable". `spawnFn`/`nodePath`/`joinFn`/`env` are injected so
+// the self-test can drive every outcome without a real npm/network dependency.
+export function runOracleCacheLoadProbe(opts) {
+  const {
+    repoRoot,
+    nodePath = process.execPath,
+    spawnFn = spawnSync,
+    joinFn = join,
+    env = process.env,
+    frameworks = ORACLE_CACHE_FRAMEWORKS,
+    timeoutMs = ORACLE_CACHE_PROBE_MAX_MS,
+  } = opts;
+  const target = joinFn(repoRoot, ...ORACLE_CACHE_PROBE_MODULE_SEGMENTS);
+  // NO TIME, NO SPAWN — mirrors `runBuildPrerequisiteLoadProbe`'s refusal for the same reason: a
+  // non-positive budget means the gate's own deadline is spent, and `spawnSync`'s timeout is only applied
+  // when it is `> 0` — a `0`/negative value would silently disable it.
+  if (!(timeoutMs > 0)) {
+    return {
+      target,
+      ok: false,
+      reason: "timeout",
+      detail:
+        `no gate wallclock remained for the oracle-cache probe (budget ${timeoutMs}ms) — refusing to ` +
+        "launch it rather than hold the single-flight mutex past the gate deadline",
+    };
+  }
+  let res;
+  try {
+    res = spawnFn(nodePath, ["-e", ORACLE_CACHE_PROBE_SOURCE, target, ...frameworks], {
+      encoding: "utf8",
+      env,
+      timeout: timeoutMs,
+      killSignal: ORACLE_CACHE_PROBE_KILL_SIGNAL,
+      windowsHide: true,
+    });
+  } catch (error) {
+    return {
+      target,
+      ok: false,
+      reason: "spawn-error",
+      detail: `probe could not be spawned: ${error && error.message}`,
+    };
+  }
+  if (!res) {
+    return { target, ok: false, reason: "spawn-error", detail: "probe returned no result" };
+  }
+  // TIMEOUT FIRST — same ordering reason as the tsserver probe: on a timeout Node sets BOTH `error`
+  // (`ETIMEDOUT`) AND `signal`, so an `error`-before-timeout check would misreport a real timeout as "could
+  // not be spawned".
+  if (res.error && res.error.code === "ETIMEDOUT") {
+    return {
+      target,
+      ok: false,
+      reason: "timeout",
+      detail:
+        `probe TIMED OUT after ${timeoutMs}ms and was killed with ` +
+        `${ORACLE_CACHE_PROBE_KILL_SIGNAL}${res.signal ? ` (signal ${res.signal})` : ""} — oracle ` +
+        "realization did not finish, or it left the probe process alive",
+    };
+  }
+  if (res.error) {
+    return {
+      target,
+      ok: false,
+      reason: "spawn-error",
+      detail: `probe could not be spawned: ${res.error.message}`,
+    };
+  }
+  if (res.signal) {
+    return {
+      target,
+      ok: false,
+      reason: "signalled",
+      detail: `probe was killed by signal ${res.signal}`,
+    };
+  }
+  if (res.status === 0) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(res.stdout || "");
+    } catch {
+      /* fall through — a missing/unparseable stdout on exit 0 still counts as realized */
+    }
+    return {
+      target,
+      ok: true,
+      reason: "realized",
+      detail: "",
+      realized: (parsed && parsed.realized) || {},
+    };
+  }
+  if (res.status === 3) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(res.stdout || "");
+    } catch {
+      /* fall through to the raw shape below */
+    }
+    if (parsed && parsed.message) {
+      return {
+        target,
+        ok: false,
+        reason: parsed.stage === "import" ? "import-error" : "realize-error",
+        errorName: parsed.name,
+        framework: parsed.framework,
+        detail: `${parsed.name ? `${parsed.name}: ` : ""}${parsed.message}`,
+      };
+    }
+  }
+  const stderr = (res.stderr || "").trim().split("\n").slice(0, 8).join("\n");
+  return {
+    target,
+    ok: false,
+    reason: "unknown-exit",
+    detail: `probe exited ${res.status}${stderr ? `\n${stderr}` : ""}`,
+  };
+}
+
+// The ONE error name the probe's structured failure may be read as "the operator never ran the
+// provisioning command" — every other name (or an import failure) is a validated-but-unusable ("invalid")
+// cache/install, which gets the SAME loud refusal but different guidance text.
+const ORACLE_CACHE_UNPROVISIONED_ERROR_NAME = "OracleCacheUnprovisionedError";
+
+// The preflight itself. Returns `{ ok, lines, reason, detail }` — same contract shape as
+// `checkBuildPrerequisites`. `lines` is the operator-facing report, already naming the probe target, the
+// underlying failure, and the exact (never auto-run) provisioning command. `loadProbe` is injected (the
+// self-test substitutes a fake; production passes the real `runOracleCacheLoadProbe`).
+export function checkOracleCachePrerequisite(opts) {
+  const { repoRoot, loadProbe = runOracleCacheLoadProbe, timeoutMs, env } = opts;
+  const probe = loadProbe({
+    repoRoot,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(env === undefined ? {} : { env }),
+  });
+  if (probe.ok) {
+    return {
+      ok: true,
+      reason: probe.reason || "realized",
+      detail: "",
+      lines: [],
+      realized: probe.realized || {},
+    };
+  }
+  const unprovisioned = probe.errorName === ORACLE_CACHE_UNPROVISIONED_ERROR_NAME;
+  const lines = [
+    `${ORACLE_CACHE_PREREQUISITE_MARKER}: the offline oracle npm cache this tree's Svelte/Vue compiled-` +
+      "output conformance tests need (`verter_session/bf2-authoritative`, including the ENTIRE " +
+      "`svelte_official_conformance_gate` suite) is " +
+      `${unprovisioned ? "not provisioned" : "provisioned but could not be realized (present but unusable)"}.` +
+      " Running the gate now would report divergences that are really an infrastructure absence, never a " +
+      "compiler regression — or, with the feature off, silently omit these 45 tests again.",
+    `  probe target: ${probe.target}`,
+    `  probe failure: ${probe.detail}`,
+  ];
+  if (probe.framework) lines.push(`  framework: ${probe.framework}`);
+  lines.push(
+    "Produce it with (from the repo root — this is the ONLY sanctioned network step; the gate never runs " +
+      "it for you):",
+    `    ${ORACLE_CACHE_PROVISION_COMMAND}`,
+    "The gate refuses to provision the cache for you (its verdict must not depend on a network mutation it " +
+      "performed) and refuses to silently skip or mis-report the tests that need it. This check performs " +
+      "the SAME offline realization `bin/check-candidate.mjs` performs on every request — a " +
+      "present-but-unusable cache (corrupt, torn, or drifted from the committed lockfile closure) fails " +
+      "identically to a missing one, never as a quiet 'axis skipped' comparison note.",
+  );
+  return { ok: false, reason: probe.reason, detail: probe.detail, lines };
+}
+
+// ----------------------------------------------------------------------------------------------------
+// SHIPPED-CFG SURFACE 3 FILTER — the packages Surface 3 (the `no-debug-assertions` shipped-cfg archive)
+// runs, and the archive-build features every archive (dev AND shipped-cfg) is built with.
+//
+// `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for the ONE `cargo nextest archive
+// --workspace` build both variants share (`archiveAndList` in gate.mjs), so the 45 tests that feature
+// gates are PRESENT in the archived test universe — not merely listed by a standalone `cargo test
+// --features` invocation nobody runs. Both debug surfaces (1 and 2) and the shipped-cfg surface (3) build
+// from an archive that includes them.
+export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative"]);
+
+// Pure builder for the `cargo nextest archive` argv — used by BOTH archive variants in gate.mjs, so a
+// feature dropped here is dropped from every surface at once (never a per-variant divergence) and is
+// directly unit-testable without invoking cargo.
+export function buildNextestArchiveArgs(opts) {
+  const { buildJobs, cargoProfile, archiveFile, runnerTarget, features = ARCHIVE_FEATURES } = opts;
+  return [
+    "nextest",
+    "archive",
+    "--workspace",
+    "--build-jobs",
+    String(buildJobs),
+    ...(features.length > 0 ? ["--features", features.join(",")] : []),
+    ...(cargoProfile ? ["--cargo-profile", cargoProfile] : []),
+    "--archive-file",
+    archiveFile,
+    "--target-dir",
+    runnerTarget,
+    "--zstd-level",
+    "-7",
+  ];
+}
+
+// The packages Surface 3 must select (ruling §10: the conformance crates + verter_compiler join
+// verter_session + verter_scheduler). `verter_session` gets its OWN richer check (`selectSessionSuites` —
+// requires at least one `lib` AND one `test` suite); every other package here only needs to exist with a
+// non-zero lib/test suite count, checked generically by `checkPackagesPresentInArchive` below.
+export const SHIPPED_CFG_EXTRA_PACKAGES = Object.freeze([
+  "verter_scheduler",
+  "verter_svelte_conformance",
+  "verter_vue_conformance",
+  "verter_compiler",
+]);
+
+export function buildShippedCfgFilter(
+  extraPackages = SHIPPED_CFG_EXTRA_PACKAGES,
+  sessionPackage = "verter_session",
+) {
+  return [sessionPackage, ...extraPackages].map((pkg) => `package(${pkg})`).join(" + ");
+}
+
+// Generic "does this archive listing have real work for these packages" guard — the same shape
+// `runShippedCfgSurface` used to hand-roll for `verter_scheduler` alone, now covering every package a
+// filterset names so a typo or a renamed/removed crate FAILS LOUD instead of silently selecting nothing.
+// Returns `{ counts: { <package>: n }, missing: [packages with zero lib/test suites] }`.
+export function checkPackagesPresentInArchive(allSuites, packages) {
+  const counts = {};
+  const missing = [];
+  for (const pkg of packages) {
+    const n = (allSuites || []).filter(
+      (s) => s["package-name"] === pkg && (s.kind === "lib" || s.kind === "test"),
+    ).length;
+    counts[pkg] = n;
+    if (n === 0) missing.push(pkg);
+  }
+  return { counts, missing };
+}
 // ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the

@@ -174,6 +174,24 @@
 //   `@verter/native` is deliberately NOT among them (the plugin's `"files": ["src/index.ts"]` excludes
 //   `src/tsc/`, its only consumer), so the gate never demands a `napi build --release`.
 //
+// ORACLE-CACHE PREREQUISITE PREFLIGHT (gate mode only; runs SECOND, right after the build-prerequisite
+// preflight above)
+//   The `verter_session/bf2-authoritative` feature (now ON for every archive — see `ARCHIVE_FEATURES` in
+//   gate-internals.mjs) gates 45 tests, including the ENTIRE `svelte_official_conformance_gate` suite —
+//   the tests that compare Verter's Svelte output against the pinned official `svelte@5.56.8` oracle.
+//   Those tests realize their Vue/Svelte oracles OFFLINE from a gitignored local npm cache
+//   (`.oracle-npm-cache`, warmed from the network ONLY by the explicit, never-automatic
+//   `node scripts/provision-oracle-npm-cache.mjs`). A fresh checkout has no cache, and the harness does
+//   NOT fail loudly when it cannot realize an oracle: it records the affected axis as skipped and keeps
+//   comparing every other axis — an environment absence that reads as a compiled-output divergence.
+//   Same shape as the build-prerequisite preflight: a REAL LOAD, not a stat. The probe calls the SAME
+//   `ensureOracleDomain` the suite's own `bin/check-candidate.mjs` calls, which validates the realized
+//   `.oracle-installs` tree against the committed lockfile's closure — an absent OR an invalid (present
+//   but unusable — corrupt, torn, or drifted) cache both FAIL SETUP loudly (exit 127, marker
+//   `ORACLE-CACHE PREREQUISITE MISSING`), naming the exact provisioning command. This is REALIZATION
+//   (offline, idempotent — the same automatic step every `bf2-authoritative` test already performs), never
+//   PROVISIONING (the networked step, which stays an explicit human/CI action the gate never runs).
+//
 // FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
 //   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
 //   through the workspace `buf` + `oxfmt` binaries (resolved under `node_modules/.bin` first, PATH second).
@@ -243,8 +261,8 @@
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
 //   126 LOCK-REFUSED  (another gate holds the single-flight mutex and is alive / lock uninspectable)
-//   127 USAGE/SETUP   (bad arguments, repo root not found, a MISSING BUILD PREREQUISITE, archive/list
-//                      setup failure)
+//   127 USAGE/SETUP   (bad arguments, repo root not found, a MISSING BUILD PREREQUISITE, a missing/invalid
+//                      ORACLE-CACHE PREREQUISITE, archive/list setup failure)
 //
 // ENV VARS HONORED
 //   VERTER_GATE_LOCK / MOM_GATE_LOCK   lockdir path (default: OS temp dir keyed by repo realpath)
@@ -290,6 +308,16 @@ import {
   // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
   checkBuildPrerequisites,
   probeBudgetMs,
+  // oracle-cache prerequisite preflight (the offline Svelte/Vue oracle npm cache the bf2-authoritative
+  // conformance suites realize from)
+  checkOracleCachePrerequisite,
+  oracleCacheProbeBudgetMs,
+  // shipped-cfg archive/filter builders — feature parity across every archive, and the package presence
+  // guard extended to every package the filterset names
+  buildNextestArchiveArgs,
+  buildShippedCfgFilter,
+  SHIPPED_CFG_EXTRA_PACKAGES,
+  checkPackagesPresentInArchive,
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
   pnpmInstallCommand,
@@ -853,10 +881,12 @@ const VARIANT_SHIPPED_CFG = {
 
 // SURFACE 3 selection. `debug_assertions` decides what a `debug_assert!` argument does and which
 // `cfg(debug_assertions)` items exist, so the surface is only meaningful where the tree actually uses
-// those constructs to guard state the tests observe. `verter_session` and the crates it drives own that
-// state, and running them is what makes surface 3 a RUN rather than a compile check. The expression is a
-// nextest filterset evaluated against the release-cfg archive's own listing.
-const SHIPPED_CFG_FILTER = "package(verter_session) + package(verter_scheduler)";
+// those constructs to guard state the tests observe. `verter_session`, `verter_scheduler`, and the
+// compiled-output conformance crates + `verter_compiler` own that state, and running them is what makes
+// surface 3 a RUN rather than a compile check. The expression is a nextest filterset evaluated against the
+// release-cfg archive's own listing; built from `SHIPPED_CFG_EXTRA_PACKAGES` (gate-internals.mjs) so the
+// filter string and the presence guard below can never drift apart.
+const SHIPPED_CFG_FILTER = buildShippedCfgFilter();
 
 // ----------------------------------------------------------------------------------------------------
 // Archive + list — the shared front half of the gate, --prepare, and surface 3. Returns the parsed list
@@ -881,24 +911,18 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   // nextest's --extract-to canonicalizes the destination BEFORE extracting, so it must already exist.
   mkdirSync(extractDir, { recursive: true });
 
-  // --- BUILD the whole workspace test universe ONCE (workspace unification => session_metrics ON) ---
+  // --- BUILD the whole workspace test universe ONCE (workspace unification => session_metrics ON;
+  // ARCHIVE_FEATURES => verter_session/bf2-authoritative ON, so the 45 oracle-backed conformance tests are
+  // PRESENT in the archive both debug surfaces and surface 3 build from — see buildNextestArchiveArgs) ---
   log(`archiving ${variant.label} (cargo nextest archive --workspace) …`);
   const archiveRes = await runContainedStep({
     cmd: "cargo",
-    args: [
-      "nextest",
-      "archive",
-      "--workspace",
-      "--build-jobs",
-      String(buildJobs),
-      ...(variant.cargoProfile ? ["--cargo-profile", variant.cargoProfile] : []),
-      "--archive-file",
+    args: buildNextestArchiveArgs({
+      buildJobs,
+      cargoProfile: variant.cargoProfile,
       archiveFile,
-      "--target-dir",
       runnerTarget,
-      "--zstd-level",
-      "-7",
-    ],
+    }),
     cwd: repoRealpath,
     env: cargoEnv,
     phase: "build",
@@ -1140,20 +1164,23 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
     err(`SURFACE 3 SETUP FAILURE: ${sel.error}`);
     return { exit: EXIT_USAGE };
   }
-  const schedulerSuites = allSuites.filter(
-    (s) => s["package-name"] === "verter_scheduler" && (s.kind === "lib" || s.kind === "test"),
-  );
-  if (schedulerSuites.length === 0) {
+  // Every OTHER package the filterset names (verter_scheduler + the conformance crates + verter_compiler,
+  // ruling §10) gets the same generic non-zero-suites guard — a typo or a renamed/removed crate fails
+  // loud instead of the filterset silently matching nothing for that package.
+  const extra = checkPackagesPresentInArchive(allSuites, SHIPPED_CFG_EXTRA_PACKAGES);
+  if (extra.missing.length > 0) {
     err(
-      "SURFACE 3 SETUP FAILURE: zero verter_scheduler lib/test suites in the shipped-cfg archive " +
-        `listing, but the filterset names that package (${SHIPPED_CFG_FILTER}). Refusing to run a ` +
-        "filterset that cannot match.",
+      `SURFACE 3 SETUP FAILURE: zero lib/test suites in the shipped-cfg archive listing for: ` +
+        `${extra.missing.join(", ")} — but the filterset names ` +
+        `${extra.missing.map((pkg) => `package(${pkg})`).join(" + ")} (full filterset: '${SHIPPED_CFG_FILTER}'). ` +
+        "Refusing to run a filterset that cannot match.",
     );
     return { exit: EXIT_USAGE };
   }
   log(
     `SURFACE 3: shipped-cfg archive lists ${allSuites.length} suites; filterset '${SHIPPED_CFG_FILTER}' ` +
-      `covers verter_session (lib=${sel.lib}, test=${sel.test}) + verter_scheduler (${schedulerSuites.length} suites)`,
+      `covers verter_session (lib=${sel.lib}, test=${sel.test}) + ` +
+      `${SHIPPED_CFG_EXTRA_PACKAGES.map((pkg) => `${pkg} (${extra.counts[pkg]} suites)`).join(" + ")}`,
   );
 
   const runArgs = [
@@ -1257,6 +1284,33 @@ async function runGate(opts, ctx) {
     return EXIT_USAGE;
   }
   log(`build-prerequisite preflight: SATISFIED — ${prerequisites.target} loaded`);
+
+  // ---------- ORACLE-CACHE PREREQUISITE PREFLIGHT (the gate's SECOND step) ----------
+  // `verter_session/bf2-authoritative` (now ON for every archive — see `buildNextestArchiveArgs`) gates 45
+  // tests, including the ENTIRE `svelte_official_conformance_gate` suite: the tests that actually compare
+  // Verter's Svelte output against the pinned official `svelte@5.56.8` oracle. Those tests realize their
+  // Vue/Svelte oracles OFFLINE from a gitignored local npm cache (`.oracle-npm-cache`, warmed from the
+  // network ONLY by the explicit `node scripts/provision-oracle-npm-cache.mjs`, never by this gate). An
+  // absent or unusable cache does not make those tests fail loudly on their own: the harness records the
+  // affected axis as skipped and keeps comparing every other axis, so a missing cache reads as compiled-
+  // output DIVERGENCES, not as a setup problem.
+  // Like the build-prerequisite preflight above, the oracle is a REAL LOAD, not a stat: this calls the
+  // SAME `ensureOracleDomain` the suite's own `bin/check-candidate.mjs` calls on every request, which
+  // validates the realized closure against the committed lockfile (paths, names, versions, edges, per-
+  // package content digests). It runs BEFORE the archive build, same bounded-by-the-gate's-own-deadline
+  // model as the build-prerequisite probe (still holding the single-flight mutex).
+  const oraclePrereq = checkOracleCachePrerequisite({
+    repoRoot: repoRealpath,
+    env: cargoEnv,
+    timeoutMs: oracleCacheProbeBudgetMs(deadlineMs, nowMs()),
+  });
+  if (!oraclePrereq.ok) {
+    for (const line of oraclePrereq.lines) err(line);
+    return EXIT_USAGE;
+  }
+  log(
+    `oracle-cache prerequisite preflight: SATISFIED — realized ${JSON.stringify(oraclePrereq.realized)}`,
+  );
 
   // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
   // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo
