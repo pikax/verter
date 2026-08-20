@@ -115,10 +115,20 @@ function write(name, content) {
   return p;
 }
 
+// The authority-registry check (--authority) is covered by its own dedicated
+// tests below. Every OTHER test in this file predates that check, exercises
+// unrelated behavior, and never sets up an authority-registry.toml fixture —
+// since --authority is now mandatory-by-default in live mode, those tests opt
+// out via the explicit --no-authority escape unless the caller already named
+// --authority or --no-authority itself.
 function run(dagPath, statePath, mode, cwd, extraArgs = []) {
+  const args =
+    extraArgs.includes("--authority") || extraArgs.includes("--no-authority")
+      ? extraArgs
+      : [...extraArgs, "--no-authority"];
   const res = spawnSync(
     process.execPath,
-    [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode, ...extraArgs],
+    [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode, ...args],
     {
       encoding: "utf8",
       cwd: cwd ?? gitRoot,
@@ -365,7 +375,10 @@ test("sequencing invariant: IN_PROGRESS with an unaccepted predecessor is reject
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "sequencing violation must fail");
-  assert.match(r.err, /sequencing violation .*block A1 is IN_PROGRESS but direct predecessor\(s\) not ACCEPTED: \[A0\]/);
+  assert.match(
+    r.err,
+    /sequencing violation .*block A1 is IN_PROGRESS but direct predecessor\(s\) not ACCEPTED: \[A0\]/,
+  );
 });
 
 test("stacked-work exception: a bare stack_id with no established stack is REJECTED", () => {
@@ -393,7 +406,10 @@ test("stacked-work exception: a bare stack_id with no established stack is REJEC
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "unestablished stacked-work exception must fail");
-  assert.match(r.err, /block A1 is REVIEW with unaccepted direct predecessor\(s\) \[A0\] and the contingent stacked-work exception is REJECTED/);
+  assert.match(
+    r.err,
+    /block A1 is REVIEW with unaccepted direct predecessor\(s\) \[A0\] and the contingent stacked-work exception is REJECTED/,
+  );
   assert.match(r.err, /stack_snapshot_digest .* is not a 64-char lowercase SHA-256/);
   assert.match(r.err, /unaccepted predecessor A0 does not carry the same non-empty stack_id "S1"/);
 });
@@ -415,7 +431,10 @@ test("status gate: ACCEPTED with PENDING mandates and no accepted identity is re
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "unreviewed ACCEPTED must fail");
   assert.match(r.err, /state block A0 is ACCEPTED but conformance_review is "PENDING"/);
-  assert.match(r.err, /state block A0 is ACCEPTED but accepted_sha is not a non-empty 40-char lowercase git object id/);
+  assert.match(
+    r.err,
+    /state block A0 is ACCEPTED but accepted_sha is not a non-empty 40-char lowercase git object id/,
+  );
   assert.match(r.err, /state block A0 is ACCEPTED but maintainer_decision is "PENDING"/);
 });
 
@@ -424,7 +443,10 @@ test("strict TOML reader: unbalanced quoting is a loud parse failure, never a si
   // Case 1: `status = "ACT"#IVE"` must NOT silently parse as "ACT".
   const state1 = write(
     "state-toml-bad1.toml",
-    header({ status: "ACTIVE", current: "A0", repoSha: SHA }).replace('status = "ACTIVE"', 'status = "ACT"#IVE"') +
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }).replace(
+      'status = "ACTIVE"',
+      'status = "ACT"#IVE"',
+    ) +
       block("A0", "IN_PROGRESS") +
       "\n" +
       block("A1", "LOCKED") +
@@ -508,7 +530,10 @@ test("mandate class gate: NOT_REQUIRED on a foundational-class block is rejected
     r.err,
     /state block A0 is ACCEPTED but conformance_review is NOT_REQUIRED and DAG class "foundational" does not permit it/,
   );
-  assert.match(r.err, /architecture_review is NOT_REQUIRED and DAG class "foundational" does not permit it/);
+  assert.match(
+    r.err,
+    /architecture_review is NOT_REQUIRED and DAG class "foundational" does not permit it/,
+  );
 });
 
 test("sequencing invariant: a stackless READY block with an unaccepted predecessor is rejected", () => {
@@ -667,8 +692,14 @@ test("private checkpoint: an UNPROVEN checkpoint (PENDING mandates, empty identi
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "unproven checkpoint must fail");
-  assert.match(r.err, /state block A1 is PRIVATE_CHECKPOINT but candidate_sha is not a non-empty 40-char lowercase git object id/);
-  assert.match(r.err, /state block A1 is PRIVATE_CHECKPOINT but evidence_digest is not a non-empty 64-char lowercase SHA-256/);
+  assert.match(
+    r.err,
+    /state block A1 is PRIVATE_CHECKPOINT but candidate_sha is not a non-empty 40-char lowercase git object id/,
+  );
+  assert.match(
+    r.err,
+    /state block A1 is PRIVATE_CHECKPOINT but evidence_digest is not a non-empty 64-char lowercase SHA-256/,
+  );
   assert.match(r.err, /state block A1 is PRIVATE_CHECKPOINT but conformance_review is "PENDING"/);
 });
 
@@ -706,7 +737,10 @@ test("live mode: a non-ACTIVE top-level status is rejected", () => {
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "non-ACTIVE live status must fail");
-  assert.match(r.err, /live state top-level status is "PAUSED" \(ORCHESTRATOR\.md:83 requires the live ledger to carry status = "ACTIVE"\)/);
+  assert.match(
+    r.err,
+    /live state top-level status is "PAUSED" \(ORCHESTRATOR\.md:83 requires the live ledger to carry status = "ACTIVE"\)/,
+  );
 });
 
 test("stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes", () => {
@@ -716,7 +750,11 @@ test("stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes", (
   const state = write(
     "state-stack-ok.toml",
     header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
-      block("A0", "IN_PROGRESS", { stack_id: "S1", stack_snapshot_digest: DIGEST, stack_layer: 0 }) +
+      block("A0", "IN_PROGRESS", {
+        stack_id: "S1",
+        stack_snapshot_digest: DIGEST,
+        stack_layer: 0,
+      }) +
       "\n" +
       block("A1", "REVIEW", {
         stack_id: "S1",
@@ -744,7 +782,11 @@ test("stacked-work exception: an equal (non-lower) predecessor stack_layer is re
   const state = write(
     "state-stack-layer-bad.toml",
     header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
-      block("A0", "IN_PROGRESS", { stack_id: "S1", stack_snapshot_digest: DIGEST, stack_layer: 1 }) +
+      block("A0", "IN_PROGRESS", {
+        stack_id: "S1",
+        stack_snapshot_digest: DIGEST,
+        stack_layer: 1,
+      }) +
       "\n" +
       block("A1", "REVIEW", {
         stack_id: "S1",
@@ -763,7 +805,10 @@ test("stacked-work exception: an equal (non-lower) predecessor stack_layer is re
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "equal predecessor stack_layer must fail");
   assert.match(r.err, /contingent stacked-work exception is REJECTED/);
-  assert.match(r.err, /unaccepted predecessor A0 stack_layer 1 is not below block A1 stack_layer 1/);
+  assert.match(
+    r.err,
+    /unaccepted predecessor A0 stack_layer 1 is not below block A1 stack_layer 1/,
+  );
 });
 
 test("stacked-work exception: a TERMINATED (ABORTED) predecessor inside the claimed stack is rejected", () => {
@@ -958,7 +1003,11 @@ test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT 
       }),
   );
   const r = run(dag, state, "live");
-  assert.notEqual(r.status, 0, "stacked REVIEW successor over a PRIVATE_CHECKPOINT predecessor must fail");
+  assert.notEqual(
+    r.status,
+    0,
+    "stacked REVIEW successor over a PRIVATE_CHECKPOINT predecessor must fail",
+  );
   assert.match(
     r.err,
     /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
@@ -1133,7 +1182,10 @@ test("D1/D2 transition (AMD-001), negative (b): mismatched snapshot digest REJEC
   const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
   assert.notEqual(r.status, 0);
   assert.match(r.err, /composite stack-window validation via --stack-window/);
-  assert.match(r.err, /block A2 ledger stack_snapshot_digest .* does not match the SHA-256 of the validated stack-window file/);
+  assert.match(
+    r.err,
+    /block A2 ledger stack_snapshot_digest .* does not match the SHA-256 of the validated stack-window file/,
+  );
 });
 
 test("D1/D2 transition (AMD-001), negative (c): acceptance_block_id names a block OTHER than A2 REJECTS", () => {
@@ -1220,10 +1272,7 @@ test("live mode: a well-formed but WRONG program_dag_digest is a violation", () 
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "mismatched program_dag_digest must fail");
-  assert.match(
-    r.err,
-    /state program_dag_digest .* does not match the SHA-256 of the DAG file/,
-  );
+  assert.match(r.err, /state program_dag_digest .* does not match the SHA-256 of the DAG file/);
 });
 
 test("live mode: an unresolvable evidence_root cannot bind evidence_digest — fail closed", () => {
@@ -1297,10 +1346,7 @@ test("live mode: a bound evidence_digest with no artifact under evidence_root is
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "missing evidence artifact must fail");
-  assert.match(
-    r.err,
-    /state block A0 has evidence_digest .* but no evidence artifact under/,
-  );
+  assert.match(r.err, /state block A0 has evidence_digest .* but no evidence artifact under/);
 });
 
 test("live mode: an evidence_digest that matches the bound landing-record artifact passes", () => {
@@ -1364,7 +1410,11 @@ test("multiple evidence roots: a mismatched digest against the resolved artifact
       block("A2", "LOCKED"),
   );
   const r = run(dag, state, "live");
-  assert.notEqual(r.status, 0, "mismatched evidence_digest under a multi-root declaration must fail");
+  assert.notEqual(
+    r.status,
+    0,
+    "mismatched evidence_digest under a multi-root declaration must fail",
+  );
   assert.match(
     r.err,
     new RegExp(
@@ -1392,7 +1442,10 @@ test("multiple evidence roots: a block with no artifact under ANY declared root 
   );
   const r = run(dag, state, "live");
   assert.notEqual(r.status, 0, "an artifact absent from every declared root must fail");
-  assert.match(r.err, /state block A0 has evidence_digest .* but no evidence artifact under \[.*roots-none-a.*roots-none-b.*\]/);
+  assert.match(
+    r.err,
+    /state block A0 has evidence_digest .* but no evidence artifact under \[.*roots-none-a.*roots-none-b.*\]/,
+  );
   assert.doesNotMatch(r.out, /^OK:/);
 });
 
@@ -1528,7 +1581,12 @@ for (const [label, filename] of [
 
   test(`extended artifact convention: ${label} with a mismatched digest still fails`, () => {
     const evidenceRoot = join(dir, `evidence-mismatch-${filename}`);
-    const artifact = writeNamedArtifact(evidenceRoot, "A0", filename, `${label} body, wrong digest\n`);
+    const artifact = writeNamedArtifact(
+      evidenceRoot,
+      "A0",
+      filename,
+      `${label} body, wrong digest\n`,
+    );
     const actual = createHash("sha256").update(readFileSync(artifact)).digest("hex");
     assert.notEqual(actual, DIGEST, "fixture digest must differ from the artifact hash");
 
@@ -1558,7 +1616,12 @@ test("extended artifact convention: one nested match (<root>/<id>/*/landing-reco
   const evidenceRoot = join(dir, "evidence-nested-single");
   const a0Artifact = writeLandingRecord(evidenceRoot, "A0", "A0 landing record\n");
   const a0Digest = createHash("sha256").update(readFileSync(a0Artifact)).digest("hex");
-  const artifact = writeNestedLandingRecord(evidenceRoot, "A2", "reopen4", "nested landing record\n");
+  const artifact = writeNestedLandingRecord(
+    evidenceRoot,
+    "A2",
+    "reopen4",
+    "nested landing record\n",
+  );
   const digest = createHash("sha256").update(readFileSync(artifact)).digest("hex");
 
   const dag = write("dag-nested-single.toml", DAG);
@@ -1583,8 +1646,18 @@ test("extended artifact convention: MULTIPLE nested matches are ambiguous and fa
   const evidenceRoot = join(dir, "evidence-nested-ambiguous");
   const a0Artifact = writeLandingRecord(evidenceRoot, "A0", "A0 landing record\n");
   const a0Digest = createHash("sha256").update(readFileSync(a0Artifact)).digest("hex");
-  const a1 = writeNestedLandingRecord(evidenceRoot, "A2", "reopen1", "first nested landing record\n");
-  const a2 = writeNestedLandingRecord(evidenceRoot, "A2", "reopen4", "second nested landing record\n");
+  const a1 = writeNestedLandingRecord(
+    evidenceRoot,
+    "A2",
+    "reopen1",
+    "first nested landing record\n",
+  );
+  const a2 = writeNestedLandingRecord(
+    evidenceRoot,
+    "A2",
+    "reopen4",
+    "second nested landing record\n",
+  );
   // Deliberately no named candidate (landing-record.md / *-exact-candidate-record.md /
   // *-summary.md / landing-equivalence.md) at the block-dir level — otherwise that
   // would resolve first and the nested search would never run.
@@ -1827,7 +1900,11 @@ test("amendment authority gate: the same block at LOCKED with an unratified enab
       block("A2", "LOCKED"),
   );
   const r = run(dag, state, "live");
-  assert.equal(r.status, 0, `LOCKED must not be gated by enabling_amendment, got:\n${r.err}\n${r.out}`);
+  assert.equal(
+    r.status,
+    0,
+    `LOCKED must not be gated by enabling_amendment, got:\n${r.err}\n${r.out}`,
+  );
 });
 
 test("amendment authority gate: ACCEPTED block with an unratified enabling_amendment is a violation", () => {

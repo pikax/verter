@@ -78,5 +78,11 @@ node scripts/validate-program-state.mjs \
   --mode live
 ```
 
+The block-authorization registry check is mandatory in live mode, not opt-in: the command above
+already enforces it, with no extra flag, because its default path (`authority-registry.toml` next
+to `--state`) resolves to `authority-registry.toml` in this same directory. Pass `--authority
+<path>` only to point at a different registry, or the explicit `--no-authority` to opt out (never
+the default — see the validator's own usage text).
+
 If you record a transition on one machine, the copy on the other machine is stale. This directory
 has no merge story — treat one machine as the writer at a time, or reconcile by hand.
