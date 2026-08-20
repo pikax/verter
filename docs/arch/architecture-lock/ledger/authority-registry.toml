@@ -316,3 +316,48 @@ documents = ["BS1-CHARTER", "RULING-AMD-005-BV1-BS1-AUTHORISED"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-20"
 scope = "Svelte compiler-output conformance train. Authority does NOT derive from AMD-005 (still PROPOSED — NOT RATIFIED); the narrow ruling returns BS1 from LOCKED to dispatchable directly."
+
+# Retroactive ratification of the five acceptances that predate machine-enforced
+# authorization. See MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md — the
+# ratification is dated to that ruling, not to the original transition, and it
+# covers exactly these five blocks with no standing exemption.
+[[document]]
+id = "PRE-ENFORCEMENT-ACCEPTANCES"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md"
+sha256 = "fadb81a3182df2523f1d848f92ad0ba0e1541a9e66dc5eef6d4bc4f29d6dbdd6"
+
+[[authorization]]
+block = "BF1"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "BF2"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B2"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B3"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B4"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"

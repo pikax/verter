@@ -1,7 +1,15 @@
 # Five accepted blocks carry no ratification record
 
-**Status:** OPEN — requires the designated maintainer. The preparer cannot
-resolve this and has deliberately not fabricated the missing records.
+**Status:** RESOLVED 2026-08-20 — the maintainer chose disposition 2,
+retroactive ratification, and approved all five. The authorizing document is
+[`MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md`](../../refactor/rev11/rulings/MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md);
+each block now carries an `[[authorization]]` record citing it, dated to that
+ruling rather than to the original transition. Live-mode validation passes.
+
+The ratification covers exactly these five blocks and grants no standing
+exemption — every transition after enforcement landed is bound by the registry.
+
+The record below is kept as the account of what was found and why.
 
 ## What the machine reports
 
