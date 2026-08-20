@@ -589,6 +589,23 @@ pub struct RuntimeScriptBlock {
     pub generated_template_hole: Option<std::ops::Range<u32>>,
     #[doc(hidden)]
     pub runtime_imports: Vec<String>,
+    /// Every `__sfc__`→`_sfc_main` rename target plus the removable
+    /// terminal default-export statement, declared by this block's own
+    /// producer — see `crate::assembly::fragment::SfcExportPlacement`.
+    #[doc(hidden)]
+    pub sfc_export_placement: Option<crate::assembly::fragment::SfcExportPlacement>,
+}
+
+/// The property name the compiled template's exported render function must be
+/// assigned to on the component object — a fact of which codegen backend
+/// produced the block, declared once by that backend rather than inferred
+/// downstream from the generated function's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateRenderExport {
+    /// `_sfc_main.render = render`.
+    Render,
+    /// `_sfc_main.ssrRender = ssrRender`.
+    SsrRender,
 }
 
 /// A framework-neutral compiled template / render-function block.
@@ -602,6 +619,9 @@ pub struct RuntimeTemplateBlock {
     pub imports: Vec<String>,
     /// SSR runtime helper imports (empty for non-SSR builds).
     pub ssr_imports: Vec<String>,
+    /// Which property the emitted function attaches to — declared by the
+    /// producing backend, never recovered by scanning [`Self::code`].
+    pub render_export: TemplateRenderExport,
     /// Qualified identity and source-map chain for this emitted unit.
     pub output_descriptor: RuntimeOutputDescriptor,
 }

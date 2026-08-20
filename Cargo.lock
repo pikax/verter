@@ -4394,6 +4394,7 @@ dependencies = [
  "uuid",
  "verter_audit",
  "verter_compiler",
+ "verter_identity",
  "verter_language",
  "verter_macro_dto",
  "verter_no_storedspan",

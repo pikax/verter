@@ -73,8 +73,9 @@ mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
+pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
-pub use compile::{UncomposableCode, UncomposableFamily};
+pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]
@@ -113,8 +114,7 @@ mod request_store_view_derived_hash_tests;
 mod template_slot_generation_rail_tests;
 #[cfg(test)]
 mod unrootable_route_admission_tests;
-// tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on
-// ImportedRegistryDb is exercised by the §12.A12 perf gate.
+// tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
 pub(crate) mod compile_cache_mode;

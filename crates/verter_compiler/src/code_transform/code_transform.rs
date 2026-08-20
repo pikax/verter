@@ -737,6 +737,37 @@ impl<'a> CodeTransform<'a> {
         self
     }
 
+    /// Same as [`overwrite_unmapped`](Self::overwrite_unmapped), but
+    /// `content` is already bump-allocated against THIS transform's own
+    /// allocator (`content: &'a str`, not a re-borrowed `&str`) — skips the
+    /// re-allocation `overwrite_unmapped` always performs, so the caller's
+    /// original pointer survives into the resulting chunk unchanged. A
+    /// caller that later mints a
+    /// [`mark_generated_sub_range`](Self::mark_generated_sub_range) fact
+    /// against that same pointer (e.g.
+    /// `CodeGenOutput::record_sfc_export_fact`) requires this variant:
+    /// `overwrite_unmapped`'s unconditional re-allocation would mint a
+    /// pointer the fact could never match.
+    pub(crate) fn overwrite_unmapped_alloc(
+        &mut self,
+        start: u32,
+        end: u32,
+        content: &'a str,
+    ) -> &mut Self {
+        self.record_audit_op();
+        if start >= end {
+            return self;
+        }
+
+        if !content.is_empty() {
+            self.unmapped_overwrite_contents
+                .insert((content.as_ptr() as usize, content.len()));
+        }
+
+        self.replace_range_impl(start, end, content, false);
+        self
+    }
+
     /// Overwrite a range while retaining exact unmapped source-map
     /// transitions inside the replacement text. Offsets are UTF-8 byte
     /// boundaries relative to `content`; malformed offsets are ignored.
@@ -1447,6 +1478,36 @@ impl<'a> CodeTransform<'a> {
             generated += content.len() as u32;
         }
         found
+    }
+
+    /// Mint an additional marker over a local sub-range of `content` a
+    /// PRIOR call already inserted using the exact same bump-allocated
+    /// pointer (e.g. [`overwrite_unmapped`](Self::overwrite_unmapped)'s
+    /// `content_ref`, or any other already-inserted chunk content the
+    /// caller retained). Mints only — never inserts anything — so one
+    /// already-inserted chunk can carry several independently-resolvable
+    /// declared positions (e.g. every `__sfc__` binding reference plus the
+    /// terminal default-export statement a script producer wrote in one
+    /// generated block) without re-allocating or re-inserting the content
+    /// once per position.
+    pub(crate) fn mark_generated_sub_range(
+        &self,
+        content: &'a str,
+        local_start: u32,
+        local_end: u32,
+    ) -> Option<GeneratedContentMarker<'a>> {
+        if local_start > local_end
+            || local_end as usize > content.len()
+            || !content.is_char_boundary(local_start as usize)
+            || !content.is_char_boundary(local_end as usize)
+        {
+            return None;
+        }
+        Some(GeneratedContentMarker {
+            content,
+            local_start,
+            local_end,
+        })
     }
 
     /// Build the output, authored range geometry, and explicit ownership

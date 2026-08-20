@@ -21,12 +21,12 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use verter_compiler::framework_common::{
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
+    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 
 use super::map_compose::rewrite_script;
 use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily};
-use super::{assemble_vue_main_module, AssembleMapFailure};
+use super::{assemble_vue_main_module, AssembleMapFailure, VueMainAssemblyFailure};
 use crate::types::{CompileProfile, FileMeta, HmrStrategy};
 
 // The input DTO (§3.3)
@@ -198,12 +198,20 @@ impl AssembleInput {
                 output_descriptor: descriptor(&script.code),
                 generated_template_hole: None,
                 runtime_imports: Vec::new(),
+                sfc_export_placement: super::map_compose::literal_scan_placement_for_fixture(
+                    &script.code,
+                ),
             }),
             template: self.template.as_ref().map(|template| RuntimeTemplateBlock {
                 code: template.code.clone(),
                 source_map: template.source_map.clone(),
                 imports: template.imports.clone(),
                 ssr_imports: template.ssr_imports.clone(),
+                render_export: if self.ssr {
+                    TemplateRenderExport::SsrRender
+                } else {
+                    TemplateRenderExport::Render
+                },
                 output_descriptor: descriptor(&template.code),
             }),
             styles: (0..self.style_count)
@@ -507,6 +515,15 @@ enum ComposeOutcome {
         family: String,
         code: String,
     },
+    /// A fragment-grammar, composition, or publication (final-parse/
+    /// undeclared-helper) failure — no frozen `expected_outcome` variant
+    /// produces this, so it always diverges when compared; the ONLY
+    /// production outcome variant with no reference-side analogue. See
+    /// `V19`'s doc note in `vector_inventory.rs` for the one frozen vector
+    /// that reaches it today.
+    AssemblyFailed {
+        detail: String,
+    },
 }
 
 /// The family's stable spelling. Exhaustive, so a new family cannot reach the
@@ -547,12 +564,15 @@ fn production_outcome(input: &AssembleInput) -> ComposeOutcome {
                 map,
             }
         }
-        Err(AssembleMapFailure::MissingRequiredInputMap { fragment }) => {
-            ComposeOutcome::MissingRequiredInputMap {
-                fragment: fragment.as_str().to_string(),
-            }
-        }
-        Err(AssembleMapFailure::UncomposableInputMap { fragment, code }) => {
+        Err(VueMainAssemblyFailure::InputMap(AssembleMapFailure::MissingRequiredInputMap {
+            fragment,
+        })) => ComposeOutcome::MissingRequiredInputMap {
+            fragment: fragment.as_str().to_string(),
+        },
+        Err(VueMainAssemblyFailure::InputMap(AssembleMapFailure::UncomposableInputMap {
+            fragment,
+            code,
+        })) => {
             // The family is read off the taxonomy's own classifier, then
             // cross-checked against the sub-code's numeric prefix — so a
             // sub-code filed under the wrong family fails here rather than
@@ -570,6 +590,38 @@ fn production_outcome(input: &AssembleInput) -> ComposeOutcome {
                 code: sub_code,
             }
         }
+        Err(VueMainAssemblyFailure::InputMap(AssembleMapFailure::InvalidSfcExportPlacement {
+            reason,
+        })) => {
+            // Every fixture's `sfc_export_placement` fact is derived from
+            // its OWN `code` by `map_compose::literal_scan_placement_for_fixture`
+            // (test-only, mirrors the same text), so it always matches —
+            // this arm has no reference-side equivalent to compare against
+            // and firing here is a defect in that fixture-construction
+            // helper, not a real production outcome under test.
+            panic!(
+                "no cross-implementation fixture declares an inconsistent __sfc__ fact: {reason:?}"
+            );
+        }
+        // A fragment/composition/publication failure has no reference-side
+        // analogue and no frozen `expected_outcome` variant, so it always
+        // diverges when compared — the divergence is what a caller (e.g.
+        // `vector_inventory.rs`'s V19 exclusion) decides how to treat, not
+        // a harness-level panic. One frozen vector today (V19) reaches this
+        // deliberately: it embeds the literal text `export default
+        // _sfc_main;` inside its OWN template code to simulate the retired
+        // write-grammar rules W-13/W-13' (see that vector's doc note) —
+        // composed alongside this assembler's own always-present trailing
+        // `export default _sfc_main`, the result genuinely has two default
+        // exports. The FORMER hardcoded-permissive-TSX final-parse check
+        // never caught this (TSX's `Unambiguous` module-kind does not
+        // enforce the single-default-export rule the way an explicit
+        // `Module` dialect does); this dialect-accurate parse now correctly
+        // does — proof the accurate dialect is doing real work, not a
+        // regression to work around.
+        Err(other) => ComposeOutcome::AssemblyFailed {
+            detail: format!("{other:?}"),
+        },
     }
 }
 
@@ -1157,26 +1209,25 @@ fn rewrite_geometries_agree_across_implementations() {
                 ]),
             ),
         ),
+        // A declared `SfcExportPlacement` fact carries exactly ONE
+        // `export_statement_range` — a real producer never emits more than
+        // one terminal default export, so a two-export-statement fixture
+        // has no fact that could declare it faithfully and is out of this
+        // suite's scope. `authored_text_matching_the_landmarks_is_left_untouched`
+        // in `map_tests.rs` covers the adjacent, more precise concern: an
+        // UNDECLARED occurrence of the landmark text is left untouched
+        // rather than incidentally swept up.
         (
-            // An occurrence of the removal pattern AHEAD of the compiler-emitted
-            // trailing one: both are removed, and the leading one's removal is
-            // non-terminal.
-            "removal-pattern-ahead-of-the-trailing-one",
-            AssembleInput::default().with_script(
-                "export default __sfc__;\nconst tail = 1\nexport default __sfc__;\n",
-                &map_of(&[
-                    seg(0, 0, 1, 0),
-                    seg(0, 15, 1, 15),
-                    seg(1, 6, 2, 6),
-                    seg(2, 0, 3, 0),
-                    seg(2, 15, 3, 15),
-                ]),
-            ),
-        ),
-        (
-            // Matching is deliberately NOT identifier-aware: `___sfc__` contains
-            // `__sfc__` at offset 1 and IS rewritten. That is the pinned
-            // behaviour, so both sides must reproduce it.
+            // `___sfc__` contains the literal `__sfc__` at offset 1.
+            // `rewrite_script` never scans for this — it routes through a
+            // producer-declared `SfcExportPlacement` fact. What this case
+            // exercises is that `to_production_inputs`' own literal-scan
+            // fixture helper (`map_compose::literal_scan_placement_for_fixture`,
+            // test-only) finds the same non-identifier-aware match a real
+            // producer's declared fact never would, and `rewrite_script` then
+            // faithfully applies exactly what THAT fact declares — reproducing
+            // the pinned bytes for this specific fixture without production
+            // itself ever scanning.
             "rename-is-not-identifier-aware",
             AssembleInput::default().with_script(
                 "const ___sfc__ = __sfc__\n",
@@ -1459,9 +1510,19 @@ fn write_grammar_axes_agree_across_implementations() {
     let script_map = map_of(&[seg(0, 0, 1, 0), seg(0, 6, 1, 6)]);
     let template_map = map_of(&[seg(0, 9, 9, 2)]);
     let with_both = |input: AssembleInput| {
+        // The template's generated code must actually match its own `ssr`
+        // axis — real Vue codegen never pairs an SSR profile with a
+        // VDOM-shaped `function render(` body (the two backends emit
+        // different function names), so a vector that combines them is
+        // not a case production has to agree with the reference on.
+        let template_code = if input.ssr {
+            "function ssrRender() {}\n"
+        } else {
+            "function render() {}\n"
+        };
         input
             .with_script("const __sfc__ = {}\n", &script_map)
-            .with_template("function render() {}\n", &template_map)
+            .with_template(template_code, &template_map)
     };
 
     assert_cross_implementation_equality(&[
@@ -1593,18 +1654,23 @@ fn write_grammar_axes_agree_across_implementations() {
             }),
         ),
         (
-            // The template's text scan picks the SSR render binding.
+            // The `ssr` axis (not the template's generated text) decides
+            // the SSR render binding.
             "ssr-render-binding",
-            AssembleInput::default()
-                .with_script("const __sfc__ = {}\n", &script_map)
-                .with_template("function ssrRender() {}\n", &map_of(&[seg(0, 9, 9, 2)])),
+            AssembleInput {
+                ssr: true,
+                ..AssembleInput::default()
+            }
+            .with_script("const __sfc__ = {}\n", &script_map)
+            .with_template("function ssrRender() {}\n", &map_of(&[seg(0, 9, 9, 2)])),
         ),
         (
-            // Neither binding: the scan matches nothing.
-            "no-render-binding",
+            // A present template ALWAYS carries a render binding — the
+            // `ssr` axis decides WHICH one, never whether one exists.
+            "non-ssr-render-binding",
             AssembleInput::default()
                 .with_script("const __sfc__ = {}\n", &script_map)
-                .with_template("const nothing = 1\n", &map_of(&[seg(0, 6, 9, 2)])),
+                .with_template("function render() {}\n", &map_of(&[seg(0, 6, 9, 2)])),
         ),
         (
             // Maps NOT requested: the result carries no map at all — not an
@@ -2030,7 +2096,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
             !agreed.iter().any(|outcome| match outcome {
                 ComposeOutcome::UncomposableInputMap { fragment: at, .. }
                 | ComposeOutcome::MissingRequiredInputMap { fragment: at } => at == fragment,
-                ComposeOutcome::Composed { .. } => false,
+                ComposeOutcome::Composed { .. } | ComposeOutcome::AssemblyFailed { .. } => false,
             })
         })
         .collect();
@@ -2302,18 +2368,39 @@ fn assert_real_compile_equality(cases: &[RealCompile]) -> Vec<ComposeOutcome> {
                     .map(|raw| compared_artifact("production", raw, &assembled.code)),
                 code: assembled.code,
             },
-            Err(AssembleMapFailure::MissingRequiredInputMap { fragment }) => {
-                ComposeOutcome::MissingRequiredInputMap {
-                    fragment: fragment.as_str().to_string(),
-                }
+            Err(VueMainAssemblyFailure::InputMap(
+                AssembleMapFailure::MissingRequiredInputMap { fragment },
+            )) => ComposeOutcome::MissingRequiredInputMap {
+                fragment: fragment.as_str().to_string(),
+            },
+            Err(VueMainAssemblyFailure::InputMap(AssembleMapFailure::UncomposableInputMap {
+                fragment,
+                code,
+            })) => ComposeOutcome::UncomposableInputMap {
+                fragment: fragment.as_str().to_string(),
+                family: family_str(code.family()).to_string(),
+                code: sub_code_str(code),
+            },
+            Err(VueMainAssemblyFailure::InputMap(
+                AssembleMapFailure::InvalidSfcExportPlacement { reason },
+            )) => {
+                // `case.compiled` is a GENUINE real-compile output (see
+                // `compile_fixture`) — every in-scope producer declares a
+                // consistent fact for its own bytes, so this is a real
+                // producer defect, not a normal outcome the reference-side
+                // JS oracle (which has no equivalent concept) could ever be
+                // compared against.
+                panic!(
+                    "real compile {} produced an inconsistent __sfc__ export-\
+                     placement fact: {reason:?}",
+                    case.id
+                );
             }
-            Err(AssembleMapFailure::UncomposableInputMap { fragment, code }) => {
-                ComposeOutcome::UncomposableInputMap {
-                    fragment: fragment.as_str().to_string(),
-                    family: family_str(code.family()).to_string(),
-                    code: sub_code_str(code),
-                }
-            }
+            Err(other) => panic!(
+                "real compile {} produced a fragment/composition/publication failure — every \
+                 real compile's fragments are, by construction, independently valid: {other:?}",
+                case.id
+            ),
         };
         if actual == expected {
             agreed.push(actual);
@@ -2944,9 +3031,15 @@ fn the_chained_script_map_carries_both_rewrite_passes_in_sequence() {
         seg(2, 0, 3, 0),
     ]);
     let decoded = validate_and_decode(&raw, code).expect("the fixture map is composable");
+    let fact = super::map_compose::literal_scan_placement_for_fixture(code)
+        .expect("the fixture declares a __sfc__ binding and export statement");
 
-    let (rewritten, chained) = rewrite_script(code, Some(&decoded));
+    let (rewritten, chained) =
+        rewrite_script(code, Some(&fact), Some(&decoded)).expect("the fact matches the fixture");
     let chained = chained.expect("a contributing map produces a chained sequence");
+    let chained = validate_and_decode(&chained, &rewritten)
+        .expect("rewrite_script's own re-encoded chain is composable")
+        .segments;
 
     assert_eq!(
         rewritten, "const _sfc_main = {}\nconst z = 2\n",

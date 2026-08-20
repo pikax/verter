@@ -28,6 +28,8 @@ pub(super) fn empty_sfc_script_block(
     runtime_module: &str,
     duration_ms: f64,
 ) -> Option<super::types::VerterScriptBlock> {
+    use crate::assembly::fragment::SfcExportPlacement;
+    use crate::script::{push_default_export_statement, push_sfc_binding};
     use crate::template::code_gen::shared::helpers::escape_js_string_into;
     if parsed.template_ast().is_some()
         || !parsed.style_nodes().is_empty()
@@ -38,9 +40,12 @@ pub(super) fn empty_sfc_script_block(
     let mut code = String::with_capacity(160 + runtime_module.len());
     code.push_str("import { defineComponent as _defineComponent } from \"");
     escape_js_string_into(&mut code, runtime_module);
-    code.push_str("\";\nconst __sfc__ = /*@__PURE__*/_defineComponent({\n  __name: \"");
+    code.push_str("\";\nconst ");
+    let binding_range = push_sfc_binding(&mut code);
+    code.push_str(" = /*@__PURE__*/_defineComponent({\n  __name: \"");
     escape_js_string_into(&mut code, component_name);
-    code.push_str("\",\n});\nexport default __sfc__;\n");
+    code.push_str("\",\n});\n");
+    let (export_binding_range, export_statement_range) = push_default_export_statement(&mut code);
     Some(super::types::VerterScriptBlock {
         code,
         duration_ms,
@@ -49,6 +54,10 @@ pub(super) fn empty_sfc_script_block(
         attrs: Vec::new(),
         generated_template_hole: None,
         runtime_imports: vec!["_defineComponent"],
+        sfc_export_placement: Some(SfcExportPlacement {
+            binding_ranges: vec![binding_range, export_binding_range],
+            export_statement_range: Some(export_statement_range),
+        }),
     })
 }
 

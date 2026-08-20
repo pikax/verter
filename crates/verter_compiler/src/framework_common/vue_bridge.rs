@@ -1403,6 +1403,7 @@ pub fn vue_result_to_runtime_bundle(
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect(),
+            sfc_export_placement: s.sfc_export_placement,
         }
     });
     let template = result.template.map(|t| {
@@ -1417,6 +1418,7 @@ pub fn vue_result_to_runtime_bundle(
             source_map: t.source_map,
             imports: t.imports.iter().map(|s| (*s).to_string()).collect(),
             ssr_imports: t.ssr_imports.iter().map(|s| (*s).to_string()).collect(),
+            render_export: t.render_export,
             output_descriptor,
         }
     });

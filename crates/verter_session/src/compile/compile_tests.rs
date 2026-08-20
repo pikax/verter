@@ -11,7 +11,7 @@ use super::*;
 
 use verter_compiler::framework_common::{
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
+    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 
 fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
@@ -34,12 +34,16 @@ fn basic_compiled_result() -> RuntimeCompileOutput {
             output_descriptor: test_output_descriptor(script_code),
             generated_template_hole: None,
             runtime_imports: Vec::new(),
+            sfc_export_placement: super::map_compose::literal_scan_placement_for_fixture(
+                script_code,
+            ),
         }),
         template: Some(RuntimeTemplateBlock {
             code: template_code.to_string(),
             source_map: String::new(),
             imports: vec!["_openBlock".to_string(), "_createElementBlock".to_string()],
             ssr_imports: vec![],
+            render_export: TemplateRenderExport::Render,
             output_descriptor: test_output_descriptor(template_code),
         }),
         ..RuntimeCompileOutput::default()
@@ -675,6 +679,9 @@ fn assemble_returns_code_and_map_together_when_maps_are_requested() {
             output_descriptor: test_output_descriptor(script_code),
             generated_template_hole: None,
             runtime_imports: Vec::new(),
+            sfc_export_placement: super::map_compose::literal_scan_placement_for_fixture(
+                script_code,
+            ),
         }),
         ..RuntimeCompileOutput::default()
     };
@@ -720,6 +727,73 @@ fn assemble_returns_code_and_map_together_when_maps_are_requested() {
     assert!(
         map.contains("\"mappings\":\"MACM,SAAA;A\""),
         "expected the replacement, resume and boundary segments, got:\n{map}"
+    );
+}
+
+/// Export binding is decided by the template block's DECLARED
+/// [`TemplateRenderExport`], never by scanning the generated code for a
+/// literal `function render(`/`function ssrRender(` occurrence. A decoy
+/// occurrence of the OTHER function's name embedded in the body must not
+/// change which property gets bound.
+#[test]
+fn render_export_binding_follows_declared_fact_not_generated_text() {
+    let ssr_decoy_code =
+        "function ssrRender(_ctx, _push, _parent, _attrs) {\n  // function render( appears only in this comment\n  _push(`<div></div>`)\n}";
+    let compiled = RuntimeCompileOutput {
+        template: Some(RuntimeTemplateBlock {
+            code: ssr_decoy_code.to_string(),
+            source_map: String::new(),
+            imports: vec![],
+            ssr_imports: vec!["_ssrRenderAttrs".to_string()],
+            render_export: TemplateRenderExport::SsrRender,
+            output_descriptor: test_output_descriptor(ssr_decoy_code),
+        }),
+        ..RuntimeCompileOutput::default()
+    };
+    let profile = CompileProfile::default();
+    let meta = FileMeta {
+        has_template: true,
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(
+        result.contains("_sfc_main.ssrRender = ssrRender"),
+        "declared SsrRender must bind ssrRender even though the body text \
+         also contains the string \"function render(\" in a comment, got:\n{result}"
+    );
+    assert!(
+        !result.contains("_sfc_main.render = render"),
+        "must not additionally bind render from the decoy text, got:\n{result}"
+    );
+
+    // Positive control, inverse declaration: a body containing the decoy
+    // "function ssrRender(" text but declared Render must bind render.
+    let render_decoy_code =
+        "function render(_ctx, _cache) {\n  // function ssrRender( appears only in this comment\n  return null\n}";
+    let compiled = RuntimeCompileOutput {
+        template: Some(RuntimeTemplateBlock {
+            code: render_decoy_code.to_string(),
+            source_map: String::new(),
+            imports: vec![],
+            ssr_imports: vec![],
+            render_export: TemplateRenderExport::Render,
+            output_descriptor: test_output_descriptor(render_decoy_code),
+        }),
+        ..RuntimeCompileOutput::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(
+        result.contains("_sfc_main.render = render"),
+        "declared Render must bind render even though the body text also \
+         contains the string \"function ssrRender(\" in a comment, got:\n{result}"
+    );
+    assert!(
+        !result.contains("_sfc_main.ssrRender = ssrRender"),
+        "must not additionally bind ssrRender from the decoy text, got:\n{result}"
     );
 }
 

@@ -1,3 +1,4 @@
+mod assembly;
 mod capability_matrix_compile_request_coverage;
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;

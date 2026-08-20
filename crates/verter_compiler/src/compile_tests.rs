@@ -19181,6 +19181,33 @@ const msg = ref('hello')
     );
 }
 
+/// The inline splice must be valid JS EVEN when the authored setup body
+/// carries no trailing whitespace/newline/semicolon before `</script>` — the
+/// moved-in render closure directly abuts the last authored token
+/// (`const n = 1` immediately followed by `return`, which is `1return`: an
+/// ECMAScript syntax error, a `NumericLiteral` may not be immediately
+/// followed by an `IdentifierStart`). Every OTHER inline fixture in this
+/// file happens to have a natural newline there already (the `</script>` on
+/// its own line), which is why this defect survived unexercised.
+#[test]
+fn inline_template_splice_is_valid_js_with_no_trailing_separator_in_setup_body() {
+    let result = compile_sfc_inline(
+        "<script setup>const n = 1</script><template><div>{{n}}</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "inline output must parse as valid JS even with no separator before \
+         </script>: {:?}\n---\n{}",
+        parsed.errors,
+        script.code
+    );
+}
+
 #[test]
 fn inline_template_ts_keeps_define_component_wrapper() {
     let result = compile_sfc_inline(
