@@ -977,6 +977,115 @@ function main() {
     }
   }
 
+  // -- Amendment authority gate
+  // templates/program-state.template.toml — `enabling_amendment` names the AMD-ID
+  // whose ratification is this block's execution authority ("" when none is
+  // needed). Until that amendment's own docs/arch/refactor/rev11/amendments/
+  // <AMD-ID>-*.md Status line is ratified, the amendment "has no execution
+  // authority" (its own wording) and the block it introduced must go no further
+  // than LOCKED. This was previously recorded only as free-text prose in a
+  // block's `notes` field — BV1 was unlocked and dispatched on DAG predecessor
+  // satisfaction alone while its enabling AMD-005 sat PROPOSED, because nothing
+  // read the prose. This check makes the dependency machine-enforced.
+  {
+    const AMENDMENT_GATED_STATUSES = new Set([
+      "READY",
+      "IN_PROGRESS",
+      "REVIEW",
+      "ACCEPTANCE_RECOMMENDED",
+      "ACCEPTED",
+    ]);
+    const amendmentsDir = join(dirname(opts.dag), "amendments");
+    const statusCache = new Map(); // amdId -> {path, ratified, statusText} | {error}
+
+    const resolveAmendmentStatus = (amdId) => {
+      if (statusCache.has(amdId)) return statusCache.get(amdId);
+      const record = (result) => {
+        statusCache.set(amdId, result);
+        return result;
+      };
+      let entries;
+      try {
+        entries = readdirSync(amendmentsDir);
+      } catch (err) {
+        return record({
+          error: `amendments directory ${amendmentsDir} could not be read: ${err.message}`,
+        });
+      }
+      const matches = entries
+        .filter((name) => name.startsWith(`${amdId}-`) && name.endsWith(".md"))
+        .sort();
+      if (matches.length !== 1) {
+        return record({
+          error: `expected exactly one file matching ${amdId}-*.md under ${amendmentsDir}, found ${matches.length}${matches.length ? ` [${matches.join(", ")}]` : ""}`,
+        });
+      }
+      const filePath = join(amendmentsDir, matches[0]);
+      let text;
+      try {
+        text = readFileSync(filePath, "utf8");
+      } catch (err) {
+        return record({ error: `amendment file ${filePath} could not be read: ${err.message}` });
+      }
+      const lines = text.split(/\r?\n/);
+      const start = lines.findIndex((l) => l.startsWith("**Status:**"));
+      if (start === -1) {
+        return record({
+          error: `amendment file ${filePath} has no **Status:** line — its ratification state cannot be parsed`,
+        });
+      }
+      // The Status field is a markdown paragraph: the declaring line through the
+      // next blank line (AMD-009's "**RATIFIED ...**" and AMD-001's multi-line
+      // "NOT part of ..." wrap onto following lines).
+      const paragraph = [];
+      for (let i = start; i < lines.length; i++) {
+        paragraph.push(lines[i]);
+        if (lines[i].trim() === "") break;
+      }
+      const statusText = paragraph.join(" ").trim();
+      // "NOT RATIFIED" (AMD-005) wins over any other "ratified" mention in the
+      // same paragraph; bare "ratified"/"maintainer-ratified" (AMD-002/003/004,
+      // AMD-006/007/008/009/010) is ratified; anything else — including
+      // AMD-001's "Registered amendment ... NOT part of the verbatim-
+      // reconstructed authority set", which never uses the ratified verb at
+      // all — defaults to not-ratified. This is a classification, not a parse
+      // failure: only a missing Status line above is unparseable.
+      let ratified;
+      if (/\bnot\s+ratified\b/i.test(statusText)) ratified = false;
+      else if (/\bratified\b/i.test(statusText)) ratified = true;
+      else ratified = false;
+      // Report only the paragraph's first line in violation text — readable, and
+      // every existing amendment's ratification verdict is already decided by
+      // its first line; classification above still sees the full paragraph.
+      return record({ path: filePath, ratified, statusText: lines[start].trim() });
+    };
+
+    for (const [id, b] of stateById) {
+      const amdId = typeof b.enabling_amendment === "string" ? b.enabling_amendment.trim() : "";
+      if (amdId === "") continue;
+      const resolved = resolveAmendmentStatus(amdId);
+      if (resolved.error) {
+        v(
+          `state block ${id} declares enabling_amendment ${JSON.stringify(amdId)} but ${resolved.error}`,
+        );
+        continue;
+      }
+      if (resolved.ratified) continue;
+      const reasons = [];
+      if (typeof b.status === "string" && AMENDMENT_GATED_STATUSES.has(b.status)) {
+        reasons.push(`status is ${b.status}`);
+      }
+      if (b.maintainer_decision === "ACCEPTED") {
+        reasons.push(`maintainer_decision is ACCEPTED`);
+      }
+      if (reasons.length > 0) {
+        v(
+          `state block ${id} has enabling_amendment ${amdId} but ${resolved.path} is not ratified (Status: ${resolved.statusText}) — an unratified enabling amendment has no execution authority, so the block must not advance beyond LOCKED: ${reasons.join(", ")}`,
+        );
+      }
+    }
+  }
+
   // -- Single IN_PROGRESS block, bound to current_block
   // templates/program-state.template.toml:18 declares `current_block`; the
   // orchestrator executes "only the next legal bounded block"

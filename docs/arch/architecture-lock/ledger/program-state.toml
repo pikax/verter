@@ -80,6 +80,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "A0 status per the status field; acceptance is maintainer-only. MAINTAINER DECISIONS RECORDED 2026-08-09: (1) designated maintainer is Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub pikax), who holds admin on pikax/verter; (2) package validation is WAIVED by explicit maintainer decision - the Revision 11 ZIP (verter-architecture-v11.zip + .sha256) was never available on this machine and python3 is absent, so tools/validate_package.py, tools/selftest_orchestration.py, tools/validate_program_state.py, tools/validate_stack_window.py and tools/validate_landing_equivalence.py were NOT run; package validation state is UNVERIFIED and authority_package_digest is EMPTY (no digest exists to record; the waiver is stated in a comment at that field and here); the claimed canonical package digest af11392f5f9eeea75cbd82def85adadfee41b3c8032b5248c09e96aba13123a7 (85 files) remains UNVERIFIED, while local artifact digests for verter-architecture-lock-master-plan-v11.md (3303834589df23cd04338801374857e685d9961df3d323c60c4b58db54ce62ce) and verter-opus-orchestrator-prompt-v11.md (d32b3f748230b3735469195ed62e6728242774ea0a575af1999b724164a750c3) match the published Revision 11 validation report exactly; program_dag_digest and the split authority documents are digests of a verbatim reconstruction from the digest-verified consolidated master, not of canonical package files; (3) PR #98 (DRAFT, mergeStateStatus DIRTY, agent/rsvelte-runtime-engine, framework/compiler boundary) is DISPOSITIONED AS ABANDON (baseline-lock §3 closed set); no GitHub action taken or to be taken - external contributor's draft. This program state file is VALIDATED after every transition by the Node reimplementation (scripts/validate-program-state.mjs --mode live, ruling R-4); the historical statement that validate_program_state.py could not be run remains true of the Python original only. ENTRY LOCK: checkout CLEAN at 9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0 (tree 3cf111cf5665586b7d8fdfd520f01cfee3bf8108), untracked 0, submodules none, worktrees 1 at capture time, branch main level with origin/main (ahead 0 / behind 0). CI at the entry SHA is FAILURE (run 31325653744: 53 failed / 20 success); main persistently red since 2026-03-18 (316d6598f), last green 2026-03-16 (94415737e); the clippy failures are NEW at 9af553dd2. Green-command proof belongs to A6, not to the A0 entry lock. main has NO branch protection, NO merge queue, NO required status checks; one ruleset (Copilot review for default branch: deletion, non_fast_forward, copilot_code_review). Commit signing NOT in use. Stack tooling (gt/git-town/spr/ghstack/jj) ABSENT; ordinary dependent PRs available. 14 open issues. 53 stashes; 571/596 local branches unmerged into main; 34 remote branches unmerged into origin/main. Evidence root is EXTERNAL to the repository (the checkout is kept byte-clean): <EVIDENCE>. Under maintainer instruction the Revision 11 plan is additionally being landed into the repository at docs/arch/refactor/rev11/ so the plan, contracts, charters and evidence are resumable from the repository; the live program ledger (this file) remains EXTERNAL by maintainer decision and is not recoverable from the repository alone. THREE-MANDATE RECHECK (round 7) against candidate b7ea2dc88bda86473de81de3438b7f88ef30adc7 / tree 47645406a9246e600af995c62608b709347e13a4: conformance mandate PASS; architecture mandate PASS; adversarial mandate PASS; all remaining findings were classified DEBT (carried in the DEBT section of A0/A0-exact-candidate-record.md: shape-only evidence digests needing an A6 artifact-binding manifest with live hashing; no cardinality pin on the foundational-private-checkpoint DAG class, owner A6/AMD-001; entry-lock gate not covering PRIVATE_CHECKPOINT; two imprecise in-tree evidence/A0-summary.md debt rows carried into A1; entry-lock test matrix missing ACCEPTANCE_RECOMMENDED and renamed-root fixtures). Context packet section 7 expected-work counts corrected to the real round-6 values (node --test 26, stub experiment 26, falsification battery 15) and the packet re-digested. MAINTAINER ACCEPTANCE: the designated maintainer Carlos Rodrigues (GitHub pikax) delegated the acceptance decision to the architecture authority, which returned PASS with no blockers; maintainer_decision = ACCEPTED is recorded under that delegation. LANDING EQUIVALENCE: accepted identity DIVERGES from the reviewed candidate identity. On maintainer instruction that no commit landed on main reference the architecture program or any of its blocks, the landed messages were neutralized and the commits replayed onto the same parent; the accepted tree is byte-identical to the reviewed candidate tree and the full diff between the two commits is empty. The divergence is covered by A0/A0-landing-equivalence.md, recorded in landing_equivalence_digest."
 
 [[block]]
@@ -101,6 +102,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -125,6 +127,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -146,6 +149,7 @@ conformance_review = "INVALIDATED"
 architecture_review = "INVALIDATED"
 adversarial_review = "INVALIDATED"
 maintainer_decision = "SUPERSEDED"
+enabling_amendment = ""
 notes = "Superseded by AMD-004 before candidate review or acceptance. The prior execution-charter digest was 101d9d718952da40a5b4da88ea232cedd0619b35d291de6052149d86a5dcbff1. V3 and amendment 1 remain historical failed-specification evidence; completion and G10 debt is FR-D8, owned by D6."
 
 
@@ -168,6 +172,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Reduced by AMD-004 to non-G10 retraction only. G10 is excluded from this exit and tracked as FR-D8 for D6."
 
 [[block]]
@@ -189,6 +194,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Track A worker run: measurement-only work-attribution substrate (verter_audit attribution feature), 70 chokepoints instrumented, disabled-overhead proven structurally+behaviourally+by measurement. Reviews found 10 items (F1-F7 doc/number-accuracy fixes, F6 !Send hardening); F5 (gate coverage for attribution/compile-fail features) dispositioned DEFER to A5, recorded in evidence/A4-summary.md. Fix pass applied, reattested, squash-landed. Commit message history rewritten (tree-identical, message-only) to remove plan-vocabulary references discovered post-landing; context_packet_digest is over the verbatim dispatch-prompt record at evidence/A4/context-packet.md, re-digested after the A6-discovered machine-path portability fix (discovery D-1, ruled FIX-NOW). candidate_sha/accepted_sha (1ab403c01) remain a genuine ancestor of the live program/architecture-lock tip. EVIDENCE RE-BINDING (evidence/A4-summary.md): the original digest matched NO artifact ever committed under docs/arch, in any commit or file type - most likely a file digested from an uncommitted scratch path; unrecoverable, so re-bound to this block real landing summary."
 
 [[block]]
@@ -210,6 +216,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Landed as a pure linear fast-forward (context-packet commit on squashed candidate, no merge commit) so accepted_sha/tree equal candidate_sha/tree exactly; no landing_equivalence artifact required. Evidence-only block (zero crates/packages/scripts/.github touched, tree-hash-verified). adversarial_review PASS is on reattested Candidate B (post-fix-pass content) after one bounded fix pass corrected 9 evidence-accuracy findings (2 blocking, 3 moderate, 4 minor) found on Candidate A (95eda628b) plus 2 more the fix pass caught in its own brief; reattested by independent spot-check of 3 key facts, not a full re-review. Decisions L1/G1/DD1/R-12/S1 ratified by the maintainer (see A6). Commit message history rewritten (tree-identical, message-only) to remove plan-vocabulary references discovered post-landing; context_packet_digest re-digested after the A6-discovered machine-path portability fix (discovery D-1, ruled FIX-NOW). A later maintainer-directed cross-block housekeeping squash (see A6 notes) collapsed the branch commit distinct to A5 into a squashed commit that also carries A6 content; accepted_sha (9e053d014) is retained as the genuinely reviewed/landed commit at A5's own acceptance time and is preserved from GC via tag program-history/A5-reviewed-candidate — it is no longer an ancestor of the live tip, which is expected and documented in docs/arch/refactor/rev11/evidence/A6/landing-equivalence-A5-A6.md. EVIDENCE RE-BINDING (evidence/A5-summary.md): original digest unrecoverable (matched no committed artifact); re-bound to this block real landing summary. IDENTITY CORRECTED by orchestrator audit: the row previously recorded 9e053d014 as both candidate and accepted, a DANGLING commit on no branch whose tree never appears in this branch's history, so neither identity was verifiable and the recorded context_packet_digest bound an artifact that commit's tree does not contain. The identity is now bb9e9a283, the commit that actually landed A5 into program/architecture-lock, whose tree does contain every artifact the three digests bind. The sole content delta between the reviewed pre-squash candidate and the landed artifacts is the machine-path normalisation to <MACHINE_ROOT> that the file itself discloses in its own header and that the guard tracked_paths_no_machine_roots requires; the digest update was already recorded in the original acceptance transition. No landing-equivalence artifact is owed because candidate and accepted are now the same landed identity. Found by an audit prompted by an unrelated consult: the validator regex-checks SHA shape and never asks git whether a commit exists or carries the stated tree."
 
 [[block]]
@@ -231,6 +238,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Implementation Lock Record + locked performance-gates.toml (no placeholders) + bound B1 charter. Reviews initially BLOCKING (missing AMD-001 traceability, missing A5-L1 disposition, one gate-direction bug on session.cache_admit_cacheable); one bounded fix pass corrected all, reattested clean. Architecture ruling (Codex Sol xhigh, read-only): (1) AMD-001 §1's four-artifact stack-window-validator prerequisite is AMENDED (not delivered now, not deferred as open debt) so it binds to the first post-A6 opened stack window / unconditionally before D1 PRIVATE_CHECKPOINT, not to A6 itself — recorded as a governance §10 acceptance-contract rescope in evidence/A6/AMD-001-deviation-memo.md; (2) discovery D-1 (machine-path leak in A4/A5 context-packet.md) ruled FIX-NOW, applied, both blocks' context_packet_digest corrected. Maintainer ratified A5-L1/G1/DD1/R-12/S1 (loop5_instrumentation converge+delete owners G4/K3/L4; attribution/compile-fail locked as per-block commands, CI deferred post-program; verter_semantic->verter_workspace pinned exception, C1 removal gate; 469 unlanded local branches abandoned as a class; stack policy max_open_stack_layers=2/ATOMIC_REVIEW/LOCAL_BRANCH_CHAIN). LANDING EQUIVALENCE: accepted identity diverges from the reviewed candidate identity — a maintainer-directed cross-block housekeeping squash (collapsing A4-ledger/A5/A6 bookkeeping commits into one, excluding the real product commit 1ab403c01) replaced the branch tip after review; the delta is disclosed, evidenced, and tree-diffed in docs/arch/refactor/rev11/evidence/A6/landing-equivalence-A5-A6.md (landing_equivalence_digest binds that file). Reviewed candidate preserved from GC via tag program-history/A6-reviewed-candidate. B1 is BLOCK_READY (charter digest ac60d191221fc5e5938e0343091c6809648a482960ca7c1a49596e547d3e28e1); J1 stays not-unlocked, no CSS work selected. EVIDENCE RE-BINDING (evidence/A6-summary.md): original digest unrecoverable (matched no committed artifact); re-bound to this block real landing summary. BASE IDENTITY CORRECTED by orchestrator audit: base_sha was 9e053d014ca4f98124f431a8d39e1a688087bf49, a pre-squash commit that is not an ancestor of the accepted identity and whose tree appears nowhere in this branch's history, so the recorded base described a state that was never landed. Re-bound to 1ab403c0107801b080438fab30b887c0c8164ecb, the real landed parent of the accepted commit, which is verifiable and satisfies base-ancestor-of-accepted. Content is unaffected; this repairs a dangling reference left by a history squash."
 
 [[block]]
@@ -252,6 +260,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "verter_identity crate (layer 1): StableEntityId/SessionHandle, QueryIdentity/SemanticFlightKey/InputBasisId non-interchangeable, ExecutionPolicy profile schema, canonical encoding. Whole-workspace closure-based dependency-firewall test with A5-DD1 equality-pinned exception (target-condition-precise, C1 removal gate). Deleted verter_audit_no_upward_deps + no_session_dep.rs; kept audit_substrate_isolation as named grandfathered guard (explicit decision). Landed as true linear fast-forward: accepted_tree == candidate_tree, no landing_equivalence artifact needed. Reviewed candidate preserved from GC via tag program-history/B1-reviewed-candidate. Prerequisite: feat(gate) memory-ceiling tooling landed separately at 5c24d22a5 (not a ledger block) after this machine's 2nd OOM incident this program; real capped canonical gate run (--build-jobs 2 --test-threads 2 --memory-limit 8GiB) terminal VERDICT with exactly 2 pre-existing load-sensitive flakes independently proven non-causal via isolated reruns on both baseline and candidate trees; one bounded fix cycle (stale discrimination-proof regenerated, mislabeled evidence file corrected), reattested PASS. Non-blocking discovery, routed not resolved: plausible (unconfirmed) RSS-driver lead in verter_session SURFACE 2 OnceLock-memoized syn-AST scans (architecture_guards.rs, output_projector_residual_guards.rs) — recommended as its own investigation thread. EVIDENCE RE-BINDING (evidence/B1/landing-equivalence.md): original digest unrecoverable (matched no committed artifact); re-bound to the landing-equivalence record, the same artifact this row landing_equivalence_digest already cites."
 
 [[block]]
@@ -273,6 +282,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Gap-analysis-only block: every one of BF1's 7 numbered exit criteria and all owned-scope bullets independently verified already satisfied by the previously-landed, maintainer-ratified AMD-005 package. REOPEN #1 (legitimate, new finding not previously reviewed): the parallelism consult found exit criterion #6 (BF2 performance cells frozen before BF2 work begins) was unmet — performance-gates.toml had no BF2 cells. Resolved by measuring the already-authored, BF1-owned official-case enumeration tool (generate-official-case-manifests.mjs) against the pinned oracle sources — a legitimate before-BF2-exists reference measurement, not criterion-selection-after-candidate-measurement — freezing BF2_VUE_ORACLE_MANIFEST_GENERATE/BF2_SVELTE_ORACLE_MANIFEST_GENERATE (10-invocation session, wall/RSS bounds, SHA-256 output-oracle, exact-equality work counters, operationally-proven zero-network via a live curl-denial control). First review pass: architecture BLOCKING (cells mislabeled as covering golden/compiler-invocation generation, which was never measured); fixed by rescoping the operation text to enumeration/classification only and adding an explicit open/deferred row in performance-impact.md for the heavier compiler-invocation+golden workload (matching the existing BV1/BS1/B6/C4 deferred-row pattern). Reattested PASS, no threshold values changed, no scope creep. candidate_sha == accepted_sha exactly (no landing squash needed beyond the one already-squashed commit). Prior review record: architecture PASS (DAG sequencing B1->BF1->BF2->BF3->{B2,B3} confirmed coherent, zero production diff, emitter-mapping dispositions spot-checked), adversarial found one BLOCKING governance finding (AMD-005 §15.1's ratification quotation cited the wrong reviewed-package SHA — pre-fix ce1d0e4688 instead of PASS-reattested 7442bb9060; citation-only, substance always correct) — escalated per STOP conditions, architecture-authorized as non-discretionary record repair (no new maintainer ratification required, governance §10), landed as standalone commit f1b59d2dd. AMD-005 (Framework Compiler Conformance Rescope) itself maintainer-ratified and landed at 34fe8167f (housekeeping squash of the original four-commit landing sequence — content byte-identical, tree unchanged; superseded pre-fix candidate ce1d0e4688/1ff1f83d8e, reviewed package 7442bb9060/69502487b, ratified bundle aa757eecc/0c078357b, original ratification-record commit ade8a301b, preserved on branch backup/pre-amd005-squash). BF2 next legal once this transition is validated. EVIDENCE RE-BINDING (evidence/BF1/BF1-summary.md): original digest unrecoverable (matched no committed artifact); re-bound to this block real landing summary."
 
 [[block]]
@@ -294,6 +304,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "REOPEN #4 RESOLVED. Two triggers: (1) BV0-relanding scoping consult Q2/Q4 — named import-specifier order compared positionally (now cosmetic in the normalizer) and script-less SFC bindingMetadata passed truthy-empty instead of undefined (wrong render-arity golden, fixed). (2) Mapping axis was structurally unsound — compared candidate-vs-official source maps despite the project's own Compiled-Output Conformance rule allowing cosmetic generated-byte divergence, so two compilers' maps necessarily describe two different documents. Binding maintainer direction: source-map correctness is judged only against the exact authored SFC. Replaced end to end with a self-referential oracle (new src/mapping-oracle.mjs): map contract/bounds, source identity, per-segment truthfulness via a closed relation table, bidirectional round-trip completeness, fragment-first assembly composition, structural generated-only range detection against fabricated provenance. Four independent review rounds; rounds 1-3 each found and fixed real defects (false doc citation; synthetic-range enforcement that never ran on the real path; non-position-exact relations; an incomplete binding-pattern check; over/under-broad generated-range detection). Round 4 (review-round cap) found two final defects, fixed and independently re-verified by the program orchestrator against committed source rather than a fifth agent round. Disclosed bounded residuals (non-blocking, stated in-module): a reference-occurrence fallback relation not fully position-exact (267/812 corpus occurrences); the boundary check intentionally unenforced on ranges nested inside a larger legitimately-mapped expression; map.file unvalidated (no golden carries it). A related maintainer optimization concern was investigated in parallel (evidence/BF2/reopen4/optimization-vs-conformance-investigation.md) — partially confirmed (narrow waste, e.g. an unused-import case now flagged for BV0), no evidence of deeper architectural cost; disposed as narrow ADOPT-NOW items plus one CLAUDE.md-level DEFER (FC-VUE-002, owned by BV1/BS1). Full detail: evidence/BF2/reopen4/{context-packet,landing-record}.md. No production compiler code, no verter_session, no Svelte file, no crates/verter_vue_conformance/corpus touched — scope confirmed via diff by the program orchestrator. Independently re-verified: harness 411/411, verter_vue_conformance 8/8. BF1 not reopened (unaffected both times). BV0 and BF3 unblocked, next legal once this transition is validated; BV0's own restack still additionally waits on AMD-007/BV0A ratification (docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md, PENDING). BASE IDENTITY CORRECTED by orchestrator audit: base_sha was cf131b4ccf4d6b18c968b5b5c30ee3e74c816ca2, a pre-squash commit that is not an ancestor of the accepted identity and whose tree appears nowhere in this branch's history, so the recorded base described a state that was never landed. Re-bound to d5cadb2c156934ee9e5ba02700f35f96837a4cbe, the real landed parent of the accepted commit, which is verifiable and satisfies base-ancestor-of-accepted. Content is unaffected; this repairs a dangling reference left by a history squash."
 
 [[block]]
@@ -315,6 +326,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Introduced by AMD-007 and amended by AMD-008 (twelve review rounds, full history in the accompanying evidence files); both amendments' landing commits, and BF2 reopen #4's acceptance commit, were later folded into one housekeeping squash commit 1db2fab53e7e04a2024fecd499da1ca4b1d5c5b1 (tree unchanged throughout; full pre-squash history preserved at branch backup/pre-double-squash). Predecessor BF2 ACCEPTED at 07465330f017d3f5e50c70fa11aaf39b499d8b73 (reopen #4). Landed candidate_sha == accepted_sha exactly (fast-forward, no landing-equivalence proof needed). Replaces the bare-String return of verter_session::compile::assemble_vue_main_module with one typed result coupling assembled Vue main-module code to a genuinely composed source map (two sequential CodeTransform rewrite passes, __sfc__->_sfc_main then export-default removal, each driving both code and map), plus its full supporting substrate: a validating pre-assembly-fragment-map decoder, a fragment map composer, a canonical deterministic V3 map serializer, an independent dependency-free JavaScript reference implementation written from a frozen two-layer specification (layer 1: frozen semantic spec, reviewed seven rounds before either implementation was written against it; layer 2: 75-entry literal vector coverage set), and cross-implementation equality tests. Composed code bytes proven byte-identical to a genuinely historical pre-change baseline. One residual finding (freeze chronology/completeness) was tracked debt with its resolution gate at this acceptance review (FC-VUE-003, evidence/BV0A/debt-layer1-gate-authority.md) — closed definitively as part of this landing, record at evidence/BV0A/landing-record.md. No __sfc__/_sfc_main identifier rename (investigated, found unsafe against cross-consumer identifiers outside BV0A's scope). This landing session (resuming after a prior track-orchestrator process died mid-task) independently re-verified round 3's already-landed fix, dispatched a further conformance round that found and fixed two more real decode bugs (an ignore-list upper-bound check misplaced at the wrong validation stage; a lossy u64 narrow that could collide two distinct large ignore-list values), ran the full canonical gate clean on all three surfaces (Surface 1 24262/24262, Surface 2 3/3, Surface 3 shipped no-debug-assertions cfg 8587/8587), clippy and fmt clean, and reconciled a stale-fork machine-path issue against a since-landed unrelated sanitization commit. pnpm test failures in a fresh worktree (typeinfo, framework-conformance-harness) independently proven pre-existing/unrelated via a control worktree comparison, not a landing blocker. Program orchestrator independently re-verified ancestry, commit content, absence of machine-path markers, and cargo test -p verter_session --lib compile:: (73/73) plus clippy directly against the landed tree rather than trusting the track-orchestrator report. Full detail: evidence/BV0A/{context-packet,landing-record}.md. Did not change BF2's accepted oracle or invocation, B3/B4/BV1/B5 authority, or introduce a universal IR — scope confirmed via diff. BV0 next legal once this transition is validated (predecessor BF2->BV0A already recorded on BV0's own row). EVIDENCE RE-BINDING (evidence/BV0A/landing-record.md): the original binding drifted: it matched this artifact at an earlier commit and the file was edited after acceptance without the ledger being updated; re-bound to the artifact current content."
 
 [[block]]
@@ -336,6 +348,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Amended by AMD-007: predecessor changed from BF2 to BV0A; mapping scope clarified (BV0A owns the assembled-module map's existence/composition, BV0 owns residual script/template-emitter mapping defects the accepted map exposes); required exits reworded to the authored-source oracle, not official-map equality. Further amended by AMD-008: one reinforcing sentence — this exit is not satisfied by BV0A's narrower composition-equality proof; BV0 still owns bringing every residual violation to zero. Both amendments' landing commits were later folded, with BF2 reopen #4's acceptance, into one housekeeping squash commit 1db2fab53e7e04a2024fecd499da1ca4b1d5c5b1 (tree unchanged, full pre-squash history at branch backup/pre-double-squash). Predecessor BV0A ACCEPTED at 7b017b955e7d16bdaf58f21a8f63a247043f3572. Round-1 candidate c40a1ca96b73cf9b723fd7209516ea0462deaad2 (preserved at branch backup/bv0-round1-candidate, tree a5e504057db9227a71b31186952aba9a58478047) received a genuine 3-way BLOCKING verdict (evidence/vue-known-defect-correction/reviews/round1-{conformance,architecture,adversarial}.md): two self-introduced VDOM regressions absorbed into a waiver ledger under a false rationale, a stale doc left contradicting shipped behavior, an undisclosed ~85% conformance-divergence growth concentrated in genuine Vapor semantic bugs, link/runtime axes silently skippable, an out-of-charter Svelte migration riding along, and — most severe — a matched-wrong-golden regression traced to a BF2-owned harness defect (see BF2 notes, resolved at reopen #4). That round-1 candidate was reverted (never accepted); Svelte migration was excluded and must land as a separate authorized block, never bundled into BV0. Re-implemented fresh (13 rounds, one resumed session) against the vendored vuejs/core v3.6.0-rc.3 oracle: script emitter (non-inline setup expose/__returned__ order and completeness/dev-block gating/Vapor marker placement/SSR binding routing), VDOM (slot fallback CACHED flag, v-if/v-else CreateCommentVNode + key hoisting, document-order hoist numbering, v-for STABLE_FRAGMENT constancy, whitespace-only text, event-handler prop hoist exclusion), Vapor (new per-region template splitting + two-phase id allocation + anchor wiring, deferred-flush v-if content loss, v-for loop-variable closure capture, _createIf/_createFor bitflags, $props routing, event delegation opt-in), and a new additive CodeTransform multi-anchor source-map primitive closing false single-anchor provenance on static attributes/interpolations. Three backend-capability extensions (Vapor per-region splitting, two-phase id allocation, segmented-overwrite primitive) each individually ADOPT-NOW-ruled by dedicated Codex xhigh consults pre-implementation. 3 full review rounds (this program's cap), all three reviewers BLOCKING each round on real findings (most severe: a v-if nested inside v-if silently dropping content, caught independently by two reviewers in round 3) — all fixed with genuine root-causing and runtime-execution proof. Per the review-round cap, round 4 was the track orchestrator's own direct gate/harness run (not a further review round), which found and fixed two further real gaps (stale trybuild pins + an architecture-guard violation; two stale JS test fixtures). One residual — a <template v-if> wrapping a nested v-if is not yet a transparent root element in the Vapor backend — is DEFERRED to BV1 as debt row FC-VUE-001 (named, currently-#[ignore]d acceptance test; BV1's charter already requires every BV0 correction survive and zero semantic known-divergences, which picks this up). Program orchestrator independently re-verified: program/architecture-lock at 961bee3f0 with 3c9d72df9 as ancestor; candidate/accepted SHAs and trees match git log exactly; commit message carries zero plan/program vocabulary; both evidence-file SHA-256 digests independently recomputed and match exactly; no absolute developer-home machine-path leaks (the one grep hit is prose in BV0A's landing-record describing a since-fixed historical leak, not a live one); independently ran cargo test -p verter_vue_conformance --test main -- seed_conformance (2/2 pass) and pnpm --filter @verter/framework-conformance-harness test (616/616 pass, matching the reported figure exactly) directly against the landed tree rather than trusting the track-orchestrator report alone. Full detail: evidence/BV0/{context-packet,landing-record}.md. B2/B3 wait on both BV0 and BF3 acceptance — BV0 is now satisfied; B2/B3 remain LOCKED pending BF3."
 
 [[block]]
@@ -357,6 +370,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "ACCEPTED by direct maintainer decision. All three mandates PASS on this exact candidate. Both final blockers were closed by a maintainer clarification act recorded verbatim, with each resolution placed beneath the reviewing seat unedited words. First: the act covers all three hunks of the correction owner obligation text, because the same dropped obligation is stated in three places and reverting one would leave that document self-contradictory - verified against the actual diff. Second: reclassifying the disputed row removes it from the exhaustion exit, recorded as a maintainer NARROWING of an unconditional exit rather than a reading of it, a distinction a review seat caught and the record now states. The architecture mandate, missing from an earlier round through an orchestrator scoping error, was re-commissioned as an external seat and ran four further rounds: three BLOCKING on real record-accuracy defects - a forward reference to an unwritten report, a surviving mischaracterization, a stale delta boundary, and whitespace an append introduced that falsified a verification claim - each fixed and returned to a FRESH seat; the sixth PASSED with no findings, re-deriving the closure rather than accepting it. All seven procedure items and all eight required-exit sentences EVIDENCED. Substantive outcome: a test-only audit with zero production behaviour change, thirteen findings dispositioned as ten DEFER to the four immediate correction owners with acceptance IDs and named ignored targets plus three REJECT. The reachability residual on the reclassified row stays open, UNKNOWN, ignored-characterized and owned by BA0; a future reproduction is a new finding with its own target. No production guard, typed refusal, withhold path, retraction or removal ID exists. Successors BA0, BS0, BCSS0 and BRT0 unlock on this acceptance; B2 and B3 stay locked until all four are accepted."
 
 [[block]]
@@ -378,6 +392,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Request/result atomicity over the requested-product set. The mixed value is now UNREPRESENTABLE - the carrier terminal result is a sum, produced-with-products or refused-with-none, and a plant restoring the old shape fails to COMPILE (E0027) rather than failing a test. A string-prefix scanning authority in the host was DELETED and none added; the refusal reason travels as a typed code. AT-1 un-ignored and live after being re-expressed over a genuinely combined token, proven RED on base for the atomicity assertion specifically. Three mandates PASS on the final candidate after a terminal targeted-delta round. GATE VERDICT: FAIL, not reinterpreted - 4 non-tolerated Surface-1 failures, each discriminated in a separate worktree against base and proven PRE-EXISTING; independently corroborated here by the landed diff touching neither the failing crates nor any manifest or lockfile. Surface 3 (shipped debug_assertions off) 8631/8631 green. One DEFER to B3 (dual warm ensure_compiled path), one REJECT, one pre-existing Content-mode divergence carried as an ignored characterization. Detail: evidence/BA0/landing-record.md."
 
 [[block]]
@@ -399,6 +414,7 @@ conformance_review = "PASS"
 architecture_review = "NOT_REQUIRED"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Four findings corrected in their root-cause owners; all four named targets enabled and green. The first row understated the work: the each-block flag is coupled to the item read form, so clearing it while still emitting a signal deref produces a module that mounts and renders WRONG - non-reactive items are now demoted to a distinct kind. The fourth was corrected in the shared framework-surface leg, NOT the projector the charter names; a grok pass proved that leg has three consumers and a projector fix would have forked the shared surface - charter wording inaccurate, recorded not edited. While extending the gate outcome enum the block found the gate NEVER COMPARED the oracle verdict, so a state asserting failure could silently record a passing cell; the verdict is now compared and the empty-divergence state is structurally unrepresentable. Both seats found real defects, two of them regressions this block introduced. Seven out-of-scope defects deferred as ignored characterizations proven RED with named owners, including a pre-existing non-ASCII identifier panic. Gate PASS on the exact landing tree (24413/24413, 3 suites clean, 8634/8634); a first run FAILED on 4 tests proven to be concurrent-gate contention by isolated re-runs, not assumed. Detail: evidence/BS0/landing-record.md."
 
 [[block]]
@@ -420,6 +436,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "SUPERSEDED"
+enabling_amendment = ""
 notes = "SUPERSEDED by direct maintainer act. Its standalone CSS source-map product transfers WHOLE to J1, which owns the CSS engine reconciliation. Re-pointing the correction at the canonical route was proven INFEASIBLE within this charter: the map is separable from the printer MAP but not from the PRINTER, because the canonical route preserves authored bytes while the legacy route emits normalized bytes, so re-pointing would change emitted CSS on a shipped public route. Nothing landed; 9 commits retained on branch block/bcss0 including a 285-line handover carrying the byte-divergence proof, a verified HAS/LACKS inventory of the Verter CSS crate for this route, an open discrimination hole, an unproven transport axis, and the behavioural test intent for J1 to re-express. The parcel_sourcemap dependency is NOT inherited. This block is REMOVED from the B2 and B3 predecessor lists by the same act so CSS defers wholly to the J train and does not gate the program."
 
 [[block]]
@@ -441,6 +458,7 @@ conformance_review = "PASS"
 architecture_review = "NOT_REQUIRED"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "COMPLETE - all three rows executed. The batch route now selects each input carrier from its own canonical id, derived at one function that takes NO language argument so a call site has nothing to get wrong. Deriving it was insufficient: the adversarial seat caught that the skip predicate compared BYTES only, so a canonical previously registered under another carrier kept it for the whole batch and the derived language never reached the host; the predicate now consumes the built registration and the intermediate raw collection is gone, so the decision structurally cannot see fewer fields than the registration carries. Earlier pass: one absent-response contract for a missing virtual node confined to a shared classifier, and the non-Vite bundler product carrying the host map. Gate PASS on all three surfaces (24417/24417, 8638/8638). ONE PUBLIC-CONTRACT NARROWING RATIFIED by direct maintainer act: an id naming no carrier is no longer compiled into a component module. Two deferrals with owners recorded. Detail: evidence/BRT0/landing-record.md."
 
 [[block]]
@@ -462,6 +480,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Parse recovery diagnostics and stable identities. The prior BLOCKING conformance verdict is genuinely resolved, not re-labelled. Two process defects were corrected first: a conformance seat had been run by an off-roster tool on the FALSE premise that the rostered tool was down - a direct probe showed it healthy and the invocation faulty - and the committed parse-facet evidence recorded rows as passing with diagnostics the tree could not emit at that level, which is false evidence rather than stale. Re-running the rostered seat against the landed tree found the off-roster leads credible but incomplete AND new defects on each subsequent fix, requiring four further fix rounds each independently re-reviewed by a rostered seat plus a separate empirical agent that re-ran oracle-backed regenerations rather than trusting a round self-report. Round 5 caught a critical fail-closed regression that had reintroduced an already-fixed IDE-breaking bug class. Round 7 was caught ONLY by the full canonical gate - targeted crate suites across three prior rounds all missed a real regression in a pre-existing integration test one layer removed from the edits; the gate re-ran clean afterwards on all three surfaces and is the authoritative verification. Architecture and adversarial PASS carry forward unchanged from the original round-3 verdicts because rounds 4-7 never touched the structural-sealing redesign those mandates evaluated. Evidence regeneration confirmed byte-identical. Two items dispositioned as pre-existing and out of scope: a trybuild fixture failing identically at base and tip with zero diff in range, and a narrow CSS diagnostic-code fidelity gap (CSS work suspended program-wide). Detail: evidence/B2/landing-record.md."
 
 [[block]]
@@ -483,6 +502,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Canonical typed compile request. Identity and all three digests independently verified. Rebased onto the MCP-launcher fork-bomb fixes that landed mid-session, so its gate covered them. Substantive work: the canonical request exists and routes; CompileTarget is session-owned; the lossy audit target tag is replaced by a product-set representation with its committed TS binding regenerated in the same candidate; FC-OPTIONS-002 closed with cited evidence; FC-SVELTE-001 deferred with its ruling reference. ALL THREE VERDICTS ARE RE-ATTESTED, NOT INHERITED: the track originally proposed PASS on an implicit close after three fix rounds that no seat had re-verified, and that was refused - the ledger held NOT_PROVEN until a bounded fix-delta re-attestation ran all three mandates concurrently on this exact candidate. Conformance verified the five fix claims at file and line, and separately flagged a future-proofing comment that claims more than the compiler guarantees without reopening the debt row. Architecture confirmed the Svelte refusal STRUCTURALLY - the two unsupported options are absent from the request type entirely, so a constructed request cannot carry them - and recorded four out-of-scope residuals rather than inflating or hiding them. Adversarial EXECUTED rather than read: two plant/RED/revert/GREEN cycles with proven-unique plants (removing deny_unknown_fields, and deleting the capability-cell gate tuples) each producing a genuine named assertion failure and a clean revert, plus a third reachability probe that returned zero reachability and correctly reported that as confirming the debt row own disclosed caveat rather than as a defect. Worktrees left clean with no plants remaining."
 
 [[block]]
@@ -504,6 +524,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "Fragment-based assembly, atomic publication and typed all-or-nothing refusal for Vue main-module compilation. Identity independently verified: linear fast-forward 664cab091 to 6a14dbe5f with zero merges, candidate equals accepted so no landing-equivalence proof is owed, and all three digests recomputed against their committed artifacts. Substantive work: verter_compiler assembly gains a typed Fragment / ValidatedFragment / SourceUnit / ProductPlan / compose / publish surface whose composer accepts only validated fragment references, and the live Vue main path was actually cut over to it rather than left dual-path, after a codex ruling refused the implementer's first attempt to defer the cutover as BV1 territory. The former session-private MapComposer, ModuleWriter and FragmentWrite are deleted. Four real production bugs were found and fixed: a render export binding decided by text-scanning generated code, a source-map desync on virtual-file import injection, a CodeTransform pointer-identity bug producing a double-export module, and a separator-less splice that could emit invalid JavaScript. Adversarial review caught and forced removal of a newly-added name-keyed source-tree scanner test, which the landed-scanner bar forbids. Verified independently by the orchestrator: no stubs, no empty test bodies and no always-true assertions in the candidate diff; the three named gate failures are genuinely pre-existing, with external_template_ide_compile_contains_selected_bytes corroborated by B3's own landing record and store_view_build_wall_cost_is_flat_across_host_sizes confirmed as a wall-clock ratio assertion last touched long before this program. Two residuals recorded rather than hidden: the V19 conformance vector is filtered out of one divergence assertion with no forcing function that would fail once the owed spec amendment lands, and a doc comment in assembly/compose.rs still names the three deleted private types. Debt FC-B4-001 and FC-B4-003 remain open with named resolution gates; FC-B4-002 is resolved by this candidate."
 
 [[block]]
@@ -525,6 +546,7 @@ conformance_review = "PASS"
 architecture_review = "PASS"
 adversarial_review = "PASS"
 maintainer_decision = "ACCEPTED"
+enabling_amendment = ""
 notes = "LANDED AND FULLY REVIEWED, BUT NOT ACCEPTED - ITS ENABLING AMENDMENT IS UNRATIFIED. AMD-005 is marked PROPOSED - NOT RATIFIED with no execution authority, and this row's own prior note said the block was not dispatchable before ratification. The program orchestrator unlocked and dispatched it on DAG predecessor satisfaction alone without reading that note; the validator does not gate on amendment ratification, so nothing caught it. The work is real and is left landed rather than reverted, but acceptance is the maintainer's, contingent on ratifying AMD-005 or ruling the block authorised. Identity independently verified: linear fast-forward ff2e0217e to 913d42ce3, zero merges, candidate equals accepted, all three digests recomputed against their committed artifacts. Substance: the Vapor/VDOM conformance backlog is closed against the locked rc.3 oracle, having first been repinned off the stale rc.1 domain that was masking real divergence. Two genuine runtime bugs found and fixed rather than papered over: a silently-dropped slot prop binding, and reactive text updating the wrong DOM node. A ratified BV0-to-BV1 debt row closed for real by un-ignoring its pinned-runtime regression test, and a scope-ordinal bug in the conformance comparator itself fixed - it had been producing false positives, so the oracle was lying in both directions. Orchestrator-verified on the candidate diff: zero stubs, zero newly ignored tests, exactly one un-ignore and it is the genuine debt closure; verter_compiler tests rose 6165 to 6193 with none removed or weakened. All three mandates PASS, but conformance returned BLOCKING on five findings in round one and passed only on a targeted-delta re-review; the implementer fixed two beyond the review's ask, one of which proved to be real data loss. Recorded rather than buried: the conformance seat could not execute a single test command in either pass because its read-only sandbox denied the cargo build lock, so its five residual not-independently-evidenced findings are a limit of that seat, not evidence of a defect. A conformance reviewer that cannot run tests is reviewing by reading alone. AUTHORITY RESOLVED 2026-08-20 by narrow maintainer ruling: BV1 and BS1 are authorised; AMD-005 itself remains PROPOSED and is NOT ratified, so it may not be cited as authority for anything else. The maintainer chose the narrow ruling over full ratification. This block's authority now derives from that ruling, not from AMD-005, so enabling_amendment stays empty. The landing stands unreverted; the orchestrator's dispatch-before-authority error is recorded above rather than erased."
 
 [[block]]
@@ -546,6 +568,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Authorised 2026-08-20 by narrow maintainer ruling alongside BV1; AMD-005 itself remains PROPOSED and NOT ratified and is not this block's authority. Dispatched as the current block under the serial regime."
 
 [[block]]
@@ -567,6 +590,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -588,6 +612,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -609,6 +634,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -630,6 +656,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -651,6 +678,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -672,6 +700,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -693,6 +722,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -714,6 +744,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -735,6 +766,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -756,6 +788,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -777,6 +810,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -798,6 +832,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -819,6 +854,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -840,6 +876,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -861,6 +898,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -882,6 +920,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -903,6 +942,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -924,6 +964,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -945,6 +986,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -966,6 +1008,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -987,6 +1030,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1008,6 +1052,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1029,6 +1074,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1050,6 +1096,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1071,6 +1118,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1092,6 +1140,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1113,6 +1162,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1134,6 +1184,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1155,6 +1206,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1176,6 +1228,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1197,6 +1250,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1218,6 +1272,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1239,6 +1294,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1260,6 +1316,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1281,6 +1338,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1302,6 +1360,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1323,6 +1382,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1344,6 +1404,7 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1365,4 +1426,5 @@ conformance_review = "PENDING"
 architecture_review = "PENDING"
 adversarial_review = "PENDING"
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""

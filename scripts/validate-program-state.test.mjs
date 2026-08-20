@@ -76,6 +76,33 @@ before(() => {
   git(["checkout", "-q", "main"], gitRoot);
   git(["branch", "-D", "scratch"], gitRoot);
 });
+
+// Amendment authority gate fixtures. The validator resolves
+// `<amendments-dir>/<AMD-ID>-*.md` relative to the DAG file's own directory
+// (mirroring the real repo, where docs/arch/refactor/rev11/amendments/ is a
+// sibling of docs/arch/refactor/rev11/program-dag.toml) — every DAG fixture
+// below is written via write() into `dir`, so one shared `dir/amendments/`
+// serves every test in this file.
+let amendmentsDir;
+function writeAmendmentFixtures() {
+  amendmentsDir = join(dir, "amendments");
+  mkdirSync(amendmentsDir, { recursive: true });
+  writeFileSync(
+    join(amendmentsDir, "AMD-900-not-ratified-fixture.md"),
+    "# AMD-900 — test fixture\n\n**Status:** PROPOSED — NOT RATIFIED. This candidate has no execution authority.\n",
+  );
+  writeFileSync(
+    join(amendmentsDir, "AMD-901-ratified-fixture.md"),
+    "# AMD-901 — test fixture\n\n**Status:** RATIFIED (see §1). Landed at cafebabe12.\n",
+  );
+  // Deliberately no **Status:** line at all — the unparseable case.
+  writeFileSync(
+    join(amendmentsDir, "AMD-902-no-status-fixture.md"),
+    "# AMD-902 — test fixture\n\nThis file never declares a Status field.\n",
+  );
+  // AMD-999 intentionally has no file at all — the not-found case.
+}
+before(writeAmendmentFixtures);
 after(() => {
   rmSync(dir, { recursive: true, force: true });
   rmSync(gitRoot, { recursive: true, force: true });
@@ -1514,4 +1541,172 @@ untracked_count = 0
   const r = run(dag, state, "template", notGitDir);
   assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
   assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+// -- Amendment authority gate (enabling_amendment) --
+//
+// The BV1 shape: a block introduced by a PROPOSED (not yet ratified) amendment
+// must not advance past LOCKED, and must not carry maintainer_decision =
+// ACCEPTED, until that amendment's own Status line is ratified.
+
+test("amendment authority gate: READY block with an unratified enabling_amendment is a violation (BV1 shape)", () => {
+  const dag = write("dag-amd-ready.toml", DAG);
+  const state = write(
+    "state-amd-ready.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "an unratified enabling_amendment must fail a begun block");
+  assert.match(
+    r.err,
+    /state block A1 has enabling_amendment AMD-900 but .*AMD-900-not-ratified-fixture\.md is not ratified \(Status: \*\*Status:\*\* PROPOSED — NOT RATIFIED\. This candidate has no execution authority\.\) — an unratified enabling amendment has no execution authority, so the block must not advance beyond LOCKED: status is READY/,
+  );
+});
+
+test("amendment authority gate: the same block at LOCKED with an unratified enabling_amendment passes", () => {
+  const dag = write("dag-amd-locked.toml", DAG);
+  const state = write(
+    "state-amd-locked.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `LOCKED must not be gated by enabling_amendment, got:\n${r.err}\n${r.out}`);
+});
+
+test("amendment authority gate: ACCEPTED block with an unratified enabling_amendment is a violation", () => {
+  const dag = write("dag-amd-accepted.toml", DAG);
+  const state = write(
+    "state-amd-accepted.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "ACCEPTED with an unratified enabling_amendment must fail");
+  assert.match(
+    r.err,
+    /state block A1 has enabling_amendment AMD-900 but .*AMD-900-not-ratified-fixture\.md is not ratified .* status is ACCEPTED, maintainer_decision is ACCEPTED/,
+  );
+});
+
+test("amendment authority gate: a ratified enabling_amendment imposes no restriction at READY or ACCEPTED", () => {
+  const dag = write("dag-amd-ratified.toml", DAG);
+  const stateReady = write(
+    "state-amd-ratified-ready.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "AMD-901" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const rReady = run(dag, stateReady, "live");
+  assert.equal(rReady.status, 0, `expected pass, got:\n${rReady.err}\n${rReady.out}`);
+
+  const stateAccepted = write(
+    "state-amd-ratified-accepted.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { enabling_amendment: "AMD-901" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const rAccepted = run(dag, stateAccepted, "live");
+  assert.equal(rAccepted.status, 0, `expected pass, got:\n${rAccepted.err}\n${rAccepted.out}`);
+});
+
+test("amendment authority gate: enabling_amendment naming a file that does not exist is a violation, even at LOCKED", () => {
+  const dag = write("dag-amd-missing.toml", DAG);
+  const state = write(
+    "state-amd-missing.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-999" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a nonexistent enabling_amendment file must fail closed, not guess");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-999" but expected exactly one file matching AMD-999-\*\.md under .*amendments, found 0/,
+  );
+});
+
+test("amendment authority gate: an unparseable Status line is a violation, not a silent pass, even at LOCKED", () => {
+  const dag = write("dag-amd-unparseable.toml", DAG);
+  const state = write(
+    "state-amd-unparseable.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-902" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "an unparseable Status line must fail closed, not pass silently");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-902" but amendment file .*AMD-902-no-status-fixture\.md has no \*\*Status:\*\* line — its ratification state cannot be parsed/,
+  );
+});
+
+test("amendment authority gate: an empty enabling_amendment is unaffected", () => {
+  const dag = write("dag-amd-empty.toml", DAG);
+  const state = write(
+    "state-amd-empty.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("amendment authority gate: an ambiguous enabling_amendment match (multiple files) is a violation", () => {
+  // Amendments dir is resolved relative to the DAG file's own directory, so
+  // this fixture gets its own directory (distinct from the shared `dir`) with
+  // the DAG living beside a fresh `amendments/` subdirectory.
+  const dupDir = join(dir, "amendments-dup");
+  const dupAmendmentsDir = join(dupDir, "amendments");
+  mkdirSync(dupAmendmentsDir, { recursive: true });
+  writeFileSync(join(dupAmendmentsDir, "AMD-950-one.md"), "**Status:** RATIFIED.\n");
+  writeFileSync(join(dupAmendmentsDir, "AMD-950-two.md"), "**Status:** RATIFIED.\n");
+  const dagPath = join(dupDir, "dag-amd-ambiguous.toml");
+  writeFileSync(dagPath, DAG);
+  const state = join(dupDir, "state-amd-ambiguous.toml");
+  writeFileSync(
+    state,
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-950" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dagPath, state, "live");
+  assert.notEqual(r.status, 0, "an ambiguous enabling_amendment match must fail closed, not guess");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-950" but expected exactly one file matching AMD-950-\*\.md under .*amendments, found 2/,
+  );
 });
