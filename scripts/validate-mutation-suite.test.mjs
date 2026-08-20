@@ -973,6 +973,197 @@ test("[PS] enabling_amendment is not ratified", () => {
 });
 
 // =====================================================================
+// PROGRAM-STATE — block authorization registry (--authority)
+// =====================================================================
+
+const BASE_TXT_SHA256 = createHash("sha256").update("base\n").digest("hex");
+const TIP_TXT_SHA256 = createHash("sha256").update("tip\n").digest("hex");
+
+function authDoc({ id, path = "base.txt", sha256 = BASE_TXT_SHA256 }) {
+  return `[[document]]\nid = "${id}"\npath = "${path}"\nsha256 = "${sha256}"\n`;
+}
+function authRecord({
+  block: blockId,
+  documents,
+  ratifiedBy = "maintainer",
+  ratifiedAt = "2026-08-20",
+  scope = "test authorization scope",
+}) {
+  const docsLine = `documents = [${documents.map((d) => `"${d}"`).join(", ")}]\n`;
+  const byLine = ratifiedBy === null ? "" : `ratified_by = "${ratifiedBy}"\n`;
+  const atLine = ratifiedAt === null ? "" : `ratified_at = "${ratifiedAt}"\n`;
+  const scopeLine = scope === null ? "" : `scope = "${scope}"\n`;
+  return `[[authorization]]\nblock = "${blockId}"\n${docsLine}${byLine}${atLine}${scopeLine}`;
+}
+function authorityText(parts) {
+  return `schema = 1\nrevision = 11\n\n${parts.join("\n")}`;
+}
+const VALID_AUTHORITY = authorityText([
+  authDoc({ id: "DOC-1" }),
+  authRecord({ block: "A0", documents: ["DOC-1"] }),
+]);
+
+test("[PS] undeclared --authority is the documented skip", () => {
+  const dag = write("dag-auth-skip.toml", DAG1);
+  const state = write("state-auth-skip.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass with no --authority given, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] a fully valid --authority registry passes", () => {
+  const dag = write("dag-auth-ok.toml", DAG1);
+  const state = write("state-auth-ok.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write("authority-ok.toml", VALID_AUTHORITY);
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] authority registry cannot be read", () => {
+  const dag = write("dag-auth1.toml", DAG1);
+  const state = write("state-auth1.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const r = runPS(dag, state, "live", ["--authority", join(dir, "nonexistent-authority.toml")]);
+  expectCheck(PS_FILE, "could not be read or parsed", r);
+});
+
+test("[PS] authority registry is unparseable TOML", () => {
+  const dag = write("dag-auth1b.toml", DAG1);
+  const state = write("state-auth1b.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write("authority-bad.toml", "schema = 1\n[[document\nbroken\n");
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "could not be read or parsed", r);
+});
+
+test("[PS] authority document has a malformed sha256", () => {
+  const dag = write("dag-auth2.toml", DAG1);
+  const state = write("state-auth2.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-badshape.toml",
+    authorityText([
+      authDoc({ id: "DOC-1", sha256: "not-a-digest" }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "has a [[document]] with a missing id/path or a malformed sha256", r);
+});
+
+test("[PS] authority registry declares a duplicate document id", () => {
+  const dag = write("dag-auth3.toml", DAG1);
+  const state = write("state-auth3.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-dupdoc.toml",
+    authorityText([
+      authDoc({ id: "DOC-1" }),
+      authDoc({ id: "DOC-1", path: "tip.txt", sha256: TIP_TXT_SHA256 }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "declares more than one [[document]] with id", r);
+});
+
+test("[PS] authority document path does not exist on disk", () => {
+  const dag = write("dag-auth4.toml", DAG1);
+  const state = write("state-auth4.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-missingfile.toml",
+    authorityText([
+      authDoc({ id: "DOC-1", path: "does-not-exist.txt", sha256: BASE_TXT_SHA256 }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "which does not exist on disk — authority is not bound to exact bytes", r);
+});
+
+test("[PS] authority document digest is stale", () => {
+  const dag = write("dag-auth5.toml", DAG1);
+  const state = write("state-auth5.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-stale.toml",
+    authorityText([
+      authDoc({ id: "DOC-1", path: "base.txt", sha256: TIP_TXT_SHA256 }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "does not match the current SHA-256 of", r);
+});
+
+test("[PS] authorization record has no string block id", () => {
+  const dag = write("dag-auth6.toml", DAG1);
+  const state = write("state-auth6.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-noblockid.toml",
+    authorityText([
+      authDoc({ id: "DOC-1" }),
+      `[[authorization]]\ndocuments = ["DOC-1"]\nratified_by = "maintainer"\nratified_at = "2026-08-20"\nscope = "x"\n`,
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "has an [[authorization]] record with no string block id", r);
+});
+
+test("[PS] authority registry declares a duplicate authorization for one block", () => {
+  const dag = write("dag-auth7.toml", DAG1);
+  const state = write("state-auth7.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-dupauth.toml",
+    authorityText([
+      authDoc({ id: "DOC-1" }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+      authRecord({ block: "A0", documents: ["DOC-1"] }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "declares more than one [[authorization]] record for block", r);
+});
+
+test("[PS] authorization is missing required metadata fields", () => {
+  const dag = write("dag-auth8.toml", DAG1);
+  const state = write("state-auth8.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-missingmeta.toml",
+    authorityText([
+      authDoc({ id: "DOC-1" }),
+      authRecord({ block: "A0", documents: ["DOC-1"], ratifiedBy: null }),
+    ]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "is missing required field(s):", r);
+});
+
+test("[PS] authorization names zero authority documents", () => {
+  const dag = write("dag-auth9.toml", DAG1);
+  const state = write("state-auth9.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-zerodoc.toml",
+    authorityText([authRecord({ block: "A0", documents: [] })]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "names zero authority documents", r);
+});
+
+test("[PS] authorization references an unknown document id", () => {
+  const dag = write("dag-auth10.toml", DAG1);
+  const state = write("state-auth10.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write(
+    "authority-unknowndoc.toml",
+    authorityText([authDoc({ id: "DOC-1" }), authRecord({ block: "A0", documents: ["DOC-DOES-NOT-EXIST"] })]),
+  );
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "references unknown document id", r);
+});
+
+test("[PS] a block past LOCKED has no authorization record", () => {
+  const dag = write("dag-auth11.toml", DAG1);
+  const state = write("state-auth11.toml", header({ current: "A0" }) + block("A0", "READY"));
+  const authority = write("authority-empty.toml", authorityText([]));
+  const r = runPS(dag, state, "live", ["--authority", authority]);
+  expectCheck(PS_FILE, "no [[authorization]] record for it", r);
+});
+
+// =====================================================================
 // PROGRAM-STATE — single IN_PROGRESS / current_block binding
 // =====================================================================
 

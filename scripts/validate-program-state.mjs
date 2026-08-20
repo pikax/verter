@@ -353,7 +353,7 @@ function verifyLiveGitIdentities(stateById, v) {
 
 function usageFail(msg) {
   process.stderr.write(
-    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live [--stack-window <stack-window.toml>]\n`,
+    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live [--stack-window <stack-window.toml>] [--authority <authority-registry.toml>]\n`,
   );
   process.exit(2);
 }
@@ -363,7 +363,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
     const value = argv[i + 1];
-    if (!["--dag", "--state", "--mode", "--stack-window"].includes(flag))
+    if (!["--dag", "--state", "--mode", "--stack-window", "--authority"].includes(flag))
       usageFail(`unknown argument: ${flag}`);
     if (value === undefined) usageFail(`missing value for ${flag}`);
     opts[flag.slice(2)] = value;
@@ -1228,6 +1228,138 @@ function main() {
           v(
             `state block ${id} evidence_digest ${b.evidence_digest} does not match the SHA-256 of ${artifact} (${actual})`,
           );
+        }
+      }
+    }
+
+    // -- Block authorization registry (docs/arch/refactor/rev11/rulings/
+    // ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md RULING 1 — replace prose
+    // `**Status:**` gates with digest-bound, ratified block-authorization
+    // records in a repository authority registry). Declared via
+    // --authority <path>, exactly like --stack-window: an undeclared
+    // registry is the documented skip — same shape as the undeclared
+    // evidence_root case above — because not every synthetic/template
+    // invocation models authorization; a real live-ledger validation is
+    // expected to always pass it. Once declared, enforcement is exhaustive
+    // and fails closed: an unreadable/unparseable registry, a document whose
+    // digest does not match its current bytes or whose path does not
+    // resolve, an authorization missing required fields or citing an unknown
+    // document, and — the core rule this replaces the old prose gate with —
+    // any block that has left LOCKED with no authorization record at all are
+    // all violations, never a silent skip.
+    const authorityPath = opts.authority;
+    if (typeof authorityPath === "string" && authorityPath !== "") {
+      let authorityDoc = null;
+      try {
+        authorityDoc = parseToml(readFileSync(authorityPath, "utf8"), authorityPath);
+      } catch (err) {
+        v(`authority registry ${authorityPath} could not be read or parsed: ${err.message}`);
+      }
+      if (authorityDoc !== null) {
+        // [[document]] — one row per digest-bound authority artifact (a
+        // charter, an enabling amendment, a binding ruling, ...), referenced
+        // by id from [[authorization]] records below so a shared document
+        // (e.g. one ruling backing two blocks) is declared once.
+        const docRecords = Array.isArray(authorityDoc.document) ? authorityDoc.document : [];
+        const docsById = new Map();
+        for (const doc of docRecords) {
+          if (
+            typeof doc.id !== "string" ||
+            doc.id === "" ||
+            typeof doc.path !== "string" ||
+            doc.path === "" ||
+            typeof doc.sha256 !== "string" ||
+            !DIGEST_RE.test(doc.sha256)
+          ) {
+            v(
+              `authority registry ${authorityPath} has a [[document]] with a missing id/path or a malformed sha256: ${JSON.stringify(doc)}`,
+            );
+            continue;
+          }
+          if (docsById.has(doc.id)) {
+            v(
+              `authority registry ${authorityPath} declares more than one [[document]] with id ${JSON.stringify(doc.id)}`,
+            );
+            continue;
+          }
+          docsById.set(doc.id, doc);
+        }
+        // Digest binding: authority is bound to exact bytes, not a path —
+        // a moved/rewritten document with a stale sha256 is a violation, not
+        // a silently-trusted reference.
+        for (const doc of docsById.values()) {
+          const docPath = resolvePath(process.cwd(), doc.path);
+          let bytes;
+          try {
+            bytes = readFileSync(docPath);
+          } catch {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} cites path ${doc.path} which does not exist on disk — authority is not bound to exact bytes`,
+            );
+            continue;
+          }
+          const actual = createHash("sha256").update(bytes).digest("hex");
+          if (actual !== doc.sha256) {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} sha256 ${doc.sha256} does not match the current SHA-256 of ${doc.path} (${actual}) — stale digest`,
+            );
+          }
+        }
+
+        // [[authorization]] — one row per block that has left LOCKED, citing
+        // the document ids that make up its authority closure plus who
+        // ratified it, when, and the scope it covers.
+        const authById = new Map();
+        const authRecords = Array.isArray(authorityDoc.authorization) ? authorityDoc.authorization : [];
+        for (const rec of authRecords) {
+          if (typeof rec.block !== "string" || rec.block === "") {
+            v(
+              `authority registry ${authorityPath} has an [[authorization]] record with no string block id: ${JSON.stringify(rec)}`,
+            );
+            continue;
+          }
+          if (authById.has(rec.block)) {
+            v(
+              `authority registry ${authorityPath} declares more than one [[authorization]] record for block ${JSON.stringify(rec.block)}`,
+            );
+          }
+          authById.set(rec.block, rec);
+          const missingMeta = [];
+          if (!(typeof rec.ratified_by === "string" && rec.ratified_by.trim() !== ""))
+            missingMeta.push("ratified_by");
+          if (!(typeof rec.ratified_at === "string" && rec.ratified_at.trim() !== ""))
+            missingMeta.push("ratified_at");
+          if (!(typeof rec.scope === "string" && rec.scope.trim() !== "")) missingMeta.push("scope");
+          if (missingMeta.length > 0) {
+            v(
+              `authority registry ${authorityPath} authorization for block ${rec.block} is missing required field(s): ${missingMeta.join(", ")}`,
+            );
+          }
+          const documents = Array.isArray(rec.documents) ? rec.documents : [];
+          if (documents.length === 0) {
+            v(
+              `authority registry ${authorityPath} authorization for block ${rec.block} names zero authority documents — an authorization must cite at least one digest-bound document`,
+            );
+          }
+          for (const docId of documents) {
+            if (typeof docId !== "string" || !docsById.has(docId)) {
+              v(
+                `authority registry ${authorityPath} authorization for block ${rec.block} references unknown document id ${JSON.stringify(docId)}`,
+              );
+            }
+          }
+        }
+
+        // The core rule: a block must not leave LOCKED without a
+        // machine-checkable authorization record (BEGUN_STATUSES mirrors the
+        // sequencing gate's own definition of "has begun" above).
+        for (const [id, b] of stateById) {
+          if (typeof b.status !== "string" || !BEGUN_STATUSES.has(b.status)) continue;
+          if (!authById.has(id)) {
+            v(
+              `state block ${id} is ${b.status} — past LOCKED — but authority registry ${authorityPath} has no [[authorization]] record for it: a block must not leave LOCKED without a digest-bound, ratified authorization record`,
+            );
+          }
         }
       }
     }
