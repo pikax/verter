@@ -240,6 +240,14 @@ const REVIEW_ENUM = new Set([
   "INVALIDATED",
 ]);
 const REVIEW_FIELDS = ["conformance_review", "architecture_review", "adversarial_review"];
+// Each review mandate's paired reviewed-candidate SHA field — see the ledger
+// header comment (templates/program-state.template.toml). Binds a PASS verdict
+// to the exact candidate it was issued against.
+const REVIEWED_SHA_FIELDS = {
+  conformance_review: "conformance_reviewed_sha",
+  architecture_review: "architecture_reviewed_sha",
+  adversarial_review: "adversarial_reviewed_sha",
+};
 
 // Begun statuses require every direct predecessor ACCEPTED. READY is begun:
 // a stackless READY with an unaccepted predecessor has begun illegally.
@@ -283,7 +291,9 @@ const DIGEST_RE = /^[0-9a-f]{64}$/; // lowercase SHA-256
 // carry no promise of naming real objects.
 //
 // One batched `git cat-file --batch-check` pass covers existence (every
-// well-formed sha) and tree-pairing (every well-formed tree field, resolved
+// well-formed sha — including conformance_reviewed_sha/architecture_reviewed_
+// sha/adversarial_reviewed_sha, so a fabricated reviewed-candidate identity
+// cannot pass) and tree-pairing (every well-formed tree field, resolved
 // via its paired sha's `^{tree}`) in a single shell-out, never one per field.
 // Reachability-from-tip is one `git rev-list <tip>` pass, checked in-memory
 // for every ACCEPTED block's accepted_sha. Only the base_sha-ancestor-of-
@@ -340,7 +350,16 @@ function verifyLiveGitIdentities(stateById, v) {
     return;
   }
 
-  const SHA_FIELDS = ["base_sha", "candidate_sha", "accepted_sha"];
+  // Reviewed-candidate SHAs join the SAME existence batch (check 1 below) —
+  // no second git shell-out path. They are NOT tree-paired and NOT subject to
+  // the ACCEPTED-only reachability/ancestry checks (3 & 4): a reviewed SHA is
+  // evidence a review was issued against a real commit, not a landing claim.
+  const SHA_FIELDS = [
+    "base_sha",
+    "candidate_sha",
+    "accepted_sha",
+    ...Object.values(REVIEWED_SHA_FIELDS),
+  ];
   const TREE_PAIRS = [
     { treeField: "candidate_tree", shaField: "candidate_sha" },
     { treeField: "accepted_tree", shaField: "accepted_sha" },
@@ -680,6 +699,47 @@ function main() {
       if (field in b && !REVIEW_ENUM.has(b[field])) {
         v(
           `state block ${id} has ${field} ${JSON.stringify(b[field])} outside the declared review enum`,
+        );
+      }
+    }
+  }
+
+  // -- Review verdict identity binding (nothing previously bound a verdict to
+  // the exact candidate it was issued against — see templates/program-state.
+  // template.toml's conformance_reviewed_sha/architecture_reviewed_sha/
+  // adversarial_reviewed_sha comment). Structural, so it runs in BOTH modes:
+  // a PASS mandate must carry a well-formed reviewed SHA equal to the row's
+  // CURRENT candidate_sha (a fix round, a rebase, or a restack that advances
+  // candidate_sha without a fresh review leaves the old PASS stale); a
+  // non-PASS mandate must carry no reviewed SHA at all. Existence of the
+  // reviewed SHA as a real git commit object is checked separately, in live
+  // mode only, by verifyLiveGitIdentities below.
+  for (const [id, b] of stateById) {
+    for (const [mandateField, shaField] of Object.entries(REVIEWED_SHA_FIELDS)) {
+      if (!(mandateField in b)) continue;
+      const mandate = b[mandateField];
+      const reviewedSha = b[shaField];
+      if (mandate === "PASS") {
+        if (!(typeof reviewedSha === "string" && SHA_RE.test(reviewedSha))) {
+          v(
+            `state block ${id} has ${mandateField} = PASS but ${shaField} is not a non-empty 40-char lowercase git object id: ${JSON.stringify(reviewedSha ?? "")} — a PASS verdict must bind the exact candidate it was issued against`,
+          );
+          continue;
+        }
+        if (!(typeof b.candidate_sha === "string" && SHA_RE.test(b.candidate_sha))) {
+          v(
+            `state block ${id} has ${mandateField} = PASS with ${shaField} = ${reviewedSha} but candidate_sha is not a non-empty 40-char lowercase git object id — cannot verify the verdict is bound to the current candidate`,
+          );
+          continue;
+        }
+        if (reviewedSha !== b.candidate_sha) {
+          v(
+            `state block ${id} has ${mandateField} = PASS but ${shaField} = ${reviewedSha} does not equal candidate_sha = ${b.candidate_sha} — the verdict was issued against a different candidate and is stale`,
+          );
+        }
+      } else if (typeof reviewedSha === "string" && reviewedSha !== "") {
+        v(
+          `state block ${id} has ${mandateField} = ${JSON.stringify(mandate)} (not PASS) but ${shaField} = ${JSON.stringify(reviewedSha)} is non-empty — a non-PASS mandate must not carry a reviewed candidate SHA`,
         );
       }
     }

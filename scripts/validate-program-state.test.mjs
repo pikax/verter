@@ -190,8 +190,11 @@ function block(id, status, overrides = {}) {
     stack_snapshot_digest: "",
     stack_layer: 0,
     conformance_review: "PENDING",
+    conformance_reviewed_sha: "",
     architecture_review: "PENDING",
+    architecture_reviewed_sha: "",
     adversarial_review: "PENDING",
+    adversarial_reviewed_sha: "",
     maintainer_decision: "PENDING",
     notes: "",
     ...overrides,
@@ -223,8 +226,11 @@ function acceptedBlock(id, overrides = {}) {
     landing_equivalence_digest: DIGEST,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
+    conformance_reviewed_sha: SHA,
     architecture_review: "PASS",
+    architecture_reviewed_sha: SHA,
     adversarial_review: "PASS",
+    adversarial_reviewed_sha: SHA,
     maintainer_decision: "ACCEPTED",
     ...overrides,
   });
@@ -243,8 +249,11 @@ function checkpointBlock(id, overrides = {}) {
     candidate_tree: TREE,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
+    conformance_reviewed_sha: SHA,
     architecture_review: "PASS",
+    architecture_reviewed_sha: SHA,
     adversarial_review: "PASS",
+    adversarial_reviewed_sha: SHA,
     ...overrides,
   });
 }
@@ -792,7 +801,7 @@ test("mandate class gate: architecture_review NOT_REQUIRED on a subsystem-class 
     header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_SUB_DIGEST }) +
       acceptedBlock("A0") +
       "\n" +
-      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED" }) +
+      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED", architecture_reviewed_sha: "" }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -1709,4 +1718,203 @@ test("amendment authority gate: an ambiguous enabling_amendment match (multiple 
     r.err,
     /state block A1 declares enabling_amendment "AMD-950" but expected exactly one file matching AMD-950-\*\.md under .*amendments, found 2/,
   );
+});
+
+// Review verdict identity binding: conformance_reviewed_sha/architecture_
+// reviewed_sha/adversarial_reviewed_sha bind a PASS mandate to the exact
+// candidate_sha it was issued against — the stale-verdict defect this change
+// closes (a fix round/rebase/restack advances candidate_sha and the old PASS
+// silently carries over).
+
+test("review verdict binding: a PASS mandate whose reviewed SHA differs from candidate_sha is a stale verdict — REJECTED", () => {
+  const dag = write("dag-reviewed-stale.toml", DAG);
+  const state = write(
+    "state-reviewed-stale.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha stays SHA (acceptedBlock default); conformance_reviewed_sha
+      // is bound to SHA_BASE — a DIFFERENT, real commit — exactly the shape of a
+      // PASS verdict left over after candidate_sha advanced past a fix round.
+      acceptedBlock("A1", { conformance_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a reviewed SHA that differs from candidate_sha must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = PASS but conformance_reviewed_sha = ${SHA_BASE} does not equal candidate_sha = ${SHA} — the verdict was issued against a different candidate and is stale`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a PASS mandate with an EMPTY reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-empty.toml", DAG);
+  const state = write(
+    "state-reviewed-empty.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { adversarial_reviewed_sha: "" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a PASS mandate with an empty reviewed SHA must fail");
+  assert.match(
+    r.err,
+    /state block A1 has adversarial_review = PASS but adversarial_reviewed_sha is not a non-empty 40-char lowercase git object id: "" — a PASS verdict must bind the exact candidate it was issued against/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a PENDING mandate that wrongly carries a reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-pending-carries.toml", DAG);
+  const state = write(
+    "state-reviewed-pending-carries.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // A1 stays IN_PROGRESS (no gated-status obligation), conformance_review
+      // is PENDING (block() default) but conformance_reviewed_sha is
+      // wrongly bound anyway — a mandate that has not passed cannot have a
+      // reviewed candidate.
+      block("A1", "IN_PROGRESS", { conformance_reviewed_sha: SHA }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a non-PASS mandate carrying a reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = "PENDING" \\(not PASS\\) but conformance_reviewed_sha = "${SHA}" is non-empty — a non-PASS mandate must not carry a reviewed candidate SHA`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: NOT_REQUIRED wrongly carrying a reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-notreq-carries.toml", DAG_SUB);
+  const state = write(
+    "state-reviewed-notreq-carries.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_SUB_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // architecture_review NOT_REQUIRED is legal on this subsystem-class row,
+      // but binding a reviewed SHA to a mandate that was never run is not.
+      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED", architecture_reviewed_sha: SHA }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "NOT_REQUIRED carrying a reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has architecture_review = "NOT_REQUIRED" \\(not PASS\\) but architecture_reviewed_sha = "${SHA}" is non-empty — a non-PASS mandate must not carry a reviewed candidate SHA`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a reviewed SHA naming a non-existent commit is rejected (live git existence)", () => {
+  const dag = write("dag-reviewed-nonexistent.toml", DAG);
+  const state = write(
+    "state-reviewed-nonexistent.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha and conformance_reviewed_sha are EQUAL (so the structural
+      // stale-verdict check above is satisfied) but name a commit that was
+      // never committed — only the live git-existence batch can catch this.
+      acceptedBlock("A1", {
+        candidate_sha: SHA_NONEXISTENT,
+        conformance_reviewed_sha: SHA_NONEXISTENT,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a never-committed reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 field conformance_reviewed_sha = ${SHA_NONEXISTENT} does not resolve to an existing git commit object \\(git reports: missing\\)`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: all three mandates correctly bound to a NON-DEFAULT candidate_sha passes", () => {
+  const dag = write("dag-reviewed-ok.toml", DAG);
+  const state = write(
+    "state-reviewed-ok.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha/candidate_tree moved off the acceptedBlock() default (SHA)
+      // onto a DIFFERENT real commit (SHA_BASE); every reviewed SHA is bound to
+      // that same candidate — proving the check follows the live value, not a
+      // coincidental shared default. accepted_sha stays SHA (a real descendant
+      // of SHA_BASE), so base_sha/accepted_sha ancestry still holds and the
+      // already-bound landing_equivalence_digest covers the divergence.
+      acceptedBlock("A1", {
+        candidate_sha: SHA_BASE,
+        candidate_tree: TREE_BASE,
+        conformance_reviewed_sha: SHA_BASE,
+        architecture_reviewed_sha: SHA_BASE,
+        adversarial_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+test("review verdict binding: applies in template mode too (structural, not git-dependent)", () => {
+  const dag = write("dag-reviewed-template.toml", DAG);
+  const state = write(
+    "state-reviewed-template.toml",
+    `schema = 1
+revision = 11
+status = "TEMPLATE"
+authority_package_digest = "REQUIRED_PACKAGE_DIGEST"
+current_block = "A0"
+
+[repository]
+remote = "REQUIRED_REMOTE"
+branch = "REQUIRED_BRANCH"
+head_sha = "REQUIRED_FULL_SHA"
+head_tree = "REQUIRED_TREE_OID"
+dirty = false
+untracked_count = 0
+
+` +
+      block("A0", "READY") +
+      "\n" +
+      // A stale PASS/reviewed-SHA mismatch — the structural check is
+      // independent of --mode and of git; template mode must still reject it.
+      block("A1", "LOCKED", {
+        conformance_review: "PASS",
+        candidate_sha: SHA,
+        conformance_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "template");
+  assert.notEqual(r.status, 0, "a stale reviewed SHA must fail even in template mode");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = PASS but conformance_reviewed_sha = ${SHA_BASE} does not equal candidate_sha = ${SHA} — the verdict was issued against a different candidate and is stale`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
 });
