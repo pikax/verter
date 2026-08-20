@@ -84,6 +84,27 @@ BV2 owns, and is the sole owner of:
    complete, but it is never the acceptance oracle — the locked Vue RC.3 conformance pack and the matrix
    below are.
 
+9. **The declaration-output call/function fidelity gap.** A call-initialized value (`const count =
+   ref(0)`) publishes as `unknown` and a `function` declaration publishes as `(...): any` in TSC/
+   declaration/tooling output, by explicit policy at `crates/verter_compiler/src/tsc/script.rs:6003` and
+   `:6015`. This is a Vue declaration/tooling fidelity gap assigned to BV2 (a CM1/Findings-B/C blast-radius
+   item — CM1 owns the parallel component-meta *publication* defect for the same source shapes; this is
+   the separate TSC/declaration-output producer for the same shapes) because Vue declarations/tooling and
+   source-local macro output are BV-owned scope (`BV1.md:21`). BV2 corrects this producer so a call-
+   initialized value or `function` declaration exposed via `defineExpose` (or otherwise reachable from
+   declaration output) publishes its real inferred/signature type instead of the `unknown`/`any` fallback.
+10. **The framework-surface memberless-runtime-macro gap.** `resolve_framework_surface_with_audit`'s
+    executor rejects non-type-based macro forms, so a runtime-object `defineExpose({...})` or
+    `defineProps({...})` publishes with zero members on the semantic framework-surface API, at
+    `crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs:533`. Assigned to BV2, not C3
+    (C3 explicitly excludes runtime object syntax from its demand vocabulary, `C3.md:33`) and not a
+    general semantic-dispatcher gap (the dispatcher already has the necessary value capabilities — this is
+    the Vue adapter's own runtime-macro plan/normalize step declining to plan a demand for the runtime
+    form at all). BV2 extends the adapter's `plan_surfaces` step to plan a demand for runtime-object
+    `defineExpose`/`defineProps` members through the same shared five-mode dispatch every other macro form
+    uses, so the framework surface reports real members instead of an empty surface for a runtime-declared
+    macro.
+
 BV2 does **not** own: restoring the removed whole-block overwrite fallback; any `code_transform/` or
 `CodeGenOutput::apply_to` change (see Rulings applied §2); Vapor (audited, unaffected — Vapor omits
 disabled comments from its own private assembly and emits one whole-template segmented replacement with
@@ -135,6 +156,23 @@ the locked Vue `3.6.0-rc.3` conformance pack stays green; and the external bench
 cells complete (secondary evidence). Vue RC.4 output is **not** the normative oracle for any cell — the
 locked RC.3 pack is.
 
+## Blast-radius acceptance (CM1/Findings-B/C ruling, §Owned scope 9–10)
+
+The declaration-fidelity and framework-surface items are proven independently of the VDOM/SSR matrix
+above, across:
+
+| Axis | Values |
+|---|---|
+| Declaration source shape | call-initialized `const` (`ref(0)`, `computed(...)`) / plain `function` declaration / typed and untyped forms |
+| Declaration output route | TSC / PublicApi / declaration (`.d.ts`) output |
+| Framework-surface macro form | runtime-object `defineExpose({...})` / runtime-object `defineProps({...})` |
+| Framework-surface invocation | `resolve_framework_surface_with_audit` direct / via LSP framework-surface request |
+
+For every cell: the declaration/TSC output carries the real inferred or signature-derived type, never the
+`unknown`/`(...): any` fallback; the framework-surface API reports real members for a runtime-declared
+macro, never a memberless surface; no change to C3's demand vocabulary or the general semantic
+dispatcher's capabilities (both stay as-is per the ruling — the fix is the Vue adapter's own plan step).
+
 ## Required exits
 
 `FC-VUE-001`, applicable BV1-owned comment/class/hoisting/mapping cells, and the acceptance matrix above
@@ -152,6 +190,8 @@ all pass with no blocked case and no new known-divergence. Specifically:
 - Vapor and Svelte suites are unaffected and stay green under normal gates — no dedicated new Svelte
   regression suite is required, because no shared `code_transform`/`CodeGenOutput::apply_to` change is
   made.
+- Every cell of the blast-radius acceptance table above (§Owned scope 9–10) produces the required
+  outcomes; C3's demand vocabulary and the general semantic dispatcher are unchanged.
 
 ## Structural confinement
 
@@ -174,12 +214,14 @@ running a scanner or a double.
 ## Review
 
 Three independent mandates on one candidate SHA and tree (`governance.md` §1): conformance (charter, diff,
-the acceptance matrix, and whether the SSR sibling correction is genuinely backend-local, not a global
-reorder); architecture (whether `code_transform/`/`CodeGenOutput::apply_to` were left untouched as
-required, and whether the deleted disabled-comment branch is a genuine structural closure rather than a
-conditional bypass); adversarial/performance (mutation-tested regression coverage for both the VDOM and
-SSR fixes, and confirmation the repair introduces no new allocation or pass on the existing hot codegen
-path).
+the acceptance matrix, the blast-radius acceptance table, and whether the SSR sibling correction is
+genuinely backend-local, not a global reorder); architecture (whether `code_transform/`/
+`CodeGenOutput::apply_to` were left untouched as required, whether the deleted disabled-comment branch is
+a genuine structural closure rather than a conditional bypass, and whether the declaration/framework-
+surface fixes stayed within the Vue-owned producer without touching C3's demand vocabulary or the general
+semantic dispatcher); adversarial/performance (mutation-tested regression coverage for the VDOM, SSR,
+declaration-fidelity, and framework-surface fixes, and confirmation the repair introduces no new
+allocation or pass on the existing hot codegen path).
 
 ## Abort/rescope
 
@@ -212,3 +254,13 @@ prior debt rows referencing scratch-only transcripts).
 4. **Placement — decided.** BV2 is the sole owner, predecessors `BV1` and `BS1`, with `B5`'s DAG
    predecessor changed from `{BV1, BS1}` to `BV2` (`program-dag.toml`). BV1's accepted record is
    historical and is not rewritten. No accepted ADR changes; no final program outcome changes.
+5. **Blast-radius scope addition — decided (CM1/Findings-B/C ruling, Codex xhigh, 2026-08-20).** The
+   separate root-cause investigation into the beta.4 component-meta regressions (Findings B and C,
+   assigned to the new `CM1` block) surfaced two additional Vue-owned defects in the same source shapes:
+   the declaration-output call/function fidelity gap (`tsc/script.rs:6003,6015`) and the framework-surface
+   memberless-runtime-macro gap (`typeinfo/framework_surface/vue_exec/mod.rs:533`). The ruling assigns
+   both to BV2 — not CM1 (a component-meta *publication* defect, distinct from these two producers) and
+   not C3 (which explicitly excludes runtime object syntax from its demand vocabulary) — because Vue
+   declarations/tooling and source-local macro output are BV-owned scope. Added here as owned-scope items
+   9–10 and the blast-radius acceptance table above. This does not add a DAG edge between CM1 and BV2;
+   the two blocks remain independent siblings under `{BV1, BS1}`. No accepted ADR changes.
