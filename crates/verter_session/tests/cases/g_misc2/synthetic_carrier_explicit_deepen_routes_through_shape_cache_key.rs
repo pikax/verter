@@ -845,11 +845,7 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
 /// drop a crate or whole `src/` subtree from the scan vacuously.
 #[test]
 fn synthetic_deepen_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test() {
-    let scratch = std::env::temp_dir().join(format!(
-        "verter_synth_classify_{}_{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let scratch = verter_test_support::unique_temp_dir("verter_synth_classify");
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
     // A real directory classifies as a directory.

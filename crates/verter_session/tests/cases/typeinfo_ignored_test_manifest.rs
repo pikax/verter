@@ -3299,6 +3299,12 @@ fn registry_fidelity_for_row(
 ///    -- --ignored --nocapture emit_lifted_row_migrations`
 #[test]
 #[ignore = "audited lift-capture generator; run manually to (re)emit LIFTED_ROW_MIGRATIONS"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "documented sidecar/output contract path a human invokes manually via LIFTED_BODIES \
+              (see the doc comment above) — not a per-test scratch path, so a per-process-unique \
+              name would break the documented convention rather than fix a race"
+)]
 fn emit_lifted_row_migrations() {
     let sidecar = std::env::var("LIFTED_BODIES").unwrap_or_else(|_| {
         std::env::temp_dir()

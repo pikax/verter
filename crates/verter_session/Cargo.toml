@@ -265,6 +265,10 @@ oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
+# Shared per-process scratch-path minting (see crates/verter_test_support) —
+# the single owner for the `unique_temp_dir` pattern this crate's tests would
+# otherwise reinvent per call site.
+verter_test_support = { path = "../verter_test_support" }
 tempfile = "3.27"
 walkdir = "2.5"
 regex = "1.12"

@@ -557,11 +557,7 @@ fn no_carrier_verdict_db_self_test() {
 /// drop a crate or whole `src/` subtree from the scan vacuously.
 #[test]
 fn retired_symbol_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test() {
-    let scratch = std::env::temp_dir().join(format!(
-        "verter_no_carrier_classify_{}_{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let scratch = verter_test_support::unique_temp_dir("verter_no_carrier_classify");
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
     // A real directory classifies as a directory.

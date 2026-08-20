@@ -24,7 +24,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -515,16 +514,13 @@ pub(super) struct TempCandidate {
 
 impl TempCandidate {
     pub(super) fn write(cell: &str, body: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let slug: String = cell
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
             .collect();
-        let path = std::env::temp_dir().join(format!(
-            "verter-bf2-candidate-{}-{}-{slug}.json",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
+        let mut path =
+            verter_test_support::unique_temp_dir(&format!("verter-bf2-candidate-{slug}"));
+        path.as_mut_os_string().push(".json");
         std::fs::write(&path, body)
             .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
         Self { path }
@@ -801,10 +797,8 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
         );
     }
 
-    let evidence = std::env::temp_dir().join(format!(
-        "verter-bf2-seed-matrix-report-{}.json",
-        std::process::id()
-    ));
+    let mut evidence = verter_test_support::unique_temp_dir("verter-bf2-seed-matrix-report");
+    evidence.as_mut_os_string().push(".json");
     std::fs::write(
         &evidence,
         serde_json::to_string_pretty(&Value::Object(records)).expect("the record serializes"),

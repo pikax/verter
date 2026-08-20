@@ -82,14 +82,12 @@ fn harness_root() -> std::path::PathBuf {
 fn execute_through_official_vapor_runtime(module_code: &str) -> (bool, String) {
     // stdin is `Stdio::null()`, so the module is a temp file. Path must be
     // unique per CALL (same `--lib` binary, concurrent mounts): a PID-only
-    // name collides; first Drop deletes the sibling's file. Same as
-    // `TempCandidate::write`: PID plus a monotonic counter.
-    static CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let temp = std::env::temp_dir().join(format!(
-        "verter-nested-vfor-runtime-proof-{}-{}.vue.mjs",
-        std::process::id(),
-        CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    ));
+    // name collides; first Drop deletes the sibling's file.
+    // `verter_test_support::unique_temp_dir` mints a per-process,
+    // per-call path; the `.vue.mjs` suffix is appended onto its filename
+    // rather than passed as part of `name` so the mint stays name-shaped.
+    let mut temp = verter_test_support::unique_temp_dir("verter-nested-vfor-runtime-proof");
+    temp.as_mut_os_string().push(".vue.mjs");
     std::fs::write(&temp, module_code).expect("write module code to a temp file");
     let temp_path = temp.to_string_lossy().into_owned();
 
