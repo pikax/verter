@@ -28,7 +28,6 @@
 //! count moves when work does run.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
@@ -151,48 +150,42 @@ fn the_resolved_canonical_witness_moves_when_a_canonical_is_actually_resolved() 
     );
 }
 
-/// Wall-clock companion to the structural assertion: the build must not
-/// get measurably more expensive as the host grows. The eager builder was
-/// ~linear, so a 12x host span produced a ~12x build; the bound here is
-/// deliberately loose (4x) because it is a wall-clock measure — it fails a
-/// restored per-owner term without failing on scheduler noise.
+/// Deterministic companion to the structural assertion above: the build
+/// must not touch a SINGLE owner through its captured roots, at any host
+/// size. This used to be measured as a wall-clock ratio (a 12x host span
+/// must not produce a ~12x build), but `Instant`-based timing flakes under
+/// parallel/loaded test execution and correctness tests in this crate must
+/// be deterministic — wall-clock budgets belong in `verter_bench`.
+///
+/// `store_view_owner_visits` (`crate::store_view_roots`) is a THREAD-LOCAL
+/// counter that increments on every read through a view's captured roots
+/// while a store-view BUILD scope is active — the exact production build
+/// path (`HostStoreView::build` enters the scope itself), not a test-only
+/// variant. It is proven to have a live producer and to be scope-gated
+/// (counts build-time reads, not demand-time ones) by
+/// `store_view_marginal_admit_tests::the_owner_visit_counter_moves_only_inside_a_build_scope`.
+/// A restored per-owner term in the builder — even one that copies data
+/// without going through `memo_len_for_tests` — visits at least one owner
+/// per already-materialised file and moves this counter by N; a correct
+/// O(1) build moves it by exactly zero, at every host size.
 #[test]
-fn store_view_build_wall_cost_is_flat_across_host_sizes() {
-    /// Builds per measurement. The median of these is compared.
-    const SAMPLES: usize = 21;
-
-    let mut medians = Vec::new();
+fn store_view_build_touches_no_owner_at_any_host_size() {
     for n in HOST_SIZES {
         let host = host_with_n_materialized_files(n);
-        let mut samples: Vec<u128> = Vec::with_capacity(SAMPLES);
-        for _ in 0..SAMPLES {
-            host.bump_store_view_epoch();
-            let start = Instant::now();
-            let view = host.resolver_store_view_read().into_owned_view();
-            samples.push(start.elapsed().as_nanos());
-            // Keep the view alive across the timing window so the lease
-            // drop is not folded into the next sample.
-            drop(view);
-        }
-        samples.sort_unstable();
-        let median = samples[SAMPLES / 2];
-        println!("store-view build @ N={n}: median {median} ns");
-        medians.push((n, median));
+        host.bump_store_view_epoch();
+        crate::store_view_roots::reset_store_view_owner_visits();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let visits = crate::store_view_roots::store_view_owner_visits();
+        assert_eq!(
+            visits, 0,
+            "host size {n}: the build touched {visits} owner(s) through its \
+             captured roots. A build must be a fixed number of scalar reads \
+             and `Arc` clones — any owner visit means a per-owner term is \
+             back, and a build that does this at N={n} would do it at every \
+             host size the O(1) contract is measured across."
+        );
+        drop(view);
     }
-
-    let (smallest_n, smallest) = medians[0];
-    let (largest_n, largest) = medians[medians.len() - 1];
-    // A one-nanosecond floor keeps the ratio well-defined when the build is
-    // too cheap for the clock to resolve — which is itself the point.
-    let ratio = largest as f64 / smallest.max(1) as f64;
-    assert!(
-        ratio < 4.0,
-        "store-view build cost must not scale with host size: \
-         N={smallest_n} median {smallest} ns vs N={largest_n} median {largest} ns \
-         (ratio {ratio:.2}, host size ratio {:.1}x). A ratio tracking the host \
-         size ratio means a per-owner term is back.",
-        largest_n as f64 / smallest_n as f64
-    );
 }
 
 // ── 2. The captured roots answer for the view's own world ──

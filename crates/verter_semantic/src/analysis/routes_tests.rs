@@ -12,6 +12,15 @@ fn canonical_str(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// A per-PROCESS temp directory under `name`. Bare `std::env::temp_dir().join(name)`
+/// is a shared OS path with no per-process component: two concurrent invocations
+/// of this test suite on the same machine (e.g. two worktrees, or a retry racing
+/// a still-cleaning-up prior run) would `remove_dir_all` and rewrite the SAME
+/// directory into each other, producing spurious missing/wrong-content failures.
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+}
+
 // =============================================================================
 // Framework Detection Tests
 // =============================================================================
@@ -301,7 +310,7 @@ export function setup() { return {} }
 
 #[test]
 fn test_file_based_routes_with_temp_dir() {
-    let tmp = std::env::temp_dir().join("verter_test_file_routes");
+    let tmp = unique_temp_dir("verter_test_file_routes");
     let pages = tmp.join("pages");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&pages).unwrap();
@@ -327,7 +336,7 @@ fn test_file_based_routes_with_temp_dir() {
 
 #[test]
 fn test_file_based_dynamic_params() {
-    let tmp = std::env::temp_dir().join("verter_test_dynamic_params");
+    let tmp = unique_temp_dir("verter_test_dynamic_params");
     let pages = tmp.join("pages");
     let users = pages.join("users");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -343,7 +352,7 @@ fn test_file_based_dynamic_params() {
 
 #[test]
 fn test_file_based_catch_all() {
-    let tmp = std::env::temp_dir().join("verter_test_catch_all");
+    let tmp = unique_temp_dir("verter_test_catch_all");
     let pages = tmp.join("pages");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&pages).unwrap();
@@ -364,7 +373,7 @@ fn test_file_based_nonexistent_dir() {
 
 #[test]
 fn test_file_based_ignores_non_vue() {
-    let tmp = std::env::temp_dir().join("verter_test_non_vue");
+    let tmp = unique_temp_dir("verter_test_non_vue");
     let pages = tmp.join("pages");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&pages).unwrap();

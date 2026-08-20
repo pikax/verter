@@ -1,5 +1,14 @@
 use super::*;
 
+/// A per-PROCESS temp directory under `name`. Bare
+/// `std::env::temp_dir().join(name)` is a shared OS path with no
+/// per-process component: two concurrent invocations of this test suite on
+/// the same machine (e.g. two worktrees) would `remove_dir_all` and rewrite
+/// the SAME directory into each other, producing spurious failures.
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
+}
+
 // ---------------------------------------------------------------------------
 // Plaintext display/documentation split — the tsgo producer-side one-shot
 // normalization into the neutral protocol (shape pinned against
@@ -1150,7 +1159,7 @@ async fn test_tsgo_spawn_and_initialize() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_init");
+    let tmp = unique_temp_dir("verter_tsgo_test_init");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
@@ -1174,7 +1183,7 @@ async fn test_tsgo_hover_on_ts_file() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_hover");
+    let tmp = unique_temp_dir("verter_tsgo_test_hover");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
@@ -1224,7 +1233,7 @@ async fn test_tsgo_survives_workspace_configuration() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_ws_config");
+    let tmp = unique_temp_dir("verter_tsgo_test_ws_config");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
@@ -3726,7 +3735,7 @@ async fn e2e_concurrent_requests_complete_without_deadlock() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_concurrent");
+    let tmp = unique_temp_dir("verter_tsgo_test_concurrent");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
@@ -5077,7 +5086,7 @@ async fn tsgo_semantic_tokens_arrive_in_verter_legend_space() {
         .await
         .expect("the pinned tsgo engine is required for the live semantic-token discriminator");
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_semtok_legend");
+    let tmp = unique_temp_dir("verter_tsgo_test_semtok_legend");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
@@ -5170,7 +5179,7 @@ async fn tsgo_inlay_hints_appear_for_inferred_types() {
         .await
         .expect("the pinned tsgo engine is required for the live inlay-hint discriminator");
 
-    let tmp = std::env::temp_dir().join("verter_tsgo_test_inlay_hints");
+    let tmp = unique_temp_dir("verter_tsgo_test_inlay_hints");
     let _ = std::fs::remove_dir_all(&tmp);
     create_test_project(&tmp).unwrap();
 
