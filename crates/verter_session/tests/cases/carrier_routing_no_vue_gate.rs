@@ -469,7 +469,8 @@ mod tests {
     }
 }
 ";
-    let tmp = std::env::temp_dir().join("session_guard_cfgtest_selftest.rs");
+    let mut tmp = verter_test_support::unique_temp_dir("session_guard_cfgtest_selftest");
+    tmp.as_mut_os_string().push(".rs");
     fs::write(&tmp, src).unwrap();
     let v = file_violations(&tmp);
     let _ = fs::remove_file(&tmp);

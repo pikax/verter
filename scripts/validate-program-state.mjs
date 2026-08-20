@@ -13,7 +13,15 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve as resolvePath,
+  sep,
+} from "node:path";
 import process from "node:process";
 import { TomlError, parseToml } from "./lib/rev11-toml.mjs";
 import { evaluateCheckpointException } from "./lib/stack-window-lib.mjs";
@@ -153,6 +161,54 @@ const STACK_EXCEPTION_STATUSES = new Set(["READY", "IN_PROGRESS", "REVIEW"]);
 const SHA_RE = /^[0-9a-f]{40}$/; // full lowercase git object id
 const DIGEST_RE = /^[0-9a-f]{64}$/; // lowercase SHA-256
 
+// Shared "**Status:**" prose-paragraph classification. This is the ONE place
+// a document's own text is read for its ratification state — used by the
+// enabling_amendment gate below (amendments/AMD-*.md) and by the authority-
+// registry's AMENDMENT/RULING document check further down. Do not duplicate
+// this parsing; route every ratification-from-text read through here.
+//
+// The Status field is a markdown paragraph: the declaring line through the
+// next blank line (AMD-009's "**RATIFIED ...**" and AMD-001's multi-line
+// "NOT part of ..." wrap onto following lines). "NOT RATIFIED" (AMD-005)
+// wins over any other "ratified" mention in the same paragraph; bare
+// "ratified"/"maintainer-ratified" (AMD-002/003/004, AMD-006/007/008/009/010)
+// is ratified; anything else — including AMD-001's "Registered amendment ...
+// NOT part of the verbatim-reconstructed authority set", which never uses
+// the ratified verb at all — defaults to not-ratified. Returns
+// `present: false` when no **Status:** line exists at all; callers decide
+// what an absent line means for their document kind (an amendment without
+// one is unparseable; a maintainer ruling without one is not, since only
+// charters/amendments carry that convention — ARCH-RULING-ORCHESTRATION-
+// AUTHORITY-MODEL.md's own inventory of what the gate parses).
+function parseStatusParagraph(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => l.startsWith("**Status:**"));
+  if (start === -1) return { present: false };
+  const paragraph = [];
+  for (let i = start; i < lines.length; i++) {
+    paragraph.push(lines[i]);
+    if (lines[i].trim() === "") break;
+  }
+  const statusText = paragraph.join(" ").trim();
+  let ratified;
+  if (/\bnot\s+ratified\b/i.test(statusText)) ratified = false;
+  else if (/\bratified\b/i.test(statusText)) ratified = true;
+  else ratified = false;
+  // Report only the paragraph's first line in violation text — readable,
+  // and every existing document's ratification verdict is already decided
+  // by its first line; classification above still sees the full paragraph.
+  return { present: true, ratified, statusText: lines[start].trim() };
+}
+
+// True when `target` (an absolute path) resolves to `dir` itself or
+// somewhere strictly beneath it. Used to enforce that an authority-registry
+// document's declared `kind` matches where the file actually lives —
+// structural placement, not text sniffing.
+function isPathUnder(dir, target) {
+  const rel = relative(dir, target);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 // Live-mode git identity verification.
 //
 // base_sha/candidate_sha/accepted_sha/candidate_tree/accepted_tree are shape-
@@ -209,7 +265,10 @@ function batchCatFileCheck(cwd, specs) {
     // "missing"/"ambiguous" rather than a resolved oid+type — a 40-hex input
     // spec (a bare sha, as opposed to a `<sha>^{tree}` derivation) would
     // otherwise false-match the regex above as if it were a resolved commit.
-    map.set(specs[i], m && m[2] !== "missing" && m[2] !== "ambiguous" ? { oid: m[1], type: m[2] } : null);
+    map.set(
+      specs[i],
+      m && m[2] !== "missing" && m[2] !== "ambiguous" ? { oid: m[1], type: m[2] } : null,
+    );
   }
   return map;
 }
@@ -353,25 +412,38 @@ function verifyLiveGitIdentities(stateById, v) {
 
 function usageFail(msg) {
   process.stderr.write(
-    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live [--stack-window <stack-window.toml>]\n`,
+    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live [--stack-window <stack-window.toml>] [--authority <authority-registry.toml> | --no-authority]\n` +
+      `In live mode the block-authorization registry is MANDATORY by default, resolved next to --state as authority-registry.toml unless --authority names a different path. --no-authority is the only opt-out, and it must be named explicitly.\n`,
   );
   process.exit(2);
 }
 
+const VALUE_FLAGS = ["--dag", "--state", "--mode", "--stack-window", "--authority"];
+const BOOLEAN_FLAGS = ["--no-authority"];
+
 function parseArgs(argv) {
   const opts = Object.create(null);
-  for (let i = 0; i < argv.length; i += 2) {
+  let i = 0;
+  while (i < argv.length) {
     const flag = argv[i];
+    if (BOOLEAN_FLAGS.includes(flag)) {
+      opts[flag.slice(2)] = true; // e.g. opts["no-authority"]
+      i += 1;
+      continue;
+    }
+    if (!VALUE_FLAGS.includes(flag)) usageFail(`unknown argument: ${flag}`);
     const value = argv[i + 1];
-    if (!["--dag", "--state", "--mode", "--stack-window"].includes(flag))
-      usageFail(`unknown argument: ${flag}`);
     if (value === undefined) usageFail(`missing value for ${flag}`);
     opts[flag.slice(2)] = value;
+    i += 2;
   }
   if (!opts.dag || !opts.state || !opts.mode)
     usageFail("--dag, --state, and --mode are all required");
   if (opts.mode !== "template" && opts.mode !== "live") {
     usageFail(`--mode must be "template" or "live", got ${JSON.stringify(opts.mode)}`);
+  }
+  if (typeof opts.authority === "string" && opts["no-authority"] === true) {
+    usageFail("--authority and --no-authority are mutually exclusive");
   }
   return opts;
 }
@@ -982,37 +1054,13 @@ function main() {
       } catch (err) {
         return record({ error: `amendment file ${filePath} could not be read: ${err.message}` });
       }
-      const lines = text.split(/\r?\n/);
-      const start = lines.findIndex((l) => l.startsWith("**Status:**"));
-      if (start === -1) {
+      const parsed = parseStatusParagraph(text);
+      if (!parsed.present) {
         return record({
           error: `amendment file ${filePath} has no **Status:** line — its ratification state cannot be parsed`,
         });
       }
-      // The Status field is a markdown paragraph: the declaring line through the
-      // next blank line (AMD-009's "**RATIFIED ...**" and AMD-001's multi-line
-      // "NOT part of ..." wrap onto following lines).
-      const paragraph = [];
-      for (let i = start; i < lines.length; i++) {
-        paragraph.push(lines[i]);
-        if (lines[i].trim() === "") break;
-      }
-      const statusText = paragraph.join(" ").trim();
-      // "NOT RATIFIED" (AMD-005) wins over any other "ratified" mention in the
-      // same paragraph; bare "ratified"/"maintainer-ratified" (AMD-002/003/004,
-      // AMD-006/007/008/009/010) is ratified; anything else — including
-      // AMD-001's "Registered amendment ... NOT part of the verbatim-
-      // reconstructed authority set", which never uses the ratified verb at
-      // all — defaults to not-ratified. This is a classification, not a parse
-      // failure: only a missing Status line above is unparseable.
-      let ratified;
-      if (/\bnot\s+ratified\b/i.test(statusText)) ratified = false;
-      else if (/\bratified\b/i.test(statusText)) ratified = true;
-      else ratified = false;
-      // Report only the paragraph's first line in violation text — readable, and
-      // every existing amendment's ratification verdict is already decided by
-      // its first line; classification above still sees the full paragraph.
-      return record({ path: filePath, ratified, statusText: lines[start].trim() });
+      return record({ path: filePath, ratified: parsed.ratified, statusText: parsed.statusText });
     };
 
     for (const [id, b] of stateById) {
@@ -1177,9 +1225,7 @@ function main() {
       const resolvedRoots = [];
       for (const { raw, field } of declaredRoots) {
         if (typeof raw !== "string" || raw === "") {
-          v(
-            `live state orchestration.${field} is not a non-empty string: ${JSON.stringify(raw)}`,
-          );
+          v(`live state orchestration.${field} is not a non-empty string: ${JSON.stringify(raw)}`);
           continue;
         }
         const resolved = resolveExistingDir(raw, opts.state);
@@ -1228,6 +1274,215 @@ function main() {
           v(
             `state block ${id} evidence_digest ${b.evidence_digest} does not match the SHA-256 of ${artifact} (${actual})`,
           );
+        }
+      }
+    }
+
+    // -- Block authorization registry (docs/arch/refactor/rev11/rulings/
+    // ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md RULING 1 — replace prose
+    // `**Status:**` gates with digest-bound, ratified block-authorization
+    // records in a repository authority registry). MANDATORY in live mode —
+    // an enforcement a caller must remember to opt into is the same prose
+    // gate this replaces (nothing passed --authority; the check was dead).
+    // Resolution: --authority <path> names an explicit registry; otherwise
+    // the default is authority-registry.toml next to --state (the real
+    // ledger's own layout); --no-authority is the sole, explicit, named
+    // opt-out (parseArgs rejects combining it with --authority). Once a
+    // registry is in force, enforcement is exhaustive and fails closed: an
+    // unreadable/unparseable registry, a document with a malformed shape,
+    // unknown/mismatched kind, or wrong-directory placement, a digest that
+    // does not match current bytes or a path that does not resolve, an
+    // AMENDMENT/RULING document whose own **Status:** paragraph is not
+    // ratified, an authorization missing required fields or citing an
+    // unknown document, and — the core rule this replaces the old prose gate
+    // with — any block that has left LOCKED with no authorization record at
+    // all are all violations, never a silent skip.
+    const authorityPath =
+      opts["no-authority"] === true
+        ? null
+        : typeof opts.authority === "string" && opts.authority !== ""
+          ? opts.authority
+          : join(dirname(opts.state), "authority-registry.toml");
+    if (authorityPath !== null) {
+      let authorityDoc = null;
+      try {
+        authorityDoc = parseToml(readFileSync(authorityPath, "utf8"), authorityPath);
+      } catch (err) {
+        v(`authority registry ${authorityPath} could not be read or parsed: ${err.message}`);
+      }
+      if (authorityDoc !== null) {
+        // Kind-to-directory: a document's declared `kind` must match where
+        // it actually lives, resolved the SAME way (relative to cwd) doc.path
+        // is resolved below — otherwise a `kind` field is just an unchecked
+        // label an authorization row can set to whatever passes review
+        // (proven bypass: cite an arbitrary correctly-digested file and tag
+        // it CHARTER, which carries no ratification-text check).
+        const VALID_DOCUMENT_KINDS = new Set(["CHARTER", "AMENDMENT", "RULING"]);
+        const rev11Dir = resolvePath(process.cwd(), dirname(opts.dag));
+        const KIND_DIR = {
+          CHARTER: join(rev11Dir, "charters"),
+          AMENDMENT: join(rev11Dir, "amendments"),
+          RULING: join(rev11Dir, "rulings"),
+        };
+
+        // [[document]] — one row per digest-bound authority artifact (a
+        // charter, an enabling amendment, a binding ruling, ...), referenced
+        // by id from [[authorization]] records below so a shared document
+        // (e.g. one ruling backing two blocks) is declared once.
+        const docRecords = Array.isArray(authorityDoc.document) ? authorityDoc.document : [];
+        const docsById = new Map();
+        for (const doc of docRecords) {
+          if (
+            typeof doc.id !== "string" ||
+            doc.id === "" ||
+            typeof doc.path !== "string" ||
+            doc.path === "" ||
+            typeof doc.sha256 !== "string" ||
+            !DIGEST_RE.test(doc.sha256)
+          ) {
+            v(
+              `authority registry ${authorityPath} has a [[document]] with a missing id/path or a malformed sha256: ${JSON.stringify(doc)}`,
+            );
+            continue;
+          }
+          if (typeof doc.kind !== "string" || !VALID_DOCUMENT_KINDS.has(doc.kind)) {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} has kind ${JSON.stringify(doc.kind ?? "")}, not one of CHARTER/AMENDMENT/RULING`,
+            );
+            continue;
+          }
+          const resolvedDocPath = resolvePath(process.cwd(), doc.path);
+          if (!isPathUnder(KIND_DIR[doc.kind], resolvedDocPath)) {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} declares kind ${doc.kind} but path ${doc.path} does not resolve under ${KIND_DIR[doc.kind]} — a document's kind must match where it actually lives`,
+            );
+            continue;
+          }
+          if (docsById.has(doc.id)) {
+            v(
+              `authority registry ${authorityPath} declares more than one [[document]] with id ${JSON.stringify(doc.id)}`,
+            );
+            continue;
+          }
+          docsById.set(doc.id, doc);
+        }
+        // Digest binding: authority is bound to exact bytes, not a path —
+        // a moved/rewritten document with a stale sha256 is a violation, not
+        // a silently-trusted reference. A digest match only proves the
+        // recorded bytes are the ones on disk; it does NOT prove those bytes
+        // ratify anything, so AMENDMENT/RULING documents are additionally
+        // classified by their own **Status:** paragraph (parseStatusParagraph
+        // — the SAME parser the enabling_amendment gate above uses, never a
+        // second one). AMENDMENT documents follow the documented convention
+        // (ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md: "amendments/AMD-*.md
+        // — a **Status:** PROSE line; the new gate parses it") strictly: no
+        // Status line is unparseable, same as the enabling_amendment gate.
+        // RULING documents are not held to that convention (the same
+        // inventory names it for charters/amendments only) — a maintainer
+        // ruling's own text and placement under rulings/ is the ratification
+        // act, so an absent Status line is not a violation; but when a
+        // Status line IS present and says DRAFT/NOT RATIFIED (the convention
+        // already used by draft architecture-consult rulings, e.g.
+        // ARCH-RULING-C1-FOUR-FORKS.md / ARCH-RULING-D1-SIX-FORKS.md), that
+        // still fails closed. CHARTER documents are never classified this
+        // way: a charter's own Status vocabulary (e.g. "PREPARED") never
+        // uses ratified/not-ratified wording — charters rest on the base
+        // program authority (see this registry's own header comment).
+        for (const doc of docsById.values()) {
+          const docPath = resolvePath(process.cwd(), doc.path);
+          let bytes;
+          try {
+            bytes = readFileSync(docPath);
+          } catch {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} cites path ${doc.path} which does not exist on disk — authority is not bound to exact bytes`,
+            );
+            continue;
+          }
+          const actual = createHash("sha256").update(bytes).digest("hex");
+          if (actual !== doc.sha256) {
+            v(
+              `authority registry ${authorityPath} document ${doc.id} sha256 ${doc.sha256} does not match the current SHA-256 of ${doc.path} (${actual}) — stale digest`,
+            );
+          }
+          if (doc.kind === "AMENDMENT") {
+            const parsed = parseStatusParagraph(bytes.toString("utf8"));
+            if (!parsed.present) {
+              v(
+                `authority registry ${authorityPath} document ${doc.id} (AMENDMENT) ${doc.path} has no **Status:** line — its ratification state cannot be parsed`,
+              );
+            } else if (!parsed.ratified) {
+              v(
+                `authority registry ${authorityPath} document ${doc.id} (AMENDMENT) ${doc.path} is not ratified (Status: ${parsed.statusText}) — an unratified amendment grants no authority`,
+              );
+            }
+          } else if (doc.kind === "RULING") {
+            const parsed = parseStatusParagraph(bytes.toString("utf8"));
+            if (parsed.present && !parsed.ratified) {
+              v(
+                `authority registry ${authorityPath} document ${doc.id} (RULING) ${doc.path} declares Status: ${parsed.statusText} — not ratified, grants no authority`,
+              );
+            }
+          }
+        }
+
+        // [[authorization]] — one row per block that has left LOCKED, citing
+        // the document ids that make up its authority closure plus who
+        // ratified it, when, and the scope it covers.
+        const authById = new Map();
+        const authRecords = Array.isArray(authorityDoc.authorization)
+          ? authorityDoc.authorization
+          : [];
+        for (const rec of authRecords) {
+          if (typeof rec.block !== "string" || rec.block === "") {
+            v(
+              `authority registry ${authorityPath} has an [[authorization]] record with no string block id: ${JSON.stringify(rec)}`,
+            );
+            continue;
+          }
+          if (authById.has(rec.block)) {
+            v(
+              `authority registry ${authorityPath} declares more than one [[authorization]] record for block ${JSON.stringify(rec.block)}`,
+            );
+          }
+          authById.set(rec.block, rec);
+          const missingMeta = [];
+          if (!(typeof rec.ratified_by === "string" && rec.ratified_by.trim() !== ""))
+            missingMeta.push("ratified_by");
+          if (!(typeof rec.ratified_at === "string" && rec.ratified_at.trim() !== ""))
+            missingMeta.push("ratified_at");
+          if (!(typeof rec.scope === "string" && rec.scope.trim() !== ""))
+            missingMeta.push("scope");
+          if (missingMeta.length > 0) {
+            v(
+              `authority registry ${authorityPath} authorization for block ${rec.block} is missing required field(s): ${missingMeta.join(", ")}`,
+            );
+          }
+          const documents = Array.isArray(rec.documents) ? rec.documents : [];
+          if (documents.length === 0) {
+            v(
+              `authority registry ${authorityPath} authorization for block ${rec.block} names zero authority documents — an authorization must cite at least one digest-bound document`,
+            );
+          }
+          for (const docId of documents) {
+            if (typeof docId !== "string" || !docsById.has(docId)) {
+              v(
+                `authority registry ${authorityPath} authorization for block ${rec.block} references unknown document id ${JSON.stringify(docId)}`,
+              );
+            }
+          }
+        }
+
+        // The core rule: a block must not leave LOCKED without a
+        // machine-checkable authorization record (BEGUN_STATUSES mirrors the
+        // sequencing gate's own definition of "has begun" above).
+        for (const [id, b] of stateById) {
+          if (typeof b.status !== "string" || !BEGUN_STATUSES.has(b.status)) continue;
+          if (!authById.has(id)) {
+            v(
+              `state block ${id} is ${b.status} — past LOCKED — but authority registry ${authorityPath} has no [[authorization]] record for it: a block must not leave LOCKED without a digest-bound, ratified authorization record`,
+            );
+          }
         }
       }
     }

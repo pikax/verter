@@ -483,14 +483,7 @@ export type Real = string | { path: string }
 
 #[test]
 fn provenance_snapshot_includes_vfs_dir_index_counters_from_workspace() {
-    let unique = format!(
-        "verter-host-provenance-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let dir = std::env::temp_dir().join(unique);
+    let dir = verter_test_support::unique_temp_dir("verter-host-provenance");
     std::fs::create_dir_all(&dir).unwrap();
     let file_path = dir.join("Comp.vue");
     std::fs::write(&file_path, "<template><div /></template>").unwrap();

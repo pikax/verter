@@ -1,0 +1,20 @@
+# Flake-prevention lint (see crates/verter_test_support and
+# docs/arch/... flake-prevention report). `3bf93df59` fixed 13 test call
+# sites that used `std::env::temp_dir()` with no per-process component,
+# so two concurrent invocations of the suite on the same machine (e.g. two
+# git worktrees) raced each other's `remove_dir_all` + rewrite of the SAME
+# path. `std::env::temp_dir` is banned bare in this crate; call
+# `verter_test_support::unique_temp_dir(name)` instead.
+#
+# Measured before adding this ban: after migrating every genuinely-shared
+# call site to `unique_temp_dir`, exactly 2 sites remained — both
+# documented, fixed, human-known contract paths for manually-run/`#[ignore]`d
+# tooling (an audit doc a human places, and a `LIFTED_BODIES` sidecar
+# convention), where a per-process-unique path would break the documented
+# location instead of fixing a race. Two `#[allow]`s is a real
+# discriminating signal, not a lint forced blind — see the `verter_lsp`
+# `clippy.toml` for the parity precedent (per-crate scoping over a
+# workspace-wide ban).
+disallowed-methods = [
+    { path = "std::env::temp_dir", reason = "shared OS path with no per-process/per-call component — use verter_test_support::unique_temp_dir(name) instead" },
+]

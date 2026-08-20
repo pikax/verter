@@ -4410,6 +4410,7 @@ dependencies = [
  "verter_session_oracle_macro",
  "verter_session_query",
  "verter_span",
+ "verter_test_support",
  "verter_type_expr",
  "verter_type_expr_oxc",
  "verter_type_runtime",

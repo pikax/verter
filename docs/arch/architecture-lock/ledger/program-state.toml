@@ -11,7 +11,7 @@ status = "ACTIVE"
 # in block A0 notes below and in the repository PROVENANCE.md.
 authority_package_digest = ""
 release_report_digest = "027f4e6dca5798ad75066acba3bb560980f7e81103492c0fcbad75c9edc62f91"
-program_dag_digest = "56765b1a6a25440a6654e8c48f7ecaabf3b56256c2116bb9492f69bf186f1071"
+program_dag_digest = "a667ad45ca6287466710d355cbe8f34acbf5f8f7270782d7074e4de75ca83070"
 entry_checkout_sha = "9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0"
 entry_checkout_tree = "3cf111cf5665586b7d8fdfd520f01cfee3bf8108"
 implementation_baseline_sha = ""

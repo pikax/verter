@@ -74,7 +74,7 @@ pub(crate) fn no_depth_sentinel_on_flow_return_path() {
 
 #[test]
 fn no_depth_sentinel_guard_predicate_flags_a_planted_marker() {
-    let dir = std::env::temp_dir().join(format!("u6_depth_sentinel_guard_{}", std::process::id()));
+    let dir = verter_test_support::unique_temp_dir("u6_depth_sentinel_guard");
     for file in PRODUCER_FILES {
         let path = dir.join(file);
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");

@@ -9,12 +9,9 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC_DIR =
-  "/private/tmp/claude-501/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings";
-const DEST_DIR = join(
-  "/Users/carlosrodrigues/Documents/dev/verter-wt-rulings",
-  "docs/arch/refactor/rev11/rulings",
-);
-const MACHINE_ROOT_PATTERN = "/Users/carlosrodrigues/Documents/dev";
+  "<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings";
+const DEST_DIR = join("<MACHINE_ROOT>/verter-wt-rulings", "docs/arch/refactor/rev11/rulings");
+const MACHINE_ROOT_PATTERN = "<MACHINE_ROOT>/Documents/dev";
 const MACHINE_ROOT_TOKEN = "<MACHINE_ROOT>";
 
 // Manifest: one entry per migrated document. `supersedes`/`supersededBy` are per-claim, not
@@ -26,7 +23,8 @@ const MANIFEST = [
     id: "C1-FOUR-FORKS",
     type: "architecture-ruling",
     date: "2026-08-20",
-    dateSource: "file-mtime (no in-document date; codex transcript, session 01a01cbf-a9a5-73b2-aced-080ee25e38c3)",
+    dateSource:
+      "file-mtime (no in-document date; codex transcript, session 01a01cbf-a9a5-73b2-aced-080ee25e38c3)",
     binds: ["C1"],
     summary:
       "Codex architecture-falsification review of C1-CHARTER-DRAFT.md's four proposed positions (crate placement, WorkspaceRead dependency, non-blocking I/O guarantee, NeedInputs coverage scope); all four VIOLATE stated invariants and are replaced: extract into existing verter_semantic (not a new crate); move the six WorkspaceRead-taking entry points upward behind an owned RouteAnalysisInputs snapshot; extraction and I/O confinement are one coupled decision requiring a capability-limited observation interface; full-coverage-required for every non-flow ModuleResolverCore/TypeInfoCore operation reachable from a C2 projection attempt.",
@@ -41,7 +39,8 @@ const MANIFEST = [
     id: "C1-THREE-GAPS-ADDENDUM",
     type: "architecture-ruling",
     date: "2026-08-20",
-    dateSource: "file-mtime (in-document: 'Source: bounded architecture challenge... run against program/architecture-lock at 8c2189389', no calendar date stated)",
+    dateSource:
+      "file-mtime (in-document: 'Source: bounded architecture challenge... run against program/architecture-lock at 8c2189389', no calendar date stated)",
     binds: ["C1"],
     summary:
       "Addendum resolving three execution gaps in the C1 charter left open by C1-FOUR-FORKS: (1) cross-crate trait sealing is impossible as drafted — seal semantic-owned snapshots, no foreign implementations; (2) the proposed file/directory relocation does not close the dependency cut set as-is — enumerates the full move/stay/split disposition per module; (3) the exhaustive-impl 'AttemptOutcome full coverage' proof is invalid under stable Rust — replaced with one closed, non-overridable inherent gateway (TypeInfoCore::attempt over a closed NonFlowOperation enum).",
@@ -77,7 +76,8 @@ const MANIFEST = [
     id: "C1-D1-FLOW-FILE-RECONCILIATION",
     type: "architecture-ruling",
     date: "2026-08-20",
-    dateSource: "file-mtime (no in-document date; tip 9275f0e40 on program/architecture-lock, codex session 01a0207a-d3b3-7771-823a-4d5e405af7fd)",
+    dateSource:
+      "file-mtime (no in-document date; tip 9275f0e40 on program/architecture-lock, codex session 01a0207a-d3b3-7771-823a-4d5e405af7fd)",
     binds: ["C1", "D1"],
     summary:
       "Reconciles the direct conflict between C1's revised charter and D1 Fork 2 over flow_return.rs / flow_return_callee.rs / dispatch_txn.rs / flow_slice_content.rs disposition: flow_slice_content.rs and flow_return_callee.rs MOVE whole to verter_semantic; flow_return.rs and dispatch_txn.rs SPLIT (semantic evaluator/value/transaction-state portions move, live capture/cache/admission/audit/flight-publication portions stay in verter_session). Finds no cross-block ObligationRuntime ownership problem. Changes no accepted ADR, DAG edge, or program outcome.",
@@ -150,7 +150,8 @@ const MANIFEST = [
     id: "CONCURRENCY-OPERATING-MODEL",
     type: "architecture-ruling",
     date: "2026-08-20",
-    dateSource: "file-mtime (in-document: 'run against program/architecture-lock at 5b899200b', no calendar date stated)",
+    dateSource:
+      "file-mtime (in-document: 'run against program/architecture-lock at 5b899200b', no calendar date stated)",
     binds: ["program-wide (ledger/concurrency operating model, not a single block)"],
     summary:
       "Two bounded read-only consults rule the operating model: allow up to five disjoint blocks in IMPLEMENTATION and targeted testing, but SERIALISE final certification (one full gate + one impact-bounded mandate re-attestation per landing) — because the gate cascade under concurrent certification is quadratic (N(N+1)/2) while implementation/review iteration dominates wall-clock. Recommends separating IN_PROGRESS into implementation vs certification states.",
@@ -171,7 +172,8 @@ const MANIFEST = [
     id: "ORCHESTRATION-AUTHORITY-MODEL",
     type: "architecture-ruling",
     date: "2026-08-20",
-    dateSource: "file-mtime (no in-document date; responds to MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION dated 2026-08-20)",
+    dateSource:
+      "file-mtime (no in-document date; responds to MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION dated 2026-08-20)",
     binds: [
       "program-wide (authority/ratification model, rulings custody, effective-state generator, mutation testing, block-checkpoint model)",
     ],
@@ -216,7 +218,8 @@ const MANIFEST = [
       },
     ],
     contradicts: [],
-    notes: "Companion document to B2-scope-and-concurrency-ruling-codex-1.md and parallelism-ruling-codex.md, all from the same 2026-08-16 codex session batch.",
+    notes:
+      "Companion document to B2-scope-and-concurrency-ruling-codex-1.md and parallelism-ruling-codex.md, all from the same 2026-08-16 codex session batch.",
   },
   {
     file: "parallelism-ruling-codex.md",
@@ -230,7 +233,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Companion document to B2-scope-and-concurrency-ruling-codex-1.md and B3-scope-ruling-codex-1.md.",
+    notes:
+      "Companion document to B2-scope-and-concurrency-ruling-codex-1.md and B3-scope-ruling-codex-1.md.",
   },
   {
     file: "MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md",
@@ -360,7 +364,8 @@ const MANIFEST = [
       "Cures a recording defect: the only recorded maintainer act (a narrow product ruling) had been over-read to license full AMD-009 §7 structural effect (four new blocks BA0/BS0/BCSS0/BRT0, a program-dag.toml amendment, five charter rewrites, a ledger write) that it did not actually authorize. Ruling 1 confirms the intended ratification WAS the full §7 — the structural reshape stands, cured by direct maintainer act rather than unwound — but requires fixing five verified in-delta test defects, re-reviewing charters changed after the previously-bound package identity, and rebinding before BF3 can be acceptance-recommended. Ruling 2: the audit amendment keeps identifier AMD-009; the separately-ratified B3/B2 option-conversion amendment is renumbered AMD-010 (substance unchanged, no re-ratification needed). Includes a verbatim maintainer ratification act for AMD-009 §7 in full.",
     supersedes: [
       {
-        document: "evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md (in-tree, not part of this migration)",
+        document:
+          "evidence/BF3/maintainer-product-ruling-no-error-on-bad-output.md (in-tree, not part of this migration)",
         claim:
           "The over-claimed reading that this narrow product ruling alone licensed full §7 structural effect. The product ruling's own actual text remains valid for exactly what it says.",
       },
@@ -406,7 +411,10 @@ const MANIFEST = [
     type: "maintainer-directive",
     date: "2026-08-17",
     dateSource: "stated",
-    binds: ["program-wide (every remaining block, not only BF3)", "AT-2 (applied here as the prompting case)"],
+    binds: [
+      "program-wide (every remaining block, not only BF3)",
+      "AT-2 (applied here as the prompting case)",
+    ],
     summary:
       "General standing rule, given in response to an AT-2 disposition question but binding project-wide: no error path for a type problem (Verter compiles/builds and returns; only a genuine compilation error produces an error); a test-discovered issue is a bug fixed in owning production code, never wrapped in a guard/tracker/refusal/allowlist; types are WAIVED from that fix-now rule for the program's duration (maintainer fixes types personally post-program); interim handling is every bug captured as an added #[ignore]d test with the fix deferred to a named owner.",
     supersedes: [],
@@ -438,7 +446,8 @@ const MANIFEST = [
       },
     ],
     contradicts: [],
-    notes: "Unchanged per this document: codex remains default for architecture decisions, premise falsification, and review seats (codex + grok, never a Claude subagent as a review seat).",
+    notes:
+      "Unchanged per this document: codex remains default for architecture decisions, premise falsification, and review seats (codex + grok, never a Claude subagent as a review seat).",
   },
   {
     file: "MAINTAINER-RULING-COMMENT-CLEANUP-PASS.md",
@@ -485,7 +494,8 @@ const MANIFEST = [
       "claude-max is the dispatch vehicle for implementers too, not only managers/orchestrators — supersedes an older 'use claude, not claude-max' note. A claude-max orchestrator may use Agent subagents for its own implementation fan-out. Unchanged: review seats stay external CLIs (codex/grok, never a Claude subagent); long-running workers launch in the foreground of a run_in_background:true Bash call, never a trailing &/nohup/setsid; a -p process is one-shot and the only sanctioned wait is a blocking foreground loop.",
     supersedes: [
       {
-        document: "an older, un-migrated 'use claude, not claude-max' dispatch note (not part of this corpus)",
+        document:
+          "an older, un-migrated 'use claude, not claude-max' dispatch note (not part of this corpus)",
         claim: "That implementers should be dispatched via claude, not claude-max.",
       },
     ],
@@ -544,8 +554,10 @@ const MANIFEST = [
       "program/architecture-lock is GREEN BY INVARIANT, not by hypothesis — a red working branch is a P0, never re-derived with a second full gate run to check whether it pre-existed on trunk. On a branch gate failure, triage in isolation (re-run the failing tests alone, several times): deterministic failure is REAL, intermittent is FLAKY; report to the maintainer; fix flaky tests ASAP. Abolishes the standing 'known pre-existing baseline / environmental' disposition category entirely — cites a real deterministic production bug (compose_generated_chunk aborting on an empty source map) that hid behind that category across four landing records.",
     supersedes: [
       {
-        document: "the orchestrator's gate-range-mode line of work (not part of this corpus, described as 'withdrawn')",
-        claim: "Detecting and running only the affected range of tests between two commits as the canonical gate.",
+        document:
+          "the orchestrator's gate-range-mode line of work (not part of this corpus, described as 'withdrawn')",
+        claim:
+          "Detecting and running only the affected range of tests between two commits as the canonical gate.",
       },
     ],
     supersededBy: [],
@@ -595,7 +607,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Explicit: delegated is the paperwork act; NOT delegated is judgement about whether the bar was met — if in doubt, the block waits.",
+    notes:
+      "Explicit: delegated is the paperwork act; NOT delegated is judgement about whether the bar was met — if in doubt, the block waits.",
   },
   {
     file: "MAINTAINER-RULING-BS1-COMPLETION-AUTHORITY.md",
@@ -632,7 +645,8 @@ const MANIFEST = [
     id: "BS1-ADVERSARIAL-EXACT-CANDIDATE-ATTESTATION",
     type: "attestation",
     date: "unknown",
-    dateSource: "file-mtime 2026-08-20 (no in-document date; binds to a candidate that predates the later restack recorded in EVIDENCE-BS1-RESTACK-BYTE-IDENTITY.md, so this attestation predates that document within the same day)",
+    dateSource:
+      "file-mtime 2026-08-20 (no in-document date; binds to a candidate that predates the later restack recorded in EVIDENCE-BS1-RESTACK-BYTE-IDENTITY.md, so this attestation predates that document within the same day)",
     binds: ["BS1"],
     summary:
       "Discharges BS1-COMPLETION-AUTHORITY §5 second half: an unprimed, isolated claude-max subagent independently attests candidate 9786e756b (base f46de1b6a, evidence commit a48d92e82) PASS, via eight genuine plant->prove-RED->revert->prove-GREEN cycles against production code plus blast-radius probes against the real pinned svelte@5.56.8 oracle. Binds ONLY to 9786e756b — the document states explicitly that if BS1's remaining completion-packet work changes the candidate, this attestation does not carry, and the review-identity binding at 71fb82dec mechanically refuses a PASS on a stale reviewed SHA.",
@@ -645,7 +659,8 @@ const MANIFEST = [
       },
     ],
     contradicts: [],
-    notes: "Lists all eight plant/RED/revert/GREEN cycles verbatim with the specific production defect each proved (function-decl name mapping, shorthand attribute binding, destructure conflation, member/each-item binding, non-ASCII char-boundary panic, store-gated EACH_ITEM_IMMUTABLE).",
+    notes:
+      "Lists all eight plant/RED/revert/GREEN cycles verbatim with the specific production defect each proved (function-decl name mapping, shorthand attribute binding, destructure conflation, member/each-item binding, non-ASCII char-boundary panic, store-gated EACH_ITEM_IMMUTABLE).",
   },
   {
     file: "EVIDENCE-BS1-RESTACK-BYTE-IDENTITY.md",
@@ -659,7 +674,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Lists BS1's remaining outstanding items as of this document: corrected completion contract awaiting maintainer ratification; two stale conformance records needing regeneration from the pinned oracle; 14 UNPROVEN rows; FC-HYDRATION-001/FC-PERF-001 BLOCKED/UNPROVEN.",
+    notes:
+      "Lists BS1's remaining outstanding items as of this document: corrected completion contract awaiting maintainer ratification; two stale conformance records needing regeneration from the pinned oracle; 14 UNPROVEN rows; FC-HYDRATION-001/FC-PERF-001 BLOCKED/UNPROVEN.",
   },
   {
     file: "DISPOSITION-B4-C1-SERIALIZE.md",
@@ -701,7 +717,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Placement: H2 owns the single-owner backend cutover and benchmark evidence; H3 owns atomic companion publication. Explicitly not B2, not B3, no new block.",
+    notes:
+      "Placement: H2 owns the single-owner backend cutover and benchmark evidence; H3 owns atomic companion publication. Explicitly not B2, not B3, no new block.",
   },
   {
     file: "MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md",
@@ -715,7 +732,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Unchanged throughout: codex+grok only for conformance/architecture seats, never a Claude subagent there; prompts neutral/unprimed; grok keeps default-to-BLOCK; round cap 3; no seat grades its own work.",
+    notes:
+      "Unchanged throughout: codex+grok only for conformance/architecture seats, never a Claude subagent there; prompts neutral/unprimed; grok keeps default-to-BLOCK; round cap 3; no seat grades its own work.",
   },
   {
     file: "MAINTAINER-RULING-REVIEW-BUDGET.md",
@@ -729,7 +747,8 @@ const MANIFEST = [
     supersedes: [],
     supersededBy: [],
     contradicts: [],
-    notes: "Explicit: correctness standards on code (TDD, no stubs, proven-applied mutation plants, honest UNPROVEN) are untouched — the objection is to review volume on prose, not rigour on code.",
+    notes:
+      "Explicit: correctness standards on code (TDD, no stubs, proven-applied mutation plants, honest UNPROVEN) are untouched — the objection is to review volume on prose, not rigour on code.",
   },
 ];
 
@@ -826,19 +845,27 @@ function indexRow(e) {
 let index = "";
 index += "# Rulings index\n\n";
 index += "One row per ruling document migrated from the session scratchpad under RULING 2 of\n";
-index += "[`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md). Each document carries a\n";
-index += "typed YAML frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,\n";
-index += "`summary`, `supersedes`, `superseded_by`, `contradicts`, `notes`) prepended to the verbatim original\n";
-index += "text — body content was not rewritten, only the frontmatter and a mechanical `<MACHINE_ROOT>` path\n";
-index += "substitution were applied. `supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can\n";
-index += "supersede one claim of another while the rest of that document remains binding — see each document's\n";
+index +=
+  "[`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md). Each document carries a\n";
+index +=
+  "typed YAML frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,\n";
+index +=
+  "`summary`, `supersedes`, `superseded_by`, `contradicts`, `notes`) prepended to the verbatim original\n";
+index +=
+  "text — body content was not rewritten, only the frontmatter and a mechanical `<MACHINE_ROOT>` path\n";
+index +=
+  "substitution were applied. `supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can\n";
+index +=
+  "supersede one claim of another while the rest of that document remains binding — see each document's\n";
 index += "own frontmatter for the exact claim text.\n\n";
 index +=
   "**Not yet built by this migration:** the effective-state generator and authority registry described in\n";
 index +=
   "RULING 1/3 of `ORCHESTRATION-AUTHORITY-MODEL` — this index is hand-curated, not a generated fail-closed\n";
-index += "model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it means no OTHER migrated\n";
-index += "ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the\n";
+index +=
+  "model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it means no OTHER migrated\n";
+index +=
+  "ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the\n";
 index += "program orchestrator (RULING 1), not performed here.\n\n";
 
 for (const type of typeOrder) {

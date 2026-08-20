@@ -1414,14 +1414,7 @@ fn strict_self_root_world_is_unavailable_inside_an_authority_transition() {
 fn uncovered_filesystem_presence_is_not_compacted_into_a_strict_world() {
     use verter_workspace::WorkspaceRead as _;
 
-    let unique = format!(
-        "verter-strict-root-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock is after the epoch")
-            .as_nanos(),
-    );
-    let dir = std::env::temp_dir().join(unique);
+    let dir = verter_test_support::unique_temp_dir("verter-strict-root");
     std::fs::create_dir_all(&dir).expect("create fixture directory");
     let path = dir.join("artifact-only.ts");
     std::fs::write(&path, "export const disk = 1;\n").expect("write fixture source");

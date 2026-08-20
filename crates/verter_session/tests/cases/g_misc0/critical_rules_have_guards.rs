@@ -1460,11 +1460,7 @@ fn title_normaliser_handles_markdown_and_critical_suffix() {
 /// gets its own distinctly-named self-test, registered under its own name.
 #[test]
 fn registry_completeness_walk_hard_fails_on_metadata_error_self_test() {
-    let scratch = std::env::temp_dir().join(format!(
-        "verter_registry_completeness_classify_{}_{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let scratch = verter_test_support::unique_temp_dir("verter_registry_completeness_classify");
     fs::create_dir_all(&scratch).expect("create scratch dir");
 
     // A real directory classifies as a directory.

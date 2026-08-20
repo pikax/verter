@@ -1,0 +1,363 @@
+# Verter Revision 11 block authorization registry.
+#
+# docs/arch/refactor/rev11/rulings/ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md
+# RULING 1 — replace prose/document `**Status:**` gates with digest-bound,
+# ratified block-authorization records in a repository authority registry.
+# Driven by docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-HARDEN-
+# ORCHESTRATION.md ("the main remaining risk is the orchestration machinery
+# incorrectly certifying an invalid transition") after BV1 was dispatched and
+# landed while its enabling amendment (AMD-005) sat unratified and nothing
+# checked it.
+#
+# One [[document]] row per digest-bound authority artifact — a ratified
+# charter, a ratified enabling amendment, or a binding maintainer ruling
+# under docs/arch/refactor/rev11/rulings/. Referenced by id from
+# [[authorization]] rows below, so one document shared by several blocks
+# (e.g. AMD-009 backing BF3/BA0/BS0/BRT0, or a narrow ruling backing both
+# BV1 and BS1) is declared once. `sha256` binds the record to the document's
+# EXACT current bytes.
+#
+# One [[authorization]] row per block whose ledger status has left LOCKED,
+# naming the document ids its execution authority rests on, who ratified it,
+# when, and the scope the authorization covers.
+#
+# Validated by `node scripts/validate-program-state.mjs ... --authority
+# <this file>` (live mode only — see the validator's own comment on this
+# section: an undeclared --authority is the documented skip, same shape as
+# an undeclared evidence_root, since not every synthetic/template invocation
+# models authorization). Enforcement, once declared: every digest here must
+# equal the current SHA-256 of the named path; every block whose status is
+# READY, IN_PROGRESS, REVIEW, ACCEPTANCE_RECOMMENDED, ACCEPTED, or
+# PRIVATE_CHECKPOINT must have exactly one [[authorization]] record naming
+# at least one document.
+#
+# Populated for docs/arch/architecture-lock/ledger/program-state.toml as of
+# 2026-08-20 (20 ACCEPTED blocks + BS1 IN_PROGRESS). Every record below cites
+# only authority that is GENUINELY ratified in the tree today — none of it
+# is retroactively invented.
+#
+# UNSUBSTANTIATED — recorded as a finding, not papered over. Five blocks
+# with ledger status past LOCKED have NO record here because no ratified
+# document in the tree grants them execution authority:
+#
+#   BF1, BF2 — their charters were landed wholesale by AMD-005 (Status:
+#     "PROPOSED — NOT RATIFIED. This candidate has no execution authority."),
+#     which itself says "authorize BF1 exposure to READY after ratification"
+#     (AMD-005 §15) — a ratification that never happened. No later ratified
+#     amendment or ruling ever touches either charter.
+#   B2, B3 — the one ratified document that touches them (AMD-010, RATIFIED
+#     2026-08-16 §9.1) amends four narrow textual deltas and says so in its
+#     own text: "Neither B2 nor B3 becomes dispatchable by this landing.
+#     Both remain LOCKED" (AMD-010:834), echoed by
+#     rulings/MAINTAINER-RULING-BF3-SECTION7.md:94 ("B2 and B3 are NOT
+#     unlocked").
+#   B4 — charter landed wholesale by AMD-005; never touched by any
+#     subsequent ratified amendment or ruling.
+#
+# Live-mode validation against the current ledger with this registry
+# therefore correctly reports 5 violations (BF1, BF2, B2, B3, B4 each
+# "past LOCKED" with no authorization record) until a maintainer ruling
+# substantiates them or the ledger is corrected — see this migration's
+# report. Do not add authorization records for these five blocks without a
+# genuine ratification to cite; do not weaken the validator to accept them.
+
+schema = 1
+revision = 11
+
+# -- Documents -----------------------------------------------------------
+
+[[document]]
+id = "A0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A0.md"
+sha256 = "68c2140d3be29de0b8737771aa80d30c17be7cf55aa249a7cfaa3b47f384cd21"
+
+[[document]]
+id = "A1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A1.md"
+sha256 = "b92ef37570b804d170aac6877cd41299e236a7dcb237a6c1d50e76a7748f6d4c"
+
+[[document]]
+id = "A2-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A2.md"
+sha256 = "522787b1c6f90166b67bdbdef16b47b9cae5819a90a1e6365ceddb87b983632a"
+
+[[document]]
+id = "A3-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A3.md"
+sha256 = "33f92398b8d2ddd574dc5deba5ffd905fad264a93f1291189a2e4756b8082d8c"
+
+[[document]]
+id = "A4-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A4.md"
+sha256 = "207259a9cf46e1a2a6ed51a5e7ebe1552596834f51ae944e0256e96707fa7f3c"
+
+[[document]]
+id = "A5-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A5.md"
+sha256 = "ab41b90774ee093fe2cc79046ee21838ab2875f03d388155bd65a75e11b2a5f2"
+
+[[document]]
+id = "A6-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/A6.md"
+sha256 = "428340c2b5148b5808a1f22124ae715b637f0a54f787f6c6d902c792b71060b4"
+
+[[document]]
+id = "B1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/B1.md"
+sha256 = "ac60d191221fc5e5938e0343091c6809648a482960ca7c1a49596e547d3e28e1"
+
+[[document]]
+id = "AMD-004"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-004-defer-completion-to-d6.md"
+sha256 = "1cae2b4e252022ee3e5e0e81acddf1f0f25730a3854dcc75a2a4071df8d5ddea"
+
+[[document]]
+id = "BV0A-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BV0A.md"
+sha256 = "5b58a0aa474e9e8f695c7124ecd2f3295948679dd13e1f8ce8fe0dbbedc6ee6d"
+
+[[document]]
+id = "AMD-007"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-007-assembled-module-source-map-interim.md"
+sha256 = "735fd4a8513d2737e6802c2c208c36768df852648db6eac66c3cc1e1dba9ecdc"
+
+[[document]]
+id = "BV0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BV0.md"
+sha256 = "81d54b0dc19bf743fd7e41ab40cfe73ad3ac89cc23f895e16f60cdc3ac10c0f2"
+
+[[document]]
+id = "AMD-006"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-006-vue-known-defect-correction.md"
+sha256 = "8a4be8edde627f6e8e0cbd086234f99a70da6e9d71784af561972ba14f0e48fe"
+
+[[document]]
+id = "AMD-008"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md"
+sha256 = "fb98d802941604d61d9c556fd087a683644f3aa5360a03b7bb31234bb34b654c"
+
+[[document]]
+id = "BF3-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BF3.md"
+sha256 = "e0e2600d12c1caa75fdeae51542c7d76abeb67f09c6a90c491e24e89816016cc"
+
+[[document]]
+id = "BA0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BA0.md"
+sha256 = "0854eaa7d695a70529ead5fa68935c1ca8e6acbbe9ebabf6ffb54488e30cec04"
+
+[[document]]
+id = "BS0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BS0.md"
+sha256 = "5458417a476fefc6a88f52eb02cccd1cc0f66287995ca2994cb2b42aabf9dbf2"
+
+[[document]]
+id = "BRT0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BRT0.md"
+sha256 = "53e1d2a1aa97e41c7040f0b2662eaedda63424809a3789177d9db07b0e7cfd7f"
+
+[[document]]
+id = "AMD-009"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-009-bf3-audit-and-immediate-correction-blocks.md"
+sha256 = "d323575c6e47aef75daba26193e6b29b7e4cea169a37e6512b7ce7d72ba7d652"
+
+[[document]]
+id = "BV1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BV1.md"
+sha256 = "64c8dfb32b7c6496761145da24209c86bc44f238c0ade2bf6b90925655cf98a4"
+
+[[document]]
+id = "BS1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/BS1.md"
+sha256 = "9789f45e8b4360aacaa8fc45fb3a108956c4862a111f0d376305658f74127090"
+
+[[document]]
+id = "RULING-AMD-005-BV1-BS1-AUTHORISED"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-AMD-005-BV1-BS1-AUTHORISED.md"
+sha256 = "e2e4a6761981985fd64a650ebf14bebf8bd7598939b9484e2b56bbdf9dd3d6e3"
+
+# -- Authorizations --------------------------------------------------------
+# A0-A6 and B1 rest on the base Revision 11 program authority itself (their
+# own ratified charters) rather than on any later amendment or ruling — the
+# amendment/ruling machinery did not exist yet when these were adopted.
+# ratified_at records the date program.md (the digest-verified consolidated
+# master these charters implement) entered the repository.
+
+[[authorization]]
+block = "A0"
+documents = ["A0-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Adopt Revision 11 and freeze the exact implementation checkout."
+
+[[authorization]]
+block = "A1"
+documents = ["A1-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Non-vacuous commands and capability truth."
+
+[[authorization]]
+block = "A2"
+documents = ["A2-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "U6 public cold/warm differential harness."
+
+[[authorization]]
+block = "A3"
+documents = ["A3-CHARTER", "AMD-004"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-11"
+scope = "Immediate wrong-complete safety retraction, reduced by AMD-004 to the non-G10 exit only; G10 is excluded and tracked as FR-D8 for D6."
+
+[[authorization]]
+block = "A4"
+documents = ["A4-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Measurement attribution baseline."
+
+[[authorization]]
+block = "A5"
+documents = ["A5-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Owner identity profile compatibility protocol consumer inventories."
+
+[[authorization]]
+block = "A6"
+documents = ["A6-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Implementation Lock Record."
+
+[[authorization]]
+block = "B1"
+documents = ["B1-CHARTER"]
+ratified_by = "maintainer (Revision 11 program adoption)"
+ratified_at = "2026-08-10"
+scope = "Neutral contracts, identities, profiles, dependency firewall. Accepted independently of AMD-005 — AMD-005 §1 records B1 as already accepted under charters/B1.md, unchanged."
+
+[[authorization]]
+block = "BV0A"
+documents = ["BV0A-CHARTER", "AMD-007"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-14"
+scope = "Interim Vue assembled-module source map, ratified by AMD-007 (RATIFIED, see AMD-007 §8.1, landed acabec8fa)."
+
+[[authorization]]
+block = "BV0"
+documents = ["BV0-CHARTER", "AMD-006", "AMD-008"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-13"
+scope = "Immediate Vue known-defect correction, ratified by AMD-006 (RATIFIED, see AMD-006 §8.1, landed fdb6f6291) and its exit criteria further amended by AMD-008 (RATIFIED, see AMD-008 §5.1, landed a1f6523ce)."
+
+[[authorization]]
+block = "BF3"
+documents = ["BF3-CHARTER", "AMD-009"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-16"
+scope = "Conformance exhaustion and correction dispatch audit, ratified on the full AMD-009 §7 scope."
+
+[[authorization]]
+block = "BA0"
+documents = ["BA0-CHARTER", "AMD-009"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-16"
+scope = "Immediate request and result atomicity, created and ratified by AMD-009 §7."
+
+[[authorization]]
+block = "BS0"
+documents = ["BS0-CHARTER", "AMD-009"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-16"
+scope = "Immediate Svelte correction, created and ratified by AMD-009 §7."
+
+[[authorization]]
+block = "BRT0"
+documents = ["BRT0-CHARTER", "AMD-009"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-16"
+scope = "Immediate route and transport parity, created and ratified by AMD-009 §7."
+
+[[authorization]]
+block = "BV1"
+documents = ["BV1-CHARTER", "RULING-AMD-005-BV1-BS1-AUTHORISED"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-20"
+scope = "Vue compiler-output conformance train. Authority does NOT derive from AMD-005 (still PROPOSED — NOT RATIFIED); the narrow ruling authorises BV1 directly and its landing stands (ACCEPTANCE_RECOMMENDED -> ACCEPTED)."
+
+[[authorization]]
+block = "BS1"
+documents = ["BS1-CHARTER", "RULING-AMD-005-BV1-BS1-AUTHORISED"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-20"
+scope = "Svelte compiler-output conformance train. Authority does NOT derive from AMD-005 (still PROPOSED — NOT RATIFIED); the narrow ruling returns BS1 from LOCKED to dispatchable directly."
+
+# Retroactive ratification of the five acceptances that predate machine-enforced
+# authorization. See MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md — the
+# ratification is dated to that ruling, not to the original transition, and it
+# covers exactly these five blocks with no standing exemption.
+[[document]]
+id = "PRE-ENFORCEMENT-ACCEPTANCES"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md"
+sha256 = "fadb81a3182df2523f1d848f92ad0ba0e1541a9e66dc5eef6d4bc4f29d6dbdd6"
+
+[[authorization]]
+block = "BF1"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "BF2"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B2"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B3"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"
+
+[[authorization]]
+block = "B4"
+documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "retroactive ratification of a pre-enforcement acceptance"

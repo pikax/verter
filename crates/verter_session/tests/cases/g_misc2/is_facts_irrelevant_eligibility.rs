@@ -91,6 +91,12 @@ const ELIGIBLE_CACHES: &[(&str, &str, &str)] = &[(
     "FallthroughResolverState.cache — empty facts only for IntrinsicSurface",
 )];
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "documented fixed location for a human-placed audit doc (read-only, soft-skip if \
+              absent — see `audit_file_present_at_documented_path`), not a per-test scratch path \
+              — a per-process-unique name would make the guard never find the audit at all"
+)]
 fn audit_file_path() -> PathBuf {
     // Under the OS temp dir, outside the repo tree (the audit is not
     // committed — it is regenerated per-block).
