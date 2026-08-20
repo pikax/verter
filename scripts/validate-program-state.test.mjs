@@ -7,6 +7,16 @@
 // (stackless and with otherwise-perfect stack fields) and evidence_digest
 // content binding (unresolvable evidence_root, mismatched/missing artifact).
 // A validator stubbed to always exit 0 cannot pass.
+//
+// Git identity fixture: `before()` builds a REAL temporary git repository
+// (gitRoot) with a genuine commit chain — SHA_BASE (root) -> SHA (tip, HEAD
+// of the repo) — plus SHA_DANGLING, a commit made on a since-deleted branch
+// off SHA_BASE: a real object, but unreachable from the tip and NOT an
+// ancestor of it. This is the exact shape of the A5 defect this validator
+// change fixes (a dangling commit recorded as an accepted identity). Every
+// live-mode test in this file runs with cwd=gitRoot by default, so the
+// pre-existing "happy path" fixtures (SHA/TREE below) now exercise the real
+// git checks, not just the old regex shape check.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -14,17 +24,62 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const VALIDATOR = join(dirname(fileURLToPath(import.meta.url)), "validate-program-state.mjs");
 
 let dir;
+let gitRoot; // real repo: SHA_BASE -> SHA (tip); SHA_DANGLING off SHA_BASE, unreachable from tip
+let notGitDir; // plain directory, never `git init`-ed
+let SHA_BASE, TREE_BASE;
+let SHA, TREE; // the repo's tip commit + its real tree (replaces the old fake constant)
+let SHA_DANGLING, TREE_DANGLING;
+const SHA_NONEXISTENT = "abcdef1234567890abcdef1234567890abcdef12"; // well-formed, never committed
+
+function git(args, cwd, input) {
+  return execFileSync("git", args, { cwd, input, encoding: "utf8" }).trim();
+}
+
 before(() => {
   dir = mkdtempSync(join(tmpdir(), "validate-program-state-"));
+  notGitDir = mkdtempSync(join(tmpdir(), "validate-program-state-nogit-"));
+
+  gitRoot = mkdtempSync(join(tmpdir(), "validate-program-state-git-"));
+  git(["init", "-q"], gitRoot);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"], gitRoot); // portable across init.defaultBranch configs
+  git(["config", "user.email", "test@example.invalid"], gitRoot);
+  git(["config", "user.name", "Test"], gitRoot);
+  git(["config", "commit.gpgsign", "false"], gitRoot);
+
+  writeFileSync(join(gitRoot, "base.txt"), "base\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "base"], gitRoot);
+  SHA_BASE = git(["rev-parse", "HEAD"], gitRoot);
+  TREE_BASE = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+
+  writeFileSync(join(gitRoot, "tip.txt"), "tip\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "tip"], gitRoot);
+  SHA = git(["rev-parse", "HEAD"], gitRoot);
+  TREE = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+
+  // A real commit, made on its own branch off SHA_BASE, then orphaned by
+  // deleting that branch — a loose object that exists but is reachable from
+  // no ref. Sibling of SHA (not its ancestor), exactly the A5 shape.
+  git(["checkout", "-q", "-b", "scratch", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "scratch.txt"), "scratch\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "scratch"], gitRoot);
+  SHA_DANGLING = git(["rev-parse", "HEAD"], gitRoot);
+  TREE_DANGLING = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+  git(["branch", "-D", "scratch"], gitRoot);
 });
 after(() => {
   rmSync(dir, { recursive: true, force: true });
+  rmSync(gitRoot, { recursive: true, force: true });
+  rmSync(notGitDir, { recursive: true, force: true });
 });
 
 function write(name, content) {
@@ -33,9 +88,10 @@ function write(name, content) {
   return p;
 }
 
-function run(dagPath, statePath, mode) {
+function run(dagPath, statePath, mode, cwd) {
   const res = spawnSync(process.execPath, [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode], {
     encoding: "utf8",
+    cwd: cwd ?? gitRoot,
   });
   return { status: res.status, out: res.stdout ?? "", err: res.stderr ?? "" };
 }
@@ -77,7 +133,7 @@ const DAG_SUB = DAG.replace(
   'id = "A1"\nname = "mid"\nclass = "subsystem"',
 );
 
-const SHA = "9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0";
+// SHA is now assigned in before() from the real gitRoot fixture (see above).
 const SHA2 = "0000000000000000000000000000000000000001";
 const DIGEST = "68c2140d3be29de0b8737771aa80d30c17be7cf55aa249a7cfaa3b47f384cd21";
 const DIGEST2 = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -134,9 +190,9 @@ function acceptedBlock(id, overrides = {}) {
     context_packet_digest: DIGEST,
     base_sha: SHA,
     candidate_sha: SHA,
-    candidate_tree: SHA,
+    candidate_tree: TREE,
     accepted_sha: SHA,
-    accepted_tree: SHA,
+    accepted_tree: TREE,
     landing_equivalence_digest: DIGEST,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
@@ -157,7 +213,7 @@ function checkpointBlock(id, overrides = {}) {
     context_packet_digest: DIGEST,
     base_sha: SHA,
     candidate_sha: SHA,
-    candidate_tree: SHA,
+    candidate_tree: TREE,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
     architecture_review: "PASS",
@@ -287,7 +343,7 @@ test("stacked-work exception: a bare stack_id with no established stack is REJEC
         stack_id: "S1",
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -457,7 +513,7 @@ test("stacked-work exception: a predecessor citing a DIFFERENT stack snapshot di
         stack_layer: 1,
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -628,7 +684,7 @@ test("stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes", (
         stack_layer: 1,
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -656,7 +712,7 @@ test("stacked-work exception: an equal (non-lower) predecessor stack_layer is re
         stack_layer: 1,
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -683,7 +739,7 @@ test("stacked-work exception: a TERMINATED (ABORTED) predecessor inside the clai
         stack_layer: 1,
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -772,7 +828,7 @@ test("entry lock: the DAG root block in REVIEW requires the digest; a bound dige
       entry_lock_digest: entryLock,
       base_sha: SHA,
       candidate_sha: SHA,
-      candidate_tree: SHA,
+      candidate_tree: TREE,
       charter_digest: DIGEST,
       context_packet_digest: DIGEST,
       evidence_digest: DIGEST,
@@ -823,7 +879,7 @@ test("private-checkpoint predecessor: a STACKLESS REVIEW successor over a PRIVAT
       block("A2", "REVIEW", {
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -855,7 +911,7 @@ test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT 
         stack_layer: 1,
         base_sha: SHA,
         candidate_sha: SHA,
-        candidate_tree: SHA,
+        candidate_tree: TREE,
         charter_digest: DIGEST,
         context_packet_digest: DIGEST,
         evidence_digest: DIGEST,
@@ -1280,4 +1336,182 @@ test("extended artifact convention: MULTIPLE nested matches are ambiguous and fa
   // Sanity: both fixture files are real and distinct, so this isn't an
   // artifact of one write clobbering the other.
   assert.notEqual(readFileSync(a1, "utf8"), readFileSync(a2, "utf8"));
+});
+
+// -- Git identity verification (the fix this file was extended for). Every
+// test below uses the real gitRoot fixture built in before(): SHA_BASE (root)
+// -> SHA (tip), plus SHA_DANGLING (a real commit, unreachable from the tip,
+// off SHA_BASE on a since-deleted branch) — the exact shape of the corrected
+// A5 ledger row (a dangling commit recorded as both candidate and accepted
+// identity). Each test isolates ONE of the four new checks so a failure here
+// is attributable to that one check, and each was run against the
+// un-hardened validator (git stashed) to confirm it does NOT catch these —
+// see the session report.
+
+test("git identity: a well-formed but NEVER-COMMITTED accepted_sha is rejected", () => {
+  const dag = write("dag-git-nonexistent.toml", DAG);
+  const state = write(
+    "state-git-nonexistent.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { accepted_sha: SHA_NONEXISTENT }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a never-committed accepted_sha must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 field accepted_sha = ${SHA_NONEXISTENT} does not resolve to an existing git commit object \\(git reports: missing\\)`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("git identity: a real but DANGLING accepted_sha (unreachable from the repository tip) is rejected — the A5 case", () => {
+  const dag = write("dag-git-dangling.toml", DAG);
+  const state = write(
+    "state-git-dangling.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", {
+        base_sha: SHA_BASE, // real ancestor of SHA_DANGLING — isolates this test to check 3
+        candidate_sha: SHA_DANGLING,
+        candidate_tree: TREE_DANGLING,
+        accepted_sha: SHA_DANGLING,
+        accepted_tree: TREE_DANGLING,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a dangling accepted_sha must fail — it is not genuinely landed");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 is ACCEPTED with accepted_sha ${SHA_DANGLING} but that commit is not reachable from the repository tip .* — it is not genuinely landed`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("git identity: a candidate_tree that is the tree of a DIFFERENT commit is rejected", () => {
+  const dag = write("dag-git-tree-mismatch.toml", DAG);
+  const state = write(
+    "state-git-tree-mismatch.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "REVIEW", {
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE_BASE, // real tree, but of SHA_BASE, not of candidate_sha (SHA)
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a tree belonging to a different commit must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 field candidate_tree = ${TREE_BASE} is not the tree of candidate_sha ${SHA} — git reports that commit's tree as ${TREE}`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("git identity: an ACCEPTED base_sha that is NOT an ancestor of accepted_sha is rejected", () => {
+  const dag = write("dag-git-base-not-ancestor.toml", DAG);
+  const state = write(
+    "state-git-base-not-ancestor.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", {
+        base_sha: SHA_DANGLING, // real commit, but a sibling of SHA — not its ancestor
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a base_sha that is not an ancestor of accepted_sha must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 is ACCEPTED but base_sha ${SHA_DANGLING} is not an ancestor of accepted_sha ${SHA}`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("git identity: a genuine multi-commit ancestry chain (base strictly precedes accepted) passes", () => {
+  const dag = write("dag-git-real-ancestry-ok.toml", DAG);
+  const state = write(
+    "state-git-real-ancestry-ok.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { base_sha: SHA_BASE }) + // SHA_BASE is a real, strict ancestor of SHA
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("live mode: NOT a git repository fails loudly, never a silent skip that greens the run", () => {
+  const dag = write("dag-git-norepo.toml", DAG);
+  const state = write(
+    "state-git-norepo.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live", notGitDir);
+  assert.notEqual(r.status, 0, "live mode outside a git repository must fail, not silently pass");
+  assert.match(
+    r.err,
+    /live mode requires a git repository to verify base_sha\/candidate_sha\/accepted_sha\/candidate_tree\/accepted_tree against real git objects, but git is unavailable at .* — this is a loud setup failure, never a silent skip of identity verification/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("template mode: passes with placeholder identities and NO git repository at all", () => {
+  const dag = write("dag-git-template-norepo.toml", DAG);
+  const state = write(
+    "state-git-template-norepo.toml",
+    `schema = 1
+revision = 11
+status = "TEMPLATE"
+authority_package_digest = "REQUIRED_PACKAGE_DIGEST"
+current_block = "A0"
+
+[repository]
+remote = "REQUIRED_REMOTE"
+branch = "REQUIRED_BRANCH"
+head_sha = "REQUIRED_FULL_SHA"
+head_tree = "REQUIRED_TREE_OID"
+dirty = false
+untracked_count = 0
+
+` +
+      block("A0", "READY") +
+      "\n" +
+      block("A1", "LOCKED") +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "template", notGitDir);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
 });
