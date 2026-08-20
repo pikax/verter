@@ -145,10 +145,16 @@ class = "subsystem"
 predecessors = ["B4"]
 
 [[block]]
+id = "BV2"
+name = "Vue post-BV1 runtime-codegen invariant and regression correction"
+class = "subsystem"
+predecessors = ["BV1", "BS1"]
+
+[[block]]
 id = "B5"
 name = "Accepted framework algorithms through sole direct compiler core"
 class = "foundational-atomic"
-predecessors = ["BV1", "BS1"]
+predecessors = ["BV1", "BS1", "BV2"]
 
 [[block]]
 id = "B6"
