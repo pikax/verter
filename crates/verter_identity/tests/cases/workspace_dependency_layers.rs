@@ -73,6 +73,12 @@ const LAYER_7_HARNESSES: &[&str] = &[
     "verter_vue_conformance",
     "verter_svelte_conformance",
     "verter_session_oracle_macro",
+    // Test-only shared primitives (unique scratch paths, ephemeral ports,
+    // deterministic counters). Consumed exclusively via `[dev-dependencies]`,
+    // which is outside this test's tracked production closure, so its wide
+    // dev-dependent fan-out never trips the "nothing may depend on a
+    // harness" firewall.
+    "verter_test_support",
 ];
 
 /// Build tooling, not a layer. Checked by

@@ -261,6 +261,11 @@ impl TsserverCancellation {
     /// startup treats that as a failed transport invariant: running tsserver
     /// without out-of-band cancellation would make its interactive lane
     /// untrustworthy.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "production per-session cancellation directory, already process+nonce \
+                  disambiguated inline — not a test scratch dir with a collide-on-cleanup risk"
+    )]
     fn create() -> Option<Self> {
         static NONCE: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(

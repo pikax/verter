@@ -1,0 +1,16 @@
+# Flake-prevention lint (see crates/verter_test_support and
+# docs/arch/... flake-prevention report). `3bf93df59` fixed 13 test call
+# sites that used `std::env::temp_dir()` with no per-process component,
+# so two concurrent invocations of the suite on the same machine (e.g. two
+# git worktrees) raced each other's `remove_dir_all` + rewrite of the SAME
+# path. `std::env::temp_dir` is banned bare in this crate; call
+# `verter_test_support::unique_temp_dir(name)` instead.
+#
+# Scoped per-crate rather than workspace-wide: most other crates have
+# legitimate production uses of `std::env::temp_dir` (content-addressed
+# cache roots) that this crate does not, and a workspace-wide ban would
+# force dozens of unrelated `#[allow]`s elsewhere for no discriminating
+# value. See the flake-prevention report for the full scoping rationale.
+disallowed-methods = [
+    { path = "std::env::temp_dir", reason = "shared OS path with no per-process/per-call component — use verter_test_support::unique_temp_dir(name) instead" },
+]

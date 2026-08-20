@@ -707,6 +707,11 @@ fn map_rel_is_absent_when_no_map_json_is_carried() {
 // ── store dir is under temp_dir, NOT under any workspace path ────────────────
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "asserts containment under the production content-addressed cache root \
+              (carrier_store_dir_for), not minting a fresh scratch path"
+)]
 fn store_dir_is_under_temp_dir_and_not_under_the_workspace() {
     let user_tree = tempfile::tempdir().expect("tempdir");
     let ws = user_tree.path().to_string_lossy().to_string();

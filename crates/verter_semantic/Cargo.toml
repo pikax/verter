@@ -55,3 +55,4 @@ web-time = "1.1"
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 static_assertions = "1.1.0"
+verter_test_support = { path = "../verter_test_support" }

@@ -133,6 +133,12 @@ pub(crate) const SVELTE_PACKAGE_UNUSABLE_CODE: &str = "svelte-package-unusable";
 /// The host data directory the shim materializes into — a per-host-version
 /// subdirectory under the system temp dir (NOT the user workspace). The
 /// version stamp keeps the copy matched to the projection the compiler emits.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "content-addressed cache root keyed by crate version + asset hash, not a per-test \
+              scratch dir removed and rewritten across runs — see verter_test_support::unique_temp_dir \
+              for the anti-pattern this lint actually guards against"
+)]
 fn host_shim_dir() -> PathBuf {
     let mut identity = blake3::Hasher::new();
     for asset in [
@@ -1021,6 +1027,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "asserts containment under the production content-addressed cache root \
+                  (host_shim_dir), not minting a fresh scratch path"
+    )]
     fn materialize_writes_the_shim_into_the_host_data_dir_not_the_workspace() {
         let dir = materialize_svelte_jsx_shim().expect("materialize");
         // The host dir is under the system temp dir, NOT a workspace path.
@@ -1341,6 +1352,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "asserts containment under the production content-addressed cache root \
+                  (host_shim_dir), not minting a fresh scratch path"
+    )]
     fn managed_tsgo_carrier_uses_owner_bound_classic_jsx_without_project_paths() {
         let Some(_) = locate_type_checker() else {
             eprintln!("SKIP managed-tsgo JSX carrier: no tsgo/tsc in node_modules/.bin");

@@ -12,14 +12,7 @@ fn canonical_str(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// A per-PROCESS temp directory under `name`. Bare `std::env::temp_dir().join(name)`
-/// is a shared OS path with no per-process component: two concurrent invocations
-/// of this test suite on the same machine (e.g. two worktrees, or a retry racing
-/// a still-cleaning-up prior run) would `remove_dir_all` and rewrite the SAME
-/// directory into each other, producing spurious missing/wrong-content failures.
-fn unique_temp_dir(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
-}
+use verter_test_support::unique_temp_dir;
 
 // =============================================================================
 // Framework Detection Tests

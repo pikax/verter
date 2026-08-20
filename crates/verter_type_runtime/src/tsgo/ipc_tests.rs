@@ -1,13 +1,5 @@
 use super::*;
-
-/// A per-PROCESS temp directory under `name`. Bare
-/// `std::env::temp_dir().join(name)` is a shared OS path with no
-/// per-process component: two concurrent invocations of this test suite on
-/// the same machine (e.g. two worktrees) would `remove_dir_all` and rewrite
-/// the SAME directory into each other, producing spurious failures.
-fn unique_temp_dir(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
-}
+use verter_test_support::unique_temp_dir;
 
 // ---------------------------------------------------------------------------
 // Plaintext display/documentation split — the tsgo producer-side one-shot
@@ -579,13 +571,7 @@ impl ForcedTraceEnv {
         let prev_enabled = std::env::var_os("VERTER_TYPE_RUNTIME_TRACE");
         let prev_path = std::env::var_os("VERTER_TYPE_RUNTIME_TRACE_PATH");
         // Unique per-process+invocation so parallel tests never share a file.
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "verter-type-runtime-trace-concurrency-{}-{}.log",
-            std::process::id(),
-            nonce
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-concurrency").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
@@ -1751,8 +1737,7 @@ fn test_parse_lsp_location() {
 
 #[test]
 fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
-    let temp_root =
-        std::env::temp_dir().join(format!("verter-tsgo-location-disk-{}", std::process::id()));
+    let temp_root = unique_temp_dir("verter-tsgo-location-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("types.ts");
@@ -2851,17 +2836,9 @@ fn code_action_resolves_each_edit_against_its_own_file_content() {
 fn parse_code_action_drops_action_when_all_edits_unresolvable() {
     // A path with no cache entry and no file on disk: the edit's range cannot be
     // converted to a byte offset, so the edit fails closed and is dropped. The
-    // directory name is made unique (process id + nanos) so the test never relies
-    // on a fixed shared temp path happening to be absent on the host.
-    let unique = format!(
-        "verter-tsgo-codeaction-absent-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let missing = std::env::temp_dir().join(unique).join("never-written.ts");
+    // directory name is made unique so the test never relies on a fixed shared
+    // temp path happening to be absent on the host.
+    let missing = unique_temp_dir("verter-tsgo-codeaction-absent").join("never-written.ts");
     let missing_uri = path_to_file_uri_string(missing.to_str().unwrap());
 
     let json = serde_json::json!({

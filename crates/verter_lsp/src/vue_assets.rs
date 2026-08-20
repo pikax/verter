@@ -207,6 +207,12 @@ export namespace JSX {{
     )
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "content-addressed cache root keyed by crate version + asset hash, not a per-test \
+              scratch dir removed and rewritten across runs — see verter_test_support::unique_temp_dir \
+              for the anti-pattern this lint actually guards against"
+)]
 fn host_adapter_dir(asset_key: &str) -> PathBuf {
     std::env::temp_dir()
         .join("verter-host")
@@ -356,6 +362,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "asserts containment under the production content-addressed cache root \
+                  (host_adapter_dir), not minting a fresh scratch path"
+    )]
     fn managed_tsgo_vue_carrier_replaces_only_the_unmapped_intro_line() {
         let tmp = tempdir().unwrap();
         vendor_vue(tmp.path());

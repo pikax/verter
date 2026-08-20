@@ -90,6 +90,7 @@ path = "src/main.rs"
 futures-util = "0.3.32"
 tower-service = "0.3.3"
 verter_macro_dto = { path = "../verter_macro_dto" }
+verter_test_support = { path = "../verter_test_support" }
 # The wire-equivalence integration test byte-compares the ACTUAL NAPI
 # protocol encoding of the LSP route's envelope.
 verter_protocol = { path = "../verter_protocol" }

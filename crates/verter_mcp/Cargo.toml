@@ -46,4 +46,5 @@ axum = "0.8.9"
 verter_span = { path = "../verter_span" }
 verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
+verter_test_support = { path = "../verter_test_support" }
 verter_type_expr = { workspace = true }

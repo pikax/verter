@@ -26,6 +26,7 @@ use std::sync::Arc;
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_test_support::unique_temp_dir;
 
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
@@ -226,10 +227,7 @@ async fn quoted_prop_consumer_mistype_surfaces_ts2322_tsserver() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join(format!(
-        "verter_quoted_prop_mistype_tsserver_{}",
-        std::process::id()
-    ));
+    let tmp = unique_temp_dir("verter_quoted_prop_mistype_tsserver");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");
@@ -350,10 +348,7 @@ async fn quoted_prop_consumer_mistype_surfaces_ts2322_tsgo() {
         return;
     }
 
-    let tmp = std::env::temp_dir().join(format!(
-        "verter_quoted_prop_mistype_tsgo_{}",
-        std::process::id()
-    ));
+    let tmp = unique_temp_dir("verter_quoted_prop_mistype_tsgo");
     let _ = std::fs::remove_dir_all(&tmp);
     if create_test_project_with_workspace_node_modules(&tmp).is_err() {
         eprintln!("skipping: could not create test project with workspace node_modules");

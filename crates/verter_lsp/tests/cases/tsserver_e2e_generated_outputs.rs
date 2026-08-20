@@ -21,6 +21,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use verter_test_support::unique_temp_dir;
+
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
@@ -193,15 +195,6 @@ pub(super) fn create_test_project_with_workspace_node_modules(dir: &Path) -> std
 }"#;
     std::fs::write(dir.join("tsconfig.json"), tsconfig)?;
     Ok(())
-}
-
-/// A per-PROCESS temp directory under `name`. Bare
-/// `std::env::temp_dir().join(name)` is a shared OS path with no
-/// per-process component: two concurrent invocations of this test suite on
-/// the same machine (e.g. two worktrees) would `remove_dir_all` and rewrite
-/// the SAME project directory into each other, producing spurious failures.
-fn unique_temp_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{name}-{}", std::process::id()))
 }
 
 fn refresh_generated_verter_types_stub(node_modules_root: &Path) -> std::io::Result<()> {
