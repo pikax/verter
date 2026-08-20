@@ -22,51 +22,36 @@ pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, Uncomposa
 use map_compose::{FragmentWrite, MapComposer, ModuleWriter, SegmentOrigin};
 use map_input::{agree_source_root, validate_and_decode, DecodedFragmentMap};
 
-/// The assembled Vue runtime main module: the code, and the source map it was
-/// generated from, as ONE result.
+/// Assembled Vue runtime main module: code and map as one result.
 ///
-/// `source_map` is `None` when no map was requested — positively absent, not an
-/// empty map and not a map with empty `mappings`. When a map WAS requested one
-/// is always produced, even for a module none of whose present fragments
-/// contributes a mapping: an empty artifact is the truthful description of such
-/// a module, and degrading it to "no map" would make a map-enabled compile
-/// indistinguishable from a map-disabled one.
+/// `source_map` is `None` only when no map was requested — not an empty
+/// map. A requested map is always produced, even if no fragment
+/// contributes a mapping: an empty artifact is truthful; "no map"
+/// would look like a map-disabled compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledVueModule {
     pub code: String,
     pub source_map: Option<String>,
 }
 
-/// Assemble the Vue `_sfc_main` runtime module from the framework-neutral
-/// [`RuntimeCompileOutput`] the Vue carrier produced.
+/// Assemble the Vue `_sfc_main` runtime module from the carrier's
+/// framework-neutral [`RuntimeCompileOutput`].
 ///
-/// This is the host's VUE main-module assembly (its virtual-file concern:
-/// style / custom-block virtual imports via [`render_ids`], plus HMR). It
-/// consumes the NEUTRAL bundle — never the Vue-shaped `VerterCompileResult` —
-/// so the carrier owns producing the blocks and the host owns wiring them into
-/// the `_sfc_main` object. The output is byte-identical for the same blocks
-/// regardless of how the carrier produced them.
+/// Host owns virtual-file wiring (style / custom-block imports via
+/// [`render_ids`], HMR); the carrier owns the blocks. Same blocks
+/// produce byte-identical output.
 ///
-/// The script fragment passes through two authorized rewrites — a global
-/// `__sfc__` → `_sfc_main` rename, then a global removal of
-/// `export default _sfc_main;\n` over the rename's output — both driven through
-/// real [`CodeTransform`](verter_compiler::code_transform::CodeTransform)
-/// transforms so the same chunk list produces the bytes AND the map. The
-/// template fragment is written verbatim and is not rewritten.
-///
-/// Assembly-owned bytes — the virtual imports, render attachment, custom-block
-/// invocation, `__file`, HMR, the SSR-context wrapper, and the export
-/// scaffolding — carry no mapping, because no authored source justifies one.
-///
-/// Public so conformance/test harnesses (`verter_vue_conformance`) compare
-/// against the GENUINE shipped runtime Main rather than a hand copy.
+/// Script rewrites (`__sfc__` → `_sfc_main`, then strip
+/// `export default _sfc_main;\n`) go through
+/// [`CodeTransform`](verter_compiler::code_transform::CodeTransform)
+/// so the same chunk list produces bytes and map. Template is verbatim.
+/// Assembly-owned bytes (imports, `__file`, HMR, SSR wrapper, export)
+/// carry no mapping.
 ///
 /// # Errors
 ///
-/// [`AssembleMapFailure`] when a required input map is missing or a present one
-/// is structurally uncomposable. Either way there is NO successful result — not
-/// code without a map, not code with an empty map. With `profile.source_map`
-/// disabled no map is required and no failure is possible.
+/// [`AssembleMapFailure`] if a required map is missing or uncomposable.
+/// No success without a map when one was requested.
 pub fn assemble_vue_main_module(
     canonical_id: &str,
     compiled: &RuntimeCompileOutput,
@@ -113,25 +98,14 @@ pub fn assemble_vue_main_module(
         out.push('\n');
     }
 
-    // Script output comes BEFORE the template's own runtime imports. Official
-    // `@vitejs/plugin-vue`/`@vue/compiler-sfc` write the authored script's own
-    // imports (and the rest of the script block) first, then the template's
-    // runtime helper imports immediately before the render function — proven
-    // against the exact rc.3 goldens (e.g. `vue/basic-interpolation__vdom__*`:
-    // `import { ref } from "vue"` / `const _sfc_main = {...}` precede the
-    // template's own `import { toDisplayString as _toDisplayString, ... }`).
-    // ESM does not require import statements to precede other statements
-    // (every import is hoisted regardless of source position), so there was
-    // no correctness reason for the prior order — only a conformance defect.
+    // Script (including its imports) precedes the template's runtime
+    // helper imports — official `@vitejs/plugin-vue` / `@vue/compiler-sfc`
+    // order. ESM hoists imports either way; the order is conformance.
     if let Some((script_code, chained)) = &rewritten_script {
-        // The compiler-emitted script passes through UNCHANGED apart from the
-        // two authorized rewrites: setup-binding elision (type-only imports,
-        // unused setup imports) is owned by the compiler's
-        // `build_returned_object` (template_used_vars-driven), not by a
-        // text-level post-pass here — the old `filter_setup_return` was
-        // removed: it keyed on a `return { ... };` shape the compiler has not
-        // emitted since `__returned__` was introduced, so it was dead code on
-        // the real production output (proven by canary).
+        // Script is unchanged except the two authorized rewrites.
+        // Setup-binding elision is `build_returned_object`, not a text
+        // post-pass (`filter_setup_return` keyed on a `return { ... };`
+        // shape the compiler no longer emits).
         composer.write_fragment(
             &mut out,
             FragmentWrite {
@@ -204,13 +178,9 @@ pub fn assemble_vue_main_module(
         );
     }
 
-    // Official `@vitejs/plugin-vue`'s real `transformMain` gates `__file` on
-    // `devToolsEnabled || (devServer && !isProduction)` — a live dev-server
-    // / devtools marker, not a bare dev-vs-prod split. Verter has no
-    // separate `devToolsEnabled` concept, but `hmr_strategy: None` already
-    // means "no dev-server tooling requested" (its own doc comment: "No HMR
-    // code is emitted"); a dev-mode assembly that explicitly opts out of
-    // HMR must skip `__file` too, not just the HMR block below.
+    // Official `transformMain` gates `__file` on
+    // `devToolsEnabled || (devServer && !isProduction)`. `hmr_strategy:
+    // None` means no dev-server tooling, so skip `__file` as well as HMR.
     if !profile.is_production && profile.hmr_strategy != HmrStrategy::None {
         let _ = writeln!(out, "_sfc_main.__file = {:?}", canonical_id);
     }

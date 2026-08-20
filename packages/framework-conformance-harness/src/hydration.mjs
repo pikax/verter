@@ -1,18 +1,13 @@
 // Hydration pairing #1 (ssr-hydration.md): official server / official
-// client, run in a deterministic jsdom environment against the pinned
-// official runtimes. This is the harness CONTROL pairing — it proves the
-// mechanism end to end using only official-core artifacts.
+// client, in a deterministic jsdom environment against the pinned official
+// runtimes. Control pairing — proves the mechanism using only official-core
+// artifacts.
 //
-// Pairings #2 ("Verter server / Verter client") and #3 ("official server /
-// Verter client") need real candidate (Verter-compiled) output in this
-// exact assembled shape. That does not exist yet at this point in the
-// program (BV1/BS1, which build Verter's conformant Vue/Svelte backends,
-// are downstream of BF2 in the DAG — see program-dag.toml: `B4 -> {BV1,
-// BS1}` while BF2's only predecessor is BF1). This module exposes
-// `hydrateVue`/`hydrateSvelteClient` as reusable, pluggable entry points so
-// BV1/BS1 can drive pairings #2/#3 through the SAME mechanism once real
-// candidate output exists — BF2 does not fabricate a placeholder candidate
-// to claim those pairings today.
+// Pairings #2 (Verter server / Verter client) and #3 (official server /
+// Verter client) need real candidate (Verter-compiled) output in this
+// assembled shape. This module exposes `hydrateVue`/`hydrateSvelteClient`
+// as pluggable entry points so those pairings can reuse the same mechanism
+// once candidate output exists. No placeholder candidate is fabricated.
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";

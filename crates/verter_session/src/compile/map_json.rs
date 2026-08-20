@@ -1,22 +1,11 @@
-//! A JSON reader whose admissible domain is fixed by this crate rather than
-//! inherited from a parser.
+//! JSON reader whose admissible domain is this crate's, not a parser's.
 //!
-//! "Parses as JSON" is not one thing across languages, and an assembled map is
-//! checked against an independently written reference. Two documents make the
-//! difference observable: a number whose magnitude exceeds the finite
-//! IEEE-754 double range, which one parser rejects outright and another coerces
-//! to an infinity; and a string carrying an unpaired surrogate, which one
-//! parser admits into a UTF-16 string type and another refuses to materialise.
-//! A repeated object member is a third: RFC 8259 leaves its meaning undefined,
-//! and the two languages' default object models agree on last-wins only by
-//! coincidence.
-//!
-//! So this reader neither rejects nor coerces those documents on its own
-//! initiative. It parses them, records what it saw, and lets the caller apply
-//! the fixed domain rules in their specified order — numbers before strings,
-//! both before any member is read. Delegating any of the three to a parser is
-//! exactly how two conforming implementations end up disagreeing without either
-//! being wrong about its own language.
+//! "Parses as JSON" differs across languages: out-of-range numbers,
+//! unpaired surrogates, repeated object members (RFC 8259 undefined).
+//! This reader records what it saw; the caller applies domain rules in
+//! specified order (numbers before strings, both before any member).
+//! Delegating any of those to a parser is how two conforming
+//! implementations disagree.
 
 /// A parsed JSON string, plus whether it survived unescaping as well-formed
 /// Unicode. An unpaired surrogate escape is replaced by `U+FFFD` and flagged

@@ -2920,13 +2920,11 @@ fn empty_sfc_tsx_output_is_valid() {
     assert_tsx_parses("<!-- comment only -->", "comment-only SFC");
 }
 
-/// Official Vue's SFC parser unconditionally rejects a carrier with no
-/// `<template>`, `<script>`, or `<script setup>` block — see the `# 6676`
-/// regression test in `compiler-sfc/__tests__/parse.spec.ts` ("should throw
-/// error if no <template> or <script> is present"). Verter's trivia-only
-/// shell exemption ([`empty_sfc_compiles_to_empty_component_shell`]) does not
-/// extend to style/custom-block-only or arbitrary-text carriers: those still
-/// diagnose `MissingSfcEntryBlock`, matching the oracle.
+/// Official Vue rejects a carrier with no `<template>`/`<script>`/`<script setup>`
+/// (`parse.spec.ts` #6676). Trivia-only shell exemption
+/// ([`empty_sfc_compiles_to_empty_component_shell`]) does not cover style/
+/// custom-block-only or arbitrary-text carriers — those still diagnose
+/// `MissingSfcEntryBlock`.
 #[test]
 fn missing_sfc_entry_block_for_non_trivia_block_less_carriers() {
     for src in [
@@ -2946,20 +2944,11 @@ fn missing_sfc_entry_block_for_non_trivia_block_less_carriers() {
     }
 }
 
-/// Official Vue's SFC parser treats an EMPTY `<script>`/`<script setup>`
-/// block as if it were never present — `parse.ts`'s `isEmpty()` helper
-/// (lines 421-429) returns true when every child is whitespace-only text (or
-/// there are no children at all, e.g. a self-closing tag), and the
-/// `ignoreEmpty` forEach branch (lines 159-169) then skips storing that node
-/// as `descriptor.script`/`descriptor.scriptSetup` entirely — UNLESS the
-/// block carries a `src` attribute (line 165, `!hasAttr(node, 'src')`; also
-/// exercised directly by the `handle empty nodes with src attribute` test at
-/// `parse.spec.ts:230-235`). A carrier whose only would-be entry block is an
-/// empty `<script>` therefore has no real template/script content, and
-/// `parse.ts:232-238` fires `MissingSfcEntryBlock` for it — see also
-/// `parse.spec.ts:220-228` ("should ignore other nodes with no content":
-/// `parse('<script/>').descriptor.script` is `null`, likewise for
-/// `<script> \n\t  </script>`).
+/// Official `isEmpty()` (`parse.ts` 421-429) treats whitespace-only /
+/// childless `<script>`/`<script setup>` as absent (`ignoreEmpty` 159-169),
+/// unless `src` (`!hasAttr(node, 'src')`, line 165). An empty-script-only
+/// carrier therefore diagnoses `MissingSfcEntryBlock` (`parse.ts` 232-238;
+/// `parse.spec.ts` 220-228).
 #[test]
 fn missing_sfc_entry_block_for_empty_script_only_carriers() {
     for src in [
@@ -2982,12 +2971,9 @@ fn missing_sfc_entry_block_for_empty_script_only_carriers() {
     }
 }
 
-/// A `src`-attributed script never counts as empty — `parse.ts:165`'s
-/// `!hasAttr(node, 'src')` guard exempts it from the `isEmpty` skip even
-/// with zero children, matching `parse.spec.ts:230-235` ("handle empty nodes
-/// with src attribute": `descriptor.script` is truthy for `<script
-/// src="com"/>`). Such a carrier has a real entry block and must NOT
-/// diagnose `MissingSfcEntryBlock`.
+/// `src` exempts a script from `isEmpty` even with zero children
+/// (`parse.ts:165`, `parse.spec.ts:230-235`). Must not diagnose
+/// `MissingSfcEntryBlock`.
 #[test]
 fn script_with_src_attr_counts_as_entry_block_even_when_empty() {
     let result = compile_sfc(r#"<script src="./foo.js"/>"#);
@@ -3003,14 +2989,10 @@ fn script_with_src_attr_counts_as_entry_block_even_when_empty() {
     );
 }
 
-/// Official Vue's `hasAttr` (`parse.ts:413-415`) tests attribute PRESENCE —
-/// `node.props.some(p => p.type === NodeTypes.ATTRIBUTE && p.name === name)`
-/// — never the attribute's VALUE. A `src` attribute with no value
-/// (`<script src/>` self-closing, or `<script src></script>`) is still
-/// PRESENT, so it must exempt the block from `isEmpty` exactly like a
-/// valued `src`. `RootNodeScript::src` only stores the value span (`None`
-/// for a valueless attribute), so the production check must not rely on it
-/// alone.
+/// Official `hasAttr` (`parse.ts:413-415`) tests presence, not value.
+/// Valueless `src` (`<script src/>`) still exempts `isEmpty`.
+/// `RootNodeScript::src` is only the value span (`None` if valueless) — do
+/// not use it as the presence check.
 #[test]
 fn script_with_valueless_src_attr_counts_as_entry_block() {
     for src in ["<script src/>", "<script src></script>"] {
@@ -3028,12 +3010,9 @@ fn script_with_valueless_src_attr_counts_as_entry_block() {
     }
 }
 
-/// `hasAttr`'s `p.name === name` (`parse.ts:413-415`) is CASE-SENSITIVE: Vue's
-/// own attribute-name parsing preserves authored casing verbatim
-/// (`onattribname`'s `name: getSlice(start, end)` in
-/// `compiler-core/src/parser.ts` — no `toLowerCase()`), so an uppercase or
-/// mixed-case spelling of `src` is a DIFFERENT attribute name to official Vue
-/// and must NOT exempt an otherwise-empty script from `MissingSfcEntryBlock`.
+/// `hasAttr` is case-sensitive (`parse.ts:413-415`; `onattribname` keeps
+/// authored casing). `SRC`/`Src` is not `src` — empty script still
+/// diagnoses `MissingSfcEntryBlock`.
 #[test]
 fn script_with_uppercase_src_spelling_does_not_count_as_entry_block() {
     for src in ["<script SRC/>", "<script Src></script>"] {
@@ -3051,10 +3030,7 @@ fn script_with_uppercase_src_spelling_does_not_count_as_entry_block() {
     }
 }
 
-/// A script block with real, non-whitespace content (even just an import)
-/// is never "empty" under `isEmpty()` (`parse.ts:421-429` only inspects
-/// whitespace-trimmed text children) and always counts as a real entry
-/// block — no `MissingSfcEntryBlock` diagnostic.
+/// Non-whitespace script content is never `isEmpty()` (`parse.ts:421-429`).
 #[test]
 fn script_with_import_only_content_counts_as_entry_block() {
     let result = compile_sfc("<script>import { ref } from 'vue'</script>");
@@ -3069,9 +3045,7 @@ fn script_with_import_only_content_counts_as_entry_block() {
     );
 }
 
-/// `<template functional>` is no longer supported in Vue 3 — see
-/// `compiler-sfc/__tests__/parse.spec.ts` ("should throw error if template
-/// functional is given").
+/// `<template functional>` is unsupported in Vue 3 (`parse.spec.ts`).
 #[test]
 fn template_functional_unsupported() {
     let result = compile_sfc("<template functional></template>");
@@ -3085,8 +3059,7 @@ fn template_functional_unsupported() {
     );
 }
 
-/// A plain `<template>` (no `functional` attribute) never diagnoses
-/// `TemplateFunctionalUnsupported`.
+/// Plain `<template>` (no `functional`) never diagnoses `TemplateFunctionalUnsupported`.
 #[test]
 fn plain_template_has_no_functional_error() {
     let result = compile_sfc("<template><div>x</div></template>");

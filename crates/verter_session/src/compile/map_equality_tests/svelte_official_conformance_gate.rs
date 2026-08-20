@@ -1,57 +1,30 @@
-//! The authoritative full-axis gate over the Svelte requests a public/default
-//! route can actually issue, plus the conformance targets the genuine defects
-//! must satisfy.
+//! Full-axis gate over the Svelte requests a public/default route can
+//! actually issue.
 //!
-//! ## Which cells this gate covers
+//! The manifest holds twelve goldens, not twelve requests: `dev` has no
+//! public spelling, so each `(fixture, generate)` pair's two `dev` arms
+//! are the same request (see
+//! [`the_dev_axis_has_no_public_spelling_and_only_its_implicit_value_is_reachable`](super::svelte_official_conformance_matrix::the_dev_axis_has_no_public_spelling_and_only_its_implicit_value_is_reachable)).
+//! Six reachable requests (three client, three server). The six `dev1`
+//! goldens are classified out via
+//! [`SvelteCell::reachability`](super::svelte_official_conformance_matrix::SvelteCell::reachability)
+//! and never driven.
 //!
-//! The committed manifest holds twelve Svelte goldens, but they do NOT describe
-//! twelve requests. The `dev` axis has no public spelling on any transport, so
-//! each `(fixture, generate)` pair's two `dev` arms are the SAME production
-//! request — proved by
-//! [`the_dev_axis_has_no_public_spelling_and_only_its_implicit_value_is_reachable`](super::svelte_official_conformance_matrix::the_dev_axis_has_no_public_spelling_and_only_its_implicit_value_is_reachable).
-//! The reachable inventory is therefore SIX requests: three client and three
-//! server. The six `dev1` goldens are classified out by construction through
-//! [`SvelteCell::reachability`](super::svelte_official_conformance_matrix::SvelteCell::reachability);
-//! they are not failing cells, and this gate never drives them.
+//! Per reachable client request: compile through the shipped
+//! `get_virtual_file(Main)` route, hand `code`/`map` to
+//! `check-candidate.mjs --authoritative`, require every axis `ran`
+//! (`runtime` may be `not-applicable` for a Svelte client artifact —
+//! never `skipped`), and assert the characterized current outcome.
+//! Fails if a defect deepens or is silently corrected. Official
+//! behaviour is in the conformance targets at the bottom — this module
+//! owns no correction.
 //!
-//! ## What the gate does per reachable client request
-//!
-//! 1. reads the SAME committed manifest the inventory module reads (no second
-//!    hand-written digest-verification copy);
-//! 2. compiles the fixture through the GENUINE shipped route — `VerterHost`
-//!    upsert plus `get_virtual_file(Main)`, which for a Svelte carrier hands
-//!    back `compile_bundle`'s own bytes verbatim
-//!    (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:3017-3026`);
-//!    never a test-local re-implementation of the emitter and never a
-//!    harness-synthesised candidate;
-//! 3. hands the real `code` and `map` to the harness's accepted entry point
-//!    (`bin/check-candidate.mjs --authoritative`) unchanged, through the SAME
-//!    report reader the sibling Vue gate drives;
-//! 4. requires EVERY axis to report `ran` — `runtime` may instead report
-//!    `not-applicable`, which for a Svelte CLIENT artifact is a structural fact
-//!    about the artifact rather than a skip (the harness makes only
-//!    `generate: "server"` Svelte goldens runtime-applicable,
-//!    `packages/framework-conformance-harness/src/check-candidate.mjs:50-56`) —
-//!    and NEVER `skipped`. The `axes` map is asserted DIRECTLY, not only through
-//!    the CLI's `reasons`; and
-//! 5. asserts the CHARACTERIZED current outcome of that request. The gate is
-//!    therefore GREEN and discriminating in both directions: it fails if a
-//!    defect deepens AND if one is silently corrected.
-//!
-//! The correct official behaviour lives in the conformance targets at the
-//! bottom of this file, each asserting one required official outcome directly
-//! rather than through a recorded divergence. This module owns no correction.
-//!
-//! Run it with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! svelte_official_conformance_gate -- --test-threads=1 --nocapture`. The tests
+//! svelte_official_conformance_gate -- --test-threads=1 --nocapture`
 //!
-//! WITHOUT `--features bf2-authoritative` this module is not compiled in, so a
-//! filter naming it matches ZERO tests and `cargo test` still exits 0. Read the
-//! `running N tests` line, never the exit code. libtest's filter is one literal
-//! substring — it has no alternation, so `"a\\|b"` matches nothing at all.
-//! here drive the oracle CLI one request at a time, so the harness's shared link
-//! scratch is never entered concurrently.
+//! Without the feature this module is not compiled. Read the
+//! `running N tests` line, never the exit code. One request at a time
+//! so the harness's shared scratch is never concurrent.
 
 use std::collections::BTreeSet;
 
@@ -250,9 +223,7 @@ const SERVER_REFUSAL_CODE: &str = "svelte-runtime-unsupported-server-generate";
 const SERVER_REFUSAL_MESSAGE: &str =
     "Svelte client emission does not yet support server-side rendering (`generate: 'server'`).";
 
-// ══════════════════════════════════════════════════════════════════════════
 // The reachable inventory this gate is defined over
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The goldens no public/default route can request are classified out of this
 /// gate, and the gate's own inventory is exactly the reachable complement.
@@ -322,9 +293,7 @@ fn the_gate_runs_over_the_reachable_requests_and_no_others() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The gate
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Every axis genuinely runs for every reachable client request, and each
 /// request's outcome is exactly the characterized one.
@@ -589,9 +558,7 @@ fn every_committed_client_cell_is_driven_and_reaches_its_recorded_outcome() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The server arm, characterized as it stands
-// ══════════════════════════════════════════════════════════════════════════
 
 /// What the shipped route returns TODAY for every reachable server request.
 ///
@@ -656,9 +623,7 @@ fn every_committed_server_cell_is_refused_by_the_shipped_route() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Per-defect characterization — green today, discriminating in both directions
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Compile one reachable client request and return its emitted module bytes.
 fn emitted_module(fixture_suffix: &str) -> (SvelteCell, String, String) {
@@ -866,9 +831,7 @@ fn the_client_source_map_currently_carries_only_these_authored_coordinates() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Conformance targets — the official behaviour each genuine defect must reach
-// ══════════════════════════════════════════════════════════════════════════
 
 /// CONFORMANCE TARGET — the `{#each}` flags argument equals the official value.
 ///
@@ -992,9 +955,7 @@ fn the_client_source_map_covers_every_required_authored_anchor() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Mutation-discrimination — the oracle behind this gate is not a stub
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The pristine baseline for the plants below: the golden's OWN recorded
 /// artifact, which is the candidate proven to reach `verdict: "pass"`.
@@ -1056,7 +1017,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
         control.reasons
     );
 
-    // ---- parse: corrupt the candidate into invalid JavaScript --------------
+    // parse: corrupt the candidate into invalid JavaScript
     let parse_mutant = format!("{pristine_code}\nconst )(( = ;;;");
     assert_plant_applied("parse", &pristine_code, &parse_mutant, "const )(( = ;;;");
     let parse_report = check_candidate(&base.golden_name, &parse_mutant, Some(&pristine_map));
@@ -1070,7 +1031,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
         parse_report.reasons
     );
 
-    // ---- link: retarget a real import outside the pinned closure ------------
+    // link: retarget a real import outside the pinned closure
     const NONEXISTENT: &str = "verter-gate-test-nonexistent-package-xyz";
     assert!(
         pristine_code.contains("'svelte/internal/client'"),
@@ -1092,7 +1053,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
         link_report.reasons
     );
 
-    // ---- structural: rename the runtime namespace binding ------------------
+    // structural: rename the runtime namespace binding
     const RENAMED: &str = "$renamedByPlant";
     let structural_mutant = pristine_code.replacen(
         "import * as $ from",
@@ -1154,7 +1115,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
         diagnostics_report.reasons
     );
 
-    // ---- mapping (content integrity): corrupt sourcesContent ---------------
+    // mapping (content integrity): corrupt sourcesContent
     const NOT_THE_FIXTURE: &str = "GATE-TEST-PLANT: this is not the authored fixture's content";
     let mut map_json: Value = serde_json::from_str(&pristine_map).expect("the map is JSON");
     let sources_content = map_json
@@ -1358,7 +1319,7 @@ fn the_runtime_comparison_detects_a_planted_wrong_render() {
         "the control rendered markup other than the markup this suite pins for it"
     );
 
-    // ---- runtime: render the wrong markup, but still mount ------------------
+    // runtime: render the wrong markup, but still mount
     //
     // `root_1` is the template the `alternate` branch instantiates, and `count`
     // starts at 0, so this is markup the control run above actually rendered.
@@ -1524,9 +1485,7 @@ fn check_candidate_envelope(golden_name: &str, envelope: &str) -> CellReport {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The committed per-cell record
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The committed, machine-checkable per-cell record
 /// (`crates/verter_session/src/svelte_conformance_cell_record.json`).
@@ -1659,9 +1618,7 @@ fn the_committed_cell_record_matches_what_the_suite_observes() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The client runtime smoke
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Mount a set of labelled client modules against the pinned official client
 /// runtime and return what each rendered.

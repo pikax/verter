@@ -1,28 +1,14 @@
-//! The IDE/TSX product family, observed by the real TypeScript compiler inside
-//! the workspace declaration domain.
+//! IDE/TSX product, observed by real TypeScript in the workspace
+//! declaration domain (`@jsxImportSource @verter/svelte-jsx`,
+//! `@verter/types`). Without those resolvable, TypeScript types them
+//! `any` and a correct projection observes like a broken one. Missing
+//! packages REFUSE the observation, never degrade.
 //!
-//! An IDE projection is a JSX module whose meaning lives behind
-//! `@jsxImportSource @verter/svelte-jsx` (`crates/verter_compiler/src/svelte/ide/prelude.rs:30`)
-//! and `@verter/types`. Observed without those resolvable, TypeScript types
-//! every reference to them `any` and a correct projection observes exactly like
-//! a broken one. So the observation runs in the harness's WORKSPACE domain: the
-//! `@verter/*` declaration packages are mapped to their own on-disk directories
-//! through TypeScript's own `paths`, JSX is enabled so the pragma is not inert,
-//! and a missing package or unresolved reference REFUSES the observation rather
-//! than degrading it.
-//!
-//! The Svelte carrier's projection is documented as type-checking clean through
-//! TSGO (`crates/verter_compiler/src/svelte/carrier.rs:186`). That is a claim;
-//! what these tests record is what TypeScript actually says.
-//!
-//! Run with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
 //! ide_surface_typescript_observation -- --test-threads=1 --nocapture`.
 //!
-//! WITHOUT `--features bf2-authoritative` this module is not compiled in, so a
-//! filter naming it matches ZERO tests and `cargo test` still exits 0. Read the
-//! `running N tests` line, never the exit code. libtest's filter is one literal
-//! substring — it has no alternation, so `"a\\|b"` matches nothing at all.
+//! Without the feature this module is not compiled. Read the
+//! `running N tests` line, never the exit code.
 
 use super::bf2_seed_matrix::{harness_root, run_bounded, TempCandidate, ORACLE_TIMEOUT};
 use super::*;
@@ -127,9 +113,7 @@ fn diagnostics_of(record: &Value) -> Vec<String> {
 const SVELTE_COMPONENT: &str = "<script lang=\"ts\">\n  let { label, disabled = false }: { label: string; disabled?: boolean } = $props();\n  let count = $state(0);\n</script>\n\n<button {disabled} onclick={() => count++}>{label}: {count}</button>\n";
 const VUE_COMPONENT: &str = "<script setup lang=\"ts\">\nconst props = defineProps<{ label: string; disabled?: boolean }>()\nconst count = 0\n</script>\n\n<template>\n  <button :disabled=\"props.disabled\">{{ props.label }}: {{ count }}</button>\n</template>\n";
 
-// ══════════════════════════════════════════════════════════════════════════
 // The domain itself is decisive — the planted control
-// ══════════════════════════════════════════════════════════════════════════
 
 /// PLANTED CONTROL — a correct JSX surface and a broken one observe
 /// DIFFERENTLY in the workspace domain.
@@ -209,9 +193,7 @@ fn the_workspace_domain_distinguishes_a_correct_jsx_surface_from_a_broken_one() 
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The published IDE surfaces, per carrier
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The Svelte carrier's published IDE projection, observed.
 ///

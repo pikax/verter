@@ -79,21 +79,11 @@ fn request(
     )
 }
 
-/// A strict-parse Svelte defect (here, an unterminated trailing comment)
-/// stays PUBLISHABLE at the carrier boundary: the tokenizer is intentionally
-/// infallible and always produces a faithful, structurally usable tree — a
-/// mid-typing document. The CLIENT-runtime "Verter emits a `Main` ⇔ official
-/// ACCEPTS" contract is a SEPARATE, later gate (`official_reject_gate`,
-/// reached at compile time through `compile_client`), not a reason to refuse
-/// carrier publication and leak no product at all — the IDE (hover, hover
-/// completion, hover diagnostics, cursor-context features) needs a usable
-/// artifact for exactly this kind of transiently-broken document.
-///
-/// This mirrors what used to be
-/// `strict_syntax_rejection_publishes_no_product_family`: refusing
-/// publication for any retained strict-parse fact broke the LSP's own
-/// recovery test suite (an unclosed `<script>`, a truncated open tag) by
-/// making the WHOLE document unusable while the user is still typing it.
+/// A strict-parse Svelte defect (unterminated trailing comment) stays
+/// publishable: the tokenizer is infallible and always yields a usable
+/// tree. The client-runtime `official_reject_gate` is a compile-time
+/// contract, not a reason to refuse carrier publication. IDE features
+/// need a usable artifact for a mid-typing document.
 #[test]
 fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
     use crate::carrier_publication_store::PublicationAuditKind;
@@ -115,13 +105,8 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
     let store = CarrierPublicationStore::new(source, grammar);
 
     let outcome = store.publish_or_get(&accepted, request(1, &accepted));
-    // The strict-parse fact (the unterminated `<!--`) DOES reach the
-    // carrier's own mapped-diagnostic channel at full `Error` severity —
-    // but carries `blocks_compile: false`, so it never marks the file's
-    // `compile_entry` gate `has_errors` (see `svelte_parse_diagnostics`'s
-    // doc and `strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file`
-    // below). This test proves the STRUCTURAL publish claim: the artifact
-    // still PUBLISHES, real downstream product and all.
+    // Unterminated `<!--` is `Error` with `blocks_compile: false`, so it
+    // does not set `has_errors`. Artifact still publishes.
     match outcome.clone().into_envelope() {
         Some(_) => {}
         None => panic!("a recoverable strict-parse defect must still publish, got {outcome:?}"),
@@ -155,15 +140,9 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
             aliases: Vec::new(),
         })
         .expect("a recoverable strict-parse defect must still admit the document");
-    // The upsert's OWN parse-phase diagnostics (populated from the published
-    // carrier, never from a refused publication) surface the strict-parse
-    // fact for the unterminated comment (official `unexpected_eof` — an
-    // EMPTY `<!--` lead, nothing after it before EOF) — proving the document
-    // was actually admitted and parsed, not silently swallowed. It is the
-    // SOLE diagnostic for this defect (no companion informal duplicate —
-    // see `svelte_parse_diagnostics`'s doc), and `has_errors` stays whatever
-    // it already was: `blocks_compile: false` keeps it off the
-    // `compile_entry` gate while still IDE-visible here.
+    // Upsert parse diagnostics surface official `unexpected_eof` for the
+    // empty `<!--` — admitted and parsed, sole diagnostic, `has_errors`
+    // stays off (`blocks_compile: false`).
     assert!(
         update
             .diagnostics
@@ -175,17 +154,11 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
     );
 }
 
-/// A single recoverable strict-parse defect (here, a missing attribute
-/// value — official `expected_attribute_value`) must NOT fail-close the
-/// COMPILE stage for the whole file, one layer above carrier publish. The
-/// carrier still publishes the artifact (proven above); the strict fact's
-/// diagnostic now ALSO reaches the carrier's mapped-diagnostic channel with
-/// `Error` severity (matching official Svelte, which records the
-/// diagnostic while still recovering a usable tree) — but that severity
-/// must not make `compile_entry`'s `has_errors` gate refuse to produce IDE
-/// output for a file that is otherwise perfectly compilable. This is the
-/// SAME regression class `strict_syntax_defect_still_publishes_a_recoverable_product_family`
-/// already guards at the carrier-publish layer, one layer further up.
+/// A recoverable strict-parse defect (`expected_attribute_value`) must
+/// not fail-close compile for the whole file. The diagnostic is `Error`
+/// but must not set `has_errors`. Same class as
+/// `strict_syntax_defect_still_publishes_a_recoverable_product_family`,
+/// one layer up.
 #[test]
 fn strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file() {
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
@@ -975,12 +948,9 @@ fn registered_structure_seals_local_refs_and_public_token_domains() {
     );
 }
 
-/// Scope-boundary negative control for the fix above: a Svelte
-/// `parse_reject_facts` defect (here, a duplicate attribute — pre-existing,
-/// `blocks_compile: true`, untouched by this fix) still fails `compile_entry`
-/// closed. Only `strict_parse_errors` moved to `blocks_compile: false`; every
-/// other rail keeps blocking exactly as before this fix — proving the fix
-/// did not silently widen into a general "advisory-only Svelte errors" policy.
+/// Negative control: a Svelte `parse_reject_facts` duplicate attribute
+/// (`blocks_compile: true`) still fails `compile_entry` closed. Only
+/// `strict_parse_errors` is advisory.
 #[test]
 fn preexisting_parse_reject_fact_still_fails_close_ide_compile() {
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
@@ -1009,19 +979,9 @@ fn preexisting_parse_reject_fact_still_fails_close_ide_compile() {
     );
 }
 
-/// Scope-boundary negative control: Vue's own parse-time `Error` diagnostics
-/// (`TemplateFunctionalUnsupported`) still fail `compile_entry` closed.
-///
-/// This is NOT discriminating for `blocks_compile` specifically — Vue's
-/// snapshot-building path (`build_vue_snapshot_from_parsed`, `parse.rs`)
-/// never reads `LanguageDiagnostic::blocks_compile` at all; it always calls
-/// `DiagnosticsSnapshot::from_vec` directly, so `has_errors` there is
-/// computed purely from severity regardless of what `blocks_compile` says.
-/// What this test actually proves: this fix's `blocks_compile` plumbing is
-/// wired ONLY into the Svelte snapshot builder
-/// (`build_svelte_snapshot_from_eval_source`) — Vue's diagnostic-gating
-/// path is untouched, by construction, because it doesn't consume the new
-/// field at all.
+/// Negative control: Vue parse-time `Error` (`TemplateFunctionalUnsupported`)
+/// still fails `compile_entry` closed. Vue's snapshot path uses
+/// `from_vec` (severity only) and never reads `blocks_compile`.
 #[test]
 fn vue_parse_time_error_diagnostic_still_fails_close_ide_compile() {
     let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(

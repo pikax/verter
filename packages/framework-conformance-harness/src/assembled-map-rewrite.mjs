@@ -1,10 +1,9 @@
-// The rewrite/chaining algebra for the two authorized rewrites.
+// Rewrite/chaining algebra for the two authorized rewrites.
 //
-// Implements LAYER 1 §2.4 (`CodeTransform` token geometry, CT-1…CT-14), §2.5
-// (the two authorized rewrites), §5.1 (overview), §5.3 (the chain operation),
-// §5.4 (sourceless-barrier semantics), §5.5 (equal-coordinate ordering) and
-// §5.7 (the template fragment is not rewritten) of
-// `spec/assembled-map-composition-layer1.md`.
+// Implements layer 1 §2.4 (`CodeTransform` token geometry, CT-1…CT-14),
+// §2.5 (authorized rewrites), §5.1, §5.3 (chain), §5.4 (sourceless-barrier),
+// §5.5 (equal-coordinate ordering), §5.7 (template fragment is not rewritten)
+// of `spec/assembled-map-composition-layer1.md`.
 
 import {
   advance,

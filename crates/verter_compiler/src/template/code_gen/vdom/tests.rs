@@ -429,12 +429,10 @@ fn gen_vdom_template_prod(source: &str) -> String {
     tpl.code.clone()
 }
 
-// ══════════════════════════════════════════════════════════════════
 // `<slot>` outlet fallback content must route through the cache-aware
 // slot-children emitter (grouped `_cache[N]` caching, same as component
 // default slots / `<template v-slot>`), and single-static-text fallback
 // must carry the `-1` (CACHED) patch flag.
-// ══════════════════════════════════════════════════════════════════
 
 #[test]
 fn slot_outlet_fallback_static_text_uses_cache_with_cached_flag() {

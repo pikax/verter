@@ -1,58 +1,25 @@
-//! The committed Svelte golden inventory, and the genuine shipped `.svelte`
-//! route that produces a candidate for it.
+//! Committed Svelte golden inventory and the shipped `.svelte` route.
+//! Same `goldens/manifest.json` and digest helpers as
+//! [`bf2_seed_matrix`](super::bf2_seed_matrix) — no second verification
+//! copy. Record projection differs (`generate` / `runes` / `dev`).
 //!
-//! This is the Svelte counterpart of [`bf2_seed_matrix`](super::bf2_seed_matrix)
-//! and it reads the SAME committed `goldens/manifest.json` through the SAME
-//! digest-verification helpers — a second hand-written copy of that verification
-//! is exactly the common-mode error a second reader is supposed to catch rather
-//! than reproduce. Only the record projection differs, because a Svelte record's
-//! axes (`generate` / `runes` / `dev`) are not Vue's.
+//! Inventory: every `svelte/` entry hashes to the manifest digest;
+//! fixtures are byte-identical (CRLF-normalised) to the hashed source;
+//! client and server inventories are separate.
 //!
-//! ## What the inventory guarantees
+//! Honest compile-option mapping: only `generate` →
+//! [`CompileProfile::ssr`]. `runes` has no option (`runes: None`, inferred
+//! from source — checked by
+//! [`the_recorded_runes_axis_matches_what_the_shipped_route_infers`]).
+//! `dev` has no option (`dev_codegen: false`); both `dev` arms drive the
+//! same request. [`SvelteCell::dev`] is retained so reports match the
+//! golden, not a pretend-different request.
 //!
-//! 1. Every `svelte/` entry the manifest names is present, and its record's
-//!    bytes hash to the digest the manifest names (a record that does not is
-//!    not the locked record, and reading its request axes would be reading
-//!    something else's).
-//! 2. Every fixture on disk is byte-identical (CRLF-normalised) to the authored
-//!    source the record hashes — otherwise a candidate and the oracle would be
-//!    describing different authored sources.
-//! 3. The client and server inventories are SEPARATE: they exercise different
-//!    backends and, today, different outcomes.
-//!
-//! ## What the shipped route can and cannot express
-//!
-//! [`SvelteCell::compile_profile`] is the honest mapping from a record's axes
-//! onto real production compile options. Only `generate` has one:
-//!
-//! * `generate` → [`CompileProfile::ssr`], which the host threads into the
-//!   neutral `RuntimeCompileOptions.ssr`
-//!   (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2862`)
-//!   and the Svelte carrier passes to `compile_client`
-//!   (`crates/verter_compiler/src/svelte/carrier.rs:410`).
-//! * `runes` has NO production compile option: the carrier hardcodes
-//!   `runes: None` (`crates/verter_compiler/src/svelte/carrier.rs:369`), so the
-//!   mode is inferred from the component source. That is not assumed here — the
-//!   inventory records the requested axis and
-//!   [`the_recorded_runes_axis_matches_what_the_shipped_route_infers`] checks
-//!   the shipped inference agrees with it.
-//! * `dev` has NO production compile option either: the carrier hardcodes
-//!   `dev_codegen: false` (`crates/verter_compiler/src/svelte/carrier.rs:377`),
-//!   and `SvelteRuntimeOptions::is_production` is declared
-//!   (`crates/verter_compiler/src/svelte/runtime/mod.rs:201`) but never read by
-//!   the Svelte runtime backend. So both `dev` arms of a fixture drive the SAME
-//!   production request. [`SvelteCell::dev`] is retained on the cell so a
-//!   consumer reports against the axis the golden actually recorded instead of
-//!   pretending the request differed.
-//!
-//! Run these with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
 //! svelte_official_conformance -- --test-threads=1 --nocapture`.
 //!
-//! WITHOUT `--features bf2-authoritative` this module is not compiled in, so a
-//! filter naming it matches ZERO tests and `cargo test` still exits 0. Read the
-//! `running N tests` line, never the exit code. libtest's filter is one literal
-//! substring — it has no alternation, so `"a\\|b"` matches nothing at all.
+//! Without the feature this module is not compiled. Read the
+//! `running N tests` line, never the exit code.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -417,9 +384,7 @@ pub(super) fn unreachable_goldens() -> Vec<(SvelteCell, RequestReachability)> {
         .collect()
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The inventory itself
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn the_committed_manifest_holds_twelve_svelte_cells_split_six_client_six_server() {

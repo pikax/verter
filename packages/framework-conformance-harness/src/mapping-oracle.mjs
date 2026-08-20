@@ -1,57 +1,31 @@
-// The AUTHORED-SOURCE mapping oracle: validates ONE candidate's source map
-// against THAT candidate's own generated code and the AUTHORED SFC fixture
-// on disk. No golden map, and no official-compiler map, is an input.
+// Authored-source mapping oracle: one candidate's source map against that
+// candidate's own generated code and the authored SFC fixture on disk.
+// No golden map or official-compiler map is an input.
 //
-// WHY THE REPLACED ORACLE COULD NOT WORK. The mapping axis previously
-// compared the candidate's `mappings` field against the official
-// compiler's. That is not merely the wrong oracle for this axis; it is
-// structurally incapable of ever being the right one, as a direct
-// consequence of the cosmetic-tolerance rule this project already enforces
-// everywhere else. A `mappings` field encodes (generated position ->
-// original position) correspondences over ONE SPECIFIC generated document.
-// Verter's generated JS is legitimately NOT byte-identical to the official
-// compiler's — differing indentation, line breaks, and behavior-preserving
-// carrier shape are explicitly permitted — so the two maps address
-// DIFFERENT generated documents by construction. Comparing them rejects a
-// completely correct candidate map whose generated layout legitimately
-// differs, and accepts a wrong candidate map whose segment shape happens to
-// resemble official's. Neither direction is fixable by normalization: the
-// coordinate spaces are not the same space.
+// Comparing candidate `mappings` to the official compiler's cannot work.
+// A `mappings` field encodes (generated → original) over one specific
+// generated document. Verter's JS is legitimately not byte-identical to
+// official (cosmetic carrier differences are permitted), so the two maps
+// address different documents. Comparing them rejects a correct map whose
+// layout differs and accepts a wrong map whose segment shape happens to
+// resemble official's. Normalization cannot fix this: the coordinate
+// spaces are not the same.
 //
-// What IS checkable, and is what a user actually needs, is self-referential:
-// does the candidate's map tell the truth about the candidate's own output
-// and the source the user wrote? That is this module.
+// Inputs: authored fixture (read from disk — never the map's
+// `sourcesContent`), candidate generated code, candidate map. A `profile`
+// supplies per-framework rewrite vocabulary only.
 //
-// THE THREE INPUTS are always: the authored fixture (read from disk here —
-// never the map's self-reported `sourcesContent`), the candidate's generated
-// code, and the candidate's map. The design is therefore backend- and
-// framework-agnostic; a `profile` supplies the per-framework rewrite
-// vocabulary and nothing else.
+// Every requirement — including generated-only ranges (requirement 6) —
+// runs on every artifact, Vue and Svelte alike. Ranges come from the
+// artifact's own parse, not the caller (see generatedOnlyRanges).
 //
-// WHAT IS AND IS NOT ENFORCED, stated up front rather than inferred from the
-// requirement list. Every requirement below — including the generated-only
-// range rule (requirement 6) — runs on every artifact this module validates,
-// for BOTH Vue and Svelte, because the ranges are derived from the artifact's
-// own parse rather than supplied by the caller (see generatedOnlyRanges).
-//
-// Its coverage is bounded, and the bound is stated as what it IS rather than
-// as a flattering approximation. A generated-only range is produced for a
-// CLAIMABLE name — one matching the profile's emitted-identifier shapes, not
-// a render-scope context root, and not a word the author wrote in the
-// fixture's own script blocks — and only where that name occupies an
-// enumerated BINDING position (declarator id, function/catch parameter,
-// pattern target, function/class declaration id, class member key,
-// import-specifier local, object-literal key) or one of the enumerated
-// STATEMENT forms (a runtime-module import, a member-assignment plumbing
-// statement, a bare default export or wrapper-call default export, a helper
-// call's callee, a claimable identifier handed directly to a helper call, a
-// bare claimable return). Everything else is uncovered — most materially,
-// compiler scaffolding spelled with AUTHORED-shaped identifiers, and the
-// non-identifier PAYLOAD of a synthesized statement. Over that remainder the
-// rail is the relation table, which for a claimable-shaped generated token
-// means `framework-emitted-token` and for punctuation `delimiter-anchor` —
-// and those two are NOT position-exact (see RELATIONS). That is the honest
-// residual, in both frameworks alike.
+// A generated-only range covers a claimable name (profile emitted-identifier
+// shape, not a context root, not a word in the fixture's script blocks) in
+// an enumerated binding position or statement form. Uncovered remainder:
+// compiler scaffolding with authored-shaped identifiers, and non-identifier
+// payload of synthesized statements. Over that remainder the rail is the
+// relation table (`framework-emitted-token` / `delimiter-anchor`), which
+// are not position-exact (see RELATIONS).
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -62,26 +36,21 @@ import { parseModule } from "./normalize.mjs";
 const WORD_CHARACTER = /[A-Za-z0-9_$]/;
 
 /**
- * Splits text into lines on "\n", RETAINING any trailing "\r". Source-map
- * columns are UTF-16 code-unit offsets into the generated/original text as
- * the producer saw it, so a CRLF document's "\r" occupies a real column and
- * must stay in the line's length; stripping it would under-count every line
- * by one and reject valid end-of-line segments.
+ * Splits on `"\n"` and keeps any trailing `"\r"`. Source-map columns are
+ * UTF-16 code units; stripping CR would under-count every CRLF line by one
+ * and reject valid end-of-line segments.
  */
 export function lineTable(text) {
   return text.split("\n");
 }
 
 /**
- * The token at a (line, column) in a line table. Columns are UTF-16 code
- * units — exactly what `String.prototype.length` and index access measure —
- * so a non-ASCII or astral-plane character is counted the way a source-map
- * consumer counts it, never as bytes.
+ * Token at `(line, column)` in a line table. Columns are UTF-16 code units
+ * (`String.length` / index access), never bytes.
  *
  * @returns {{ kind: "word-start"|"word-interior"|"punct"|"eol"|"out-of-bounds",
- *   text: string, rest: string }} `text` is the whole word for word kinds
- *   (the single character for punct); `rest` is the text from `column` to
- *   the token's end, which is what an exact carry compares on.
+ *   text: string, rest: string }} `text` is the whole word (or the punct
+ *   character); `rest` is the tail from `column`, used by exact carry.
  */
 export function tokenAt(lines, line, column) {
   if (line < 0 || line >= lines.length) return { kind: "out-of-bounds", text: "", rest: "" };
@@ -102,17 +71,12 @@ export function tokenAt(lines, line, column) {
 }
 
 /**
- * The authored fixture's SCRIPT-block content regions, as `[start, end)`
- * character offsets into `source`.
+ * Authored fixture script-block regions as `[start, end)` character offsets.
  *
- * A `.vue`/`.svelte` fixture is not a JavaScript module, so the script halves
- * have to be located before anything can be parsed. That location is by
- * delimiter over the AUTHORED TEST FIXTURE — the harness's own committed
- * input, never a production carrier — and it is used only to bound a parse:
- * every structural fact below comes from the parser, not from the scan. A
- * region that does not parse contributes nothing (fail-closed), so a
- * mis-located or exotic block can only ever REMOVE evidence, never fabricate
- * it.
+ * A `.vue`/`.svelte` fixture is not a JS module; delimiter scan over the
+ * committed test fixture (never a production carrier) only bounds the parse.
+ * Structural facts come from the parser. An unparseable region contributes
+ * nothing (fail-closed) — a mis-located block can only remove evidence.
  */
 function authoredScriptRegions(source) {
   const regions = [];
@@ -129,11 +93,9 @@ function authoredScriptRegions(source) {
 }
 
 /**
- * A projection of `source` in which every character OUTSIDE `[start, end)` is
- * replaced by a space, with newlines preserved. Parsing the projection yields
- * acorn locations that are already the authored fixture's own (line, column)
- * coordinates — no offset arithmetic, and therefore no class of off-by-one
- * between "where the parser saw it" and "where the map claims it is".
+ * Projection of `source` with characters outside `[start, end)` replaced by
+ * spaces (newlines kept). Acorn locations are then the fixture's own
+ * (line, column) — no offset arithmetic between parser and map.
  */
 function blankedOutside(source, start, end) {
   const blank = (text) => text.replace(/[^\n]/g, " ");
@@ -143,13 +105,10 @@ function blankedOutside(source, start, end) {
 const BINDER_FUNCTION = /^(FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/;
 
 /**
- * The destructuring patterns that occupy a genuine BINDING position — a
- * `VariableDeclarator.id`, a function parameter, or a catch-clause parameter
- * — and nothing else. An object EXPRESSION brace, a nested sub-pattern, and
- * an assignment-target pattern (`({ a } = obj)`, whose node is an
- * ObjectPattern under an AssignmentExpression) are all deliberately absent:
- * only a pattern reached through one of the three declaration forms above is
- * marked, so the caller's lookup cannot land on a brace that declares nothing.
+ * Destructuring patterns in a genuine binding position: `VariableDeclarator.id`,
+ * function parameter, or catch-clause parameter. Object-expression braces,
+ * nested sub-patterns, and assignment-target patterns (`({ a } = obj)`) are
+ * absent so a lookup cannot land on a brace that declares nothing.
  */
 function rootBindingPatterns(ast) {
   const roots = new Set();
@@ -167,12 +126,11 @@ function rootBindingPatterns(ast) {
 }
 
 /**
- * The names a pattern binds AT ITS OWN LEVEL. A property KEY is not a binding
- * (`{ disabled: other }` binds `other`); a default-value EXPRESSION is not a
- * binding (`{ other = disabled }` binds `other`); a NESTED pattern's names are
- * not at this level (`{ data: { x } }` binds nothing here) — the mapped brace
- * would be the outer pattern's, and admitting the inner names would re-open
- * the "somewhere inside" looseness this relation exists to close.
+ * Names a pattern binds at its own level. A property key is not a binding
+ * (`{ disabled: other }` binds `other`); a default-value expression is not
+ * (`{ other = disabled }` binds `other`); nested pattern names are not
+ * (`{ data: { x } }` binds nothing here). Admitting inner names would
+ * re-open "somewhere inside" looseness.
  */
 function ownLevelBindings(pattern) {
   const names = new Set();
@@ -192,19 +150,15 @@ function ownLevelBindings(pattern) {
 }
 
 /**
- * The authored fixture's script-derived index, memoized per line table.
+ * Authored script index, memoized per line table.
  *
- *  - `bindingPatterns`: `"<line>:<column>"` of a binding pattern's OPENING
- *    delimiter -> the names it binds at its own level. This is what makes
- *    `destructured-binding-pattern` position-exact: the lookup key is the
- *    parser's own start position for a pattern in a declaration position, so
- *    an object literal, a template interpolation `{{ x }}`, a Svelte
- *    shorthand `{x}` and a block directive `{#each …}` are all absent by
- *    construction rather than by exclusion.
- *  - `scriptNames`: every identifier-shaped word inside the authored script
- *    blocks. A generated name that the AUTHOR also wrote is not claimable as
- *    compiler-introduced, so this set is subtracted from the generated-only
- *    ranges below (see generatedOnlyRanges).
+ *  - `bindingPatterns`: `"<line>:<column>"` of a binding pattern's opening
+ *    delimiter → names it binds at its own level. Lookup is the parser's
+ *    start for a declaration-position pattern, so object literals, `{{ x }}`,
+ *    Svelte `{x}`, and `{#each …}` are absent by construction.
+ *  - `scriptNames`: identifier-shaped words in authored script blocks.
+ *    A generated name the author also wrote is not claimable; subtracted
+ *    from generated-only ranges (see generatedOnlyRanges).
  */
 const AUTHORED_SCRIPT_INDEX = new WeakMap();
 
@@ -260,41 +214,29 @@ function withoutDisambiguator(name) {
 }
 
 /**
- * The per-framework REWRITE VOCABULARY — the only framework-specific input
- * the oracle takes. Each field names a rewrite CLASS (never a fixture):
+ * Per-framework rewrite vocabulary — the only framework-specific oracle
+ * input. Each field names a rewrite class, never a fixture:
  *
- *  - `contextRoots`: the render-scope roots a template binding resolves
- *    through (`_ctx.count`, `$setup.count`, …). A segment whose generated
- *    token is one of these must satisfy the `context-binding-prefix` tie
- *    (the accessed property IS the authored identifier) or the narrower
- *    `component-instance-surface` relation — it never falls through to the
- *    generic emitted-token relation.
- *  - `macroBindings`: generated binding -> the authored macro call it
- *    stands for (`__props` <- `defineProps`).
- *  - `emittedIdentifier`: the shapes a compiler-EMITTED identifier may take
- *    (imported runtime helpers, hoisted nodes, synthesized locals). A
- *    generated identifier outside these shapes has no fallback: it must
- *    carry authored text verbatim or satisfy a named tie.
- *  - `runtimeModules`: the CLOSED set of module specifiers the framework's
- *    own runtime lives behind, matched by EXACT string membership. It is
- *    what makes the runtime-helper import rule a statement about provenance
- *    rather than about spelling: an authored `import { thing as _thing }
- *    from "./my-utils.js"` is outside the set and can never be swept in,
- *    however its local is spelled. Exact membership rather than a namespace
- *    prefix, because a prefix rule also claims the framework's
- *    AUTHOR-FACING entry points (`vue/reactivity`, `@vue/shared`,
- *    `svelte/store`) — which a fixture may legitimately import and whose
- *    truthful segments the pinned compilers really do carry. The
- *    side-effect form is where that matters most: `import "svelte/store";`
- *    binds no local, so the authored-name subtraction below cannot rescue
- *    it. The six members are the specifiers the pinned compilers actually
- *    emit across the whole committed corpus (enumerated from all 48
- *    goldens: `vue` ×48, `vue/server-renderer` ×12, `svelte/internal/client`
- *    ×6, `svelte/internal/server` ×6, `svelte/internal/disclose-version`
- *    ×6, `svelte/internal/flags/legacy` ×2), so a specifier that appears
- *    here is a measurement, not a guess. A compiler upgrade that emits a
- *    new one fails LOUDLY — its import is no longer generated-only — rather
- *    than silently widening the claim.
+ *  - `contextRoots`: render-scope roots (`_ctx.count`, `$setup.count`, …).
+ *    A generated token in this set must satisfy `context-binding-prefix`
+ *    (accessed property is the authored identifier) or the narrower
+ *    `component-instance-surface` — never the generic emitted-token relation.
+ *  - `macroBindings`: generated binding → authored macro (`__props` ← `defineProps`).
+ *  - `emittedIdentifier`: shapes of compiler-emitted identifiers (helpers,
+ *    hoisted nodes, synthesized locals). Outside these shapes there is no
+ *    fallback: verbatim authored text or a named tie.
+ *  - `runtimeModules`: closed exact-string set of framework-runtime
+ *    specifiers. Provenance, not spelling: `import { thing as _thing } from
+ *    "./my-utils.js"` is outside the set. Exact membership, not a prefix —
+ *    a prefix would also claim author-facing entry points (`vue/reactivity`,
+ *    `@vue/shared`, `svelte/store`) that fixtures may import and whose
+ *    truthful segments the pinned compilers carry. Side-effect form matters
+ *    most: `import "svelte/store";` binds no local, so authored-name
+ *    subtraction cannot rescue it. The six members are measured from all 48
+ *    goldens (`vue` ×48, `vue/server-renderer` ×12, `svelte/internal/client`
+ *    ×6, `svelte/internal/server` ×6, `svelte/internal/disclose-version` ×6,
+ *    `svelte/internal/flags/legacy` ×2). A compiler upgrade that emits a new
+ *    specifier fails loudly rather than silently widening the claim.
  */
 const VUE_VOCABULARY = {
   framework: "vue",
@@ -322,9 +264,8 @@ const SVELTE_VOCABULARY = {
 };
 
 /**
- * One profile per (framework, emission target). The rewrite vocabulary is
- * shared across a framework's targets — the target only distinguishes which
- * anchors a map is required to carry (see FIXTURE_ANCHORS).
+ * One profile per (framework, emission target). Vocabulary is shared;
+ * the target only selects required anchors (see FIXTURE_ANCHORS).
  */
 export const MAPPING_PROFILES = {
   "vue:vdom": { ...VUE_VOCABULARY, key: "vue:vdom" },
@@ -338,61 +279,37 @@ const VUE_PROFILE_KEYS = ["vue:vdom", "vue:vapor", "vue:ssr"];
 const SVELTE_PROFILE_KEYS = ["svelte:client", "svelte:server"];
 
 /**
- * The ORDERED relation table. Each entry is a NAMED, checkable rule from a
- * generated-token shape to an original-token shape; the first match
- * classifies the segment. A segment matching none is a violation
- * (`segment-provenance`) — never a skip, never an "in bounds so probably
- * fine" pass.
+ * Ordered relation table. First matching named rule classifies the segment;
+ * none matching is a `segment-provenance` violation — never a skip.
  *
- * POSITION BINDING, stated per relation rather than in general terms.
- * POSITION-EXACT — the mapped ORIGINAL position must BE a specific authored
- * lexeme (and for `verbatim-carry`, a specific offset inside it), so
- * re-pointing the segment anywhere else, including elsewhere on the same
- * authored line, breaks the relation: `verbatim-carry`,
+ * Position-exact (mapped original must be a specific authored lexeme, and
+ * for `verbatim-carry` a specific offset inside it): `verbatim-carry`,
  * `context-binding-prefix`, `macro-result-binding`, `event-handler-key`,
  * `synthesized-local-for-authored-name`, `destructured-binding-pattern`.
- * None of these is satisfied by "the right text appears somewhere nearby".
+ * Re-pointing elsewhere on the same line breaks them.
  *
- * One bound is narrower than the others and is stated rather than implied.
- * `verbatim-carry` is a TEXT-EQUALITY relation (same lexeme, same offset
- * inside it), so it is position-exact only UP TO identical-lexeme
- * interchangeability: two occurrences of the same token at the same offset
- * are interchangeable under it. That is inherent to the relation and
- * deliberate — the alternative, requiring `word-start` on both sides, would
- * reject the interior->interior segments the pinned official compilers
- * really emit. The other five above pin a position no other occurrence of
- * the same text satisfies.
+ * `verbatim-carry` is text-equality (same lexeme, same offset), so two
+ * occurrences of the same token at the same offset are interchangeable.
+ * Requiring `word-start` on both sides would reject interior→interior
+ * segments the pinned official compilers emit. The other five pin a
+ * position no other occurrence of the same text satisfies.
  *
- * NOT position-exact, and named here so no reader has to infer it:
- * `component-instance-surface`, `framework-emitted-token` and
- * `delimiter-anchor` constrain only the GENERATED side (a profile-declared
- * compiler-emitted token, a context root, or a delimiter) and accept any
- * in-bounds authored position that is not word-interior. Their strength is
- * the generated-side precondition: any AUTHORED-looking generated
- * identifier falls outside all three and must satisfy a position-exact
- * relation above. That is the correspondence class every IDE feature
- * consumes. The generated-only-range requirement below covers the
- * scaffolding half of the loose class; what remains uncovered is recorded
- * at generatedOnlyRanges.
+ * Not position-exact: `component-instance-surface`, `framework-emitted-token`,
+ * `delimiter-anchor` constrain the generated side only and accept any
+ * in-bounds non-word-interior authored position. Authored-looking generated
+ * identifiers fall outside all three and must satisfy a position-exact
+ * relation. Generated-only ranges cover the scaffolding half of the loose
+ * class; remainder is recorded at generatedOnlyRanges.
  */
 const RELATIONS = [
   {
     name: "verbatim-carry",
-    // POSITION-EXACT, not text-similar. The two positions must sit at the
-    // SAME offset inside the SAME lexeme: `gen.text === src.text` pins the
-    // whole token on both sides, and `gen.rest === src.rest` on top of equal
-    // token text pins the offset within it (rest is the token's tail from
-    // the mapped column, so equal text + equal tail => equal offset).
-    // Comparing only `rest` — the tail — accepted two DIFFERENT tokens that
-    // happened to share a trailing substring: generated `import`@col5 and
-    // authored `script`@col6 both yield the tail "t".
-    //
-    // Word-INTERIOR positions are deliberately still admissible (the pinned
-    // official compilers really do emit interior→interior segments, e.g. the
-    // final `t` of a generated `import` carried from the final `t` of the
-    // authored one); what the tightening removes is any pair whose lexemes
-    // differ. Requiring `word-start` on both sides instead would reject
-    // genuine official output.
+    // Position-exact: same lexeme (`gen.text === src.text`) and same offset
+    // inside it (`gen.rest === src.rest`). Comparing only `rest` accepted
+    // different tokens sharing a trailing substring (`import`@col5 vs
+    // `script`@col6 both yield "t"). Word-interior stays admissible — pinned
+    // compilers emit interior→interior segments; requiring `word-start` on
+    // both sides would reject genuine official output.
     match: ({ gen, src }) =>
       gen.kind !== "eol" &&
       gen.kind === src.kind &&
@@ -445,13 +362,11 @@ const RELATIONS = [
   },
   {
     name: "synthesized-local-for-authored-name",
-    // POSITION-EXACT: the mapped position must BE the start of the authored
+    // Position-exact: mapped position must be the start of the authored
     // occurrence the generated local was named after, not merely share its
-    // LINE. The previous line-scoped tie (`containsWholeWord` over
-    // `srcLines[segment.srcLine]`) accepted a generated `items` re-pointed
-    // from the authored `items` declarator to column 0 of the same line —
-    // the `const` keyword — because the line still contained the word
-    // somewhere.
+    // line. Line-scoped `containsWholeWord` accepted a generated `items`
+    // re-pointed to column 0 (`const`) because the line still contained the
+    // word.
     match: ({ gen, src }) =>
       gen.kind === "word-start" &&
       src.kind === "word-start" &&
@@ -459,25 +374,18 @@ const RELATIONS = [
   },
   {
     name: "destructured-binding-pattern",
-    // A local the compiler hoisted OUT of an authored destructuring pattern
-    // is anchored by the pinned Svelte compiler at the PATTERN's opening
-    // delimiter, not at the bound name: `let { label, disabled = false } =
-    // $props()` yields `let disabled = $.prop(…)` whose `disabled` maps to
-    // the authored `{`. This is a real official correspondence, so the
-    // position-exact tightening above needs it named rather than absorbed
-    // back into a line-scoped text match.
+    // Pinned Svelte anchors a local hoisted out of a destructuring pattern
+    // at the pattern's opening delimiter, not the bound name:
+    // `let { label, disabled = false } = $props()` → `let disabled = $.prop(…)`
+    // whose `disabled` maps to the authored `{`. Named because it is a real
+    // official correspondence, not a line-scoped text match.
     //
-    // It stays position-exact in its own right, and STRUCTURALLY so: the
-    // mapped position must be the PARSER's own start position for a
-    // destructuring pattern that sits in a declaration position (a
-    // `VariableDeclarator.id`, a function parameter, or a catch-clause
-    // parameter) inside the authored fixture's script block, and the name
-    // must be one of the identifiers that pattern binds at its own level.
-    // Re-pointing the segment to any other position — an object LITERAL
-    // brace, a Vue interpolation `{{ x }}`, a Svelte shorthand `{x}` or block
-    // directive `{#each …}`, a property key, a default-value expression, a
-    // nested sub-pattern, or anywhere else on the same line — breaks it,
-    // because none of those is a key in the parsed binding-pattern index.
+    // Position-exact: mapped position must be the parser's start for a
+    // declaration-position pattern (`VariableDeclarator.id`, function
+    // parameter, catch-clause parameter) that binds the name at its own
+    // level. Object-literal braces, `{{ x }}`, Svelte `{x}` / `{#each …}`,
+    // property keys, default-value expressions, nested sub-patterns, and
+    // other same-line positions are not keys in the binding-pattern index.
     match: ({ gen, src, srcLines, segment }) =>
       gen.kind === "word-start" &&
       src.kind === "punct" &&
@@ -513,22 +421,17 @@ export function classifySegment(context) {
 }
 
 /**
- * The REQUIRED anchors per authored fixture — authored HERE from the fixture
- * text itself (each anchor names the lexeme it points at, and the oracle
- * re-reads the fixture from disk to confirm that lexeme really is at that
- * position), never derived from any compiler's output. Each anchor also
- * names the relation(s) under which a correct map may express it. An anchor
- * with no segment at its exact position is a completeness gap and FAILS.
+ * Required anchors per authored fixture — taken from fixture text (each
+ * names the lexeme at that position; the oracle re-reads the fixture from
+ * disk to confirm), never from any compiler's output. Each names the
+ * relation(s) a correct map may use. No segment at the exact position fails.
  *
- * `requiredFor` scopes an anchor to the emission profiles that must carry
- * it. Most anchors are required for every profile of their framework. The
- * exceptions are recorded, not hidden: the pinned official Vue compiler's
- * map for a TEMPLATE-ONLY SFC (`slots.vue`) is extremely sparse — the vapor
- * backend maps two positions in the whole file and the ssr backend four, and
- * they do not overlap with the vdom backend's — so that fixture's anchors
- * are per-backend. This is a FLOOR derived from what the pinned oracles
- * demonstrably map, not a ceiling: an anchor listed for a profile is a hard
- * requirement there.
+ * `requiredFor` scopes an anchor to emission profiles. Most are required
+ * for every profile of their framework. Exception: the pinned Vue compiler's
+ * map for template-only `slots.vue` is sparse (vapor maps two positions,
+ * ssr four, and they do not overlap with vdom), so that fixture's anchors
+ * are per-backend. Floor from what the pinned oracles actually map, not a
+ * ceiling: listed for a profile means required there.
  */
 export const FIXTURE_ANCHORS = {
   "fixtures/vue/basic-interpolation.vue": [
@@ -688,155 +591,92 @@ function walkAst(node, visit, parent = null, key = null) {
 }
 
 /**
- * The ranges of ONE generated module that have no authored counterpart —
- * derived from THAT module's own syntax tree plus the profile's declared
- * emitted-identifier vocabulary, and from nothing else.
+ * Ranges of one generated module with no authored counterpart — derived
+ * from that module's own syntax tree plus the profile's emitted-identifier
+ * vocabulary, nothing else.
  *
- * This is deliberately CANDIDATE-DERIVED rather than golden-derived. A
- * candidate's generated layout is legitimately its own (cosmetic carrier
- * differences are permitted), so geometry recorded when the golden was
- * produced would address the wrong document the moment a candidate emits an
- * extra blank line. Parsing the artifact under validation is the only
- * derivation that stays true for every candidate — and it is why this rail
- * runs at the acceptance boundary rather than only where an assembler's
- * fragment geometry happens to be in scope.
+ * Candidate-derived, not golden-derived: cosmetic carrier differences are
+ * permitted, so golden geometry would address the wrong document the moment
+ * a candidate emits an extra blank line. Parsing the artifact under
+ * validation is the only derivation that stays true for every candidate.
  *
- * WHAT MAKES A POSITION CLAIMABLE. A name is treated as compiler-introduced
- * only when BOTH hold: it matches one of the profile's `emittedIdentifier`
- * shapes, and it does NOT occur as a word anywhere in the AUTHORED fixture's
- * script blocks. The second half is the one that turns a spelling heuristic
- * into evidence: an author who really did write `_ref`, `_authored` or
- * `_component` puts that word in the file the oracle already reads from disk,
- * and their code is then never swept into a generated-only range. A profile
- * `contextRoots` name (`_ctx`, `$$props`) is likewise never claimed — those
- * carry authored provenance by design, through `context-binding-prefix`.
+ * A name is compiler-introduced only when it matches a profile
+ * `emittedIdentifier` shape AND does not occur as a word in the authored
+ * fixture's script blocks (an author who wrote `_ref` / `_authored` /
+ * `_component` is never swept in). `contextRoots` (`_ctx`, `$$props`) are
+ * never claimed — they carry authored provenance via `context-binding-prefix`.
  *
- * The range classes, each a structural fact about the parsed module:
+ * Range classes:
  *
- *  - RUNTIME-HELPER IMPORT: an `import` whose SOURCE is in the profile's
- *    closed `runtimeModules` set AND which either binds nothing at all
- *    (`import 'svelte/internal/disclose-version'` — a side-effect import of
- *    the framework runtime is generated by construction) or binds only
- *    claimable locals (`import { toDisplayString as _toDisplayString } from
- *    "vue"`, `import * as $ from "svelte/internal/client"`). Both halves are
- *    load-bearing: `.every` (not `.some`) keeps a MIXED import — one emitted
- *    local, one authored local — entirely out, and the closed source set
- *    keeps an authored `import { thing as _thing } from "./my-utils.js"` out
- *    however its local is spelled.
- *  - EMITTED DECLARATION SITE: a claimable name in an enumerated BINDING
- *    position — declarator id, function parameter, catch-clause parameter,
- *    default/rest/array pattern target, object-pattern property value,
- *    function- or class-declaration id, non-computed class member key,
- *    import-specifier local, or non-computed object-LITERAL key (`__name:`,
- *    `setup(__props)`, `_hoisted_1`, `root_1`, `$$anchor`). The compiler
- *    INTRODUCED the name at that position; no authored token sits behind it.
- *    An object-PATTERN key is NOT one of them — it names a property of the
- *    source object, which is authored material the compiler carried through
- *    (`{ _sourceKey: authored }` binds `authored`, and real official maps
- *    do carry `_sourceKey` verbatim). The pattern's VALUE is the binding.
- *    A REFERENCE to such a binding is deliberately NOT a declaration site:
- *    the pinned Vue compiler really does map its helper call sites and
- *    hoisted-node arguments (`_createElementVNode(_hoisted_1, …)`) back to
- *    the authored template, so claiming them would reject correct maps.
- *  - GENERATED PLUMBING STATEMENT: a statement, AT ANY DEPTH, that wires two
- *    generated bindings together and carries no authored payload —
- *    `_sfc_main.render = render` and its computed spelling
- *    `_sfc_main['render'] = render` (member assignment rooted at a claimable
- *    binding, bare-identifier right-hand side). A statement with a
- *    non-identifier right-hand side (`_sfc_main.props = { … }`) carries
- *    authored material and is NOT captured.
- *  - GENERATED DEFAULT EXPORT: `export default _sfc_main`, and the standard
- *    wrapper footer `export default _export_sfc(_sfc_main, [ … ])` (a call
- *    whose callee is claimable).
- *  - GENERATED HELPER CALL: the CALLEE of a statement-level call rooted at a
- *    claimable binding (`__expose()`, `$.push(…)`, `$.pop()`,
- *    `$.delegate([…])`), plus any claimable identifier handed DIRECTLY to
- *    such a call (`Object.defineProperty(__returned__, …)` — whose callee is
- *    the authored-shaped `Object`). Only the callee and direct identifier
- *    arguments; see the payload bound below.
- *  - GENERATED RETURN: `return <claimable identifier>` (`return
- *    __returned__`), which carries no authored payload at all.
+ *  - Runtime-helper import: source in closed `runtimeModules`, and either
+ *    binds nothing (`import 'svelte/internal/disclose-version'`) or binds
+ *    only claimable locals. `.every` (not `.some`) keeps mixed imports out;
+ *    the closed source set keeps `import { thing as _thing } from "./my-utils.js"`
+ *    out however the local is spelled.
+ *  - Emitted declaration site: claimable name in an enumerated binding
+ *    position (declarator id, function/catch parameter, pattern target,
+ *    function/class id, non-computed class member key, import-specifier
+ *    local, non-computed object-literal key). Object-pattern keys are not
+ *    sites — they name an authored source property (`{ _sourceKey: authored }`
+ *    binds `authored`; official maps carry `_sourceKey` verbatim). A
+ *    reference to such a binding is not a declaration site: pinned Vue maps
+ *    helper call sites and hoisted-node arguments back to the template, so
+ *    claiming them would reject correct maps.
+ *  - Generated plumbing: any-depth statement wiring two generated bindings
+ *    with no authored payload (`_sfc_main.render = render` /
+ *    `_sfc_main['render'] = render`). Non-identifier RHS (`_sfc_main.props = { … }`)
+ *    is not captured.
+ *  - Generated default export: `export default _sfc_main` and
+ *    `export default _export_sfc(_sfc_main, [ … ])` (claimable callee).
+ *  - Generated helper call: callee of a statement-level call rooted at a
+ *    claimable binding, plus claimable identifiers handed directly to such
+ *    a call. Only callee and direct identifier arguments.
+ *  - Generated return: `return <claimable identifier>` — no authored payload.
  *
- * WHAT THIS DOES NOT COVER, stated as the real boundary rather than a
- * flattering approximation of it. The pinned compilers emit no provenance
- * marker, so the covered set is exactly: claimable names in the enumerated
- * binding positions, plus the enumerated statement forms above. Everything
- * else is uncovered, and the three materially large classes are:
+ * Uncovered (pinned compilers emit no provenance marker):
  *
- *  1. Compiler scaffolding spelled with AUTHORED-shaped identifiers. Vue's
- *     `compileScript` interleaves its synthesized wrapper with authored
- *     statements (`render`, `setup`, `Object.defineProperty`), and nothing
- *     in the emitted artifact separates the two without re-deriving the
- *     compiler's own bookkeeping.
- *  2. A REFERENCE to a claimable binding outside the enumerated statement
- *     forms — a helper call nested in an expression, a hoisted node passed
- *     as an argument inside a render return. The measurement behind the
- *     exclusion is stated per RULE, not per occurrence, because that is
- *     what a rule change costs: widening `return <claimable identifier>` to
- *     `return <call rooted at a claimable binding>` would claim 5 corpus
- *     sites, and 2 of them (`return _createElementVNode("li", …)` in the
- *     mapped `basic-interpolation__vdom` goldens) carry a REAL official
- *     source-bearing segment on the callee the rule would claim. Individual
- *     sites inside the excluded class are cheaper than that — the 3 Svelte
- *     `return $.pop($$exports);` occurrences carry no real segment at all,
- *     so a fabrication there is accepted — but no rule reaches them without
- *     also reaching the two that are not free. The exclusion is that
- *     measurement, not a claim that every uncovered site is load-bearing.
- *  3. The non-identifier PAYLOAD of a synthesized statement — string and
- *     object literals, punctuation, and the non-identifier argument lists of
- *     helper calls (`$.delegate(['click'])`, `Object.defineProperty(…,
- *     '__isScriptSetup', …)`). A literal in a synthesized call genuinely can
- *     carry authored provenance (`'click'` comes from an authored
+ *  1. Compiler scaffolding with authored-shaped identifiers. Vue
+ *     `compileScript` interleaves synthesized wrapper with authored
+ *     statements (`render`, `setup`, `Object.defineProperty`).
+ *  2. A reference to a claimable binding outside the enumerated statement
+ *     forms. Widening `return <claimable identifier>` to `return <call
+ *     rooted at a claimable binding>` would claim 5 corpus sites; 2 of them
+ *     (`return _createElementVNode("li", …)` in `basic-interpolation__vdom`)
+ *     carry a real official source-bearing segment on the callee. The 3
+ *     Svelte `return $.pop($$exports);` sites carry none, but no rule
+ *     reaches them without also reaching the two that are not free.
+ *  3. Non-identifier payload of a synthesized statement. A literal in a
+ *     synthesized call can carry authored provenance (`'click'` from
  *     `onclick=`), so claiming the whole statement would reject correct maps.
  *
- * A segment inside the uncovered remainder is still subject to the relation
- * table — which for a claimable-shaped generated token means
- * `framework-emitted-token`, and for punctuation `delimiter-anchor`. Those
- * two are NOT position-exact (see RELATIONS): they constrain the generated
- * side only and accept any in-bounds, non-word-interior authored position.
- * That is the honest residual rail over the uncovered set.
+ * Uncovered remainder still goes through the relation table
+ * (`framework-emitted-token` / `delimiter-anchor`) — not position-exact
+ * (see RELATIONS).
  *
- * `boundary` decides whether the no-inherited-provenance check applies to a
- * range, and the deciding property is whether the range STARTS ITS OWN
- * generated LINE. This is not a stylistic distinction: a range covers only
- * the construct it names, so the column immediately to its left is outside
- * every range and a fabricated segment planted there escapes the
- * containment check entirely — while a consumer resolving the range's own
- * start column still finds it, because the applying segment is the last one
- * on the line at or before that column (`resolveAt`). A plant in the
- * whitespace before `__expose();` therefore reports authored provenance for
- * `__expose` exactly as a plant ON the callee would.
+ * `boundary` applies the no-inherited-provenance check only when the range
+ * starts its own generated line. A range covers only the construct it names,
+ * so a plant in the whitespace immediately to its left escapes containment
+ * while a consumer resolving the start column still finds it (`resolveAt` =
+ * last segment on the line at or before that column). Whitespace-only prefix
+ * keeps the requirement; mid-line ranges are exempt because they sit inside
+ * a legitimately mapped statement (`for (const _for_item0 of …)`,
+ * `if (count > 0) $$render(consequent)`), and demanding a boundary segment
+ * there requires density no compiler emits. Corpus: of 244 statement-level
+ * ranges, 193 with whitespace-only prefix cost zero official segments;
+ * enforcing on the remaining 51 would reject 4 real `$$render` calls in
+ * basic-runes client goldens. Inline `emitted declaration` is exempt.
  *
- * So a range whose same-line prefix is pure whitespace keeps the
- * requirement: no legitimate enclosing expression can supply provenance at
- * that column. A range that begins MID-LINE is exempt — an emitted
- * identifier sitting inside a larger, legitimately-mapped statement (`for
- * (const _for_item0 of …)`, `if (count > 0) $$render(consequent)`)
- * correctly inherits the enclosing expression's provenance, and demanding a
- * boundary segment before every one would require a segment density no
- * compiler emits. Both halves are measured over the committed corpus: of
- * the 244 statement-level ranges, the 193 with a whitespace-only prefix
- * carry the requirement and cost ZERO real official segments, while
- * enforcing it on the remaining 51 would reject 4 real ones (the `$$render`
- * calls nested inside a mapped expression in the basic-runes client
- * goldens). The inline `emitted declaration` class is exempt throughout.
- *
- * What the exemption therefore still admits, said plainly: for a mid-line
- * range — the 4 nested helper calls, the 47 direct call arguments, the 265
- * emitted declarations in the committed corpus — a fabricated segment at
- * the column immediately before it is ACCEPTED, and a consumer resolving
- * the range's start column inherits it. That is the price of not demanding
- * a boundary segment inside expressions no compiler terminates, and it is
- * the bound, not an oversight: the enclosing expression at those columns is
- * itself legitimately mappable.
+ * Mid-line exemption therefore accepts a fabricated segment immediately
+ * before the range (4 nested helper calls, 47 direct call arguments, 265
+ * emitted declarations in the corpus). Bound, not oversight: the enclosing
+ * expression at those columns is itself legitimately mappable.
  *
  * @param {string} code the generated module under validation
  * @param {{ emittedIdentifier: RegExp[], runtimeModules: string[],
  *   contextRoots: string[] }} profile the framework vocabulary
- * @param {string[]} [authoredLines] the authored fixture's line table; its
- *   script-block words are subtracted from the claimable set. Omitted only
- *   by callers that have no authored side (unit probes over synthetic
- *   modules), in which case nothing is subtracted.
+ * @param {string[]} [authoredLines] authored fixture line table; script-block
+ *   words are subtracted from the claimable set. Omitted only by callers
+ *   with no authored side (synthetic-module probes).
  * @returns {Array<{ label: string, startLine: number, startColumn: number,
  *   endLine: number, endColumn: number, boundary?: boolean }>}
  */
@@ -848,9 +688,8 @@ export function generatedOnlyRanges(code, profile, authoredLines = []) {
     (authored === null || !authored.has(name));
   const ast = parseModule(code, "generated-only-ranges");
   const genLines = lineTable(code);
-  // Whether a range STARTS ITS OWN generated line — nothing but whitespace
-  // precedes it. That is exactly the condition under which the boundary
-  // requirement is meaningful; see the `boundary` note above.
+  // Range starts its own generated line (prefix is whitespace) — the only
+  // case where the boundary requirement is meaningful.
   const startsOwnLine = (span) =>
     /^\s*$/.test((genLines[span.startLine] ?? "").slice(0, span.startColumn));
   const ranges = [];
@@ -886,10 +725,8 @@ export function generatedOnlyRanges(code, profile, authoredLines = []) {
       return;
     }
     if (node.type === "ExpressionStatement" && node.expression.type === "CallExpression") {
-      // Only the CALLEE is claimed. A helper call's ARGUMENTS legitimately
-      // carry authored payload — `$.delegate(['click'])`'s literal comes
-      // from an authored `onclick=` — so claiming the whole statement would
-      // reject correct maps.
+      // Only the callee is claimed. Arguments can carry authored payload
+      // (`$.delegate(['click'])` from `onclick=`).
       const callee = node.expression.callee;
       const root =
         callee.type === "Identifier"
@@ -905,13 +742,10 @@ export function generatedOnlyRanges(code, profile, authoredLines = []) {
           boundary: startsOwnLine(span),
         });
       }
-      // A claimable identifier handed DIRECTLY to a statement-level call is
-      // the compiler passing one of its own bindings to a helper
-      // (`Object.defineProperty(__returned__, …)`), whatever the callee is.
-      // Only direct arguments qualify: a claimable name nested inside an
-      // argument EXPRESSION is a reference the pinned compilers really do
-      // map (`_createElementVNode(…, [_hoisted_1, …])` inside a render
-      // return), and claiming those rejects correct maps.
+      // Claimable identifier handed directly to a statement-level call
+      // (`Object.defineProperty(__returned__, …)`). Nested names inside an
+      // argument expression are mapped by the pinned compilers
+      // (`_createElementVNode(…, [_hoisted_1, …])`).
       for (const argument of node.expression.arguments) {
         if (argument.type === "Identifier" && claimable(argument.name)) {
           const span = spanOf(argument);
@@ -959,8 +793,8 @@ export function generatedOnlyRanges(code, profile, authoredLines = []) {
     }
   });
 
-  // Object-PATTERN properties bind their value; object-LITERAL properties do
-  // not. The two share a node type, so the patterns are collected first.
+  // Object-pattern properties bind their value; object-literal properties
+  // do not. Same node type, so patterns are collected first.
   const patternProperties = new Set();
   walkAst(ast, (node) => {
     if (node.type === "ObjectPattern") {
@@ -977,13 +811,10 @@ export function generatedOnlyRanges(code, profile, authoredLines = []) {
       (parent.type === "RestElement" && key === "argument") ||
       (parent.type === "ArrayPattern" && key === "elements") ||
       (parent.type === "Property" && key === "value" && patternProperties.has(parent)) ||
-      // An object-LITERAL key is introduced by the statement that writes it
-      // (`__name:`). An object-PATTERN key is not: it names a property of
-      // the SOURCE object, which is authored material the compiler carried
-      // through — `v-for="{ _sourceKey: authored } in items"` lowers to
-      // `({ _sourceKey: authored }) => …`, where `authored` is the bound
-      // name and `_sourceKey` carries the authored token verbatim. Only the
-      // pattern's VALUE (the arm above) binds.
+      // Object-literal key is introduced by the writer (`__name:`).
+      // Object-pattern key names a source property (`v-for="{ _sourceKey:
+      // authored } in items"` → `({ _sourceKey: authored }) => …`); only
+      // the pattern value binds.
       (parent.type === "Property" &&
         key === "key" &&
         !parent.computed &&
@@ -1014,11 +845,10 @@ function memberName(member) {
 }
 
 /**
- * Resolves a map source spelling to an absolute path under each declared
- * base. Separators are normalized to the host's before any platform-aware
- * path operation: a map produced on Windows may spell its sources with `\`,
- * and mixing `path.posix.join` with the platform-aware `path.isAbsolute` /
- * `path.resolve` would leave such a spelling unresolvable.
+ * Resolve a map source spelling to an absolute path under each declared
+ * base. Normalize separators to the host's before any platform-aware path
+ * op: a Windows-produced map may use `\`, and mixing `path.posix.join` with
+ * `path.isAbsolute` / `path.resolve` would leave that spelling unresolvable.
  */
 function resolvesToFixture(spelling, sourceRoot, bases, fixtureAbsolutePath) {
   const toPosix = (value) => String(value).split("\\").join("/");
@@ -1031,10 +861,9 @@ function resolvesToFixture(spelling, sourceRoot, bases, fixtureAbsolutePath) {
 }
 
 /**
- * Line-scoped source-map resolution: the segment a consumer would apply at
- * (line, column) is the last segment on THAT line at or before the column.
- * A line with no earlier segment is unmapped — which is what makes the
- * boundary requirement below meaningful.
+ * Line-scoped resolution: last segment on that line at or before the
+ * column. No earlier segment → unmapped (makes the boundary requirement
+ * meaningful).
  */
 function resolveAt(segmentsByLine, line, column) {
   const onLine = segmentsByLine.get(line);
@@ -1048,16 +877,13 @@ function resolveAt(segmentsByLine, line, column) {
 }
 
 /**
- * Validates a candidate's map against the candidate's own generated code and
+ * Validate a candidate's map against the candidate's own generated code and
  * the authored fixture.
  *
- * The generated-only ranges requirement 6 enforces are DERIVED here, from
- * the `code` under validation (`generatedOnlyRanges`) — never supplied by
- * the caller. No call site can therefore disable that requirement by
- * passing an empty range list, which is exactly how it came to be inert on
- * the acceptance path. `extraSyntheticRanges` only ADDS ranges a caller
- * knows about from geometry the module text does not expose; it can never
- * subtract.
+ * Requirement 6's generated-only ranges are derived here from `code`
+ * (`generatedOnlyRanges`) — never supplied by the caller, so an empty range
+ * list cannot disable the rail. `extraSyntheticRanges` only adds ranges the
+ * module text does not expose; it cannot subtract.
  *
  * @param {{
  *   code: string|null,
@@ -1106,7 +932,7 @@ export function validateAuthoredMapping({
     return { ok: false, violations, stats };
   }
 
-  // ---- requirement 1: contract + bounds -----------------------------------
+  // requirement 1: contract + bounds
   if (map.version !== 3)
     fail("map-version", `expected version 3, got ${JSON.stringify(map.version)}`);
 
@@ -1124,10 +950,9 @@ export function validateAuthoredMapping({
   const fixtureSource = readFileSync(fixture.absolutePath, "utf8");
   const srcLines = lineTable(fixtureSource);
 
-  // Derived from the code under validation, so requirement 6 below runs on
-  // EVERY artifact this oracle sees. Unparseable generated code is a
-  // candidate defect the parse axis reports independently; here it means the
-  // rail cannot be derived, which is recorded rather than passed over.
+  // Derived from the code under validation so requirement 6 runs on every
+  // artifact. Unparseable generated code is a parse-axis defect; here the
+  // rail cannot be derived and that is recorded.
   let syntheticRanges;
   try {
     syntheticRanges = [...generatedOnlyRanges(code, profile, srcLines), ...extraSyntheticRanges];
@@ -1140,7 +965,7 @@ export function validateAuthoredMapping({
   }
   stats.syntheticRanges = syntheticRanges.length;
 
-  // ---- requirement 2: source identity -------------------------------------
+  // requirement 2: source identity
   if (sources.length === 0) fail("source-identity", "map declares no sources");
   sources.forEach((spelling, index) => {
     if (typeof spelling !== "string") {
@@ -1162,7 +987,7 @@ export function validateAuthoredMapping({
     }
   });
 
-  // ---- requirement 3: per-segment truthfulness -----------------------------
+  // requirement 3: per-segment truthfulness
   const segmentsByLine = new Map();
   for (const segment of segments) {
     if (!segmentsByLine.has(segment.genLine)) segmentsByLine.set(segment.genLine, []);
@@ -1207,13 +1032,10 @@ export function validateAuthoredMapping({
       );
       continue;
     }
-    // `names[nameIdx]` is a CLAIM about the symbol the segment carries, and
-    // a bounds check does not test it. A named segment must name the
-    // AUTHORED symbol at its own original position, or the generated symbol
-    // at its own generated position (with any `_<digits>` disambiguator
-    // stripped) — the two readings real producers use. Anything else is a
-    // name the map invented; garbage entries and a wholesale-rewritten
-    // `names` array are rejected here rather than silently carried.
+    // `names[nameIdx]` is a claim, not a bounds check. A named segment must
+    // name the authored symbol at its original position or the generated
+    // symbol at its generated position (`_<digits>` stripped) — the two
+    // readings real producers use. Anything else is invented.
     if (nameInBounds) {
       const declared = names[segment.nameIdx];
       const admissible =
@@ -1240,7 +1062,7 @@ export function validateAuthoredMapping({
     stats.classifications[relation] = (stats.classifications[relation] ?? 0) + 1;
   }
 
-  // ---- requirement 4: required anchors, both directions --------------------
+  // requirement 4: required anchors, both directions
   const requiredAnchors = anchors.filter((anchor) => anchor.requiredFor.includes(profile.key));
   stats.anchors = requiredAnchors.length;
   for (const anchor of requiredAnchors) {
@@ -1255,10 +1077,9 @@ export function validateAuthoredMapping({
       );
       continue;
     }
-    // The two directions are checked INDEPENDENTLY, so each reports on its
-    // own: generated -> source (a segment lands on the anchor's exact start)
-    // and source -> generated (the anchor's authored span has any generated
-    // counterpart at all).
+    // Directions checked independently: generated → source (segment lands
+    // on the anchor's exact start) and source → generated (authored span
+    // has any generated counterpart).
     const exact = segments.filter(
       (segment) =>
         segment.srcIdx !== null &&
@@ -1299,7 +1120,7 @@ export function validateAuthoredMapping({
     }
   }
 
-  // ---- requirement 6: synthetic ranges carry no authored provenance --------
+  // requirement 6: synthetic ranges carry no authored provenance
   for (const range of syntheticRanges) {
     for (const segment of segments) {
       if (segment.srcIdx === null) continue;
@@ -1316,10 +1137,9 @@ export function validateAuthoredMapping({
         );
       }
     }
-    // Only a range that STARTS ITS OWN generated line carries the
-    // no-inherited-provenance requirement; a range beginning mid-line sits
-    // inside a legitimately mapped statement, where inheriting the enclosing
-    // expression's provenance is correct. See generatedOnlyRanges.
+    // No-inherited-provenance only when the range starts its own generated
+    // line; mid-line ranges inherit enclosing-expression provenance.
+    // See generatedOnlyRanges.
     if (range.boundary === false) continue;
     const inherited = resolveAt(segmentsByLine, range.startLine, range.startColumn);
     if (inherited !== null && inherited.srcIdx !== null) {

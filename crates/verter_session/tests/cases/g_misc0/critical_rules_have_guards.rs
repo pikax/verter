@@ -80,11 +80,8 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Shared Optimized Codebase",
         &[
-            // The whole-workspace resolve-graph closure test superseded
-            // `verter_audit_no_upward_deps` (a per-manifest TOML scan);
-            // `verter_audit`'s leaf-dependency invariant is now proven as
-            // one row of the same closure walk that proves it for every
-            // other layered crate.
+            // Leaf-dependency invariant is the workspace resolve-graph
+            // closure walk, not a per-manifest TOML scan.
             "workspace_production_closures_never_cross_upward_except_the_recorded_exception",
             "audit_substrate_isolation",
             "audit_observer_single_accessor",

@@ -1,54 +1,28 @@
-//! The additive, opt-in segmented-overwrite primitive.
+//! Additive segmented overwrite.
 //!
-//! `Chunk::Overwritten` (the existing, unconditional `overwrite`/
-//! `overwrite_unmapped`/`update` family) emits AT MOST one source-map token
-//! for its entire replacement — `generate_map` maps the whole replaced span
-//! to the ORIGINAL range's own start (MagicString convention: "no
-//! character-level correspondence"). That is correct for the overwhelming
-//! majority of overwrites, but wrong for a specific, narrow shape this
-//! primitive exists to serve: generated code that is MOSTLY synthetic
-//! scaffolding but embeds one or more AUTHORED lexemes VERBATIM at known
-//! byte offsets (an interpolation identifier inside `_toDisplayString(...)`,
-//! a static attribute name inside a hoisted template string) — each such
-//! embedded lexeme has a REAL, checkable authored correspondence that a
-//! single whole-block token cannot express.
+//! `Chunk::Overwritten` emits at most one source-map token for the whole
+//! replacement (MagicString: no character-level correspondence). Wrong
+//! when generated scaffolding embeds authored lexemes at known offsets
+//! (interpolation inside `_toDisplayString(...)`).
 //!
-//! `try_overwrite_segmented` is a SEPARATE, crate-private entry point — it
-//! does not modify `overwrite`, `try_overwrite`, `update`, or any existing
-//! splice path in any way, and produces a distinct `Chunk::OverwrittenSegmented`
-//! variant that only `generate_map`'s own dedicated arm interprets. Existing
-//! callers of every other `CodeTransform` operation are provably unaffected
-//! (see `code_transform/tests.rs`'s byte-identity suite).
-//!
-//! Deliberately narrow: the target range must fall entirely within ONE
-//! live `Original` chunk (the fast-overwrite precondition `try_fast_overwrite`
-//! already uses) and no affinity-anchored insertion may be active anywhere
-//! in this transform. Both are true for every intended caller (VDOM/Vapor/
-//! SSR template emitters build fresh, non-overlapping per-node overwrites
-//! and never use the anchored insertion API) — a caller outside that shape
-//! gets a typed refusal instead of a best-effort/wrong splice.
+//! `try_overwrite_segmented` is a separate crate-private entry; it does
+//! not change `overwrite`/`update`. Target range must lie in one live
+//! `Original` chunk with no affinity-anchored insertion — otherwise a
+//! typed refusal, not a best-effort splice.
 
 use super::chunk::Chunk;
 use super::code_transform::CodeTransform;
 use super::fallible::CodeTransformError;
 use crate::template::code_gen::types::SegmentedOverwriteAuthority;
 
-/// One embedded authored anchor inside a segmented-overwrite's replacement
-/// text: `content[content_offset..content_offset + length]` is the AUTHORED
-/// lexeme, copied verbatim, and maps to the authored source byte range
-/// `[source_pos, source_pos + length)`. Bytes outside every anchor —
-/// including before the first and after the last — are synthetic
-/// scaffolding and carry no source-map token.
+/// Authored lexeme inside a segmented overwrite:
+/// `content[content_offset..content_offset + length]` maps to
+/// `[source_pos, source_pos + length)`. Bytes outside anchors are synthetic
+/// (no source-map token).
 ///
-/// `pub`, not `pub(crate)`: it rides inside otherwise-`pub` carriers
-/// (`VaporTextPart::Dynamic`, `VaporRootElement::statements`, …) that
-/// themselves cross module-visibility boundaries within
-/// `template::code_gen`, so the plain data shape must match their own
-/// visibility. This does NOT relax the actual authorization boundary — the
-/// OPERATIONS that produce a `SegmentAnchor`-bearing chunk
-/// (`CodeTransform::try_overwrite_segmented`,
-/// `CodeGenOutput::overwrite_segmented`) stay restricted to the authorized
-/// Vue runtime emitters; see the static call-site guard.
+/// `pub` to match the `pub` carriers that hold it (`VaporTextPart::Dynamic`,
+/// …). Operations that produce a `SegmentAnchor` chunk stay restricted to
+/// Vue runtime emitters ([`SegmentedOverwriteAuthority`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentAnchor {
     pub content_offset: u32,
@@ -57,10 +31,7 @@ pub struct SegmentAnchor {
 }
 
 impl SegmentAnchor {
-    /// Test-only constructor — production call sites always build a
-    /// `SegmentAnchor { .. }` struct literal directly (they compute all
-    /// three fields inline from AST/segment-plan data), so this convenience
-    /// constructor exists only for the direct primitive tests.
+    /// Test-only; production builds a struct literal from AST/segment-plan data.
     #[cfg(test)]
     pub(crate) fn new(content_offset: u32, length: u32, source_pos: u32) -> Self {
         Self {
@@ -76,24 +47,12 @@ impl SegmentAnchor {
 }
 
 impl<'a> CodeTransform<'a> {
-    /// Checked, crate-private segmented overwrite. See the module doc for
-    /// the exact shape this serves and its narrow preconditions.
+    /// Checked segmented overwrite. Fails atomically (no mutation on `Err`)
+    /// for a malformed/empty range, out-of-order or overlapping anchors,
+    /// out-of-range/`source_pos` mid-character, a target not entirely in one
+    /// live `Original` chunk, or any affinity-anchored insertion.
     ///
-    /// Fails atomically (no mutation on `Err`) for: a malformed `[start,
-    /// end)` range (see [`CodeTransformError`]); an empty range; any anchor
-    /// whose `content` span is out of range, not a UTF-8 boundary, or
-    /// overlaps/precedes the previous anchor (anchors MUST be supplied in
-    /// ascending, non-overlapping `content_offset` order — the caller
-    /// already builds them in source order); any anchor's `source_pos` out
-    /// of range or mid-character; the target range not fitting entirely
-    /// inside one live, unedited `Original` chunk; or any affinity-anchored
-    /// insertion active anywhere in this transform (the narrow-shape
-    /// precondition above).
-    ///
-    /// `_authority` proves the caller is `template::code_gen` — the sole
-    /// authorized caller (see [`SegmentedOverwriteAuthority`]'s own doc) —
-    /// and is otherwise unused; its mere presence in the signature is the
-    /// static call-site guard.
+    /// `_authority` is the static call-site guard ([`SegmentedOverwriteAuthority`]).
     pub(crate) fn try_overwrite_segmented(
         &mut self,
         start: u32,

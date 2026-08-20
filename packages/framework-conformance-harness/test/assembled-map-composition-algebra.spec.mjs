@@ -75,9 +75,7 @@ function input(overrides) {
   };
 }
 
-// ---------------------------------------------------------------------------
 // §5 — the chain operation
-// ---------------------------------------------------------------------------
 
 describe("§5.3 / §5.5 — the chain operation", () => {
   it("§5.5 worked case: N coincident segments at a replaced range beginning at column 0", () => {
@@ -343,9 +341,7 @@ describe("§5.7 — the template fragment is not rewritten", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // §5.8 — a present fragment whose map is legitimately absent
-// ---------------------------------------------------------------------------
 
 describe("§5.8 — the mapless present fragment", () => {
   const maplessScript = input({
@@ -391,9 +387,7 @@ describe("§5.8 — the mapless present fragment", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // §6.4 — the boundary rules
-// ---------------------------------------------------------------------------
 
 /**
  * §6.4 BR-5, checked over an assembled module rather than asserted: NO generated
@@ -593,9 +587,7 @@ describe("§6.5 — fragment line ranges are disjoint", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // §6.2 / §6.3 — the write grammar and placement
-// ---------------------------------------------------------------------------
 
 describe("§6.2 — the exact byte grammar", () => {
   it("W-01…W-16 with a script, a template, a style, a custom block and vite HMR", () => {
@@ -807,9 +799,7 @@ describe("§6.2 — the exact byte grammar", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // §7 — the output artifact
-// ---------------------------------------------------------------------------
 
 describe("§7 — the output artifact schema", () => {
   const twoFragments = (scriptExtra, templateExtra) =>
@@ -997,9 +987,7 @@ describe("§7.6 — the canonical `mappings` encoding", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // §11.4 / §3.5 — a malformed DTO instance is out of layer-1 scope
-// ---------------------------------------------------------------------------
 
 describe("§11.4 — a schema- or P1-invalid DTO is NOT a composition outcome", () => {
   const valid = () =>

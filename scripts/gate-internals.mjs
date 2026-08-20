@@ -1,19 +1,15 @@
-// gate-internals.mjs — the reusable internals of the canonical agent Rust gate.
+// Reusable internals of the canonical Rust gate.
 //
-// This module holds the load-bearing primitives, classifiers, parsers, the single-flight mutex, the
-// contained-step runner, and the multi-step seam runner that BOTH the production gate CLI (`gate.mjs`)
-// and the self-test (`gate-selftest.mjs`) build on. It contains NO CLI dispatch, NO argv parsing, NO
-// `process.exit`, and NO top-level side effects: importing it runs nothing. The production gate composes
-// these into the real gate (archive → nextest → direct libtest → verdict); the self-test imports the
-// classifiers/primitives DIRECTLY (as functions) to drive its scenarios in-process — so the production
-// gate binary never has to expose a test-seam / classifier-hook / custom-command mode that could exit 0
-// without actually building and running the test suite.
+// Primitives, classifiers, parsers, single-flight mutex, contained-step
+// and multi-step seam runners. No CLI, argv, `process.exit`, or top-level
+// side effects — importing this runs nothing. Production `gate.mjs`
+// composes them into the real gate. The self-test imports the functions
+// in-process so the production CLI never needs a test-seam mode that
+// could exit 0 without running the suite.
 //
-// SECURITY INVARIANT: the production CLI (`gate.mjs`) imports the gate-execution pieces here but NEVER
-// exposes a CLI mode that returns the gate success contract without running the real gate. The seam
-// runner (`runMultiStepSeam`) and the contained-step runner (`runContainedStep`) are reusable building
-// blocks; only the SELF-TEST script drives the cargo-free seam, and only via its OWN dedicated harness —
-// never via a magic flag on the production gate.
+// SECURITY: `gate.mjs` must never expose a CLI mode that returns the
+// success contract without running the real gate. Only the self-test
+// harness drives the cargo-free seam.
 
 import { spawn, spawnSync } from "node:child_process";
 import {

@@ -1,17 +1,9 @@
-//! Validating a fragment's input source map, and the exhaustive rejection
-//! taxonomy.
+//! Fragment input-map validation and the exhaustive rejection taxonomy.
 //!
-//! Missing, malformed, ambiguous or uncomposable required input mapping is a
-//! hard fail-closed outcome — never coerced into an empty, approximate, or
-//! unmapped successful result. Validation runs to completion BEFORE any
-//! composition work begins: no segment is translated and no table row is
-//! appended until every check below has passed.
-//!
-//! Every rejection reports exactly ONE outcome. The checks form a total order
-//! — including the element order within each scanned array and the field order
-//! within one segment — so an input for which several conditions hold has one
-//! determined answer. The first failing check is the outcome; validation stops
-//! there.
+//! Missing, malformed, or uncomposable required mapping is fail-closed —
+//! never an empty, approximate, or unmapped success. Validation finishes
+//! before any composition. One outcome per rejection: checks are totally
+//! ordered; the first failure wins.
 
 use super::map_json::{parse, Json};
 
@@ -202,13 +194,8 @@ impl UncomposableCode {
     }
 }
 
-/// Why an assembly produced no result at all.
-///
-/// Both variants are hard failures, and NEITHER returns a partial result: not
-/// code without a map, not code with an empty map. Returning the assembled code
-/// while reporting a map failure would be exactly the unmapped successful
-/// result that is forbidden, and the callers of this path require code and map
-/// together.
+/// Why assembly produced no result. Both variants are hard failures —
+/// never code without a map, never code with an empty map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssembleMapFailure {
     /// A fragment that is both authored and present carries an empty map.
@@ -251,7 +238,7 @@ impl std::fmt::Display for AssembleMapFailure {
 
 impl std::error::Error for AssembleMapFailure {}
 
-// ── The decoded map ────────────────────────────────────────────────────────
+// The decoded map
 
 /// A segment's authored payload. Absent for a sourceless segment, whose four
 /// authored fields are all null by definition.
@@ -489,14 +476,10 @@ fn read_ignore_list_spelling(member: Option<&Json>) -> Result<Option<Vec<f64>>, 
         .ok_or(UncomposableCode::MetadataMemberWrongType)?;
     let mut list = Vec::with_capacity(entries.len());
     for entry in entries {
-        // §4.3 step 1.15: an ignore-list entry's TYPE requirement is exactly
-        // "non-negative integral number" — no upper bound. Bounding it against
-        // the source table is step 1.23 (`U6.3`), checked later once the table
-        // is known; an entry beyond i32::MAX is still legally TYPED here and
-        // must be admitted so it can be correctly rejected as out-of-range
-        // there, not misreported as wrong-type here. Integrality and
-        // non-negativity are asked of the CONVERTED binary64 value, not of the
-        // decimal lexeme.
+        // Step 1.15: type is "non-negative integral" — no upper bound.
+        // Table bound is step 1.23. An entry beyond i32::MAX is still
+        // legally typed here so it can fail as out-of-range there, not
+        // wrong-type. Check the converted binary64, not the lexeme.
         let number = entry
             .as_number()
             .ok_or(UncomposableCode::MetadataMemberWrongType)?;
@@ -539,7 +522,7 @@ fn classify_column(line: &str, column: u32) -> ColumnKind {
     }
 }
 
-// ── The wire decoder ───────────────────────────────────────────────────────
+// The wire decoder
 
 fn base64_digit(character: u8) -> Option<u32> {
     match character {
@@ -586,24 +569,10 @@ fn decode_field(bytes: &[u8], at: &mut usize) -> Result<i64, UncomposableCode> {
     Ok(value)
 }
 
-/// Decode `mappings` in a single left-to-right pass, examining segments in wire
-/// order and reporting the FIRST violation.
-///
-/// Within one segment the checks run in three ordered steps, and the ordering
-/// is mandated rather than incidental — a decode-then-validate design and an
-/// apply-as-you-decode design naturally reach them in different orders:
-///
-/// 1. Lexical and per-field, as each field is read: a field's own encoding is
-///    well defined independently of how many fields the segment turns out to
-///    have.
-/// 2. Arity, once the segment has been read in full.
-/// 3. Accumulator application, and only once the arity is known legal.
-///
-/// So arity beats every accumulator property: a three-field segment whose first
-/// field would also drive an accumulator negative reports the arity, because a
-/// three-field segment has no interpretation at all and calling its field 0 a
-/// "generated column delta" already presumes one. Within accumulator
-/// application, range beats ordering.
+/// Decode `mappings` left-to-right; first violation wins. Per segment:
+/// lexical/per-field, then arity, then accumulator. Arity beats every
+/// accumulator property (a three-field segment has no interpretation).
+/// Within accumulator application, range beats ordering.
 fn decode_mappings(mappings: &str) -> Result<Vec<WireSegment>, UncomposableCode> {
     let mut segments = Vec::new();
     let mut source_index = 0i64;
@@ -683,19 +652,9 @@ fn decode_mappings(mappings: &str) -> Result<Vec<WireSegment>, UncomposableCode>
     Ok(segments)
 }
 
-/// Normalise and agree the `sourceRoot` across every contributing map.
-///
-/// `sourceRoot` prefixes every `sources` entry, so dropping it while copying
-/// spellings verbatim would silently change every declared source identity, and
-/// folding it into the spellings would perturb spellings that must be carried
-/// unchanged. A composed map has one root for all rows, so two different
-/// declared roots cannot both be represented.
-///
-/// `""` is a declared value distinct from absent: this layer does not interpret
-/// the root, so it does not decide that an empty root is the identity root.
-/// With ZERO contributing maps there is no value to agree on and the result is
-/// absent; with exactly one the condition is vacuous and that map's value
-/// carries through.
+/// Agree `sourceRoot` across contributing maps. Dropping or folding it
+/// would change declared source identities. `""` is distinct from absent.
+/// Zero maps → absent; one map → that value.
 pub(crate) fn agree_source_root<'a>(
     contributing: impl IntoIterator<Item = (MapFragment, &'a DecodedFragmentMap)>,
 ) -> Result<Option<String>, AssembleMapFailure> {

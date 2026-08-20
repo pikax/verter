@@ -195,7 +195,6 @@ describe("requirement 4 — a dropped anchor is a completeness gap, not a shrug"
   });
 });
 
-// ---------------------------------------------------------------------------
 // UTF-16 code units and CRLF line terminators.
 //
 // The fixture is written to a scratch directory rather than committed under
@@ -204,7 +203,6 @@ describe("requirement 4 — a dropped anchor is a completeness gap, not a shrug"
 // set), and a committed CRLF file is subject to checkout normalization,
 // which would make the CRLF half of this test depend on the checkout's line
 // -ending configuration instead of on the oracle.
-// ---------------------------------------------------------------------------
 
 const UNICODE_LINES = [
   "<script setup>",

@@ -30,13 +30,10 @@ use verter_semantic::analysis::framework_facts::{ScriptFactProvider, ScriptFactS
 /// One framework's carrier leg — a monomorphic opener installed at
 /// registry-build time.
 ///
-/// `open` recovers the ERASED carrier from a registered
-/// [`FrameworkParseArtifact`], returning `None` for a foreign artifact
-/// (adapter-id-gated inside the opener itself — see `vue_bridge::open_vue_carrier`
-/// / `svelte::carrier::open_svelte_carrier`). No capability token: the opener
-/// installed on a given adapter's leg only ever opens that adapter's own
-/// artifacts, by construction. A carrier-less adapter has no leg
-/// (`carrier: None`).
+/// Recovers the erased carrier from a registered
+/// [`FrameworkParseArtifact`], or `None` for a foreign artifact. No
+/// capability token: an opener only opens that adapter's artifacts. A
+/// carrier-less adapter has `carrier: None`.
 #[derive(Clone, Copy)]
 pub struct CarrierLeg {
     /// The registered-projector opener for this adapter.

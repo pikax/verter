@@ -123,12 +123,9 @@ pub(crate) struct CompileOutputValue {
     /// u64 collision can never serve a result carrying a different scope class
     /// (the exact-override warm-hit discriminant).
     pub css_hash_override: Option<Arc<str>>,
-    /// What the compile transaction committed — the produced product set
-    /// (per-kind outputs, last-good outputs, IDE `tsx`, template analysis), OR a
-    /// payload-free runtime refusal. Being a SUM is what keeps a refusal from
-    /// carrying a sibling product under the same request identity, and it is
-    /// also why the refusal reason is read structurally here rather than
-    /// recovered by sniffing a framework-specific diagnostic-code prefix.
+    /// Committed products or a payload-free runtime refusal. A sum: a
+    /// refusal cannot carry a sibling product. The reason is structural,
+    /// never sniffed from a diagnostic-code prefix.
     pub products: crate::types::CompileProducts,
     /// Snapshot of compile diagnostics published with this entry.
     pub diagnostics: DiagnosticsSnapshot,

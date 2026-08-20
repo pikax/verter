@@ -1,14 +1,9 @@
 #!/usr/bin/env node
-// Executes the WASM transport's representative cases and prints the result as
-// JSON on stdout, for a Rust-side comparison against the in-process host route.
+// Drive the WASM transport's representative cases and print JSON for
+// Rust-side comparison against the in-process host.
 //
-// It also ENUMERATES the transport's exported surface from the BUILT ARTIFACT
-// itself — the wasm-bindgen-generated module's own exports plus each exported
-// class's prototype — never by reading source.
-//
-// Usage: node scripts/probe-transport-surface.mjs
-// Exit codes: 0 = probed; 2 = the built module could not be loaded (an
-// execution prerequisite, reported as such, never a pass).
+// Enumerates the exported surface from the built artifact, never from
+// source. Exit: 0 probed, 2 module could not load (never a pass).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -73,7 +68,7 @@ function virtualFile(host, canonicalId, kind, compileProfile, index) {
 
 const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
 
-// ── SUCCESS + the optional-product axis ────────────────────────────────────
+// SUCCESS + the optional-product axis
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -102,7 +97,7 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   results.cases.svelteNodeList = host.listVirtualFiles("/probe/Ok.svelte");
 }
 
-// ── REFUSAL + artifact absence ─────────────────────────────────────────────
+// REFUSAL + artifact absence
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -126,7 +121,7 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   );
 }
 
-// ── STRUCTURAL ABSENCE: a node the carrier simply does not have ────────────
+// STRUCTURAL ABSENCE: a node the carrier simply does not have
 //
 // The refusal case above reaches a missing node THROUGH a refused compilation.
 // This one never involves a refusal at all: the carrier compiles normally and
@@ -158,7 +153,7 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   });
 }
 
-// ── IDE/TSX: ensure + read, on the profile the LSP uses ────────────────────
+// IDE/TSX: ensure + read, on the profile the LSP uses
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -200,7 +195,7 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   }
 }
 
-// ── PUBLIC API: option conversion of the `mode` argument ───────────────────
+// PUBLIC API: option conversion of the `mode` argument
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -244,7 +239,7 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   }
 }
 
-// ── AUDITED COMPILE: the same spelling the NAPI probe drives ───────────────
+// AUDITED COMPILE: the same spelling the NAPI probe drives
 //
 // `crates/verter_wasm/src/lib.rs:874` exposes `compileWithAudit`. It is driven
 // on an audit-enabled host for both carriers so the two transports' answers to

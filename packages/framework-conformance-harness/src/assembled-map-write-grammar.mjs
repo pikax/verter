@@ -1,13 +1,13 @@
-// The assembler write-site manifest, as an exact byte grammar, and placement.
+// Assembler write-site manifest as an exact byte grammar, and placement.
 //
-// Implements LAYER 1 §6.1 (classification vocabulary), §6.2 (the manifest
-// W-01…W-18 and the transitions T1…T4), and §6.3 (placement derived from the
-// write cursor) of `spec/assembled-map-composition-layer1.md`.
+// Implements layer 1 §6.1 (classification vocabulary), §6.2 (manifest
+// W-01…W-18, transitions T1…T4), §6.3 (placement from the write cursor)
+// of `spec/assembled-map-composition-layer1.md`.
 //
-// Placement is DERIVED from the write grammar AS THE ASSEMBLER WRITES. It is
-// never supplied as an input (§3.1), never recovered by scanning the generated
-// output, and never reconstructed by concatenating code first and computing
-// offsets afterwards (§6.3).
+// Placement is derived from the write grammar as the assembler writes. Never
+// supplied as an input (§3.1), never recovered by scanning generated output,
+// never reconstructed by concatenating first and computing offsets after
+// (§6.3).
 
 import { advance } from "./assembled-map-coordinates.mjs";
 

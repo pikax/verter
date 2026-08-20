@@ -1,18 +1,10 @@
-//! Orchestrator for the AST-based compilation pipeline.
+//! AST compilation orchestrator (SFC → JS).
 //!
-//! Drives the full SFC → JS compilation:
-//!   1. Tokenize → `Syntax` (parse SFC structure + template AST)
-//!   2. Typed style rewrites (v-bind, CSS Modules, scoping) — if `CompileTarget::STYLE`
-//!   3. Script codegen (macros, bindings, imports) — if `CompileTarget::needs_script()`
-//!   4. Template codegen (VDOM or Vapor render function) — if `CompileTarget::TEMPLATE`
-//!   5. TSX codegen (valid JSX for LSP type checking) — if `CompileTarget::TSX`
-//!   6. TSC codegen (minimal TS declarations) — if `CompileTarget::TSC`
-//!   7. Assemble results
+//! Tokenize → style (if `STYLE`) → script (if `needs_script`) →
+//! template (if `TEMPLATE`) → TSX (if `TSX`) → TSC (if `TSC`) → assemble.
 //!
-//! Use [`CompileTarget`] bitflags to control which steps run. Presets:
-//! - [`CompileTarget::BUNDLER`] — style + script + template (runtime output)
-//! - [`CompileTarget::IDE`] — TSX only (LSP type checking, independent of steps 2-4)
-//! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
+//! Presets: [`CompileTarget::BUNDLER`], [`CompileTarget::IDE`],
+//! [`CompileTarget::ANALYSIS`].
 
 mod helpers;
 mod macro_scope_check;

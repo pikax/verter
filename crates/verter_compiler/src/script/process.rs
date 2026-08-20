@@ -24,14 +24,11 @@ use super::macros::{
 };
 use super::{ScriptCodeGenOptions, ScriptContext};
 
-/// Whether an import binding is ref-bindable as an inline template ref
-/// (`ref_key`/`ref: name`), matching official compiler-sfc binding metadata:
-/// named imports from ANY source and default imports from non-`vue`,
-/// non-component sources are `setup-maybe-ref` (ref-bindable); namespace
-/// imports, default imports from component (Vue-carrier) sources, and
-/// `vue`-source imports are `setup-const` (stay string refs). The
-/// component-source test routes through the language registry (the ONE
-/// carrier-extension authority — no hand-matched extension literals).
+/// Official compiler-sfc binding metadata for inline template refs.
+/// Named imports (any source) and default imports from non-`vue`,
+/// non-component sources are `setup-maybe-ref`. Namespace imports,
+/// default imports from a component source, and `vue` imports are
+/// `setup-const`. Component-source test uses the language registry.
 pub(super) fn is_ref_bindable_import(source: &str, kind: Option<ImportSpecifierKind>) -> bool {
     !(matches!(kind, Some(ImportSpecifierKind::Namespace))
         || (matches!(kind, Some(ImportSpecifierKind::Default))

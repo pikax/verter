@@ -1,33 +1,21 @@
-//! Every in-scope PublicApi / TSC / declaration cell, observed by the real
-//! TypeScript compiler inside the pinned framework closure.
+//! PublicApi / TSC / declaration cells, observed by real TypeScript
+//! inside the pinned framework closure.
 //!
-//! The declarations Verter publishes mean nothing on their own: their whole
-//! content is `import("vue").PublicProps & …` and
-//! `import("svelte").Component<Props, Exports, Bindings>`. Observed without the
-//! framework's own declarations resolvable, TypeScript silently types those
-//! references `any` under `skipLibCheck`, and a correct surface and an empty one
-//! observe IDENTICALLY — an observation that decides nothing.
+//! Published declarations are `import("vue").PublicProps & …` /
+//! `import("svelte").Component<…>`. Without the framework resolvable,
+//! TypeScript types those `any` under `skipLibCheck` and a correct
+//! surface observes identically to an empty one.
 //!
-//! So the observation runs in the harness's OBSERVATION DOMAIN: the artifacts
-//! are rooted inside the realized, pinned framework install
-//! (`packages/framework-conformance-harness/.oracle-installs/<framework>`) and
-//! TypeScript's own node resolution finds that install's `node_modules`. A
-//! module reference that does not resolve REFUSES the observation rather than
-//! degrading it — the harness's `ModuleResolutionError`, proven by
-//! `test/typescript-observation-domain.spec.mjs`.
+//! Artifacts are rooted in the pinned install
+//! (`.oracle-installs/<framework>`). An unresolved module REFUSES the
+//! observation (`ModuleResolutionError`), never degrades. Assertions
+//! read the checker's view, never declaration bytes.
 //!
-//! Every assertion here is SEMANTIC: props, events, exports, bindings and
-//! declaration-only-ness are read from the checker's own view of the published
-//! declaration, never from its bytes.
-//!
-//! Run with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! public_api_typescript_observation -- --test-threads=1 --nocapture`.
+//! public_api_typescript_observation -- --test-threads=1 --nocapture`
 //!
-//! WITHOUT `--features bf2-authoritative` this module is not compiled in, so a
-//! filter naming it matches ZERO tests and `cargo test` still exits 0. Read the
-//! `running N tests` line, never the exit code. libtest's filter is one literal
-//! substring — it has no alternation, so `"a\\|b"` matches nothing at all.
+//! Without the feature this module is not compiled. Read the
+//! `running N tests` line, never the exit code.
 
 use super::bf2_seed_matrix::{harness_root, run_bounded, TempCandidate, ORACLE_TIMEOUT};
 use super::*;
@@ -207,9 +195,7 @@ const SVELTE_TYPED: &str = "<script lang=\"ts\">\n  let { label, disabled = fals
 /// The same component with an UNTYPED `$props()` destructure.
 const SVELTE_UNTYPED: &str = "<script>\n  let { label, disabled = false } = $props();\n</script>\n\n<button {disabled}>{label}</button>\n";
 
-// ══════════════════════════════════════════════════════════════════════════
 // Vue — the three public-API modes
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn the_vue_public_surface_types_its_declared_props_and_emits_against_the_pinned_vue_closure() {
@@ -346,9 +332,7 @@ fn only_the_vue_declaration_mode_surface_is_ambient_clean_as_a_dts() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Svelte — typed, untyped, and the declaration mode
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn a_typed_svelte_props_surface_types_its_props_exports_and_bindings() {

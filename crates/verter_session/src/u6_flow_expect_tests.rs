@@ -1,168 +1,40 @@
-//! Recursive flow-return EXPECTATIONS, the public cold/warm boundary
-//! companion, and the crossed capture-write position matrix — the U6
-//! corpus-harness strengthening layer.
+//! Recursive flow-return expectations, public cold/warm boundary, and
+//! the crossed capture-write matrix.
 //!
-//! # Why this module exists
+//! Root `NodeShape` cannot distinguish `() => "a"` from `() => "b"`
+//! (both `Other`) or `"a" | "b"` from `"a" | undefined` (both `Union`).
 //!
-//! The root-`NodeShape` corpus assertion cannot distinguish the VALUES a
-//! row's own `checker` column names: `() => "a"` and `() => "b"` are both
-//! `NodeShape::Other`; `"a" | "b"` and `"a" | undefined` are both
-//! `NodeShape::Union`. Five rows shipped that way and characterized
-//! nothing. This module adds:
+//! 1. [`ExpectedNode`] asserts signatures, exact literals, intersections,
+//!    and order-insensitive union *sets* to arbitrary depth.
+//! 2. Distinct graph variants for `TypeParam` / `DeclRef` / `BareRef`
+//!    (raise projects all three to `Ref { name }`).
+//! 3. Public boundary via `get_flow_return_type_with_audit`, twice.
+//!    First call is cold (`from_cache == false`, `cold_computes >= 1`).
+//!    A clean result must replay warm with zero cold computes. A
+//!    `ReturnOnly` result must not be admitted warm and must
+//!    cold-compute again (`from_cache == false` alone is not replay).
+//!    A refusal is never served warm.
+//! 4. [`matrix`]: the same capture-write effect regardless of expression
+//!    position.
 //!
-//! 1. **A recursive [`ExpectedNode`] expectation** able to assert
-//!    signatures, exact literal and primitive values, intersections, and
-//!    order-insensitive but EXACT union constituent sets (set equality,
-//!    never subset), to arbitrary member depth.
-//! 2. **Graph-level identity, preserved.** The `TypeExpr` raise boundary
-//!    projects `TypeParam` / `DeclRef` / `BareRef` all to `Ref { name }`
-//!    (see `SemanticNodeData::DeclRef` / `BareRef` docs), and the corpus's
-//!    own `NodeShape` buckets all three as `Other` — two independent
-//!    conflation sites. [`ExpectedNode`] carries a DISTINCT variant for
-//!    each, matched on the graph node itself, so an expectation can (and
-//!    the controls do) reject one where another is measured.
-//! 3. **A public-boundary companion** ([`Boundary::Audit`] /
-//!    [`Boundary::AuditRefusal`]) through
-//!    `VerterHost::get_flow_return_type_with_audit`, invoked TWICE per
-//!    row, with BOTH calls modelled explicitly (result class, typed
-//!    degradation, projected JSON, `from_cache`, cold-compute count):
-//!    the first call must be COLD (`from_cache == false`,
-//!    `cold_computes >= 1`) with the pinned typed `degradation` and the
-//!    EXACT projected JSON (`project_node_to_type_expr_json_bytes`); the
-//!    second call must keep the first call's result CLASS and typed
-//!    degradation, and its cache-replay state is pinned (`warm_replay`) —
-//!    a clean result must replay warm with ZERO cold computes and an
-//!    identical projection, and a degraded (`ReturnOnly`) result must NOT
-//!    be admitted warm AND must genuinely COLD-COMPUTE again
-//!    (`from_cache == false` alone is not cold replay). A refusal row
-//!    pins [`Boundary::AuditRefusal`]: both calls refuse, and the second
-//!    refusal is never served warm and always recomputes — the typed
-//!    non-admission contract. The assertions fail in both directions, so
-//!    a result admitted warm when it must stay cold is a failure, not a
-//!    speedup.
-//! 4. **The crossed capture-write matrix** ([`matrix`]): binding kind ×
-//!    write timing × closure depth × expression position × guard kind ×
-//!    completion container, with the KEY assertion that the same
-//!    capture-write effect surfaces for a given cell REGARDLESS of
-//!    expression position — the assertion that makes a position-specific
-//!    effect hook impossible to reintroduce silently.
+//! Stamped with [`ORACLE_STAMP`] (checker, never `.d.ts`) and
+//! [`PROFILE_STAMP`]. A deep measurement that diverges from `checker`
+//! is `Verdict::KnownOwed`.
 //!
-//! # Oracle / profile stamps
-//!
-//! Every assertion this module makes is stamped: [`ORACLE_STAMP`] names
-//! the pinned checker every `checker` value was measured against, and
-//! [`PROFILE_STAMP`] names the exact semantic profile in force for every
-//! measurement. Both stamps ride every failure message.
-//!
-//! # Expected-versus-actual gap rows
-//!
-//! This module does NOT fix flow semantics. A strengthened row whose deep
-//! measurement DIVERGES from its `checker` column is pinned to the ACTUAL
-//! measured value with `Verdict::KnownOwed` — a visible, recorded
-//! expected-versus-actual gap that fails the moment the owning block
-//! repairs the semantics (forcing a deliberate re-pin), and fails if the
-//! shape degrades further.
-//!
-//! # Negative controls — the comparators themselves are characterized
-//!
-//! The controls in [`expectation_controls`] and [`matrix_outcome_controls`]
-//! prove every comparison clause this module RETAINS can fail, so
-//! neutering any retained comparison clause leaves a failing control,
-//! never a silently green suite. Comparison vocabulary that neither a
-//! corpus row nor a control exercises is DELETED rather than shipped
-//! uncharacterizable — but ONLY under an exhaustive reachability
-//! argument over the type-expression grammar, never a handful of sample
-//! probes. Deleting the `SignatureKind::Call` discriminant violates that
-//! standard and is REVERSED here: three sample probes (`return class C
-//! {}` → `any`; a `{ new (): Box }`-typed value → `{  }`; an alias to
-//! `new () => Box` → `DeclRef`) were read as "no `Construct` signature
-//! is reachable on this rail", but the annotation-typed parameter form
-//! (`function makeProps(x: new () => Box) { return x }`) DOES reach a
-//! `SignatureKind::Construct` node, so the deletion had made every
-//! signature pin accept a construct signature where a call signature
-//! was pinned. The discriminant is RESTORED in both comparators
-//! ([`node_matches`] and [`checker_syntax::matches_node`]) and
-//! controlled live in both directions by
+//! Controls in [`expectation_controls`] and [`matrix_outcome_controls`]
+//! prove every retained comparison clause can fail. Vocabulary neither
+//! a row nor a control exercises is omitted; re-add a form only with a
+//! control. `SignatureKind::Call` vs `Construct` is load-bearing: the
+//! annotation-typed parameter form (`function makeProps(x: new () => Box)
+//! { return x }`) reaches `SignatureKind::Construct`, so a call pin
+//! must reject a construct signature. Held by
 //! [`expectation_controls::construct_signature_is_distinct_from_call_signature`].
 //!
-//! The surviving deletions, each with its DIRECTIONAL exhaustive
-//! argument (an accept-arm removal narrows the matcher — every deleted
-//! pair now reaches the controlled `_ => false` catchall — so unlike a
-//! rejection-clause removal it can never widen what a pin accepts):
-//!
-//! * `Lit::Bool` / `Lit::BigInt` — EXPECTED-side vocabulary only.
-//!   [`lit_matches`] is total over `(Lit, LiteralValue)` via its
-//!   catchall: the retained `Str`/`Num` arms match only their own
-//!   measured kinds, so a measured boolean/bigint literal is REJECTED
-//!   by every retained pin (fail-closed), and no row's `checker`
-//!   column names a boolean/bigint literal (the checker-syntax parser
-//!   rejects `true`/`false` prints loudly and models no bigint print).
-//!   Re-add a variant together with its control when a row needs it;
-//! * alias transparency in the matcher — a TRANSPARENCY removal, which
-//!   STRICTENS: no `node_matches` / `checker_syntax::matches_node` arm
-//!   carries `Alias` on the measured side, so every `Alias` node
-//!   reaches the controlled `_ => false` for EVERY expected form
-//!   (exhaustive over the match arms, not sampled) and the failure
-//!   report renders it as `Alias(…)` — fail-closed, loud. A future
-//!   alias-producing row must add transparency together with a control
-//!   that discriminates it.
-//!
-//! Covered, precisely:
-//!
-//! * every [`ExpectedNode`] form — exact literal STRING and NUMBER
-//!   values, literal-versus-primitive widening, signature KIND (a call
-//!   pin rejects a live construct signature and vice versa), signature
-//!   parameter ARITY, ordered parameter types, and return types, union
-//!   set equality (subset / superset / swapped / duplicate), intersection
-//!   arms (wrong name, missing arm, REVERSED source order, reference
-//!   identity), the `TypeParam` / `DeclRef` / `BareRef` trio at VARIANT
-//!   level and at NAME level, object members (wrong value, wrong name,
-//!   missing, extra, duplicate-key injectivity), and the typed
-//!   unmodelled-position marker;
-//! * the fail-closed STRUCTURAL clauses of BOTH matchers — the depth
-//!   guard (an exhausted depth never reads as a match) and the
-//!   absent-node early-out (an evicted/unknown node id never reads as a
-//!   match), each exercised directly by
-//!   [`expectation_controls::depth_and_absent_node_guards_fail_closed`],
-//!   plus each matcher's `_ => false` catchall (cross-variant pairs are
-//!   rejected, held by the cross-class control assertions);
-//! * every [`check_boundary`] clause — the no-value carrier, both
-//!   first-call-cold clauses, typed degradation, exact projected JSON,
-//!   result-class drift across the replay, typed-degradation drift
-//!   across the replay, both warm-replay clauses INDIVIDUALLY, both
-//!   cold-replay clauses INDIVIDUALLY (warm non-admission AND the second
-//!   call actually cold-computing), and replay-projection drift;
-//! * every [`check_boundary_refusal`] clause — the value-versus-refusal
-//!   class in both directions, the cold first call, the PINNED typed
-//!   refusal KIND of call 1, refusal stability on the second call,
-//!   refusal-IDENTITY stability across the two calls (a refusal that
-//!   changes kind between calls fails), warm non-admission of the
-//!   refusal, and the second call's genuine cold recompute;
-//! * every [`check_cell_outcome`] clause — the outcome class in both
-//!   directions (a `NoValue` pin against a measured value, a `Value` pin
-//!   against a measured refusal), the exact rendering, the typed
-//!   degradation, BOTH first-call-cold clauses (shared with
-//!   [`check_boundary`]), and the full second-call replay model (shared
-//!   with [`check_boundary`] through one clause set, so a matrix cell
-//!   and a corpus row cannot drift apart); a `NoValue` cell pins its
-//!   typed refusal kind through the same [`check_boundary_refusal`]
-//!   delegation the corpus refusal rows use;
-//! * the structural clauses of [`checker_syntax::matches_node`] — union
-//!   length and constituent injectivity, intersection length, object
-//!   length and member injectivity, the function-print `Call`-kind
-//!   discriminant, its depth guard, its absent-node early-out, and its
-//!   `_ => false` catchall — held by
-//!   [`expectation_controls::checker_syntax_structural_clauses_fail_closed`]
-//!   together with the corpus-level checker-column mutation controls.
-//!
-//! Each control feeds a deliberately WRONG pin against a REAL
-//! measurement. The boundary-clause controls that need a trace no fresh
-//! host can produce (a warm first call; a single replay field in
-//! isolation; a drifted replay; a class-drifted or cached refusal) build
-//! it exclusively from measured values — a re-labelled or
-//! single-field-substituted real trace, stated inline at each site.
-//! `stamps_match_the_pinned_oracle_and_profile` is a consistency check
-//! over the stamps, not a negative control, and is not counted as one.
+//! `Alias` nodes match nothing (fail-closed). [`Lit`] is not total over
+//! [`LiteralValue`]: only `Str`/`Num` are exercised. Boundary-clause
+//! controls that need a trace no fresh host can produce build it from
+//! measured values — a re-labelled or single-field-substituted real
+//! trace, stated inline at each site.
 
 use std::sync::Arc;
 
@@ -178,9 +50,7 @@ use crate::{FileLanguage, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
-// ─────────────────────────────────────────────────────────────────────────
 // Oracle / profile stamps
-// ─────────────────────────────────────────────────────────────────────────
 
 /// The oracle every `checker` value in this module (and every matrix
 /// cell's `checker` column) was measured against. CHECKER only, never
@@ -195,17 +65,11 @@ pub(crate) const PROFILE_STAMP: &str = "VerterHost standalone { analysis_level: 
      demand = ReturnProjectionDemand::whole_return(); \
      rail = body-derived FlowReturn via VerterHost::get_flow_return_type_with_audit";
 
-// ─────────────────────────────────────────────────────────────────────────
 // The recursive expectation
-// ─────────────────────────────────────────────────────────────────────────
 
-/// An exact literal value expectation.
-///
-/// Deliberately NOT total over [`LiteralValue`]: only variants a corpus
-/// row or a negative control exercises are kept, so every comparison
-/// clause in [`lit_matches`] is characterized. `Bool` / `BigInt` were
-/// DELETED (no row and no control measured either on this rail); re-add
-/// a variant together with its control when a row needs it.
+/// Exact literal expectation. Not total over [`LiteralValue`]: only
+/// variants a corpus row or control exercises. Re-add `Bool` / `BigInt`
+/// only together with a control.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Lit {
@@ -213,70 +77,48 @@ pub(crate) enum Lit {
     Num(f64),
 }
 
-/// A RECURSIVE graph-node expectation.
+/// Recursive graph-node expectation.
 ///
-/// Matched against [`SemanticNodeData`] at the GRAPH-NODE level — never
-/// against the projected `TypeExpr`, which conflates `TypeParam` /
-/// `DeclRef` / `BareRef` into `Ref { name }`. Every variant must match
-/// structurally, recursively, to arbitrary depth. `Alias` nodes match
-/// NOTHING: the previously-claimed alias transparency was proven
-/// unexercised (neutering the deref left the whole u6_flow suite green),
-/// so it was deleted per the no-uncharacterized-comparison rule — an
-/// `Alias` node fails loudly, rendered as `Alias(…)`, and a future
-/// alias-producing row must reintroduce transparency WITH a control.
-///
-/// Like [`Lit`], the vocabulary is exercised, not speculative: every
+/// Matched against [`SemanticNodeData`] at the graph-node level — never
+/// the projected `TypeExpr`, which conflates `TypeParam` / `DeclRef` /
+/// `BareRef` into `Ref { name }`. `Alias` nodes match nothing
+/// (fail-closed); reintroduce transparency only with a control. Every
 /// variant is pinned by a corpus row or discriminated by a control.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ExpectedNode {
-    /// `SemanticNodeData::Literal` with EXACTLY this value.
+    /// `SemanticNodeData::Literal` with this exact value.
     Literal(Lit),
-    /// `SemanticNodeData::Primitive` with EXACTLY this kind.
+    /// `SemanticNodeData::Primitive` with this exact kind.
     Primitive(PrimitiveKind),
-    /// `SemanticNodeData::Union` whose constituent set EQUALS this set —
-    /// order-insensitive, but EXACT: a subset match and a superset match
-    /// both FAIL. Duplicate expectations must be satisfied by distinct
+    /// `SemanticNodeData::Union` whose constituent set equals this set
+    /// (order-insensitive, exact). Duplicate expectations need distinct
     /// constituents.
     Union(&'static [ExpectedNode]),
-    /// `SemanticNodeData::Intersection` with EXACTLY these arms, in
-    /// source order.
+    /// `SemanticNodeData::Intersection` with these arms, in source order.
     Intersection(&'static [ExpectedNode]),
-    /// A `SemanticNodeData::Signature` with `SignatureKind::Call`,
-    /// exactly these parameter types (ordered, exact arity), and this
-    /// return type. This is what makes `() => "a"` distinguishable from
-    /// `() => "b"`.
+    /// `SemanticNodeData::Signature` with `SignatureKind::Call`, exact
+    /// ordered params, and this return type.
     ///
-    /// The `kind == Call` discriminant is LOAD-BEARING and was once
-    /// wrongly deleted on a sample-probe argument. Three probes (`return
-    /// class C {}` → `any`; a `{ new (): Box }`-typed value → `{  }`;
-    /// an alias to `new () => Box` → `DeclRef`) as proof that no
-    /// `Construct` signature is reachable on the body-derived rail.
-    /// That claim was FALSE — the annotation-typed parameter form
-    /// (`function makeProps(x: new () => Box) { return x }`) measures a
-    /// `SignatureKind::Construct` node through this rail's own
-    /// boundary — and the deletion had let a construct signature
-    /// satisfy every call-signature pin. Restored and controlled in
-    /// both directions by
+    /// `kind == Call` is load-bearing: `function makeProps(x: new () => Box)
+    /// { return x }` measures `SignatureKind::Construct`, so a call pin
+    /// must reject it. Held by
     /// [`expectation_controls::construct_signature_is_distinct_from_call_signature`].
     Signature {
         params: &'static [ExpectedNode],
         ret: &'static ExpectedNode,
     },
-    /// A `SemanticNodeData::Signature` with `SignatureKind::Construct`
-    /// (`new () => T`), same parameter/return semantics as
-    /// [`ExpectedNode::Signature`]. The distinct variant is what lets a
-    /// control (and a future row) pin a construct signature exactly —
-    /// and REJECT a call signature where a construct one is pinned.
+    /// `SemanticNodeData::Signature` with `SignatureKind::Construct`
+    /// (`new () => T`). Distinct so a construct pin rejects a call
+    /// signature.
     ConstructSignature {
         params: &'static [ExpectedNode],
         ret: &'static ExpectedNode,
     },
-    /// `SemanticNodeData::Object` whose named member set EQUALS this set
-    /// (exact: a missing member and an extra member both fail), each
-    /// member's value matched recursively.
+    /// `SemanticNodeData::Object` whose named member set equals this set;
+    /// each value is matched recursively.
     Object(&'static [(&'static str, ExpectedNode)]),
-    /// `SemanticNodeData::TypeParam` with this display name — DISTINCT
+    /// `SemanticNodeData::TypeParam` with this display name — distinct
     /// from `DeclRef` / `BareRef`, which project identically.
     TypeParam { name: &'static str },
     /// `SemanticNodeData::DeclRef` naming this declaration.
@@ -299,10 +141,8 @@ fn lit_matches(expected: &Lit, got: &LiteralValue) -> bool {
     }
 }
 
-/// Order-insensitive EXACT set equality between measured constituents and
-/// expected constituents: every expected node must claim a DISTINCT
-/// measured constituent and the counts must be equal. Backtracking, so
-/// duplicate expectations are handled exactly.
+/// Order-insensitive exact set equality: every expected node claims a
+/// distinct measured constituent and the counts must match.
 fn set_matches(
     dispatch: &ProjectSemanticDispatch<'_>,
     measured: &[SemanticNodeId],
@@ -338,8 +178,8 @@ fn set_matches(
     assign(dispatch, measured, expected, &mut used, 0, depth)
 }
 
-/// Whether `node` matches `expected`, recursively. Silent (no failure
-/// text) — [`check_node`] wraps it with a rendered report.
+/// Whether `node` matches `expected`, recursively. Silent; [`check_node`]
+/// wraps it with a rendered report.
 pub(crate) fn node_matches(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -349,10 +189,8 @@ pub(crate) fn node_matches(
     if depth > MATCH_DEPTH_LIMIT {
         return false;
     }
-    // NO alias deref: an `Alias` node matches nothing (see the
-    // [`ExpectedNode`] docs — transparency was proven unexercised and
-    // deleted; reintroduce it only together with a discriminating
-    // control).
+    // No alias deref: an `Alias` node matches nothing. Reintroduce
+    // transparency only with a discriminating control.
     let Some(data) = dispatch.graph().node_data(node) else {
         return false;
     };
@@ -378,14 +216,9 @@ pub(crate) fn node_matches(
                 ..
             },
         ) => {
-            // The `kind == Call` discriminant is load-bearing: the
-            // annotation-typed parameter form (`x: new () => Box`)
-            // reaches a Construct signature on this rail, and a call
-            // pin must reject it (held by
-            // `construct_signature_is_distinct_from_call_signature`).
-            // Arity is exact and the parameter types are ORDERED —
-            // both clauses are held by
-            // `signature_params_and_arity_reject_wrong_shapes`.
+            // `kind == Call` is load-bearing: `x: new () => Box` reaches
+            // Construct, and a call pin must reject it. Arity is exact;
+            // parameter types are ordered.
             *kind == SignatureKind::Call
                 && got_params.len() == params.len()
                 && got_params
@@ -412,10 +245,9 @@ pub(crate) fn node_matches(
                 && node_matches(dispatch, *return_type, ret, depth + 1)
         }
         (ExpectedNode::Object(exp), SemanticNodeData::Object(surface)) => {
-            // INJECTIVE: every expected member must claim a DISTINCT
-            // measured member, so duplicate expected keys cannot both be
-            // satisfied by one actual member. Measured object surfaces
-            // carry unique keys, so greedy claiming is exact.
+            // Injective: duplicate expected keys cannot both claim one
+            // measured member. Surfaces carry unique keys, so greedy
+            // claiming is exact.
             let members = surface.positive_members();
             if members.len() != exp.len() {
                 return false;
@@ -581,9 +413,7 @@ pub(crate) fn check_node(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Row columns: recursive expectation + public-boundary companion
-// ─────────────────────────────────────────────────────────────────────────
 
 /// The recursive-expectation column of a corpus `Row`.
 #[derive(Clone, Copy, Debug)]
@@ -600,39 +430,27 @@ pub(crate) enum Expect {
 pub(crate) enum Boundary {
     /// The row does not drive the public boundary.
     Skip,
-    /// `get_flow_return_type_with_audit`, invoked TWICE, both calls
-    /// modelled explicitly:
+    /// `get_flow_return_type_with_audit` twice:
     ///
-    /// * call 1 must produce a VALUE, be COLD (`from_cache == false`,
+    /// * call 1 must produce a value, be cold (`from_cache == false`,
     ///   `cold_computes >= 1`), carry exactly `degradation`, and project
-    ///   exactly `json` (`project_node_to_type_expr_json_bytes` of the
-    ///   result node);
-    /// * call 2 must keep call 1's result CLASS (a value, never a
-    ///   refusal) and typed degradation, project byte-identically, and
-    ///   report the pinned cache-replay state: `warm_replay == true`
-    ///   demands a warm family replay (`from_cache == true`) with ZERO
-    ///   cold computes; `warm_replay == false` demands the result was
-    ///   NOT admitted warm (`from_cache == false`, the `ReturnOnly`
-    ///   no-poison contract) AND that the second call genuinely
-    ///   COLD-COMPUTES again (`cold_computes >= 1`) — `from_cache ==
-    ///   false` with zero cold work is a replay that did nothing, not a
-    ///   cold replay.
+    ///   exactly `json`;
+    /// * call 2 must keep call 1's result class and degradation, project
+    ///   byte-identically, and report the pinned replay: `warm_replay`
+    ///   requires `from_cache == true` and zero cold computes; otherwise
+    ///   the result must not be admitted warm (`ReturnOnly` no-poison)
+    ///   and must cold-compute again (`from_cache == false` with zero
+    ///   cold work is not a cold replay).
     Audit {
         json: &'static str,
         degradation: Degr,
         warm_replay: bool,
     },
-    /// `get_flow_return_type_with_audit`, invoked TWICE, where the
-    /// boundary must REFUSE (a typed no-value) on BOTH calls: call 1
-    /// refuses COLD (`from_cache == false`, `cold_computes >= 1`) with
-    /// EXACTLY the pinned typed refusal (`error` — the full
-    /// [`FlowReturnError`] identity, so a refusal swapped for a
-    /// different typed refusal fails); call 2 refuses AGAIN with the
-    /// SAME refusal identity as call 1 (a refusal that changes kind
-    /// across calls fails), is never served warm (`from_cache == false`
-    /// — a cached refusal is the typed-non-admission violation this pin
-    /// exists to catch), and genuinely recomputes (`cold_computes >=
-    /// 1`). Checked by [`check_boundary_refusal`].
+    /// `get_flow_return_type_with_audit` twice; both calls refuse. Call 1
+    /// refuses cold with exactly `error` (full [`FlowReturnError`]
+    /// identity). Call 2 refuses with the same identity, is never served
+    /// warm (a cached refusal is the typed-non-admission violation), and
+    /// recomputes. Checked by [`check_boundary_refusal`].
     AuditRefusal { error: FlowReturnError },
 }
 
@@ -641,33 +459,25 @@ pub(crate) enum Boundary {
 pub(crate) struct MeasuredBoundary {
     pub first_from_cache: bool,
     pub first_cold_computes: u32,
-    /// Typed degradation of the first call's result (`None` arm of the
-    /// carrier ⇒ this is `Degr::None`-or-real; an `Err` carrier leaves it
-    /// unset and records `error`).
+    /// First-call typed degradation. `Err` leaves this unset and records `error`.
     pub degradation: Option<Degr>,
     /// Exact projected JSON of the first call's result node.
     pub json: Option<String>,
     pub second_from_cache: bool,
     pub second_cold_computes: u32,
-    /// Typed degradation of the SECOND call's result — the replay must
-    /// carry the same typed degradation as the first call, so drift here
-    /// is a comparison failure, not an unrecorded fact.
+    /// Second-call typed degradation. Drift versus the first call is a
+    /// comparison failure.
     pub second_degradation: Option<Degr>,
     /// Exact projected JSON of the second call's result node.
     pub second_json: Option<String>,
     /// Debug of the `Err` arm when the FIRST call produced no value.
     pub error: Option<String>,
-    /// The TYPED `Err` arm of the first call — the refusal identity the
-    /// kind pin and the cross-call identity clause compare. The debug
-    /// string above is presentation; this field is the semantics.
+    /// First-call typed refusal identity. `error` is presentation.
     pub error_kind: Option<FlowReturnError>,
-    /// Debug of the `Err` arm when the SECOND call produced no value —
-    /// recorded separately so a result-class drift across the replay
-    /// (value ⇄ refusal) is comparable, never discarded.
+    /// Second-call `Err` debug, so value ⇄ refusal drift is comparable.
     pub second_error: Option<String>,
-    /// The TYPED `Err` arm of the second call — compared against
-    /// `error_kind` so a refusal that changes kind across calls is a
-    /// comparison failure, not an unrecorded fact.
+    /// Second-call typed refusal identity. Kind drift versus `error_kind`
+    /// is a comparison failure.
     pub second_error_kind: Option<FlowReturnError>,
 }
 
@@ -708,9 +518,8 @@ fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
     }
 }
 
-/// Drive one program through the PUBLIC audited flow-return boundary
-/// twice, and (optionally) match the result node against a recursive
-/// expectation while the host's graph is live.
+/// Drive one program through the public audited flow-return boundary
+/// twice; optionally match the result node while the graph is live.
 pub(crate) fn drive_expect_boundary(
     aux: &str,
     id: &str,
@@ -753,7 +562,7 @@ pub(crate) fn drive_expect_boundary(
         Err(err) => (None, None, None, Some(format!("{err:?}")), Some(*err)),
     };
 
-    // Match + render against the LIVE graph before the host drops.
+    // Match + render against the live graph before the host drops.
     let (expect_failures, rendered) = {
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -814,12 +623,9 @@ pub(crate) fn drive_expect_boundary(
     }
 }
 
-/// The SECOND-call replay clauses, shared verbatim by
-/// [`check_boundary`] (corpus rows) and [`matrix::check_cell_outcome`]
-/// (matrix `Value` cells) so the two comparators cannot drift apart:
-/// result-class drift, typed-degradation drift, the warm pair (both
-/// clauses, individually), the cold pair (both clauses, individually),
-/// and replay-projection drift. Pure over the measurement.
+/// Second-call replay clauses, shared by [`check_boundary`] and
+/// [`matrix::check_cell_outcome`] so the comparators cannot drift:
+/// class, degradation, warm pair, cold pair, projection.
 fn replay_clauses(warm_replay: bool, measured: &MeasuredBoundary) -> Vec<String> {
     let mut failures = Vec::new();
     if let Some(err) = &measured.second_error {
@@ -877,10 +683,8 @@ fn replay_clauses(warm_replay: bool, measured: &MeasuredBoundary) -> Vec<String>
     failures
 }
 
-/// Drive one program through the PUBLIC audited flow-return boundary
-/// ONCE and hand the caller the LIVE dispatch plus the result node
-/// (`None` when the boundary refused). Shared by the expectation
-/// controls and the checker-syntax semantic cross-validation.
+/// Drive one program through the public audited boundary once; return
+/// the live dispatch and result node (`None` on refusal).
 pub(crate) fn with_live_flow_node<R>(
     aux: &str,
     id: &str,
@@ -912,11 +716,9 @@ pub(crate) fn with_live_flow_node<R>(
     f(&dispatch, node)
 }
 
-/// The two FIRST-CALL-COLD clauses, shared verbatim by
-/// [`check_boundary`] (corpus rows) and
-/// [`matrix::check_cell_outcome_measured`]'s `Value` arm (matrix
-/// cells), so a matrix cell pins first-call coldness at parity with a
-/// corpus row. Pure over the measurement.
+/// First-call-cold clauses, shared by [`check_boundary`] and
+/// [`matrix::check_cell_outcome_measured`] so matrix cells pin coldness
+/// at corpus parity.
 fn first_call_cold_clauses(measured: &MeasuredBoundary) -> Vec<String> {
     let mut failures = Vec::new();
     if measured.first_from_cache {
@@ -934,9 +736,8 @@ fn first_call_cold_clauses(measured: &MeasuredBoundary) -> Vec<String> {
     failures
 }
 
-/// Check a measured public-boundary trace against a [`Boundary::Audit`]
-/// pin. Pure over the measurement, so the negative controls can prove
-/// every clause is able to fail.
+/// Check a measured trace against a [`Boundary::Audit`] pin. Pure over
+/// the measurement so controls can prove every clause fails.
 pub(crate) fn check_boundary(
     json: &str,
     degradation: Degr,
@@ -968,12 +769,8 @@ pub(crate) fn check_boundary(
     failures
 }
 
-/// Check a measured public-boundary trace against a
-/// [`Boundary::AuditRefusal`] pin: the boundary must REFUSE on both
-/// calls with EXACTLY the pinned typed refusal, keep the same refusal
-/// identity across the two calls, refuse cold each time, and never be
-/// admitted warm. Pure over the measurement, so the negative controls
-/// can prove every clause is able to fail.
+/// Check a measured trace against [`Boundary::AuditRefusal`]: both calls
+/// refuse with the pinned identity, cold each time, never warm-admitted.
 pub(crate) fn check_boundary_refusal(
     expected: FlowReturnError,
     measured: &MeasuredBoundary,
@@ -1037,48 +834,27 @@ pub(crate) fn check_boundary_refusal(
     failures
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Checker-syntax semantic projection
-// ─────────────────────────────────────────────────────────────────────────
 
-/// A TYPED, test-only projection of the pinned checker's PRINT syntax,
-/// with ONE canonical comparison rule against the live semantic graph.
+/// Test-only projection of the pinned checker's print syntax, with one
+/// comparison rule against the live graph.
 ///
-/// This is what makes a deep-pinned row's `checker` column LOAD-BEARING:
-/// `deep_pinned_rows_semantic_equality_follows_their_verdict` parses the
-/// column into [`CheckerType`] and compares it against the LIVE graph
-/// for EVERY deep-pinned row, independent of the `RENDER_COMPARABLE` /
-/// `RENDER_INCOMPARABLE` byte lists — so a `RENDER_INCOMPARABLE` entry
-/// exempts PRESENTATION BYTES only, never semantic equality.
+/// Makes a deep-pinned `checker` column load-bearing:
+/// `deep_pinned_rows_semantic_equality_follows_their_verdict` parses it
+/// and compares every deep-pinned row against the live graph.
+/// `RENDER_INCOMPARABLE` exempts presentation bytes only, never
+/// semantic equality.
 ///
-/// The grammar covers exactly the print forms the deep-pinned rows use:
-/// string and number literals, primitive names, bare reference names,
-/// `A | B` unions, `A & B` intersections with parentheses, object
-/// prints `{ name: T; }` (nested to arbitrary depth), and
-/// `(p: T, …) => T` function prints. An unsupported construct is a
-/// LOUD parse error naming the offending text — never a silent
-/// exemption; extend the parser (with its comparison rule and a
-/// control) when a new deep-pinned row needs a new form.
+/// Grammar: string/number literals, primitives, bare names, `A | B`,
+/// `A & B`, `{ name: T; }`, `(p: T, …) => T`. Unsupported text is a
+/// loud parse error — never a silent exemption.
 ///
-/// Comparison rules, canonical on purpose: unions are order-INSENSITIVE
-/// exact constituent sets (the checker prints its own internal order);
-/// intersections are ORDERED (source order on both sides); objects are
-/// exact member sets; a function print is a CALL signature only (the
-/// checker prints a construct signature `new (…) => T`, which this
-/// grammar does not model — a construct-signature node therefore never
-/// satisfies a function print, and a construct-bearing deep row must
-/// extend the grammar WITH a control); function parameter NAMES are
-/// ignored (they are print artifacts, not semantics) while parameter
-/// TYPES and arity are exact; a reference name matches a RESOLVED
-/// `DeclRef` carrying that name ONLY. The former `BareRef` / `TypeParam`
-/// acceptance arms were DELETED as unexercised comparison vocabulary
-/// (no deep-pinned row and no control measures either through this
-/// rail; the deletion removes ACCEPT arms, so every such pair now
-/// reaches the controlled `_ => false` — fail-closed, exhaustive over
-/// the match arms). A future deep-pinned row whose graph node is a
-/// `BareRef`/`TypeParam` fails loudly here and must reintroduce the
-/// arm together with a discriminating control; the graph-level
-/// [`ExpectedNode`] pins keep holding reference identity exactly.
+/// Unions are order-insensitive exact sets; intersections are source-
+/// ordered; objects are exact member sets; a function print is a Call
+/// signature only (`new (…) => T` never satisfies it). Parameter names
+/// are ignored; types and arity are exact. A reference name matches a
+/// resolved `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
+/// (fail-closed). Re-add those arms only with a control.
 pub(crate) mod checker_syntax {
     use super::*;
 
@@ -1350,10 +1126,8 @@ pub(crate) mod checker_syntax {
                 e.to_bits() == g.to_bits()
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
-            // A reference name matches a RESOLVED `DeclRef` only. The
-            // former `BareRef` / `TypeParam` acceptance arms were
-            // deleted as unexercised (see the module doc): those pairs
-            // now reach the `_ => false` catchall, fail-closed.
+            // A reference name matches a resolved `DeclRef` only.
+            // `BareRef` / `TypeParam` reach `_ => false` (fail-closed).
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
@@ -1425,11 +1199,8 @@ pub(crate) mod checker_syntax {
                     ..
                 },
             ) => {
-                // A function print is a CALL signature: the checker
-                // prints construct signatures `new (…) => T`, which
-                // this grammar does not model, so a Construct node must
-                // never satisfy a Function print (the restored
-                // discriminant — see the module doc).
+                // A function print is a Call signature. Construct
+                // (`new (…) => T`) must never satisfy it.
                 *kind == SignatureKind::Call
                     && got_params.len() == params.len()
                     && got_params
@@ -1443,24 +1214,19 @@ pub(crate) mod checker_syntax {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // The crossed capture-write matrix
-// ─────────────────────────────────────────────────────────────────────────
 
-/// The crossed capture-write / effect / completion position matrix.
+/// Crossed capture-write / effect / completion position matrix.
 ///
-/// Axes (§7 of `docs/arch/u6-flow-return-gaps-and-target.md`): binding
-/// kind × write timing × closure depth × expression position × guard
-/// kind × completion container. Cells are generated from ONE shared
-/// program generator so a position can never drift from its siblings,
-/// and each cell records the pinned checker answer for its program
-/// ([`ORACLE_STAMP`]) plus the pinned CURRENT substrate outcome.
+/// Axes (`docs/arch/u6-flow-return-gaps-and-target.md`): binding kind ×
+/// write timing × closure depth × expression position × guard kind ×
+/// completion container. One shared program generator; each cell pins
+/// the checker answer ([`ORACLE_STAMP`]) and the current substrate
+/// outcome.
 ///
-/// The KEY assertion is [`matrix_suite::same_capture_write_cell_is_position_independent`]:
-/// for the invoked-IIFE capture-write cell, the measured outcome must be
-/// IDENTICAL across every covered expression position. A change that
-/// wires a capture-write effect at one position and not its siblings
-/// breaks that uniformity and fails loudly.
+/// [`matrix_suite::same_capture_write_cell_is_position_independent`]:
+/// the invoked-IIFE capture-write cell must measure identically across
+/// every covered expression position.
 pub(crate) mod matrix {
     use super::*;
 
@@ -1472,9 +1238,7 @@ pub(crate) mod matrix {
         Param,
     }
 
-    /// Deliberately TOTAL — the §7 axis vocabulary exists ahead of the
-    /// cells that will cover it; an uncovered variant is a named gap,
-    /// not an error.
+    /// Total: uncovered axis variants are named gaps, not errors.
     #[allow(dead_code)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum WriteTiming {
@@ -1538,12 +1302,10 @@ pub(crate) mod matrix {
     /// The one capture-write expression every position embeds.
     pub(crate) const CAPTURE_WRITE: &str = "(() => { x = \"b\"; return true })()";
 
-    /// The typed refusal every refusing invoked-IIFE capture-write cell
-    /// MEASURES today: the directly-invoked closure statement's captured
-    /// flow effect is not represented by the sequential statement
-    /// evaluator. Pinned per-cell (a cell measuring any other refusal
-    /// kind fails its pin), named once because the measured kind is the
-    /// same for every refusing cell.
+    /// Typed refusal every refusing invoked-IIFE capture-write cell
+    /// measures: the sequential evaluator does not represent a
+    /// directly-invoked closure statement's captured flow effect. Any
+    /// other refusal kind fails the cell pin.
     pub(crate) const IIFE_EFFECT_REFUSAL: FlowReturnError = FlowReturnError::Failure(
         FlowReturnFailure::Unsupported(FlowReturnUnsupported::InvokedClosureEffect),
     );
@@ -1574,7 +1336,7 @@ pub(crate) mod matrix {
     }
 
     /// One pinned outcome of a cell program under the profile stamp.
-    /// Deliberately TOTAL — see [`WriteTiming`].
+    /// Total — see [`WriteTiming`].
     #[allow(dead_code)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum CellOutcome {
@@ -1593,7 +1355,7 @@ pub(crate) mod matrix {
     }
 
     /// What a cell asserts across its covered positions.
-    /// Deliberately TOTAL — see [`WriteTiming`].
+    /// Total — see [`WriteTiming`].
     #[allow(dead_code)]
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum CellExpectation {
@@ -1614,10 +1376,8 @@ pub(crate) mod matrix {
         /// [`ORACLE_STAMP`].
         pub checker: &'static str,
         pub outcome: CellOutcome,
-        /// `""` when the pinned outcome AGREES with the checker; otherwise
-        /// the recorded expected-versus-actual gap — what diverges, who
-        /// owns it — kept beside the pin so the divergence is visible in
-        /// the cell itself, not recoverable only by comparing columns.
+        /// `""` when the pin agrees with the checker; otherwise the
+        /// recorded expected-versus-actual gap.
         pub gap: &'static str,
     }
 
@@ -1676,28 +1436,14 @@ pub(crate) mod matrix {
 
     /// Compare one measured program against a pinned [`CellOutcome`].
     ///
-    /// A `Value` pin models BOTH calls: the class, the exact rendering
-    /// and typed degradation of call 1, BOTH first-call-cold clauses
-    /// (shared verbatim with `check_boundary`), and the full second-call
-    /// replay clause set shared with `check_boundary` (class drift,
-    /// degradation drift, the warm/cold pair, projection drift). A
-    /// `NoValue` pin is the explicit refusal model of
-    /// [`check_boundary_refusal`]: both calls refuse with exactly the
-    /// pinned typed refusal, cold each time, never warm-admitted.
+    /// A `Value` pin models both calls (class, rendering, degradation,
+    /// first-call-cold, replay) via the same clauses as `check_boundary`.
+    /// A `NoValue` pin is [`check_boundary_refusal`]: both calls refuse
+    /// with the pinned identity, cold, never warm-admitted.
     ///
-    /// DELIBERATE remaining delta versus a corpus [`Boundary::Audit`]
-    /// row, stated precisely: a cell pins NO exact-projected-JSON
-    /// constant. The cell's value-exactness pin is the exact recursive
-    /// RENDERING of the same result node (complete for every cell
-    /// program — no cell rendering reaches the renderer's depth cap or
-    /// an opaque print), and call-2-versus-call-1 projection drift is
-    /// still asserted measured-vs-measured by the shared replay
-    /// clauses. The JSON constant additionally pins the `TypeExpr`
-    /// projection ENCODING, which is the corpus rows' concern
-    /// (boundary-encoding stability on real rows), not the matrix's
-    /// (position/timing uniformity of the same few shapes) — duplicating
-    /// 20 encoding constants here would pin the encoder 20 more times
-    /// without discriminating any additional cell semantics.
+    /// Cells pin the recursive rendering, not a projected-JSON constant.
+    /// Replay still asserts call-2-versus-call-1 projection drift.
+    /// Encoding stability is the corpus rows' concern.
     pub(crate) fn check_cell_outcome(
         cell_id: &str,
         coords: &str,
@@ -1714,10 +1460,8 @@ pub(crate) mod matrix {
         );
     }
 
-    /// The PURE comparator half of [`check_cell_outcome`] — takes the
-    /// measurement instead of driving it, so the negative controls can
-    /// feed single-field-substituted real traces through the exact
-    /// production comparison path (including the refusal delegation).
+    /// Comparator half of [`check_cell_outcome`]: takes a measurement so
+    /// controls can feed single-field-substituted real traces.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_cell_outcome_measured(
         cell_id: &str,
@@ -1803,9 +1547,7 @@ pub(crate) mod matrix {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // The matrix cells — pinned measurements
-// ─────────────────────────────────────────────────────────────────────────
 
 // Cells are pinned in `matrix_cells.rs`-style inline consts below the
 // suite; see `matrix_suite` for the drivers.
@@ -1819,23 +1561,9 @@ mod matrix_suite {
         std::env::var("U6_CORPUS_DUMP").is_ok_and(|v| v == "1")
     }
 
-    /// THE position cell: binding=let, timing=inside-invoked-IIFE,
-    /// depth=1, guard=none, container=none, crossed over every covered
-    /// expression position. Checker: every position types `"b"`.
-    ///
-    /// RECORDED expected-versus-actual GAP (owner: `U6.LOOP_CLOSURE`).
-    /// The pinned checker types EVERY position `"b"`; the current tree is
-    /// POSITION-DEPENDENT in outcome CLASS: statement / sequence-operand
-    /// / call-argument positions REFUSE (typed no-value), while
-    /// declarator-init / if-test / template / short-circuit /
-    /// object-literal positions never see the write and publish the
-    /// STALE pre-write `"a"` CLEAN AND WARM — the wrong-and-warm G4/G5
-    /// class. Every per-position outcome is pinned below, so ANY
-    /// position-local movement (a fix at one position, a regression at
-    /// another) fails loudly and forces a deliberate re-pin — the moment
-    /// the owner makes the effect position-independent, this cell is
-    /// re-pinned `Uniform` and the live uniformity assertion becomes
-    /// unconditional.
+    /// Position cell: let × inside-invoked-IIFE × depth 1. Checker:
+    /// every position types `"b"`. Pin is Uniform refusal
+    /// (`IIFE_EFFECT_REFUSAL`) across covered positions.
     const IIFE_POSITION_CELL: PositionCell = PositionCell {
         id: "let_iife_write_positions",
         binding: BindingKind::Let,
@@ -2303,9 +2031,7 @@ mod matrix_suite {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Negative controls — the MATRIX COMPARATOR must be able to fail
-// ─────────────────────────────────────────────────────────────────────────
 
 /// [`matrix::check_cell_outcome`] is the sole comparison engine behind
 /// `matrix_cells_hold_their_pins`. Every clause of it is fed a
@@ -2398,9 +2124,7 @@ mod matrix_outcome_controls {
         );
     }
 
-    /// CONTROL — the outcome-CLASS clauses, both directions: a `NoValue`
-    /// pin against a real measured VALUE fails, and a `Value` pin against
-    /// a real measured REFUSAL fails.
+    /// Outcome-class clauses, both directions.
     #[test]
     fn cell_outcome_class_clauses_reject_the_opposite_class() {
         let fails = run(
@@ -2438,11 +2162,8 @@ mod matrix_outcome_controls {
         );
     }
 
-    /// CONTROL — the NoValue arm's refusal-replay delegation: a REAL
-    /// refusal measurement with ONLY `second_from_cache` substituted
-    /// (a cached refusal) must fail the non-admission clause THROUGH
-    /// the cell comparator, so neutering the delegation (not only the
-    /// underlying clauses) leaves this control red.
+    /// Cached refusal must fail non-admission through the cell
+    /// comparator's refusal delegation, not only the underlying clauses.
     #[test]
     fn cell_no_value_arm_rejects_a_cached_refusal() {
         let script = iife_position_program(ExprPosition::Statement);
@@ -2526,13 +2247,8 @@ mod matrix_outcome_controls {
         );
     }
 
-    /// CONTROL — the Value arm's FIRST-CALL-COLD delegation: a REAL
-    /// clean value measurement with ONLY the first call's cache flag /
-    /// compute count substituted must fail exactly the corresponding
-    /// first-call-cold clause THROUGH the cell comparator, so a matrix
-    /// cell pins first-call coldness at parity with a corpus row and
-    /// neutering the delegation (not only the shared clauses) leaves
-    /// this control red.
+    /// A substituted warm first call must fail first-call-cold through
+    /// the cell comparator, at corpus parity.
     #[test]
     fn cell_value_arm_rejects_a_warm_first_call() {
         let real = measure_cell("ctl_cell_warm_first", VALUE_SCRIPT);
@@ -2600,9 +2316,7 @@ mod matrix_outcome_controls {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Negative controls — every expectation form must be able to fail
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod expectation_controls {

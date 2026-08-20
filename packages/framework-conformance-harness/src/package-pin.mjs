@@ -1,39 +1,26 @@
-// Verifies the packages this harness actually resolved at require-time are
-// exactly the pinned official closures — five independent layers, so a
-// single mutated file cannot silently pass:
+// Verifies packages resolved at require-time are the pinned official
+// closures — five independent layers, so a single mutated file cannot
+// silently pass:
 //
-//   1. resolved version equality: every direct package this harness
-//      requires resolves to exactly domain.packageVersion (catches a
-//      package.json range/dist-tag or a stale pnpm store).
-//   2. evidence-lock byte integrity: the COMMITTED
-//      oracles/{vue,svelte}/package-lock.json evidence file's own SHA-256
-//      still matches the digest BF1 recorded (catches evidence tampering).
-//   3. evidence-lock content cross-check: every direct package's
-//      version+integrity INSIDE that lock file matches domain-pin.mjs's
-//      transcription (catches domain-pin.mjs itself drifting from the
-//      ratified evidence).
-//   4. closure-evidence byte integrity: the COMMITTED
-//      oracles/{vue,svelte}/closure.tsv full-transitive-closure evidence
-//      file's own SHA-256 still matches the digest BF1 recorded.
-//   5. transitive-closure derivation cross-check: the FULL closure —
-//      every nested package path, name, version, integrity, resolution
-//      URL, and dependency edge — independently re-derived from the
-//      committed lockfile must be byte-identical to the committed
-//      closure.tsv. A hand-edited nested lock entry (a transitive
-//      dependency's resolved version or integrity) breaks this layer even
-//      though no direct package changed; an attacker who regenerates
-//      closure.tsv to match a mutated lock instead breaks layer 4.
+//   1. Resolved version equality: every direct package resolves to
+//      `domain.packageVersion`.
+//   2. Evidence-lock byte integrity: committed
+//      `oracles/{vue,svelte}/package-lock.json` SHA-256 matches the
+//      recorded digest.
+//   3. Evidence-lock content cross-check: every direct package's
+//      version+integrity inside that lock matches domain-pin.mjs.
+//   4. Closure-evidence byte integrity: committed
+//      `oracles/{vue,svelte}/closure.tsv` SHA-256 matches the recorded
+//      digest.
+//   5. Transitive-closure derivation: the full closure independently
+//      re-derived from the committed lockfile is byte-identical to
+//      committed `closure.tsv`. A hand-edited nested lock entry breaks
+//      this layer even if no direct package changed; regenerating
+//      `closure.tsv` to match a mutated lock breaks layer 4.
 //
-// Layers 4-5 run inside `assertPackagesPinned`, which every oracle invoker
-// calls BEFORE its first compiler invocation — so transitive drift refuses
-// the run before any expectation or candidate work happens. This is the
-// "package drift refusal" half of official-core-oracles.md's "The harness
-// rejects any source SHA/tree, package version, integrity, or transitive
-// closure mismatch before generating expectations or running candidate
-// output." The REALIZED half — proving the committed lockfile actually
-// installs to exactly this closure — is exercised by the disposable
-// scripts-disabled install self-test (test/closure-drift.spec.mjs) via
-// src/closure-verify.mjs.
+// Layers 4–5 run inside `assertPackagesPinned`, which every oracle invoker
+// calls before first compiler invocation. Realized-install proof lives in
+// `test/closure-drift.spec.mjs` via `src/closure-verify.mjs`.
 
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";

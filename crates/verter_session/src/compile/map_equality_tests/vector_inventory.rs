@@ -1,36 +1,8 @@
-//! Layer-2 vector-inventory reproduction — production side.
-//!
-//! The JavaScript reference's own test
-//! (`packages/framework-conformance-harness/test/assembled-map-composition-vectors.spec.mjs`)
-//! reads `vectors/assembled-map-composition.vectors.json` and drives every one
-//! of its entries — every positive vector plus every fail-closed vector the
-//! suite currently declares, whatever that count is — straight through
-//! `composeAssembledVueMainModule`. This module is production's counterpart: it
-//! reads the SAME file, builds the SAME [`AssembleInput`] DTO this harness
-//! already bridges to the real production entry point through
-//! [`production_outcome`], and asserts EXACT agreement with each vector's own
-//! frozen `expected`. Both implementations reproducing EVERY vector is not
-//! met by a hand-transcribed subset (the earlier
-//! `map_tests.rs` `vector_v*`/`vector_f*` functions cover only V1–V7/F1–F7,
-//! predating this suite's later completion) — it requires the full inventory,
-//! with the EXECUTED ids asserted against the suite's own id inventory. No
-//! count is hardcoded anywhere in this module: the expected inventory is
-//! derived from the loaded arrays themselves, so it moves with the suite and
-//! a driver that silently skips an entry fails the parity assertion.
-//!
-//! This module adds NO comparison semantics of its own: it reuses
-//! [`AssembleInput`], [`production_outcome`], [`ComposeOutcome`],
-//! [`compared_artifact`] and [`claimed_segment`] from the parent module
-//! unchanged — the same bridge the cross-implementation equality suite runs
-//! through — rather than growing a second DTO projection or a second
-//! comparator.
-//!
-//! Unlike the rest of this harness, this module does NOT spawn the JavaScript
-//! reference: the vectors file's `expected` is the frozen, hand-derived answer
-//! layer 1 already commits to, so comparing production against it directly is
-//! strictly what "reproduces the vector" means. Cross-implementation agreement
-//! on live input is separately covered by `assert_cross_implementation_equality`
-//! and its callers elsewhere in this file.
+//! Layer-2 vector inventory, production side. Same vectors file as the JS
+//! reference; every entry through [`production_outcome`] against its
+//! frozen `expected`. Executed ids must match the suite's own inventory
+//! (derived, never hardcoded — a skip fails parity). Reuses the parent
+//! harness bridge; does not spawn the JS reference.
 
 use std::path::{Path, PathBuf};
 
@@ -177,17 +149,8 @@ impl AssembleInput {
     }
 }
 
-/// Parse a vector's frozen `expected` into the same [`ComposeOutcome`] shape
-/// [`production_outcome`] returns, so the two can be compared directly.
-///
-/// This mirrors `reference_outcome`'s three arms exactly, but reads the
-/// suite's own static `expected` object instead of a live reference-driver
-/// response, and therefore skips that function's reference-self-consistency
-/// checks (segments-vs-mappings cross-decode, provenance-length) — there is no
-/// second surfaced-segments field here to cross-check against; the suite's
-/// `expected.segments` IS the authority, and comparing it against production's
-/// own `mappings`-decoded segments (via [`compared_artifact`]) is exactly the
-/// proof this module exists to run.
+/// Frozen `expected` as [`ComposeOutcome`]. `expected.segments` is the
+/// authority; compared to production's decoded mappings.
 fn expected_outcome(id: &str, expected: &Value) -> ComposeOutcome {
     let outcome = expected
         .get("outcome")
@@ -225,15 +188,8 @@ fn expected_outcome(id: &str, expected: &Value) -> ComposeOutcome {
     }
 }
 
-/// Drive every entry of one suite array through production and compare each
-/// against its own frozen `expected`, returning the ids that were ACTUALLY
-/// driven (in array order) plus every divergence found.
-///
-/// The executed-id list is the coverage evidence the callers assert against
-/// the suite's own inventory — a driver change that silently skips an entry
-/// shrinks this list and fails the parity assertions, rather than passing by
-/// omission. An id counts as executed once production RAN it, independent of
-/// whether the outcome diverged; divergence is asserted separately.
+/// Drive every entry; return executed ids (array order) plus divergences.
+/// A skip shrinks the id list and fails parity. Executed ≠ passed.
 fn reproduce(vectors: &[Value]) -> (Vec<String>, Vec<String>) {
     let mut executed = Vec::with_capacity(vectors.len());
     let mut divergences = Vec::new();
@@ -270,11 +226,8 @@ fn suite_ids(vectors: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// Every positive vector, reproduced by production against its own frozen
-/// `expected` — mirrors the JavaScript reference's `describe("layer-2 seed
-/// vectors — positive (§9)")` block, one production run per vector. The
-/// executed ids are asserted against the suite's own inventory, so the
-/// expected count is DERIVED from the loaded array, never hardcoded.
+/// Every positive vector vs frozen `expected`. Executed ids derived from
+/// the loaded array, never hardcoded.
 #[test]
 fn every_positive_vector_reproduces_its_frozen_expected() {
     let suite = load_suite();
@@ -329,12 +282,8 @@ fn every_fail_closed_vector_reproduces_its_frozen_expected() {
     );
 }
 
-/// The executed inventory, asserted against the suite's OWN id inventory —
-/// never a hardcoded count that could be bumped independently of the real
-/// array contents. This runs the same driver the two reproduction tests run
-/// and asserts exact id-sequence parity across BOTH arrays, so "a vector was
-/// silently not exercised" is a structural failure here even if someone
-/// edits one reproduction test without the other.
+/// Executed ids vs the suite's own inventory, both arrays. Never a
+/// hardcoded count.
 #[test]
 fn every_vector_in_the_suite_was_exercised() {
     let suite = load_suite();

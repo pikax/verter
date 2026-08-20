@@ -26,10 +26,8 @@ pub mod svelte_jsx_assets;
 pub mod synth;
 pub mod virtual_file_naming_ts;
 
-/// The framework PRODUCT/route evidence suites. They live under the substrate
-/// they characterize — the reachable product surface, the carrier the batch
-/// route selects, and the public transports over both — rather than on the
-/// crate root, which stays a thin re-export shell.
+/// Framework product/route evidence suites, under the substrate they
+/// characterize rather than on the crate-root re-export shell.
 #[cfg(test)]
 pub(crate) mod framework_product_surface_tests;
 #[cfg(test)]
@@ -37,9 +35,8 @@ mod svelte_batch_route_tests;
 #[cfg(all(test, feature = "transport-authoritative"))]
 mod transport_route_equivalence_tests;
 
-/// Proves each of those suites' documented invocations selects a non-vacuous
-/// suite. It sits OUTSIDE them deliberately: a check living inside a suite is
-/// deleted by the same edit that empties it.
+/// Census: each documented invocation selects a non-vacuous suite. Lives
+/// outside the suites so emptying one cannot delete the check.
 #[cfg(test)]
 mod suite_census;
 

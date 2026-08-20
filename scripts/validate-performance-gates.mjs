@@ -1,32 +1,15 @@
 #!/usr/bin/env node
-// validate-performance-gates.mjs — performance-gate file validator (Node/ESM).
+// Performance-gate file validator. Locked file must set status = "LOCKED",
+// contain no REQUIRED_* values, and pass this script.
 //
-// This is a NEW ratified implementation, not a port: the plan's original
-// `tools/validate_performance_gates.py` was never available on this machine
-// (docs/arch/refactor/rev11/PROVENANCE.md "Not recoverable / absent"), and the
-// maintainer ruled the validators are reimplemented in Node
-// (docs/arch/refactor/rev11/evidence/maintainer-rulings.md R-4). Every check below
-// is derived from the program tree's own text; each rule cites its source.
-//
-// Mandate: docs/arch/refactor/rev11/templates/performance-gates.template.toml:3 —
-// "The locked file must set status = \"LOCKED\", contain no REQUIRED_* values, and
-// pass tools/validate_performance_gates.py."
-//
-// CLI:
 //   node scripts/validate-performance-gates.mjs --gates <performance-gates.toml>
 //
-// Exit codes: 0 = pass (one-line summary naming the file, cells and metrics);
-//             1 = validation failure (every violation listed, one per line);
-//             2 = usage / unreadable input.
-//
-// No dependencies beyond node:fs / node:process. TOML is read by a small
-// purpose-written reader restricted to the shapes the gate file actually uses;
-// anything it cannot parse is a LOUD failure, never a silent skip.
+// Exit: 0 pass, 1 validation failure (one violation per line), 2 usage /
+// unreadable input. Unknown TOML is a loud failure, never a silent skip.
 
 import { readFileSync } from "node:fs";
 import process from "node:process";
 
-// ---------------------------------------------------------------------------
 // Minimal strict TOML reader.
 //
 // Supported shapes: full-line comments, `[table]`, `[[array-of-tables]]`, and
@@ -34,7 +17,6 @@ import process from "node:process";
 // array of basic strings (single- or multi-line), an integer, a float, or a
 // boolean. A trailing `# comment` after a value is allowed, except inside a
 // string. Everything else fails loudly with the file/line.
-// ---------------------------------------------------------------------------
 
 class TomlError extends Error {}
 
@@ -163,9 +145,7 @@ export function readGatesToml(text) {
   return { root, cells };
 }
 
-// ---------------------------------------------------------------------------
 // Validation.
-// ---------------------------------------------------------------------------
 
 const BOUNDARIES = new Set(["rust", "napi", "wasm", "lsp", "cli"]);
 const STATISTICS = new Set(["median", "max", "min", "mean", "p95", "p99"]);
@@ -265,7 +245,7 @@ export function validateGates(text) {
   const { root, cells } = doc;
   const top = root[""];
 
-  // --- placeholders, anywhere ---------------------------------------------
+  // placeholders, anywhere
   walkStrings(top, "", (value, path) => {
     if (PLACEHOLDER.test(value)) fail(`placeholder value at \`${path}\`: \`${value}\``);
   });
@@ -287,7 +267,7 @@ export function validateGates(text) {
     });
   });
 
-  // --- document header -----------------------------------------------------
+  // document header
   if (top.schema !== 1) fail("top-level `schema` must be the integer 1");
   if (top.revision !== 11) fail("top-level `revision` must be the integer 11");
   if (top.status !== "LOCKED") fail('top-level `status` must be "LOCKED"');
@@ -301,7 +281,7 @@ export function validateGates(text) {
   )
     fail("top-level `created_at_utc` must be an ISO-8601 UTC instant (…Z)");
 
-  // --- [runner] ------------------------------------------------------------
+  // [runner]
   const runner = root.runner;
   if (!runner) {
     fail("missing `[runner]` table");
@@ -329,7 +309,7 @@ export function validateGates(text) {
     }
   }
 
-  // --- [statistics] --------------------------------------------------------
+  // [statistics]
   // Bounds come from docs/arch/refactor/rev11/verification.md 8.3.
   const stats = root.statistics;
   if (!stats) {
@@ -356,7 +336,7 @@ export function validateGates(text) {
     }
   }
 
-  // --- cells ---------------------------------------------------------------
+  // cells
   if (cells.length === 0) fail("no `[[cell]]` is declared");
   const cellIds = new Set();
   let metricCount = 0;
@@ -508,7 +488,7 @@ export function validateGates(text) {
     }
   }
 
-  // --- [primary_suite] -----------------------------------------------------
+  // [primary_suite]
   const suite = root.primary_suite;
   if (!suite) {
     fail("missing `[primary_suite]` table");
@@ -552,9 +532,7 @@ export function validateGates(text) {
   return { violations, cells: cells.length, metrics: metricCount };
 }
 
-// ---------------------------------------------------------------------------
 // CLI
-// ---------------------------------------------------------------------------
 
 function main(argv) {
   const index = argv.indexOf("--gates");

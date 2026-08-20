@@ -1,38 +1,18 @@
-//! The public transports, built and invoked.
+//! Public transports, built and driven.
 //!
-//! A transport is part of a capability cell's identity: source showing that
-//! `VerterHost#getVirtualFile` forwards to `VerterHost::get_virtual_file` is
-//! route-identity evidence, not an executed result. So each transport is BUILT
-//! and DRIVEN over representative cases, and its answers are compared against
-//! the in-process host route for the same typed request.
+//! Source that `VerterHost#getVirtualFile` forwards is route-identity
+//! evidence, not an executed result. Each transport is built, probed, and
+//! compared to the in-process host for the same typed request.
 //!
-//! Per transport the probe covers:
+//! Probes (`packages/native/scripts/probe-transport-surface.mjs`,
+//! `packages/wasm/scripts/probe-transport-surface.mjs`) print JSON; this
+//! module compares against the host's own answers, not transcribed
+//! constants. Covers success, typed refusal + product absence,
+//! optional-product, option conversion, serialization, and export
+//! enumeration from the built artifact (never from source).
 //!
-//! * a SUCCESS publishing its products (a supported Svelte client component's
-//!   module and its scoped CSS);
-//! * a typed REFUSAL (the same component under a server profile) and the
-//!   ABSENCE of every other product alongside it;
-//! * the OPTIONAL-PRODUCT axis (source map on and off);
-//! * OPTION CONVERSION (the public-API `mode` argument, the compile profile's
-//!   `ssr` / `sourceMap` / `isProduction` fields, the node-kind `index`);
-//! * SERIALIZATION shape (the typed two-arm public-API envelope, the node list);
-//! * and an independent EXPORT ENUMERATION taken from the BUILT ARTIFACT's own
-//!   surface — never from source — with every exported spelling either executed
-//!   here or classified out of scope with a reason.
-//!
-//! The probes themselves are `packages/native/scripts/probe-transport-surface.mjs`
-//! and `packages/wasm/scripts/probe-transport-surface.mjs`. Each is a plain
-//! Node script that prints JSON; this module runs it and does the comparing, so
-//! the expected values are the in-process host's own answers rather than
-//! transcribed constants.
-//!
-//! ## Build prerequisites
-//!
-//! These tests need the transports BUILT, so the whole module sits behind the
-//! opt-in `transport-authoritative` cargo feature — a FIRST-CLASS surface a gate
-//! can enable, not an invisible-by-default one. With the feature on they FAIL
-//! loudly — never silently skip — when an artifact is missing, naming its
-//! producing build command, so an unbuilt transport can never read as a pass.
+//! Behind `transport-authoritative`. Missing artifacts FAIL (name the
+//! build command) — never skip.
 //!
 //! ```text
 //! CARGO_BUILD_JOBS=4 pnpm --filter @verter/native run build:debug
@@ -43,9 +23,9 @@
 //!   transport_route_equivalence -- --test-threads=1
 //! ```
 //!
-//! WITHOUT `--features transport-authoritative` this module is not compiled
-//! in, so a filter naming it matches ZERO tests and `cargo test` still exits 0.
-//! Read the `running N tests` line, never the exit code.
+//! Without the feature this module is not compiled: a filter naming it
+//! matches ZERO tests and `cargo test` still exits 0. Read the
+//! `running N tests` line, never the exit code.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -59,20 +39,12 @@ use crate::{
     VirtualNodeKind, VirtualQuery,
 };
 
-/// This module's half of a MUTUAL, compile-enforced registration.
+/// Mutual, compile-enforced census registration.
 ///
-/// The census lives OUTSIDE this module deliberately — a check placed inside a
-/// suite is deleted by the same edit that empties it. That leaves the reverse
-/// hole: deleting the census too. This test consumes an item the census owns,
-/// and the census in turn NAMES this test as an item, so removing EITHER `mod`
-/// declaration is a COMPILE error rather than a filter that silently matches
-/// nothing and still exits 0.
-///
-/// The identity the census counts by is this function ITEM, not a path this
-/// module writes down: it is passed by reference and the compiler answers with
-/// the definition's own path. A suite therefore cannot nominate a module it does
-/// not live in, and the census requires a test with exactly that path to be
-/// present in the binary's own listing before counting anything under it.
+/// The census lives outside this module so emptying the suite cannot
+/// delete the check. This test consumes a census-owned item and the
+/// census names this function, so removing either `mod` is a compile
+/// error — not a filter that matches nothing and still exits 0.
 #[test]
 pub(crate) fn this_suite_is_registered_with_the_census() {
     assert!(
@@ -91,28 +63,22 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The exact sources the probe scripts use. Kept here as the SAME bytes so the
-/// in-process comparison is asking the identical question.
+/// Same bytes the probe scripts use, so in-process comparison asks the
+/// identical question.
 const SUPPORTED_SVELTE: &str = "<script>\n  let count = $state(0);\n</script>\n\n<div class=\"root\">{count}</div>\n\n<style>\n  .root { color: red; }\n</style>\n";
 const VUE_SFC: &str = "<script setup>\nconst props = defineProps({ label: { type: String, required: true } });\n</script>\n\n<template>\n  <button>{{ label }}</button>\n</template>\n";
-/// The carrier ids this suite asks the bundler about.
-///
-/// Expectations are stated against THESE, never against an id read back out of
-/// the probe record: an assertion whose subject comes from the record can be
-/// satisfied by forging both the subject and the answer, which is exactly what
-/// a retargeted map plus a relabelled `id` did. Where a case reports an id, it
-/// is ASSERTED equal to one of these before anything about that case is read.
+/// Carrier ids this suite asks the bundler about. Assert against these,
+/// never an id read back from the probe record (a retargeted map plus a
+/// relabelled `id` can satisfy both).
 const PROBE_VUE_ID: &str = "/probe/Plug.vue";
 const PROBE_SVELTE_ID: &str = "/probe/Plug.svelte";
 
 /// A second supported Svelte component, distinct from [`SUPPORTED_SVELTE`].
 const SUPPORTED_TWO: &str =
     "<script>\n  let total = $state(7);\n</script>\n\n<span class=\"total\">{total}</span>\n";
-/// A component whose Svelte runtime surface the client backend refuses: an
-/// instance-script prop WRITE, which official lowers through the prop SETTER
-/// and this backend does not emit. An instance-script prop READ is a SUPPORTED
-/// surface, so a read-only component is no longer a refusal witness. The bytes
-/// are mirrored verbatim by the NAPI probe script this suite compares against.
+/// Client-backend refusal: instance-script prop WRITE (official uses
+/// the prop setter; this backend does not emit it). A prop READ is
+/// supported, so a read-only component is not a refusal witness.
 const ADVANCED_RUNE_REFUSAL: &str = "<script>\n  let { count = 0 } = $props();\n  function inc() { count += 1; }\n</script>\n\n<button onclick={inc}>{count}</button>\n";
 
 fn batch_input(canonical: &str, source: &str) -> crate::host_compile::CompileBatchInput {
@@ -162,12 +128,9 @@ fn run_probe(script: &Path) -> (Option<i32>, String, String) {
     let mut child = Command::new("node")
         .arg(script)
         .current_dir(repo_root())
-        // The bundler's non-Vite lanes read `NODE_ENV` to decide production
-        // codegen, and a production profile changes both the emitted module and
-        // the component id it is scoped by. Pinning it here makes the probe's
-        // inputs the test's own rather than the ambient shell's; a run under a
-        // different value would fail the product comparisons rather than pass
-        // quietly, but it would fail for the wrong reason.
+        // Pin NODE_ENV: non-Vite lanes use it for production codegen and
+        // the scoped component id. An ambient value would fail for the
+        // wrong reason.
         .env("NODE_ENV", "development")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -208,18 +171,9 @@ fn run_probe(script: &Path) -> (Option<i32>, String, String) {
     (status.and_then(|status| status.code()), stdout, stderr)
 }
 
-/// Drive one transport's probe and return its parsed result.
-///
-/// A transport that could not be loaded FAILS here with the producing build
-/// command, so a missing artifact is an execution prerequisite reported as
-/// such — never a silent skip and never a pass.
-///
-/// A probe that publishes `erroredCases` is declaring which of the lanes it is
-/// REQUIRED to drive failed to reach their subject. That is a failed run, not a
-/// datum, and it fails here for every consumer at once — so no single test can
-/// read a lane that errored as an observation of the thing it names. (Probes
-/// with legitimately-failing cases, like the transports' typed-refusal rows, do
-/// not publish the field.)
+/// Drive one transport probe. Missing artifact fails with the build
+/// command — never skip. `erroredCases` is a failed run, not a datum
+/// (typed-refusal rows do not publish the field).
 fn probe(transport: &str, script: &str, build_command: &str) -> Value {
     let (code, stdout, stderr) = run_probe(&repo_root().join(script));
     let record: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
@@ -378,18 +332,14 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
             );
         }
         HostOutcome::Missing => {
-            // Both transports report a MISSING node the same way: an absent
-            // response, never a throw. The contract itself is pinned by
-            // `the_transports_report_a_missing_node_the_same_way` below; this
-            // holds every other case in the suite to it too, so a transport
-            // that reintroduced a throw here could not pass by being
-            // "missing-shaped".
+            // Missing node: absent response, never a throw. Pinned by
+            // `the_transports_report_a_missing_node_the_same_way`.
             assert_eq!(
                 case["outcome"], "missing",
                 "{transport}/{label}: the host reported a missing node but the transport \
                  returned {case}"
             );
-            // Whatever the shape, NO product crossed the boundary.
+            // No product crossed the boundary.
             assert_eq!(
                 case["code"],
                 Value::Null,
@@ -401,7 +351,7 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
 
 /// Every case the probes execute, compared against the in-process host.
 fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
-    // ── SUCCESS + the optional-product axis, on a supported Svelte component ──
+    // Success + optional-product axis (supported Svelte).
     let svelte = host_with(
         "/probe/Ok.svelte",
         SUPPORTED_SVELTE,
@@ -440,8 +390,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
             &probe_profile(false, true),
         ),
     );
-    // The optional-product axis is honoured across the boundary in BOTH
-    // directions, and changes no module byte.
+    // Optional-product axis both ways; no module-byte change.
     assert_eq!(
         record["cases"]["svelteMainWithMap"]["hasMap"], true,
         "{transport}: a requested source map did not cross the transport boundary"
@@ -456,7 +405,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         "{transport}: the source-map axis changed the emitted module bytes"
     );
 
-    // SERIALIZATION shape: the node list crosses as the typed kind/index pair.
+    // Node list serializes as typed kind/index.
     let listed = record["cases"]["svelteNodeList"]
         .as_array()
         .unwrap_or_else(|| panic!("{transport}: the node list did not serialize as an array"));
@@ -480,7 +429,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         "{transport}: the host route's node list moved, so the comparison above is stale"
     );
 
-    // ── REFUSAL + artifact ABSENCE ──────────────────────────────────────────
+    // Refusal + artifact absence.
     let server = host_with(
         "/probe/Server.svelte",
         SUPPORTED_SVELTE,
@@ -524,7 +473,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         record["cases"]["svelteServerStyle"]
     );
 
-    // ── IDE/TSX: ensure + read, compared against the host's own answers ─────
+    // IDE/TSX: ensure + read vs host.
     let ide_host = host_with(
         "/probe/Ide.svelte",
         SUPPORTED_SVELTE,
@@ -571,9 +520,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         transported["isJsx"], host_ide.is_jsx,
         "{transport}/getIde: the reported JSX flag differs from the host's"
     );
-    // `get_ide` is a pure cached read keyed on the IDE-normalized profile: a
-    // profile that was never ensured has nothing to hand back. The host says
-    // the same, so the transport is not inventing an answer.
+    // `get_ide` is a cached read: never-ensured profile has nothing to return.
     let unensured_profile = CompileProfile {
         source_map: false,
         ..ide_profile.clone()
@@ -591,7 +538,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         record["cases"]["getIdeWithoutMap"]
     );
 
-    // ── OPTION CONVERSION: the public-API `mode` argument ───────────────────
+    // Option conversion: public-API `mode`.
     let vue = host_with(
         "/probe/Api.vue",
         VUE_SFC,
@@ -621,8 +568,7 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
             "{transport}/{label}: the typed envelope carries an error arm alongside a value"
         );
     }
-    // The `mode` argument genuinely converted: the two modes produced DIFFERENT
-    // surfaces, so a transport that dropped the argument would be caught.
+    // Modes produce different surfaces — dropping `mode` would be caught.
     assert_ne!(
         record["cases"]["vuePublicApiDefault"]["code"],
         record["cases"]["vuePublicApiDeclaration"]["code"],
@@ -631,14 +577,10 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
     );
 }
 
-/// Every enumerated spelling belongs to EXACTLY ONE class.
-///
-/// A union of two lists cannot prove completeness: dropping a name from the
-/// executed list stays green as long as the same name also sits in the
-/// out-of-scope list. This is a PARTITION — in two classes, or in none, is a
-/// failure — and each class is additionally required to name nothing the built
-/// artifact does not export, so a stale row cannot silently absorb a dropped
-/// one.
+/// Every exported spelling belongs to exactly one class. A union of two
+/// lists is not completeness: a dropped name stays green if it sits in
+/// both. In two classes, or in none, is a failure; stale rows cannot
+/// name a spelling the artifact does not export.
 #[track_caller]
 fn assert_partition(
     transport: &str,
@@ -697,19 +639,12 @@ fn assert_partition(
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // NAPI
-// ══════════════════════════════════════════════════════════════════════════
 
 const NAPI_BUILD: &str = "CARGO_BUILD_JOBS=4 pnpm --filter @verter/native run build:debug";
 
-/// Exported NAPI spellings this probe does NOT execute, each with the reason it
-/// is out of the in-scope product surface.
-///
-/// This is one side of a PARTITION, not a fallback: [`assert_partition`]
-/// requires every exported spelling to be in exactly one class, rejects any name
-/// appearing in both, and rejects any row naming a spelling the built artifact
-/// does not export.
+/// NAPI spellings this probe does not execute, with reason. One side of
+/// [`assert_partition`], not a fallback.
 const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
     (
         "analyzeWithAudit",
@@ -785,12 +720,9 @@ fn the_napi_transport_matches_the_in_process_host_route() {
     );
     assert_transport_matches_the_host_route("napi", &record);
 
-    // The standalone CSS spelling crosses as its own product, and its
-    // `sourcemap` axis is inert at the transport too — the same finding the
-    // in-process route records.
+    // Standalone CSS product; `sourcemap` axis is inert here too.
     let css = &record["cases"]["processStyle"];
-    // EQUALITY against the in-process compiler for the same options, not a
-    // substring search in the transported bytes.
+    // Equality against the in-process compiler, not a substring search.
     let expected_css = verter_compiler::css::process_style(
         ".x{color:red}",
         &verter_compiler::css::ProcessStyleOptions {
@@ -815,17 +747,8 @@ fn the_napi_transport_matches_the_in_process_host_route() {
     );
 }
 
-/// The batch route, driven through the NAPI boundary and compared item-for-item
-/// against the in-process host's answers for the same typed request.
-///
-/// The batch shape is the one the in-process suite uses: a supported Svelte
-/// component, the advanced-rune refusal input, and a second distinct supported
-/// component — the refusal in the MIDDLE so a shifted or fanned-out result is
-/// visible in both directions. Four option shapes are compared: the
-/// runtime-render lane with and without maps, the host-backed lane, and the
-/// server profile.
-///
-/// The expected values are the host's own answers, never transcribed constants.
+/// NAPI batch vs in-process host, item-for-item. Refusal in the middle so
+/// a shift is visible both ways. Host answers, never transcribed constants.
 #[test]
 fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
     use crate::host_compile::{CompileBatchOptions, CompileManyTarget};
@@ -884,8 +807,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             expected.len()
         );
         for (index, (entry, host_entry)) in observed.iter().zip(&expected).enumerate() {
-            // ORDERING + attribution: entry N is the host's entry N, and both
-            // name the caller's input N.
+            // Entry N is the host's entry N, attributed to input N.
             assert_eq!(
                 entry["canonicalId"].as_str(),
                 Some(host_entry.canonical_id.as_str()),
@@ -927,11 +849,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
         let first = observed[0]["code"].as_str().unwrap_or_default();
         let third = observed[2]["code"].as_str().unwrap_or_default();
         if label == "batchServerProfile" {
-            // The SERVER lane refuses the Svelte carrier outright: the client
-            // backend does not emit a server module, so every entry in this
-            // batch is a typed refusal and NONE of them publishes a product.
-            // Asserting the two supported inputs' declarations here would be
-            // asserting bytes that correctly do not exist.
+            // Server lane: every entry is a typed refusal; no product.
             for (index, entry) in observed.iter().enumerate() {
                 let errors: Vec<&str> = entry["errors"]
                     .as_array()
@@ -959,9 +877,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             continue;
         }
 
-        // NON-CONTAMINATION, observed at the transport: the two distinct
-        // supported inputs declare `count` and `total`, and neither entry
-        // carries the other's declarations.
+        // Distinct inputs: `count` vs `total`; neither carries the other.
         assert!(
             first.contains("count") && !first.contains("total"),
             "napi/{label}: the first entry carries another input's declarations:\n{first}"
@@ -986,9 +902,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
         .expect("array");
     let mut published_entries = 0;
     for (index, (mapped, unmapped)) in with_map.iter().zip(without_map).enumerate() {
-        // A REFUSED entry publishes nothing on either variant, so the axis says
-        // nothing about it — but it must stay refused on both, or the axis
-        // would be deciding whether the refusal fires.
+        // Refused entries publish nothing; the axis must not decide refusal.
         let refused = !mapped["errors"].as_array().is_none_or(|e| e.is_empty());
         if refused {
             assert!(
@@ -1028,9 +942,8 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
     );
 }
 
-/// Every spelling the BUILT NAPI artifact exports is either executed by the
-/// probe or classified out of scope with a reason — enumerated from the
-/// artifact's own surface, never from source.
+/// Every NAPI export is executed or classified out of scope, from the
+/// built artifact — never from source.
 #[test]
 fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
     let record = probe(
@@ -1076,20 +989,12 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // WASM
-// ══════════════════════════════════════════════════════════════════════════
 
 const WASM_BUILD: &str = "CARGO_BUILD_JOBS=4 cargo build -p verter_wasm --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir packages/wasm/wasm --out-name verter_wasm target/wasm32-unknown-unknown/debug/verter_wasm.wasm";
 
-/// Exported WASM spellings this probe does NOT execute, each with its reason.
-///
-/// Declared in its OWN right rather than derived from the NAPI class: the two
-/// artifacts export different surfaces (the WASM one exports no `close`,
-/// `configureProjects`, `evaluateTypes`, `getMetrics`, `resolveExports` or
-/// `resolveImport`) and it EXECUTES `analyzeWithAudit`, which is out of scope on
-/// NAPI. An explicit list is what lets the staleness half of the partition bite
-/// on BOTH transports instead of being satisfied by construction.
+/// WASM spellings this probe does not execute. Own list, not derived from
+/// NAPI: WASM exports a different surface and executes `analyzeWithAudit`.
 const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     (
         "applyBlockOverrides",
@@ -1168,8 +1073,7 @@ fn the_wasm_transport_matches_the_in_process_host_route() {
     );
     assert_transport_matches_the_host_route("wasm", &record);
 
-    // The transport's OWN typed refusal: audited analysis is not built for
-    // wasm32, and the boundary says so rather than returning an empty success.
+    // wasm32 has no audited analysis; typed refusal, not empty success.
     let analyze = &record["cases"]["analyzeWithAudit"];
     assert_eq!(
         analyze["outcome"], "error",
@@ -1207,9 +1111,7 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
         "the enumeration found no VerterHost methods, so it proves nothing"
     );
 
-    // The WASM surface is the NAPI surface minus the native-only spellings, so
-    // the same out-of-scope classification applies; anything the built artifact
-    // exports beyond it is unaccounted for.
+    // Anything the built artifact exports beyond these lists is unaccounted.
     assert_partition(
         "wasm",
         &methods,
@@ -1219,23 +1121,9 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
     );
 }
 
-/// The audited-compile spelling, driven on BOTH transports.
-///
-/// Two facts are pinned, and both were measured rather than assumed:
-///
-/// 1. The transport spelling returns the AUDIT RECORD, not the compiled
-///    product. `crates/verter_napi/src/lib.rs:2525-2540` encodes `.audit()` and
-///    drops the result; `crates/verter_wasm/src/lib.rs:874` does the same. With
-///    audit disabled it projects to `null`
-///    (`crates/verter_napi/src/audit.rs:60-65`).
-/// 2. On an audit-ENABLED host the Vue carrier yields a stored record naming
-///    the requested canonical, and the Svelte carrier yields `null` — i.e. the
-///    audited compile of a Svelte component whose module serves normally
-///    captures no stored record. Both transports agree, so this is the shared
-///    host's behaviour, not a transport divergence.
-///
-/// This is a characterization: it fails in either direction if the audited
-/// compile starts (or stops) capturing for either carrier.
+/// Audited compile on both transports: returns the audit record, not the
+/// product (audit disabled → `null`). Vue stores a record; Svelte does not.
+/// Characterization: fails if capture starts or stops for either carrier.
 #[test]
 fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports() {
     for (transport, script, build, vue_canonical) in [
@@ -1295,42 +1183,14 @@ fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_tran
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The missing-node transport contract
-// ══════════════════════════════════════════════════════════════════════════
 
-/// The missing-node transport contract: the two transports report a missing
-/// node the SAME way.
-///
-/// For a typed request whose in-process answer is
-/// `Err(HostError::MissingVirtualNode)`, both transports answer with an ABSENT
-/// response.
-///
-/// The absent response is the settled shape rather than a throw because a node
-/// that does not exist is an ordinary negative answer about the carrier's
-/// structure — a `.vue` with no `<style>` block — not a failure. Under a throw
-/// a caller cannot separate "no such node" from an invalid query or an unknown
-/// file without matching the error TEXT; under an absent response the
-/// distinction is structural, and it is the answer the rest of both transports
-/// already give for absence (`getIde`, `remove`, the document structure).
-///
-/// BOTH ways a request reaches "no product" are driven, because a transport can
-/// serialize them differently and one of them alone would leave the other free
-/// to diverge:
-///
-/// * STRUCTURAL absence — the carrier compiles normally and the requested node
-///   does not exist (`style[0]` of an SFC with no `<style>` block);
-/// * absence reached THROUGH a refusal — the same node on a component whose
-///   runtime surface the server profile refused.
-///
-/// A SUCCESSFUL control on the same carrier as the structural case runs
-/// alongside them: without it an absent answer could equally be a host that
-/// never loaded the file.
-///
-/// What the portable public contract owes, and what this asserts: ONE answer
-/// exists for both transports across both absence classes, it is that absent
-/// response, it is distinguishable from a published product, and neither
-/// transport leaks a product while giving it.
+/// Both transports report a missing node the same way: an absent response
+/// for `Err(HostError::MissingVirtualNode)`, never a throw. Absence is
+/// structural (no such node), not a failure — a throw would require matching
+/// error text. Driven both as structural absence (`style[0]` with no
+/// `<style>`) and through a refusal. A successful control on the same
+/// carrier proves the file loaded. Neither transport leaks a product.
 #[test]
 fn the_transports_report_a_missing_node_the_same_way() {
     let napi = probe(
@@ -1344,9 +1204,7 @@ fn the_transports_report_a_missing_node_the_same_way() {
         WASM_BUILD,
     );
 
-    // Staleness guards: the in-process host must still answer MISSING for each
-    // request, or the transports are converting something else and the
-    // comparisons below decide nothing.
+    // Host must still answer MISSING, or the comparisons decide nothing.
     let server = host_with(
         "/probe/Server.svelte",
         SUPPORTED_SVELTE,
@@ -1409,8 +1267,7 @@ fn the_transports_report_a_missing_node_the_same_way() {
             &wasm["cases"]["vueMissingStyle"],
         ),
     ] {
-        // True before the correction and it must survive it: a node that does
-        // not exist is never published as a product on either transport.
+        // A missing node is never published as a product.
         for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
             assert_ne!(
                 case["outcome"], "published",
@@ -1430,10 +1287,7 @@ fn the_transports_report_a_missing_node_the_same_way() {
              {napi_case}, wasm {wasm_case}"
         );
 
-        // Parity alone is satisfied by BOTH transports throwing, which is not
-        // the settled contract — so the agreed spelling is pinned too. Stated
-        // per transport rather than once over the pair, so a failure names
-        // which one moved.
+        // Parity is not enough (both throwing would pass); pin the spelling.
         for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
             assert_eq!(
                 case["outcome"], "missing",
@@ -1449,9 +1303,7 @@ fn the_transports_report_a_missing_node_the_same_way() {
         }
     }
 
-    // The control: the node that DOES exist on that carrier is published by
-    // both transports, with the host's own bytes. An absent answer above is
-    // therefore about the requested node, not about the file.
+    // Control: the node that exists is published — absence is about the node.
     for (transport, record) in [("napi", &napi), ("wasm", &wasm)] {
         let case = &record["cases"]["vueMissingStyleControl"];
         assert_eq!(
@@ -1468,9 +1320,7 @@ fn the_transports_report_a_missing_node_the_same_way() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The bundler route
-// ══════════════════════════════════════════════════════════════════════════
 
 const BUNDLER_BUILD: &str =
     "pnpm --filter @verter/unplugin build (the plugin's fingerprinted dist/index.mjs)";
@@ -1496,14 +1346,9 @@ fn parse_source_map_artifact(label: &str, map: &Value) -> Value {
     }
 }
 
-/// Assert a published source-map ARTIFACT, never a probe-derived boolean.
-///
-/// A `hasMap` flag is the probe's OPINION of the artifact: hard-coding it to
-/// `true` while the real `map` stays `null` satisfies an assertion written
-/// against it, so such an assertion cannot tell a published map from a claimed
-/// one. This reads the map itself — present, parsed when it crossed as a JSON
-/// string (the bundler hooks return both shapes), and carrying the three fields
-/// that make it a usable v3 map rather than an empty envelope.
+/// Assert a published source-map artifact, never a probe `hasMap` flag
+/// (hard-coding `true` while `map` is `null` would pass). Reads the map
+/// itself: present, parsed if it crossed as JSON, usable v3 envelope.
 #[track_caller]
 fn assert_source_map_artifact(label: &str, map: &Value) {
     let object = &parse_source_map_artifact(label, map);
@@ -1585,26 +1430,11 @@ fn mappings_shape(label: &str, map: &Value) -> MappingsShape {
     }
 }
 
-/// A published map, normalized for WHOLE-ARTIFACT comparison.
-///
-/// The envelope check ([`assert_source_map_artifact`]) proves a map is usable;
-/// it cannot prove a route PRESERVED the map it was given. Neither can a
-/// comparison over a chosen subset of fields: comparing `sources` plus the mere
-/// PRESENCE of `sourcesContent` accepts forged `sourcesContent` bytes, which is
-/// exactly the content a debugger displays to the user as the authored source.
-/// So the comparison is over the entire artifact — `version`, `file`,
-/// `sourceRoot`, `sources`, every `sourcesContent` VALUE, `names`, `mappings`,
-/// and any other member the producer emitted.
-///
-/// Exactly two things are normalized away, and only because neither carries
-/// meaning:
-///
-/// * KEY ORDER — a JSON object is unordered by definition, and `serde_json`
-///   compares object members by key, so parsing alone normalizes it.
-/// * ABSENT vs explicit `null` for an optional member — `{"file": null}` and a
-///   map with no `file` member both say "no file", so `null` members are
-///   dropped. Nothing else is dropped: an EMPTY value (`""`, `[]`) is a
-///   statement about the map, not an absence, and is compared as itself.
+/// Whole-artifact comparison. Envelope checks cannot prove the route
+/// preserved the map; comparing `sources` plus presence of `sourcesContent`
+/// accepts forged content (what a debugger shows). Compare every member.
+/// Normalize only key order (JSON objects are unordered) and absent vs
+/// explicit `null`. Empty `""`/`[]` is a statement, not an absence.
 #[track_caller]
 fn normalized_source_map(label: &str, map: &Value) -> Value {
     let mut parsed = parse_source_map_artifact(label, map);
@@ -1620,17 +1450,9 @@ fn host_normalized_source_map(label: &str, outcome: &HostOutcome) -> Value {
     normalized_source_map(label, &Value::String(outcome.published_map(label)))
 }
 
-/// Assert a published map that actually MAPS something.
-///
-/// [`assert_source_map_artifact`] validates the envelope, and an envelope is
-/// satisfied by the single segment `"A"` — one generated column naming no
-/// authored position. Where the envelope check is the ACCEPTANCE rather than a
-/// precondition to a parity comparison, that is not enough: the product is
-/// claimed to carry a requested map, and a map that maps nothing does not.
-///
-/// This is deliberately NOT applied to the public Svelte virtual-script
-/// product, whose map is exactly that empty single segment today — a recorded
-/// observation with an owner and its own green characterization.
+/// Envelope plus at least one mapped segment (`"A"` is a valid envelope
+/// that maps nothing). Not applied to the public Svelte virtual-script
+/// product, whose map is that empty segment today.
 #[track_caller]
 fn assert_mapped_source_map_artifact(label: &str, map: &Value) {
     assert_source_map_artifact(label, map);
@@ -1643,12 +1465,7 @@ fn assert_mapped_source_map_artifact(label: &str, map: &Value) {
     );
 }
 
-/// Assert a case describes the carriers this test means.
-///
-/// A probe case reports the id it drove and the opposite id it offered. Every
-/// assertion about that case — its include decisions, its published map —
-/// silently inherits those ids, so they are pinned to the test's own constants
-/// before anything else about the case is read.
+/// Pin the case's carrier ids to this test's constants before reading it.
 #[track_caller]
 fn assert_bundler_case_carriers(case: &Value, expected_id: &str, expected_opposite: &str) {
     assert_eq!(
@@ -1657,9 +1474,8 @@ fn assert_bundler_case_carriers(case: &Value, expected_id: &str, expected_opposi
         "the case this test reads as `{expected_id}` reports a different requested carrier, so \
          every assertion below would be about something else: {case}"
     );
-    // REQUIRED, never conditional: the opposite-carrier include decision is the
-    // whole content of the REJECTION half of each pinned entry's contract, so a
-    // missing `oppositeId` leaves that assertion describing nothing at all.
+    // Opposite-carrier include is the rejection half; missing `oppositeId`
+    // would make that assertion vacuous.
     assert_eq!(
         case["oppositeId"].as_str(),
         Some(expected_opposite),
@@ -1668,13 +1484,8 @@ fn assert_bundler_case_carriers(case: &Value, expected_id: &str, expected_opposi
     );
 }
 
-/// Assert a published map describes the carrier it was REQUESTED for.
-///
-/// A structural oracle says a map is well-formed and covers something; it says
-/// nothing about WHAT. Where no host counterpart exists to compare against,
-/// that gap lets a map retargeted at an unrelated file satisfy every check
-/// while describing a different compilation. Every `sources` entry must
-/// therefore name the requested carrier.
+/// Every `sources` entry must name the requested carrier. A well-formed
+/// map retargeted at another file would otherwise pass.
 #[track_caller]
 fn assert_source_map_names_only(label: &str, map: &Value, requested_id: &str) {
     let object = parse_source_map_artifact(label, map);
@@ -1713,14 +1524,8 @@ fn assert_no_source_map_artifact(label: &str, map: &Value) {
     );
 }
 
-/// The BUNDLER route, executed: the shipped unplugin's public Vue- and
-/// Svelte-pinned Vite and Rollup entries, loaded from the fingerprinted BUILT
-/// entry and driven through `transform` and any virtual-script `load` it
-/// publishes.
-///
-/// The plugin loads `@verter/native` internally, so this exercises the whole
-/// bundler → transport → host chain rather than a citation of it. Its answers
-/// are compared against the in-process host route for the same source.
+/// Bundler route from the fingerprinted built entry (bundler → transport
+/// → host), compared to the in-process host for the same source.
 #[test]
 fn the_bundler_route_matches_the_in_process_host_route() {
     let record = probe(
@@ -1734,9 +1539,7 @@ fn the_bundler_route_matches_the_in_process_host_route() {
         "bundler: the ignored dist was not proven fresh against its production sources: {record}"
     );
 
-    // SVELTE — `VerterSvelte.vite({})` publishes a wrapper, and the wrapper's
-    // `?verter&type=script` load publishes the same module bytes as the host's
-    // `Main` node. The wrapper itself is routing glue, not the mapped product.
+    // Svelte public wrapper's virtual-script load equals host `Main`.
     let svelte = &record["cases"]["sveltePublicEntry"];
     assert_eq!(
         svelte["outcome"], "transformed",
@@ -1777,8 +1580,7 @@ fn the_bundler_route_matches_the_in_process_host_route() {
         "bundler/svelte: the loaded virtual-script bytes differ from the host route's `Main`"
     );
 
-    // VUE — execute the corresponding public Vue-pinned entry and its `?vue`
-    // virtual-script load. Its rendered content is owned elsewhere.
+    // Vue public entry + virtual-script load (content owned elsewhere).
     let vue = &record["cases"]["vuePublicEntry"];
     assert_eq!(
         vue["outcome"], "transformed",
@@ -1800,10 +1602,8 @@ fn the_bundler_route_matches_the_in_process_host_route() {
     );
 }
 
-/// BND-1 was measured against the legacy/default Vue-pinned raw factory. The
-/// documented public contract is two pinned entries: `VerterVue.vite({})`
-/// accepts `.vue`, and `VerterSvelte.vite({})` accepts `.svelte`; each rejects
-/// the other carrier extension.
+/// `VerterVue.vite({})` accepts `.vue`; `VerterSvelte.vite({})` accepts
+/// `.svelte`; each rejects the other extension.
 #[test]
 fn the_bundler_public_entries_apply_their_documented_include_contract() {
     let record = probe(
@@ -1814,9 +1614,7 @@ fn the_bundler_public_entries_apply_their_documented_include_contract() {
     let vue = &record["cases"]["vuePublicEntry"];
     let svelte = &record["cases"]["sveltePublicEntry"];
 
-    // Which carrier each case is ABOUT is fixed by this test, not read from the
-    // record: without this the include booleans below describe whichever ids
-    // the probe chose.
+    // Carrier ids are this test's constants, not the probe record's.
     assert_bundler_case_carriers(vue, PROBE_VUE_ID, PROBE_SVELTE_ID);
     assert_bundler_case_carriers(svelte, PROBE_SVELTE_ID, PROBE_VUE_ID);
 
@@ -1838,56 +1636,13 @@ fn the_bundler_public_entries_apply_their_documented_include_contract() {
     );
 }
 
-/// A SECOND reading of the built bundler entry, owned by this test.
-///
-/// Everything the guards below judge otherwise arrives in one JSON document
-/// written by one program. Cross-checking two fields of that document catches a
-/// case copied from a sibling — the copy carries the sibling's drive result —
-/// but both fields are still that program's word. This observation is not: its
-/// text lives here, it is executed by this test, and it imports the same built
-/// entry the probe imported.
-///
-/// It re-uses the probe's freshness fingerprint rather than adding a second
-/// one: the probe proves that entry fresh, and this reads the same path.
-///
-/// ## What it closes, and what remains open
-///
-/// It closes any forgery that MISSTATES the artifact — an export the probe
-/// omitted or invented, or a value whose reported `typeof`, adapter
-/// callability, or alias identity is not what the module actually holds. Those
-/// have to disagree with a reading the probe did not produce.
-///
-/// It also closes INVOCATION ATTRIBUTION, which used to be the named residue.
-/// The problem was that nothing required a driven export to have been APPLIED:
-/// a probe could print an export's TRUE readings — evidence, plugin keys,
-/// carriers — while sourcing the drive results from its sibling, and every
-/// check was satisfied because each individual statement was true of the real
-/// value. So this observation no longer reads shape only. Per enumerated
-/// export it wraps the callable it is about to invoke — an unplugin object's
-/// `.vite`, or a raw factory itself — in an apply-counting `Proxy`, invokes it
-/// exactly as the probe does, and records both the apply count and the plugin
-/// object THAT drive returned. A spelling this test classifies as executed must
-/// then carry a non-zero apply count HERE, and the probe's `pluginKeys` must
-/// equal the ones this test's own drive produced. The executed class is
-/// therefore witnessed by an apply this test performed, and the probe's drive
-/// result is compared against a drive result it did not produce.
-///
-/// The other half of the spelling discriminator — which carriers a value
-/// ACCEPTS — is taken over the same way: the observation asks each driven
-/// plugin's own `transformInclude` about both carriers (a decision that needs
-/// no host) and the probe's answers must match. So every component of the
-/// `(kind, accepts_vue, accepts_svelte)` triple the contract rows are matched
-/// on is now something this test measured.
-///
-/// What remains is narrower than "these spellings are indistinguishable", which
-/// would be false: `VerterVue` and `unpluginFactory` separate cleanly out of
-/// process — object vs function, a callable `.vite` vs none, and the flattened
-/// `configResolved` / `handleHotUpdate` that only the `createUnplugin` wrapper
-/// carries. The residue is that this observation drives the FACTORY and the
-/// include decision only, never a carrier transform, so the per-carrier
-/// PRODUCT bytes in the probe's record remain the probe's word — judged, where
-/// it matters, by the host parity comparisons and the wrapped-factory product
-/// equality this suite asserts separately.
+/// Independent reading of the same built bundler entry. The probe's JSON
+/// is one program's word; this script lives here, imports the same entry,
+/// and wraps each callable in an apply-counting Proxy so "executed" is
+/// witnessed by an apply this test performed. `transformInclude` is asked
+/// here too. Residue: this drives the factory and include decision, never
+/// a carrier transform — product bytes stay the probe's word, judged by
+/// host parity separately. Reuses the probe's freshness fingerprint.
 const BUNDLER_OBSERVER_SCRIPT: &str = r#"
 const { pathToFileURL } = await import("node:url");
 const entry = process.env.VERTER_OBSERVED_ENTRY;
@@ -2078,14 +1833,7 @@ fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
              reading of the same module: {case}"
         );
 
-        // ── INVOCATION ATTRIBUTION ──────────────────────────────────────────
-        //
-        // Everything above is a statement ABOUT the value, and a probe can
-        // print an export's true readings while sourcing its DRIVE results
-        // from a sibling: each individual statement stays true of the real
-        // value. So the executed class is witnessed by an apply THIS TEST
-        // performed, through the same observation script, and the probe's
-        // drive result is compared against one it did not produce.
+        // Executed class is witnessed by an apply this test performed.
         if !derived_kind(name, case).is_executed() {
             continue;
         }
@@ -2132,24 +1880,10 @@ fn assert_probe_agrees_with_the_test_owned_observation(record: &Value) {
     }
 }
 
-/// What an export IS, derived HERE from the evidence the probe read off the
-/// value — never a classification the probe assigned.
-///
-/// The probe records `typeof`, an object's sorted own-key list with each key's
-/// `typeof`, a callable's arity and name, and any measured alias identity. It
-/// records no `kind`: a `kind` string is an opinion, and an opinion copied from
-/// a sibling case arrives already agreeing with itself.
-///
-/// ## What this proves, and what it cannot
-///
-/// It proves the recorded evidence is VALUE-DERIVED and internally consistent
-/// with the driving results and with each spelling's documented contract, so a
-/// case copied from a sibling contradicts the row it is filed under. On its own
-/// it does NOT prove the probe READ HONESTLY: a probe can print any `typeof` it
-/// likes. What answers that is not a further assertion over the record but a
-/// SECOND reading — [`assert_probe_agrees_with_the_test_owned_observation`],
-/// whose script lives in this file, is executed by this test, and both READS
-/// and APPLIES each export itself.
+/// Kind derived here from probe evidence (`typeof`, own keys, alias) —
+/// never a probe-assigned `kind` string (a copied opinion agrees with
+/// itself). Honest reading is
+/// [`assert_probe_agrees_with_the_test_owned_observation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DerivedKind {
     /// A `createUnplugin` result: an object exposing a callable `.vite`.
@@ -2209,16 +1943,8 @@ fn derived_kind(export: &str, case: &Value) -> DerivedKind {
     }
 }
 
-/// The recorded evidence must agree with what DRIVING the value produced.
-///
-/// Two independent observations of the same export are recorded: what the value
-/// looked like (`typeof`, own keys), and what the invocation returned (the
-/// plugin object's own keys). `createUnplugin` is precisely what flattens an
-/// adapter's Vite-only hooks onto the plugin it returns, so a wrapped entry's
-/// plugin carries `configResolved` at the top level while a raw factory's keeps
-/// it nested under `.vite`. A case copied from a wrapped entry therefore
-/// contradicts any reading that claims a bare factory — the copied drive result
-/// and the claimed shape cannot both be true.
+/// Evidence vs drive result. Wrapped entries flatten `configResolved`;
+/// raw factories keep it nested. A copied sibling case cannot match both.
 #[track_caller]
 fn assert_evidence_matches_the_driven_plugin(export: &str, case: &Value, kind: &DerivedKind) {
     let keys: Vec<&str> = case["pluginKeys"]
@@ -2251,20 +1977,9 @@ fn assert_evidence_matches_the_driven_plugin(export: &str, case: &Value, kind: &
     }
 }
 
-/// What each drivable public spelling must be, and must accept.
-///
-/// These rows are the DISCRIMINATOR between the spellings, and both components
-/// come from measurements rather than labels: `kind` is [`derived_kind`]'s
-/// answer over the recorded evidence, and `accepts_*` are that value's OWN
-/// `transformInclude` answers, one per carrier. `createUnplugin` wraps a raw
-/// factory into an unplugin object, so the two really are different shapes at
-/// the export surface — which is what separates `VerterVue` from
-/// `unpluginFactory`, since those two agree on both carriers.
-///
-/// The four rows are pairwise DISTINCT on that triple —
-/// [`the_bundler_public_spellings_are_distinguished_by_what_they_accept`]
-/// asserts that first, so the discrimination claim is itself checked rather
-/// than assumed.
+/// Discriminator: `kind` from [`derived_kind`], `accepts_*` from
+/// `transformInclude`. Pairwise distinct — asserted by
+/// [`the_bundler_public_spellings_are_distinguished_by_what_they_accept`].
 struct BundlerSpelling {
     export: &'static str,
     kind: DerivedKind,
@@ -2301,14 +2016,8 @@ fn bundler_spelling_contracts() -> Vec<BundlerSpelling> {
     ]
 }
 
-/// Every spelling the BUILT bundler artifact exports is either executed by the
-/// probe or classified out of scope with a reason.
-///
-/// Both classes are DERIVED from the probe's per-export records, never from a
-/// list kept here: the probe's case map is keyed by the export enumeration
-/// itself and each record carries the name it was read by, so a case cannot be
-/// contributed for a spelling that was never looked up. A list on this side
-/// could only ever assert that a name was written down.
+/// Every bundler export is executed or classified out of scope, derived
+/// from the probe's per-export records — not a list kept here.
 #[test]
 fn every_exported_bundler_spelling_is_executed_or_classified_out_of_scope() {
     let record = probe(
@@ -2445,8 +2154,7 @@ fn every_exported_bundler_spelling_is_executed_or_classified_out_of_scope() {
 fn the_bundler_public_spellings_are_distinguished_by_what_they_accept() {
     let contracts = bundler_spelling_contracts();
 
-    // The discrimination claim, checked before it is relied on: two spellings
-    // sharing a triple could each satisfy the other's row.
+    // Pairwise distinct triples, or a row could satisfy another spelling.
     for (index, left) in contracts.iter().enumerate() {
         for right in contracts.iter().skip(index + 1) {
             assert!(
@@ -2466,9 +2174,7 @@ fn the_bundler_public_spellings_are_distinguished_by_what_they_accept() {
         BUNDLER_BUILD,
     );
 
-    // Every executed export has a row, and every row names an exported
-    // spelling: the contract table and the driven set stay in step. The driven
-    // set is derived from the evidence here, not read off a probe label.
+    // Contract table and driven set stay in step (driven set from evidence).
     let exported: Vec<String> = record["exports"]
         .as_array()
         .expect("the built plugin entry enumerates its exports")
@@ -2626,7 +2332,7 @@ fn the_bundler_virtual_script_loads_publish_requested_source_maps() {
         &svelte["loadedScriptMap"],
     );
 
-    // ── the ACCEPTANCE: the Svelte product carries the HOST's map ───────────
+    // the ACCEPTANCE: the Svelte product carries the HOST's map
     // This case already compares its loaded bytes against the host's `Main`
     // product, so its map is comparable the same way.
     let host = host_with(
@@ -2842,11 +2548,8 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
          cannot be tested: {host_product:?}"
     );
 
-    // PRECONDITION: a usable map that maps something. This is deliberately NOT
-    // the whole acceptance — a `version: 3` envelope for an unrelated file also
-    // satisfies it, so on its own it cannot tell a PRESERVED map from a
-    // substituted one — but the Vue product this route inlines is one whose map
-    // covers its output, so an empty-mapping map is already a failure here.
+    // Usable map that maps something — not the whole acceptance (an envelope
+    // for an unrelated file would also pass).
     let inline_label = format!(
         "VerterVue.rollup: the public non-Vite inline product's requested map \
          (hostHasMap={host_has_map}, publicTransformIsInline={}, publicTransformHasMap={})",
@@ -2854,10 +2557,7 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
     );
     assert_mapped_source_map_artifact(&inline_label, &vue["publicTransformMap"]);
 
-    // The ACCEPTANCE: "preserves" means the inline product carries the SAME
-    // map the host published for the profile this route requested — the
-    // sources it names, whether their contents ride along, and the mapping
-    // payload itself.
+    // Acceptance: same map the host published for this profile.
     assert_eq!(
         normalized_source_map(&inline_label, &vue["publicTransformMap"]),
         host_normalized_source_map("the host's Vue `Main` product's map", &host_product),
@@ -2866,7 +2566,6 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The bundler route's remaining product lanes
 //
 // The lanes below are reached through the SAME built entry the tests above
@@ -2879,7 +2578,6 @@ fn the_bundler_rollup_inline_transform_preserves_requested_source_maps() {
 // inventory, so what is asked of it is route identity plus publication — the
 // bundler's product must BE the in-process host's product for the same typed
 // request — not a new semantic case.
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The lexical repository root, matching how the probe derives its own.
 ///

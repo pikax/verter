@@ -11889,20 +11889,12 @@ fn unrelated_function() {
 // Audit substrate isolation guards — created with the verter_audit
 // crate and the cascade-move that retired the in-session DTO copies.
 //
-// `verter_audit_no_upward_deps` (the Cargo.toml dependency-table scan) was
-// deleted here: its invariant is strictly implied by the whole-workspace
-// resolve-graph closure test
-// (`crates/verter_identity/tests/cases/workspace_dependency_layers.rs`),
-// which proves `verter_audit`'s production closure is exactly
-// `{verter_audit, verter_span}` by walking what cargo actually links rather
-// than scanning manifest text. Keeping both would be a second authority for
-// one rule. `audit_substrate_isolation` below is NOT deleted alongside it:
-// its dependency half is implied by the same closure walk, but its NAMING
-// half (rejecting a bare `verter_*` token on a non-comment source line,
-// including one that is not a dependency at all — e.g. a local binding
-// name) is not something a resolve-graph walk can see. That residue is kept
-// as a separate, named, grandfathered guard (CLAUDE.md's forward-only rule:
-// pre-existing landed scanners are grandfathered, not re-justified).
+// `verter_audit_no_upward_deps` (manifest scan) is implied by
+// `crates/verter_identity/tests/cases/workspace_dependency_layers.rs`
+// (`verter_audit` production closure is `{verter_audit, verter_span}`).
+// `audit_substrate_isolation` stays: the resolve-graph walk cannot see
+// a bare `verter_*` token that is not a dependency (a local binding).
+// Grandfathered scanner (CLAUDE.md forward-only rule).
 // ----------------------------------------------------------------
 
 /// Source files under `crates/verter_audit/src/` MUST `use` only

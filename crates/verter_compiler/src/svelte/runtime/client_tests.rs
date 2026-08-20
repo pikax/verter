@@ -2926,7 +2926,7 @@ fn html_ts_wrapper_object_payload_wraps_arrow_body_unconditionally() {
     // is parenthesized and returns correctly — complete-by-construction, no shape predicate.
     //
     // This is a PLAIN-`<script>` form on purpose (NOT a corpus cell): the `lang="ts"` variant
-    // panics Verter's parse-domain TS-strip gate (a later block), and official svelte@5.56.3
+    // panics Verter's parse-domain TS-strip gate, and official svelte@5.56.3
     // REJECTS the plain-`<script>` TS-in-template form (no golden) while Verter ACCEPTS it (the
     // template expr parses as TSX and the rewriter strips the TS skin) — so it can only be locked
     // by a unit test on the accepted form, never an official-golden corpus row.

@@ -63,9 +63,7 @@ pub mod props;
 pub mod text;
 
 use nav_request::PendingNavRequest;
-// The opaque queue TYPE, not `PendingNavRequest` itself, is what the
-// shared `template::code_gen::types` module needs — see `PendingNavQueue`'s
-// own doc comment for why.
+// Shared types import the opaque `PendingNavQueue`, not `PendingNavRequest`.
 pub(in crate::template::code_gen) use nav_request::PendingNavQueue;
 
 use crate::ast::types::{
@@ -87,10 +85,7 @@ use super::types::{
 use super::vdom::props::needs_quoted_key;
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
-/// Append `body` to `stmt`, shifting `body_anchors` (relative to `body`'s own
-/// start) to their ABSOLUTE position within `stmt` and accumulating them into
-/// `out_anchors`. Shared by every `write_vif_branches` arm that splices a
-/// closure body string into the enclosing `_createIf(...)` statement.
+/// Append `body` to `stmt`, shifting `body_anchors` to absolute offsets in `stmt`.
 fn push_body_with_anchors(
     stmt: &mut String,
     body: &str,
@@ -176,16 +171,10 @@ fn resolve_expr(
     }
 }
 
-/// The second argument to official Vapor's real `setInsertionState(parent,
-/// anchor)` runtime call — confirmed to take exactly these three shapes
-/// against the vendored rc.3 runtime and compiler:
-/// - omitted entirely → append as the container's last child.
-/// - a plain number → insert at that 0-based DOM child index (a one-time
-///   position, no persistent marker — components/slot outlets, which
-///   mount exactly once).
-/// - a node ref → insert before that specific (already-navigated-to)
-///   anchor node (v-if/v-for, whose content can be removed and
-///   re-inserted across reactivity updates and so needs a STABLE marker).
+/// Official `setInsertionState(parent, anchor)` 2nd arg (vendored rc.3):
+/// omitted → append last child; a number → one-time 0-based DOM index
+/// (components/slot outlets, mount once); a node ref → insert before that
+/// already-navigated marker (v-if/v-for, which remount).
 enum InsertionAnchor {
     Append,
     Index(u32),
@@ -198,52 +187,36 @@ struct VIfBranch<'alloc> {
     condition: Option<&'alloc str>,
     /// The closure body string (template instantiation, nav, effects, return).
     body: String,
-    /// `body`'s own embedded interpolation anchors, relative to `body`'s own
-    /// text start (see `code_transform::segmented`'s module doc). Empty when
-    /// the branch carries no interpolation.
+    /// Interpolation anchors relative to `body`'s start. Empty if none.
     anchors: Vec<SegmentAnchor>,
-    /// Whether this branch registered no effects/nav/text-extractions/
-    /// statements — official's `canSkipIfBranchScope` NO_SCOPE eligibility
-    /// signal (see `build_closure_body`'s `is_static` doc).
+    /// Official `canSkipIfBranchScope` NO_SCOPE eligibility (`build_closure_body`).
     is_static: bool,
-    /// This branch's own sequential region-wide if-node index — official's
-    /// `context.root.nextIfIndex()`, allocated once per `v-if`/`v-else-if`
-    /// node (never for `v-else`, which isn't its own IfNode). `None` for a
-    /// `v-else` branch.
+    /// Official `context.root.nextIfIndex()`, once per `v-if`/`v-else-if`.
+    /// `None` for `v-else`.
     own_if_index: Option<u32>,
 }
 
-/// The shape of a v-if construct's negative (else) branch, for
-/// `compute_if_flags` — official's `getNegativeIfBranchShape` distinguishes
-/// a continuing `v-else-if` chain (never NO_SCOPE-eligible: negativeNoScope
-/// requires `negative.type !== 14`) from a terminal `v-else` block (carries
-/// its own static-ness for the FALSE_NO_SCOPE bit).
+/// Official `getNegativeIfBranchShape`: `v-else-if` is never NO_SCOPE
+/// (`negative.type !== 14`); a terminal `v-else` carries its own static-ness
+/// for FALSE_NO_SCOPE.
 #[derive(Clone, Copy)]
 enum IfNegative {
-    /// No `v-else`/`v-else-if` at all.
+    /// No `v-else`/`v-else-if`.
     None,
-    /// A `v-else-if` continuing the chain.
+    /// Continuing `v-else-if`.
     Chain,
-    /// A terminal `v-else`, carrying whether ITS OWN branch is static.
+    /// Terminal `v-else`, with whether its own branch is static.
     Terminal(bool),
 }
 
-/// Compute official's `_createIf` 4th argument — the numeric bitflags plus,
-/// in dev mode, a `/* NAME, NAME, ... */` comment — matching
-/// `genIfFlags`/`genIfFlagNames` in the vendored rc.3 `@vue/compiler-vapor`
-/// source bit-for-bit and name-for-name. Returns `None` when official's own
-/// `flags === 1` special case omits the argument entirely (a bare v-if with
-/// no negative branch, whose positive branch isn't itself NO_SCOPE-eligible
-/// and isn't nested where NO_SCOPE is disallowed).
+/// Official `_createIf` 4th argument (`genIfFlags`/`genIfFlagNames`, vendored
+/// rc.3). `None` when official omits it (`flags === 1`: bare v-if, positive
+/// branch not NO_SCOPE-eligible, not nested where NO_SCOPE is disallowed).
 ///
-/// Verter's Vapor emitter currently only ever builds SINGLE_ROOT closures
-/// (never EMPTY/MULTI_ROOT — `build_closure_body` always returns exactly
-/// one node) and doesn't support `v-once`/slot-root `v-if`, so this covers
-/// exactly the reachable case space: both branches' `blockShape` is always
-/// `1` (SINGLE_ROOT) when present, and `once`/`slotRoot` are always false —
-/// the resulting bit layout is `1 | (has_negative ? 4 : 0) | (positive
-/// NO_SCOPE-eligible ? 32 : 0) | (negative NO_SCOPE-eligible ? 64 : 0) |
-/// (has_negative ? (own_if_index + 1) << 8 : 0)`.
+/// Reachable space is SINGLE_ROOT only (`build_closure_body` always returns
+/// one node; no `v-once`/slot-root `v-if`):
+/// `1 | (has_negative ? 4 : 0) | (positive NO_SCOPE ? 32 : 0) |
+/// (negative NO_SCOPE ? 64 : 0) | (has_negative ? (own_if_index + 1) << 8 : 0)`.
 fn compute_if_flags(
     positive_static: bool,
     negative: IfNegative,
@@ -288,20 +261,13 @@ fn compute_if_flags(
     })
 }
 
-/// Compute official's `_createFor` trailing bitflags argument — matching
-/// `genForFlags` in the vendored rc.3 `@vue/compiler-vapor` source
-/// bit-for-bit and name-for-name. `is_single_node` is unconditionally `true`
-/// for every v-for the current Vapor emitter reaches: `build_closure_body`
-/// always registers a real hoisted template for the item body, exactly
-/// official's own `isSingleNodeBlock` condition (`child.template != null`).
-/// Component v-for, `v-once` v-for, and slot-root v-for aren't supported
-/// yet (Verter's `build_v_for_root` never sets `component`/`once`/
-/// `slot_root`-equivalent state) — this covers exactly the reachable case
-/// space, same discipline as `compute_if_flags`. Official's `!flags` early
-/// return (omit the argument entirely) is unreachable here: `onlyChild` and
-/// `isSingleNode` alone can be false, but nothing SETS them without also
-/// producing at least one bit in the reachable case space — still checked
-/// explicitly, never assumed.
+/// Official `_createFor` trailing flags (`genForFlags`, vendored rc.3).
+/// `is_single_node` is always true here (`build_closure_body` always hoists
+/// a template — official `isSingleNodeBlock` / `child.template != null`).
+/// Component / `v-once` / slot-root v-for are unsupported, so `component` /
+/// `once` / `slot_root` stay unset. Official's `!flags` omit is unreachable
+/// (nothing sets `onlyChild`/`isSingleNode` without at least one bit) but
+/// still checked, never assumed.
 fn compute_for_flags(only_child: bool, is_production: bool) -> Option<String> {
     let is_single_node = true;
     let mut flags: u32 = 0;
@@ -324,19 +290,15 @@ fn compute_for_flags(only_child: bool, is_production: bool) -> Option<String> {
     })
 }
 
-/// Build a v-for's loop-variable rename map for [`BindingResolver::
-/// push_for_scope`] — official's real `itemVar = _for_item${depth}` +
-/// `buildDestructureIdMap`, confirmed directly against the vendored rc.3
-/// source. `param_part` is [`helpers::parse_v_for_expression`]'s first
-/// return value (parens already stripped, e.g. `"item"` or
-/// `"item, index"`); positions map value → key → index, per official's
-/// own `parseFor` — [`helpers::split_v_for_params`]'s doc comment.
+/// Loop-variable rename map for [`BindingResolver::push_for_scope`] —
+/// official `itemVar = _for_item${depth}` + `buildDestructureIdMap` (rc.3).
+/// `param_part` is [`helpers::parse_v_for_expression`]'s first return
+/// (parens stripped); positions are value → key → index
+/// ([`helpers::split_v_for_params`]).
 ///
-/// Only a BARE identifier position gets a rename; a destructuring pattern
-/// (`{ id, name }`, `[a, b]`) in any position is left un-renamed — a
-/// disclosed, narrower gap (official's path-based `buildDestructureIdMap`
-/// rewriting for destructured sub-bindings isn't implemented yet). `_`
-/// (official's placeholder for "skip this position") never gets an entry.
+/// Only a bare identifier is renamed. Destructures (`{ id }`, `[a, b]`)
+/// stay un-renamed (official path-based `buildDestructureIdMap` is not
+/// implemented). `_` never gets an entry.
 fn build_for_scope_map(param_part: &str, depth: u32) -> rustc_hash::FxHashMap<String, String> {
     use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
@@ -360,14 +322,10 @@ fn build_for_scope_map(param_part: &str, depth: u32) -> rustc_hash::FxHashMap<St
     map
 }
 
-/// Build the v-for main closure's own parameter list — the RENAMED
-/// accessor names (`_for_item{depth}`, ...) for each BARE identifier
-/// position, in source order, stopping at the first absent (trailing)
-/// position — contiguous prefix only, matching v-for's own positional
-/// syntax (you cannot have an index without a value). A destructured
-/// position (no [`build_for_scope_map`] entry) is left as its ORIGINAL
-/// text, since nothing inside the body was renamed for it either — see
-/// `build_for_scope_map`'s doc comment for the same disclosed gap.
+/// Main-closure params: renamed `_for_item{depth}`… for each bare identifier,
+/// contiguous prefix only (no index without a value). A destructured
+/// position stays as authored text — same disclosed gap as
+/// [`build_for_scope_map`].
 fn build_for_callback_params(param_part: &str, depth: u32) -> String {
     use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
@@ -391,15 +349,9 @@ fn build_for_callback_params(param_part: &str, depth: u32) -> String {
     pieces.join(", ")
 }
 
-/// The leading JS identifier at the very start of `expr` — the ROOT of a
-/// member/computed-access/call chain (`item.tags`, `item[0]`,
-/// `item.tags.filter(x)`, ...), always the chain's own textual PREFIX since
-/// member/call expressions are left-recursive. `None` when `expr` does not
-/// begin with an identifier character at all (a literal, a parenthesized
-/// expression, a leading unary operator, ...) — used by
-/// [`VaporCodeGen::resolve_v_for_source`] to find a v-for source's
-/// potential outer-loop-variable root without parsing the whole expression;
-/// see that method's own doc comment for the exact scope this covers.
+/// Leading identifier of `expr` — root of a left-recursive member/call chain.
+/// `None` if `expr` does not start with an identifier. Used by
+/// [`VaporCodeGen::resolve_v_for_source`].
 fn leading_identifier(expr: &str) -> Option<&str> {
     let mut chars = expr.char_indices();
     let (_, first) = chars.next()?;
@@ -419,32 +371,18 @@ struct VIfChain<'alloc> {
     outer_ref: u32,
     /// Accumulated branches.
     branches: Vec<VIfBranch<'alloc>>,
-    /// The AST id of the MOST RECENTLY accumulated branch — updated as each
-    /// branch is added, so at flush time it names the chain's LAST branch.
-    /// Used (at depth > 0 only) to look ahead for a following sibling —
-    /// whether the WHOLE chain's mount position needs a `<!>` anchor —
-    /// since that's a property of where the chain's final branch sits in
-    /// its parent's children, not any earlier branch.
+    /// AST id of the most recently accumulated branch (the chain's last at flush).
+    /// At depth > 0, used to decide whether the whole chain needs a `<!>` anchor.
     last_branch_id: NodeId,
-    /// `element_stack`'s own index of this chain's TRUE DOM PARENT's entry,
-    /// captured when the chain's FIRST branch is created (the one moment
-    /// `element_stack.last()` is unambiguously that parent — this element's
-    /// own entry, if any, has already been popped by that point, and no
-    /// sibling's entry has been pushed yet). `None` means the chain's
-    /// parent is the template root (flush routes to `root_elements`).
+    /// `element_stack` index of this chain's true DOM parent, captured when the
+    /// first branch is created (`element_stack.last()` is unambiguously the
+    /// parent then). `None` = template root (flush to `root_elements`).
     ///
-    /// A chain with no following sibling can stay pending until something
-    /// ELSE'S `leave_element` triggers the eventual flush — either the
-    /// chain's own structural PARENT finishing (its own last child was the
-    /// chain) or a LATER SIBLING finishing (a plain element, or another
-    /// structural element like a `v-for`, that itself pushed and later
-    /// pops its OWN stack entry in between). Both cases can leave a
-    /// DIFFERENT number of `element_stack` entries above the true parent's
-    /// own entry at the moment of the actual flush — an index captured
-    /// once at chain-creation time is stable under either, where a fresh
-    /// `element_stack.last_mut()` read AT FLUSH TIME is not: it would read
-    /// whatever the FLUSHING element's own (still- or no-longer-pushed)
-    /// entry happens to be, not the chain's actual parent.
+    /// A chain with no following sibling stays pending until some later
+    /// `leave_element` flushes it — the parent's last child, or a later sibling
+    /// that pushed its own stack entry in between. An index captured at
+    /// creation is stable under either; `element_stack.last_mut()` at flush
+    /// time is not (it would read the flushing element's own entry).
     target_stack_index: Option<usize>,
 }
 
@@ -474,34 +412,22 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     root_elements: Vec<VaporRootElement<'alloc>>,
     /// Depth counter (0 = root-level children of <template>).
     depth: u32,
-    /// Dynamic BLOCK nesting depth — DISTINCT from `depth` (plain AST/DOM
-    /// element nesting). Incremented only when entering a construct that
-    /// creates a genuinely new official-compiler "block" (a v-if/v-else
-    /// branch, a v-for item body, a slot outlet's fallback, a component's
-    /// or `<template v-slot>`'s own slot content) — never for an ordinary
-    /// wrapping element like `<div>`. Mirrors official's `context.block`
-    /// identity check (`allowNoScope = context.block ===
-    /// context.root.block`): a v-if directly inside any number of PLAIN
-    /// wrapping elements is still eligible for NO_SCOPE (block_depth stays
-    /// 0), but one nested inside ANOTHER block-creating construct is not.
-    /// `depth == 0` was the pre-existing (wrong) proxy — it conflated "is
-    /// the document root" with "is in the root's own top-level block",
-    /// producing a missing FALSE_NO_SCOPE bit for a v-if merely nested one
-    /// DOM level inside a plain root wrapper (confirmed against the pinned
-    /// rc.3 golden for `basic-interpolation.vue`).
+    /// Dynamic block nesting, distinct from `depth` (plain AST/DOM nesting).
+    /// Incremented only for a new official-compiler block (v-if/v-else branch,
+    /// v-for item, slot fallback, component/`<template v-slot>` content) — never
+    /// a wrapping `<div>`. Mirrors official `allowNoScope = context.block ===
+    /// context.root.block`: a v-if inside plain wrappers stays NO_SCOPE-eligible
+    /// (`block_depth` stays 0); one inside another block-creating construct does
+    /// not. `depth == 0` was the wrong proxy (document root vs root top-level
+    /// block) and dropped FALSE_NO_SCOPE for a v-if one DOM level inside a
+    /// plain root wrapper (rc.3 `basic-interpolation.vue`).
     block_depth: u32,
-    /// v-for NESTING depth (a genuine push/pop stack depth, distinct from
-    /// `block_depth`) — official's real `context.scopeLevel`
-    /// (`enterScope()`/`exitScope()`), used to name each v-for's loop
-    /// variables `_for_item{depth}`/`_for_key{depth}`/`_for_index{depth}`.
-    /// Confirmed directly against the vendored rc.3 source: SIBLING
-    /// (non-nested) v-for loops both get depth 0 (the counter returns to 0
-    /// between them); only a v-for genuinely NESTED inside another v-for's
-    /// own item body gets depth 1, etc. Official also shares this exact
-    /// counter with slot-props destructuring (`_slotProps{depth}`) — not
-    /// yet implemented here, so this counter is v-for-only for now; a
-    /// future slot-props-destructure feature must reuse this SAME field,
-    /// not add a second one.
+    /// v-for nesting depth (push/pop, distinct from `block_depth`) — official
+    /// `context.scopeLevel` (`enterScope`/`exitScope`), naming
+    /// `_for_item{depth}`/`_for_key{depth}`/`_for_index{depth}`. Sibling (not
+    /// nested) v-fors both get 0. Official shares this counter with slot-props
+    /// destructuring (`_slotProps{depth}`) — unimplemented; reuse this field,
+    /// do not add a second.
     for_scope_depth: u32,
     /// Pool of recycled VaporElementState instances (retains Vec capacities).
     state_pool: Vec<VaporElementState<'alloc>>,
@@ -510,38 +436,28 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     /// Set for O(1) dedup of delegated events.
     delegated_events_set: FxHashSet<&'alloc str>,
     /// Templates hoisted by structural directives (v-if/v-for closures).
-    /// Each entry is (template_idx, html_string, is_static) — `is_static`
-    /// mirrors official's `canUseStaticTemplate()`: this closure registered
-    /// NO effects, navigation, text extractions, or statements, so its
-    /// template is 100% static markup. A closure's own template is NEVER the
-    /// document root (`root` is always false for these), matching official's
-    /// `templateRoot` propagation, which never reaches into a v-if/v-for
-    /// branch or slot-fallback closure.
+    /// Each entry is `(template_idx, html, is_static)`. `is_static` is official
+    /// `canUseStaticTemplate()` (no effects/nav/text-extractions/statements).
+    /// A closure template is never the document root (`root` is always false),
+    /// matching official `templateRoot` which never reaches into a
+    /// v-if/v-for/slot-fallback closure.
     hoisted_templates: Vec<(u32, String, bool)>,
     /// Pending v-if chain being accumulated across sibling elements.
     pending_vif_chain: Option<VIfChain<'alloc>>,
     /// Counter for v-memo cache slot allocation.
     memo_cache_idx: u32,
-    /// Region-wide sequential v-if/v-else-if node-index counter — official's
-    /// `context.root.nextIfIndex()`. Incremented once per `v-if`/`v-else-if`
-    /// node (never per `v-else`), independent of whether that node ends up
-    /// using the index in its emitted `_createIf` flags (only a node WITH a
-    /// negative branch consumes its own index — see `compute_if_flags`).
+    /// Official `context.root.nextIfIndex()` — once per `v-if`/`v-else-if`,
+    /// never `v-else`. Only a node WITH a negative branch consumes the index
+    /// in `_createIf` flags (`compute_if_flags`).
     if_index_counter: u32,
-    /// Per-open-element-scope reserved CONSTRUCT-OWN id for a v-if/v-for
-    /// structural root, pushed/popped in lockstep with `element_stack`.
-    /// `Some(id)` for a `v-if`/`v-for` element (the id its `_createIf`/
-    /// `_createFor` statement's own `const nN = ` binds to); `None` for a
-    /// `v-else-if`/`v-else` element (no construct-own id — see
-    /// `handle_v_if_chain`'s doc comment) or a non-structural element.
+    /// Per-open-element reserved construct-own id, lockstep with `element_stack`.
+    /// `Some(id)` for `v-if`/`v-for` (`const nN = _createIf`/`_createFor`);
+    /// `None` for `v-else-if`/`v-else` or a non-structural element.
     ///
-    /// Reserved at ENTER time (before descending into children) because
-    /// official's real id-allocation order (confirmed by instrumenting the
-    /// vendored rc.3 compiler directly) allocates the construct's own id,
-    /// THEN one wasted id from entering its own block scope, BEFORE any of
-    /// its children — including interpolations, which Verter's bottom-up
-    /// walker would otherwise resolve (and consume an id for) before this
-    /// element's own `leave_element` ever runs.
+    /// Reserved at enter (before children) because official allocates the
+    /// construct id, then one wasted block-entry id, before any children
+    /// (rc.3). Verter's bottom-up walker would otherwise consume a child
+    /// interpolation id before `leave_element`.
     pending_construct_ref: Vec<Option<u32>>,
 }
 
@@ -584,20 +500,12 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// return n2
     /// ```
     ///
-    /// Returns `(body, is_static, anchors)` — `is_static` mirrors official's
-    /// `canUseStaticTemplate()`/`canSkipIfBranchScope()` signal (no effects,
-    /// navigation, text extractions, or statements were registered), reused
-    /// by both the hoisted template's own `_template()` flags (this
-    /// function) and a v-if branch's `_createIf()` NO_SCOPE flag (the
-    /// caller). `anchors` are `body`'s own embedded interpolation anchors,
-    /// relative to `body`'s own text start (see
-    /// `code_transform::segmented`'s module doc), populated from this
-    /// closure's OWN effects only: a nested construct bubbled in through
-    /// `child_statements` carries its OWN anchors alongside its OWN
-    /// statement text (`Vec<(&str, &[SegmentAnchor])>` — see
-    /// `VaporElementState::child_statements`), so its anchors stay attached
-    /// to that entry rather than being flattened into this closure's own
-    /// top-level `anchors` list.
+    /// Returns `(body, is_static, anchors)`. `is_static` is official
+    /// `canUseStaticTemplate()`/`canSkipIfBranchScope()` (no effects/nav/
+    /// text-extractions/statements) — reused for `_template()` flags and
+    /// `_createIf()` NO_SCOPE. `anchors` are this closure's own interpolation
+    /// anchors, relative to `body`; a nested construct in `child_statements`
+    /// keeps its own anchors on that entry, not flattened here.
     fn build_closure_body(
         &mut self,
         mut state: VaporElementState<'alloc>,
@@ -611,11 +519,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // Finalize text parts
         element::finalize_text_parts(&mut state, has_dynamic_text);
 
-        // Resolve any nav requests THIS closure's own direct children
-        // queued (see `PendingNavRequest`) BEFORE reading `state.child_nav`/
-        // `child_statements`/`node_ref` below — every direct child of this
-        // closure's root has now been visited (e.g. a v-if branch's body
-        // containing its own nested wrapping element), matching official's
+        // Resolve this closure's direct-child nav requests before reading
+        // `child_nav`/`child_statements`/`node_ref` — official
         // `processDynamicChildren` timing.
         self.resolve_pending_nav_requests(&mut state, out);
 
@@ -626,11 +531,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let template_idx = self.counters.next_template();
         out.add_vapor_import(VaporHelper::Template);
 
-        // Mirrors official's `canUseStaticTemplate()`: static iff this
-        // closure's subtree registered NO effects, navigation, text
-        // extractions, or statements — nothing dynamic at all, so the
-        // template is 100% static markup (confirmed directly against the
-        // vendored rc.3 source).
+        // Official `canUseStaticTemplate()`: no effects/nav/text-extractions/statements.
         let is_static = state.own_effects.is_empty()
             && state.child_effects.is_empty()
             && state.child_nav.is_empty()
@@ -678,12 +579,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             body.push_str(tc);
             body.push('\n');
         }
-        // This closure's own root's direct text extraction (e.g. a v-if
-        // branch whose entire body is `{{ expr }}`) — see the identical fix
-        // in `element::finalize_root_element` for the general case and why
-        // it is needed (a bare `_setText(xN, …)` reference with no `const
-        // xN = _txt(nRef)` statement and no Txt/SetText import is a runtime
-        // `ReferenceError`, not merely a cosmetic omission).
+        // This closure root's own text extraction (e.g. a `{{ expr }}` v-if body).
+        // Without `const xN = _txt(nRef)` + Txt/SetText, `_setText(xN, …)` is a
+        // runtime `ReferenceError` — see `element::finalize_root_element`.
         if let Some(text_ref) = state.text_node_ref {
             body.push_str(indent);
             body.push_str("  const x");
@@ -697,10 +595,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             out.add_vapor_import(VaporHelper::SetText);
         }
 
-        // Statements — official ALWAYS emits a block's non-reactive one-time
-        // OPERATIONS before its aggregated effects (see the identical fix
-        // in `assemble_output`'s root-element serialization for the general
-        // rule and the confirming golden).
+        // Official always emits one-time operations before aggregated effects
+        // (`assemble_output` root serialization).
         for (stmt, stmt_anchors) in &state.child_statements {
             body.push_str(indent);
             body.push_str("  ");
@@ -757,17 +653,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     ) {
         let cond = el.v_condition.as_ref().unwrap();
 
-        // The construct's own id (If only) was already reserved at ENTER
-        // time, before this element's children (including any
-        // interpolations) were visited — see `pending_construct_ref`'s doc
-        // comment and `enter_element`'s reservation for why: official's
-        // real allocation order (confirmed by instrumenting the vendored
-        // rc.3 compiler directly, cross-checked against 2 independent
-        // pinned goldens) puts the construct's own id AND one wasted
-        // branch-entry id BEFORE any of the branch's own content, but
-        // Verter's bottom-up walker resolves a child interpolation's id
-        // before this element's own leave-time processing ever runs — so
-        // the reservation cannot happen here, only at enter.
+        // Construct id reserved at enter, before children — official allocates
+        // construct id + one wasted branch-entry id before branch content (rc.3);
+        // leave-time reservation is too late for this bottom-up walker.
         let outer_ref = construct_ref;
         let (body, is_static, body_anchors) =
             self.build_closure_body(state, has_dynamic_text, "  ", out);
@@ -807,10 +695,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         own_if_index: Some(own_if_index),
                     }],
                     last_branch_id: id,
-                    // This element's own `element_stack` entry (if any) was
-                    // already popped above, and no sibling's entry has been
-                    // pushed yet — `element_stack.last()` right now is
-                    // unambiguously this chain's true DOM parent.
+                    // This element's stack entry is already popped; `element_stack.last()`
+                    // is the chain's true DOM parent.
                     target_stack_index: self.element_stack.len().checked_sub(1),
                 });
             }
@@ -882,8 +768,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         push_u32(&mut stmt, chain.outer_ref);
         stmt.push_str(" = ");
 
-        // Build nested structure from branches, accumulating every branch's
-        // own embedded interpolation anchors (absolute within `stmt`).
+        // Nested `_createIf`s; each branch's interpolation anchors are absolute in `stmt`.
         let mut anchors: Vec<SegmentAnchor> = Vec::new();
         self.write_vif_branches(&chain.branches, 0, &mut stmt, &mut anchors);
 
@@ -915,9 +800,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Recursively write nested _createIf calls for v-if chain branches.
-    /// `anchors` accumulates every branch's OWN interpolation anchors,
-    /// shifted to their ABSOLUTE position within `stmt`.
+    /// Recursively write nested `_createIf` calls.
+    /// Shift each branch's interpolation anchors to absolute offsets in `stmt`.
     fn write_vif_branches(
         &self,
         branches: &[VIfBranch<'alloc>],
@@ -931,14 +815,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
         let branch = &branches[idx];
         let remaining = branches.len() - idx - 1;
-        // Official's `allowNoScope = context.block === context.root.block`:
-        // the NO_SCOPE optimization applies to a v-if in the root's own
-        // top-level BLOCK — any number of plain wrapping elements (e.g. a
-        // root `<div>`) don't create a new block, so it stays eligible —
-        // but never one nested inside ANOTHER block-creating construct
-        // (v-for, a slot fallback, a component's default slot, ...). See
-        // `block_depth`'s doc comment for why this is NOT `self.depth == 0`
-        // (that conflates DOM/AST nesting with block nesting).
+        // Official `allowNoScope = context.block === context.root.block`.
+        // Plain wrappers do not create a block; another block-creating construct
+        // does. Not `self.depth == 0` — see `block_depth`.
         let allow_no_scope = self.block_depth == 0;
 
         if let Some(cond_expr) = branch.condition {
@@ -964,9 +843,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     stmt.push('}');
                     IfNegative::Terminal(next.is_static)
                 };
-                // A negative branch is always present here, so official's
-                // flags always carry at least the FALSE_SINGLE_ROOT bit —
-                // `compute_if_flags` never returns `None` in this arm.
+                // A negative branch always yields flags (at least FALSE_SINGLE_ROOT).
                 let flags = compute_if_flags(
                     branch.is_static,
                     negative,
@@ -980,11 +857,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             } else {
                 // No else branch — close the if-branch closure.
                 stmt.push_str("  }");
-                // Official's `genMulti` placeholder rule: a present (truthy)
-                // flags argument with an ABSENT negative renders an explicit
-                // `null` placeholder for the skipped 3rd argument, rather
-                // than shifting flags into its slot — confirmed directly
-                // against the vendored rc.3 `genCall`/`genMulti` source.
+                // Official `genMulti`: a present flags arg with no negative uses an
+                // explicit `null` placeholder for the skipped 3rd arg (rc.3 `genCall`).
                 match compute_if_flags(
                     branch.is_static,
                     IfNegative::None,
@@ -1008,33 +882,20 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Resolve a v-for SOURCE expression (the `items` in `item in items`),
-    /// applying an active OUTER v-for's loop-variable rename to it exactly
-    /// like every other in-body reference does. `resolve_simple_expr` alone
-    /// cannot do this: it resolves only a BARE identifier, passing anything
-    /// else (a member/computed-access/call chain — `item.tags`, `item[0]`,
-    /// `item.tags.filter(x)`, a nested v-for's real-world source shape)
-    /// through UNCHANGED. A raw outer-loop reference reaching generated
-    /// code is a runtime `ReferenceError` — `item` is not in scope, only
-    /// `_for_item0` is — not merely a cosmetic divergence.
+    /// Resolve a v-for source (`items` in `item in items`), applying an outer
+    /// loop-variable rename. `resolve_simple_expr` only handles a bare
+    /// identifier — a member/call chain (`item.tags`) would otherwise reach
+    /// generated code as a runtime `ReferenceError` (`item` is not in scope;
+    /// `_for_item0` is).
     ///
-    /// Two cases:
-    /// - The source IS the bare outer variable (`v-for="cell in row"` where
-    ///   `row` is itself an outer loop's item) — rename it wholesale.
-    /// - The source is a chain ROOTED at the outer variable (`item.tags`,
-    ///   ...) — member/computed-access/call expressions are left-recursive,
-    ///   so the chain's root is always source's own leading identifier;
-    ///   rewrite only that leading identifier, leaving the rest of the
-    ///   chain (`.tags`, `[0]`, `.filter(x)`, ...) verbatim.
+    /// - Bare outer variable (`v-for="cell in row"`) — rename wholesale.
+    /// - Chain rooted at the outer variable — rewrite only the leading
+    ///   identifier; leave `.tags`/`[0]`/`.filter(x)` verbatim.
     ///
-    /// A source whose reference to the outer variable is NOT in leading
-    /// position (`someFn(item).tags`, `[item, other]`) is a KNOWN,
-    /// DISCLOSED residual: it falls through to `resolve_simple_expr`'s
-    /// plain identifier-only resolution, unchanged. Closing that residual
-    /// needs the v-for parser's own scope-local reference SPANS (today it
-    /// exposes only NAMES, via `VForWithBindings::scope_local_reference_names`
-    /// — see that field's doc comment), a producer-side addition with call
-    /// sites beyond this one.
+    /// A non-leading reference (`someFn(item).tags`) is a disclosed residual:
+    /// it falls through to identifier-only resolution. Closing it needs
+    /// scope-local reference spans (`VForWithBindings::scope_local_reference_names`
+    /// currently exposes only names).
     fn resolve_v_for_source(&self, source_part: &str) -> String {
         use super::binding::is_simple_ident;
 
@@ -1070,10 +931,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     ) -> VaporRootElement<'alloc> {
         use super::shared::helpers::push_u32;
 
-        // Reserved at ENTER time, before this element's children (including
-        // any interpolations) were visited — see `pending_construct_ref`'s
-        // doc comment and `handle_v_if_chain`'s (the same pattern applies
-        // to v-for's own construct id).
+        // Reserved at enter, before children — same as `handle_v_if_chain`.
         let outer_ref = construct_ref.expect("v-for always reserves a construct-own id");
 
         // Get the v-for expression: "item in items" → source="items", param="item"
@@ -1100,10 +958,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // Parse "item in items" or "(item, index) in items"
         let (param_part, source_part) = helpers::parse_v_for_expression(full_expr);
 
-        // Build the closure body. v-for bodies do not thread interpolation
-        // anchors (no mapped interpolation anchor sits inside a v-for closure today
-        // — see `push_body_with_anchors`'s call sites for the covered
-        // shape); the returned anchors are intentionally discarded here.
+        // No mapped interpolation anchor sits inside a v-for closure today;
+        // returned anchors are discarded.
         let (closure_body, _is_static, _closure_body_anchors) =
             self.build_closure_body(state, has_dynamic_text, "  ", out);
 
@@ -1112,12 +968,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
         // Build the _createFor statement
         let resolved_source = self.resolve_v_for_source(source_part);
-        // The MAIN closure's own param list uses the RENAMED accessor names
-        // (`_for_item{depth}`, ...) — official's real `itemVar`/`keyVar`/
-        // `indexVar`. `self.for_scope_depth` at this point already equals
-        // the depth THIS v-for used at enter time (push/pop is symmetric —
-        // see `for_scope_depth`'s doc comment and `leave_element`'s pop,
-        // which runs before this function is reached).
+        // Main-closure params use renamed `_for_item{depth}`… (`itemVar`/`keyVar`/
+        // `indexVar`). `for_scope_depth` here already matches this v-for's enter
+        // depth (pop runs in `leave_element` before this function).
         let for_callback_params = build_for_callback_params(param_part, self.for_scope_depth);
         let mut stmt = String::with_capacity(256);
         stmt.push_str("const n");
@@ -1130,12 +983,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         stmt.push_str(&closure_body);
         stmt.push_str("  }");
 
-        // Add :key callback if present. UNLIKE the main closure above, the
-        // key callback's own param list stays the RAW source names —
-        // official's real `genCallback`/`genSimpleIdMap` leaves rawKey/
-        // rawIndex (and any destructured value) bare and unrenamed here,
-        // confirmed against the pinned rc.3 golden (`(item) => (item)`,
-        // never `(_for_item0) => (_for_item0.value)`).
+        // Key callback params stay the raw source names — official
+        // `genCallback`/`genSimpleIdMap` leaves rawKey/rawIndex unrenamed
+        // (rc.3: `(item) => (item)`, never `(_for_item0) => (_for_item0.value)`).
         let has_key = key_expr.is_some();
         if let Some(key) = key_expr {
             stmt.push_str(", (");
@@ -1145,13 +995,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             stmt.push(')');
         }
 
-        // Trailing bitflags argument (`_createFor`'s 4th positional arg) —
-        // see `compute_for_flags`. The flags-present, key-absent
-        // combination needs an explicit `undefined` key-slot placeholder to
-        // stay positionally valid — confirmed directly against the real
-        // rc.3 compiler (`_createFor(() => (_ctx.items), (_for_item0) =>
-        // {...}, undefined, 9 /* FAST_REMOVE, IS_SINGLE_NODE */)` for a
-        // bare `v-for` with no `:key` at all).
+        // `_createFor` 4th arg. Flags-present + key-absent needs an explicit
+        // `undefined` key-slot placeholder (rc.3:
+        // `_createFor(..., undefined, 9 /* FAST_REMOVE, IS_SINGLE_NODE */)`).
         let only_child = self.v_for_is_only_child(id, source);
         if let Some(flags) = compute_for_flags(only_child, self.options.is_production) {
             if !has_key {
@@ -1211,28 +1057,16 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         state.html = std::mem::replace(&mut self.html, enclosing);
     }
 
-    /// Ensure the CURRENT parent scope (`element_stack`'s top) has its own
-    /// Emit `const n{target_ref} = _child(n{container_ref})` — the FIRST
-    /// navigation within the current parent scope — or `const n{target_ref}
-    /// = _next(n{prev_ref})` — chained from the previous navigation in this
-    /// SAME scope — matching official Vapor's real single-argument runtime
-    /// signature (`next(node) => node.nextSibling`, confirmed directly
-    /// against the vendored rc.3 runtime). This is a SEPARATE mechanism
-    /// from `element::merge_into_parent`'s existing dom-index-based
-    /// navigation (a plain element's own dynamic text/props/effects,
-    /// untouched) — this one backs multi-anchor navigation within one
-    /// parent (a wrapping element reaching a nested slot/component, or a
-    /// v-if/v-for anchor reaching a following sibling position), where the
-    /// dom-index-absolute style cannot express "the Nth sibling of a node
-    /// that is itself not the parent."
+    /// Emit `const n{target} = _child(n{container})` (first nav in this parent
+    /// scope) or `const n{target} = _next(n{prev})` (chained). Official
+    /// single-arg `next(node) => node.nextSibling` (rc.3). Separate from
+    /// `element::merge_into_parent`'s dom-index nav — this backs multi-anchor
+    /// nav inside one parent, which a parent-absolute index cannot express.
     ///
-    /// `chain` is the caller's OWN local nav-chain-state for the scope being
-    /// resolved (see [`resolve_pending_nav_requests`]) — NOT module-level
-    /// state, since every scope's chain is now resolved in one shot, in one
-    /// call, well after the element_stack entry it would have lived on was
-    /// already popped. Updated to `target_ref` so a subsequent call for the
-    /// SAME scope chains from here instead of recomputing from
-    /// `container_ref`.
+    /// `chain` is the caller's local nav-chain state for this resolve pass
+    /// ([`resolve_pending_nav_requests`]), not module state: the stack entry
+    /// it would have lived on is already popped. Updated to `target_ref` so
+    /// the next call for this scope chains from here.
     fn emit_chained_nav(
         &self,
         target_ref: u32,
@@ -1266,18 +1100,12 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         *chain = Some(target_ref);
     }
 
-    /// Bubble a plain wrapping element's OWN establishment (when something
-    /// nested inside it needed to navigate TO it — `state.node_ref` is
-    /// `Some`) plus any structural content (v-if/v-for/slot/component
-    /// creation statements bubbled from a descendant, `state.child_statements`)
-    /// up into the CURRENT parent scope. Called ALONGSIDE (not instead of)
-    /// `element::merge_into_parent` — that function still runs first for
-    /// this element's own dynamic text/props/effects, untouched; this one
-    /// activates only when there is structural content to forward, using
-    /// `emit_chained_nav` rather than an absolute dom-child-index (no `<!>`
-    /// anchor needed here — a plain wrapping element like `<header>` is
-    /// already a REAL static tag in the skeleton, unlike a v-if/v-for
-    /// region which has no corresponding static content at all).
+    /// Bubble a wrapping element's establishment (`state.node_ref` is `Some`)
+    /// plus descendant structural statements (`child_statements`) into the
+    /// current parent. Runs alongside `element::merge_into_parent` (that path
+    /// still handles this element's own dynamic text/props/effects). Uses
+    /// `emit_chained_nav`, not a `<!>` — a wrapping `<header>` is already a
+    /// real static tag, unlike a v-if/v-for region.
     fn bubble_structural_content_into_parent(
         &mut self,
         mut state: VaporElementState<'alloc>,
@@ -1287,27 +1115,15 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         if state.node_ref.is_none() && state.child_statements.is_empty() {
             return state;
         }
-        // `already_navigated` is true when `element::merge_into_parent`'s
-        // OWN gate (this element's own dynamic text/props/effects) already
-        // ran and established navigation to `state.node_ref` via its
-        // existing dom-index formula — that field is never cleared by
-        // that path, so checking `node_ref.is_some()` alone here would
-        // navigate to the SAME ref a second time via a DIFFERENT
-        // mechanism, producing a reference-before-declaration ordering bug
-        // (confirmed as a genuine regression during development on plain
-        // nested dynamic-text elements, e.g. `<div><section><article><p>{{
-        // deep }}</p></article></section></div>`). Bubbling
-        // `child_statements` (structural content from a descendant) is
-        // always safe/needed regardless, since `merge_into_parent` never
-        // touches that field at all.
+        // `already_navigated` means `merge_into_parent` already established
+        // `state.node_ref` via its dom-index formula and never clears that
+        // field — `node_ref.is_some()` alone would navigate twice (different
+        // mechanisms) and emit a reference-before-declaration. `child_statements`
+        // still always bubble; `merge_into_parent` never touches them.
         //
-        // The establishment's TEXT SLOT is reserved right here (preserving
-        // this exact DFS position in `child_nav`), but its NUMBER is
-        // resolved later — this scope's own ref cannot be minted until it
-        // (the parent whose slot this becomes) has visited every one of ITS
-        // OWN direct children; see `PendingNavRequest`'s doc comment.
-        // `resolve_pending_nav_requests` overwrites the reserved slot once
-        // that parent scope is ready to finalize.
+        // Reserve the nav TEXT SLOT at this DFS position; the NUMBER is filled
+        // later (`PendingNavRequest`) once the parent has visited all its
+        // direct children.
         if !already_navigated {
             if let Some(own_ref) = state.node_ref {
                 if let Some(parent) = self.element_stack.last_mut() {
@@ -1330,31 +1146,18 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         state
     }
 
-    /// Merge a non-root structural element (component, slot outlet,
-    /// v-if/v-for chain) into its parent — the SAME mechanism for all of
-    /// them (confirmed directly against the real vendored
-    /// `@vue/compiler-vapor` rc.3: it is NOT limited to v-if/v-for needing
-    /// a persistent anchor — a component followed by dynamic text
-    /// (`<div><MyComp>x</MyComp>after {{ a }}</div>`) ALSO gets a `<!>`
-    /// anchor: `t1 = "<div><!> "`, `_setInsertionState(n4, n3)`; the real
-    /// distinguishing factor is purely whether something else in the SAME
-    /// parent scope needs to navigate PAST this exact position, regardless
-    /// of what kind of element this is):
+    /// Merge a non-root structural element (component, slot outlet, v-if/v-for)
+    /// into its parent. Official rc.3 is not limited to v-if/v-for: a component
+    /// followed by dynamic text (`<div><MyComp>x</MyComp>after {{ a }}</div>`)
+    /// also gets `<!>` (`t1 = "<div><!> "`, `_setInsertionState(n4, n3)`). The
+    /// factor is whether something else in this parent needs to navigate past
+    /// this position:
     ///
-    /// - nothing else at all in the container (neither before nor after)
-    ///   → `_setInsertionState(container)`, 1-arg append.
-    /// - a MEANINGFUL sibling follows (`has_following_sibling`) → that
-    ///   sibling (or whatever comes after it) may need to `_next()` PAST
-    ///   this position, so it needs a stable node to navigate from — a
-    ///   `<!>` placeholder inserted into the shared scope HTML buffer at
-    ///   exactly this position (DFS order already guarantees correct
-    ///   placement), referenced via `_setInsertionState(container, anchorRef)`.
-    /// - only static, non-referenced siblings precede it and nothing
-    ///   follows → nothing will ever navigate past or from this position,
-    ///   so the cheaper one-time numeric `_setInsertionState(container,
-    ///   domChildIndex)` suffices, no anchor node needed at all
-    ///   (`<div><a>x</a><b>y</b><c>z</c></div>` → `_setInsertionState(n2, 2)`,
-    ///   zero `<!>` nodes in the skeleton).
+    /// - nothing else → `_setInsertionState(container)` (1-arg append)
+    /// - a meaningful sibling follows → `<!>` + `_setInsertionState(container, anchorRef)`
+    /// - only static unreferenced siblings precede, nothing follows →
+    ///   numeric `_setInsertionState(container, domChildIndex)`
+    ///   (`<div><a>x</a><b>y</b><c>z</c></div>` → `_setInsertionState(n2, 2)`)
     fn merge_non_root_into_parent(
         &mut self,
         id: NodeId,
@@ -1362,36 +1165,22 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
     ) {
-        // The direct parent's own entry is unambiguously `element_stack`'s
-        // last entry for every caller of THIS method: each one merges the
-        // construct it JUST finished building for `id`, immediately after
-        // `id`'s own `element_stack` entry was popped in `leave_element`,
-        // before anything else pushes or pops. `merge_vif_chain_into_target`
-        // is the one case that does NOT hold — see its own doc comment.
+        // Callers merge immediately after `id`'s stack entry was popped; last
+        // is the parent. `merge_vif_chain_into_target` is the exception.
         let Some(parent_index) = self.element_stack.len().checked_sub(1) else {
             return;
         };
         self.merge_into_stack_index(parent_index, id, root, source, out);
     }
 
-    /// Merge a v-if chain's finished construct into ITS OWN true DOM
-    /// parent's `element_stack` entry — `chain.target_stack_index`, NOT
-    /// necessarily `element_stack`'s current last entry.
+    /// Merge a finished v-if chain into its true DOM parent —
+    /// `chain.target_stack_index`, not necessarily `element_stack`'s last
+    /// entry.
     ///
-    /// A chain whose last branch has no following sibling stays pending
-    /// until SOMETHING ELSE'S `leave_element` triggers the eventual flush:
-    /// either the chain's own structural parent finishing (its last child
-    /// was the chain — flushed before that parent's own entry pops, so the
-    /// parent IS still `element_stack`'s last entry) or, when the chain
-    /// instead has a LATER SIBLING, that sibling's own `leave_element`
-    /// (flushed before THAT sibling's own depth decrements — so the
-    /// sibling's own entry is what's currently last, one level too deep;
-    /// the chain's true parent sits at `chain.target_stack_index`,
-    /// recorded when the chain was created and stable regardless of how
-    /// many further entries have been pushed above it since). Using
-    /// `element_stack.last()` here would silently merge into whichever of
-    /// those unrelated entries happens to be on top at flush time instead
-    /// of the chain's actual parent.
+    /// A last-child chain stays pending until something else's `leave_element`
+    /// flushes it: the structural parent (still last on the stack) or a later
+    /// sibling (that sibling is last, one level too deep). `element_stack.last()`
+    /// here would merge into whichever unrelated entry is on top.
     fn merge_vif_chain_into_target(
         &mut self,
         target_index: usize,
@@ -1403,9 +1192,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         self.merge_into_stack_index(target_index, id, root, source, out);
     }
 
-    /// Shared merge body for [`merge_non_root_into_parent`] and
-    /// [`merge_vif_chain_into_target`] — the only difference between the two
-    /// callers is which `element_stack` index they resolve as the target.
+    /// Shared merge body; callers differ only in which `element_stack` index
+    /// they target.
     fn merge_into_stack_index(
         &mut self,
         target_index: usize,
@@ -1420,39 +1208,19 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             .map(|parent| parent.observe_dom_element())
             .unwrap_or(0);
         let has_following = self.has_following_sibling(id, source);
-        // The `<!>` anchor CHARACTER is meant to land at this construct's
-        // exact DFS position in the shared scope HTML buffer — unlike the
-        // numeric id/statement text below, its POSITION is a property of
-        // traversal order, not of any id value. This holds for every DIRECT
-        // caller of this merge (component/slot-outlet/element merges: each
-        // runs immediately inside its OWN `leave_element`, before any later
-        // sibling's own markup has been appended). A v-if chain whose flush
-        // is ITSELF deferred past a following PLAIN sibling — e.g.
-        // `<li><p v-if>A</p><footer>after</footer></li>`, where the
-        // `<footer>` leaves (and appends its own markup) before the pending
-        // chain's true parent `<li>` does — is a KNOWN, CONFIRMED exception:
-        // the anchor still gets appended here, but "here" is now AFTER that
-        // sibling's markup, not at the chain's original DFS point (official
-        // emits `<li><!><footer>after`; this emits `<li><footer>after<!>`).
-        // The mount still inserts the branch content in the right place
-        // (`_child` reads the container's actual first child, not
-        // specifically this comment), so this is a skeleton-text-only
-        // divergence — reserving the anchor's DFS position at chain-creation
-        // time (mirroring how `child_nav`/`child_statements` reserve their
-        // NUMBER slots below) would close it, but is a materially larger
-        // change than a single-site fix.
+        // `<!>` is meant to land at this construct's DFS position. Direct callers
+        // (component/slot/element) run inside their own `leave_element`, before
+        // later sibling markup. A v-if chain flushed after a following PLAIN
+        // sibling is a known exception (official: comment before the sibling;
+        // this: comment after). Mount is still correct (`_child` reads the
+        // container's first child). Closing it needs reserving the DFS slot at
+        // chain-creation time.
         if has_following {
             self.html.push_str("<!>");
         }
 
-        // The TEXT SLOTS are reserved right here (preserving this exact DFS
-        // position — `root.statements`, e.g. `const n0 = _createIf(...)`,
-        // is pushed immediately after, unchanged from before), but the
-        // NUMBERS filled into them are resolved later: the container's own
-        // ref (and, when `has_following`, the anchor id) cannot be minted
-        // until the WHOLE parent scope's direct children have been
-        // visited. `resolve_pending_nav_requests` overwrites the reserved
-        // slot(s) once that parent scope is ready to finalize.
+        // Reserve TEXT SLOTS at this DFS position; NUMBERS are filled later,
+        // once the whole parent scope's children have been visited.
         if let Some(parent) = self.element_stack.get_mut(target_index) {
             let nav_slot = if has_following {
                 let idx = parent.child_nav.len();
@@ -1475,12 +1243,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Emit `_setInsertionState(nContainer)` (append as last child) or
-    /// `_setInsertionState(nContainer, nAnchor)` (insert before the anchor)
-    /// — official Vapor's REAL 2-argument signature (`setInsertionState(parent,
-    /// anchor)`, confirmed directly against the vendored rc.3 runtime),
-    /// NOT `merge_non_root_into_parent`'s former 4-argument call (which
-    /// passed two extra arguments the real function doesn't accept).
+    /// Official 2-arg `setInsertionState(parent, anchor)` (rc.3) — append
+    /// (1-arg) or insert before a node ref. Not the former 4-arg call.
     fn emit_set_insertion_state(
         &self,
         container_ref: u32,
@@ -1510,17 +1274,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         sink[slot] = (out.alloc_str(&stmt), &[]);
     }
 
-    /// Resolve every deferred [`PendingNavRequest`] queued onto `state` by
-    /// its direct children, now that ALL of them have been visited — the
-    /// exact moment official's `processDynamicChildren` runs (once, at the
-    /// end of `transformChildren`, before returning control to whatever
-    /// scope contains THIS element). Mints `state`'s own container ref
-    /// (memoized — a scope with no establishing children never mints one)
-    /// and any per-request anchor ids, in queued (DFS visit) order, ANCHOR
-    /// before container-ref within each request — confirmed directly
-    /// against the vendored rc.3 source's `processDynamicChildren`: a fresh
-    /// `context.increaseId()` for the anchor precedes the memoized
-    /// `context.reference()` call for the container.
+    /// Resolve deferred [`PendingNavRequest`]s now that every direct child has
+    /// been visited — official `processDynamicChildren` timing. Mints the
+    /// memoized container ref (none if no establishing children) and per-request
+    /// anchor ids in DFS order, ANCHOR before container-ref within each request
+    /// (rc.3: `increaseId()` for the anchor precedes memoized `reference()`).
     fn resolve_pending_nav_requests(
         &mut self,
         state: &mut VaporElementState<'alloc>,
@@ -1549,12 +1307,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                             out,
                         );
                     } else if has_following {
-                        // The `<!>` anchor character was already pushed into
-                        // the shared scope HTML buffer eagerly, at DFS visit
-                        // time — see `merge_non_root_into_parent`. Only the
-                        // number and statement text are resolved here.
-                        // Anchor FIRST, container ref second (memoized) —
-                        // matches official's real allocation order exactly.
+                        // `<!>` was already pushed at DFS visit. Anchor id first, then
+                        // memoized container ref — official allocation order.
                         let anchor_ref = self.counters.next_node();
                         let container_ref = state.ensure_node_ref(&mut self.counters);
                         let nav_slot = nav_slot.expect("has_following always reserves a nav slot");
@@ -1599,12 +1353,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Whether `id` has any semantically-relevant following sibling within
-    /// its own AST parent's children — i.e. whether its dynamic content
-    /// needs an explicit `<!>` anchor placeholder (something follows it,
-    /// so the runtime needs a stable position to insert before) or can
-    /// simply append as the parent's last child (nothing does).
-    /// Whitespace-only text between elements is not semantically relevant.
+    /// Whether `id` has a semantically-relevant following sibling. If so,
+    /// dynamic content needs a `<!>` anchor; otherwise it can append.
+    /// Whitespace-only text is not relevant.
     fn has_following_sibling(&self, id: NodeId, source: &str) -> bool {
         let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
             return false;
@@ -1625,9 +1376,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             .any(|&sib| self.is_meaningful_sibling(sib, source))
     }
 
-    /// Whether an AST child renders an actual DOM node — used by
-    /// `has_following_sibling` to skip whitespace-only text between tags
-    /// (which Vue's own runtime never observes as separating content).
+    /// Whether an AST child renders a DOM node (skip whitespace-only text).
     fn is_meaningful_sibling(&self, id: NodeId, source: &str) -> bool {
         match &self.ast.nodes[id.0].kind {
             AstNodeKind::Text(t) => source
@@ -1638,15 +1387,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Official's `_createFor`'s FAST_REMOVE bit source: `isOnlyChild =
-    /// parent && parent.block.node !== parent.node && parent.node.children
-    /// .length === 1` (confirmed directly against the vendored rc.3
-    /// `processFor` source) — the v-for element is the SOLE meaningful
-    /// child of its own AST parent, AND that parent is a PLAIN element
-    /// (not itself a block-creating construct — a component, slot outlet,
-    /// `<template v-slot>`, or another v-if/v-for branch, all of which own
-    /// their OWN block whose `.node` equals themselves, making
-    /// `block.node !== node` false).
+    /// Official FAST_REMOVE source: `isOnlyChild = parent &&
+    /// parent.block.node !== parent.node && parent.node.children.length === 1`
+    /// (rc.3 `processFor`). Sole meaningful child of a PLAIN parent — not a
+    /// component, slot outlet, `<template v-slot>`, or another block whose
+    /// `.node` equals itself.
     fn v_for_is_only_child(&self, id: NodeId, source: &str) -> bool {
         let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
             return false;
@@ -1654,19 +1399,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let AstNodeKind::Element(parent_el) = &self.ast.nodes[parent_id.0].kind else {
             return false;
         };
-        // Official's real `isOnlyChild` (`transformFor`'s exit callback,
-        // vendored rc.3 `@vue/compiler-vapor`): `parent.block.node !==
-        // parent.node && parent.node.children.length === 1`. A v-if/v-for
-        // parent does NOT, by itself, disqualify `onlyChild` — confirmed
-        // directly against the real compiler: a `<p v-if>`/`<p v-for>`
-        // whose ONLY child is this v-for still yields FAST_REMOVE, and a
-        // sibling at that SAME immediate-parent level (not any ancestor
-        // further up) is what disqualifies it, v-if/v-for present or not.
-        // Only a genuinely DIFFERENT block-root shape — a component, a
-        // `<slot>` outlet, or a `<template v-slot>` — disqualifies: those
-        // route through the entirely separate SLOT_ROOT flag encoding
-        // (confirmed empirically: `40 /* IS_SINGLE_NODE, SLOT_ROOT */`,
-        // never a FAST_REMOVE bit at all), not this sibling-count story.
+        // A v-if/v-for parent does not itself disqualify `onlyChild` (a
+        // `<p v-if>`/`<p v-for>` whose only child is this v-for still gets
+        // FAST_REMOVE). A sibling at this immediate parent does. A different
+        // block-root (component, `<slot>`, `<template v-slot>`) routes through
+        // SLOT_ROOT (`40 /* IS_SINGLE_NODE, SLOT_ROOT */`), never FAST_REMOVE.
         let parent_creates_new_block = parent_el.tag_type == TagType::Component
             || parent_el.tag_type == TagType::SlotOutlet
             || (parent_el.tag_type == TagType::Template && parent_el.v_slot.is_some());
@@ -1776,10 +1513,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 result.push_str(entry);
             }
             if has_default_content {
-                // Implicit default slot from non-template children. No
-                // mapped interpolation anchor sits inside a slot-fallback closure
-                // today — see `push_body_with_anchors`'s call sites for the
-                // covered shape — so the returned anchors are discarded.
+                // Implicit default slot from non-template children. No mapped
+                // interpolation anchor in a slot-fallback closure today.
                 let (body, _is_static, _body_anchors) =
                     self.build_closure_body(state, has_dynamic_text, "    ", out);
                 if !named_slots.is_empty() {
@@ -1850,9 +1585,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         out: &mut CodeGenOutput<'alloc>,
     ) -> String {
         let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
-        // No mapped interpolation anchor sits inside a default-slot closure today —
-        // see `push_body_with_anchors`'s call sites for the covered shape —
-        // so the returned anchors are discarded.
+        // No mapped interpolation anchor in a default-slot closure today.
         let (body, _is_static, _body_anchors) =
             self.build_closure_body(state, has_dynamic_text, "    ", out);
 
@@ -2014,21 +1747,13 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         Some(result)
     }
 
-    /// Build a root element for a slot outlet: `_createSlot(name, props,
-    /// fallback)`, trailing default-valued args omitted (official's own
-    /// convention — confirmed against the pinned rc.3 golden for
-    /// `slots.vue`: a named slot WITH fallback content emits all three
-    /// args, `<slot />` with neither a name nor fallback content emits
-    /// `_createSlot()`).
+    /// `_createSlot(name, props, fallback)`, trailing default-valued args
+    /// omitted (rc.3 `slots.vue`: named + fallback emits all three; bare
+    /// `<slot />` emits `_createSlot()`).
     ///
-    /// `state` carries the slot outlet's own children (its FALLBACK
-    /// content, e.g. `<slot name="header">Untitled</slot>`'s "Untitled"
-    /// text) — accumulated into `state.html`/nav/effects during the DFS
-    /// exactly like any other template-scope root (slot outlets open their
-    /// own HTML scope in `enter_element`), then handed over via
-    /// `take_scope_html` before this function runs. It is built into its
-    /// own hoisted template + closure via `build_closure_body` (the SAME
-    /// mechanism v-if branches use), NOT discarded.
+    /// `state` is the outlet's fallback content (its own HTML scope, handed
+    /// over via `take_scope_html`) and is built with `build_closure_body`,
+    /// not discarded.
     fn build_slot_outlet_root(
         &mut self,
         el: &ElementNode,
@@ -2039,13 +1764,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     ) -> VaporRootElement<'alloc> {
         use super::shared::helpers::push_u32;
 
-        // Determine slot name from static `name` attribute, and the
-        // ATTRIBUTE NAME's own source start (not the value's) — the pinned
-        // official Vue vapor compiler anchors the generated name-string
-        // literal's opening quote to the `name` ATTRIBUTE's own start (a
-        // `delimiter-anchor` relation: a punctuation-classified generated
-        // token at a non-word-interior source position — confirmed directly
-        // against the rc.3 oracle's own map for `slots.vue`).
+        // Slot name from static `name`; the generated literal's opening quote
+        // anchors to the ATTRIBUTE name's start, not the value (rc.3
+        // `delimiter-anchor` on `slots.vue`).
         let mut slot_name = "default";
         let mut slot_name_attr_start: Option<u32> = None;
         for prop in &el.props {
@@ -2067,16 +1788,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             .is_some_and(|content| !content.children.is_empty());
         let fallback = if has_fallback {
             let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
-            // `state.node_ref` already holds the SLOT's OWN ref (allocated
-            // by the caller for `_createSlot`'s LHS, `const nN = ...`) —
-            // clear it before handing `state` to `build_closure_body`,
-            // which otherwise reuses that SAME number for the fallback's
-            // own template-instantiation ref (`ensure_node_ref` returns an
-            // already-`Some` value unchanged) instead of allocating a
-            // fresh one, colliding with the outer slot's own `nN`.
+            // `state.node_ref` is the slot's own LHS ref — clear it or
+            // `build_closure_body` reuses it for the fallback template and
+            // collides with the outer `nN`.
             state.node_ref = None;
-            // No mapped interpolation anchor sits inside a slot-fallback closure
-            // today, so the returned anchors are discarded.
+            // No mapped interpolation anchor in a slot-fallback closure today.
             let (body, _is_static, _body_anchors) =
                 self.build_closure_body(state, has_dynamic_text, "  ", out);
             let mut closure = String::with_capacity(64 + body.len());
@@ -2088,9 +1804,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             None
         };
 
-        // Trailing default-valued args are omitted: fallback (undefined),
-        // then props (null) once fallback is gone, then name ("default")
-        // once props is gone too.
+        // Omit trailing defaults: fallback, then props (`null`), then name (`"default"`).
         let props_is_default = true; // no fixture drives dynamic slot props yet
         let name_is_default = slot_name == "default";
         let name_arg_included = fallback.is_some() || !props_is_default || !name_is_default;
@@ -2103,8 +1817,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let mut anchors: Vec<SegmentAnchor> = Vec::new();
         let mut first_arg = true;
         if name_arg_included {
-            // The opening quote's own generated position — a single
-            // punctuation byte, matching official's exact anchor shape.
+            // Opening quote's generated position — official's delimiter-anchor shape.
             let quote_offset = create_line.len() as u32;
             create_line.push('"');
             create_line.push_str(slot_name);
@@ -2165,39 +1878,20 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         use super::shared::helpers::push_u32;
 
         let mut buf = String::with_capacity(512);
-        // Absolute anchor positions in `buf` — the opt-in segmented-overwrite
-        // primitive's anchor shape (see `code_transform::segmented`'s module
-        // doc). Populated by every write path that can embed an
-        // interpolation identifier: this function's own top-level effects
-        // loop below, plus `root.statements` entries pre-computed by
-        // `flush_vif_chain`/`build_closure_body` (v-if/v-for branch bodies).
+        // Absolute interpolation/static-attr anchors in `buf` (segmented overwrite).
         let mut anchors: Vec<SegmentAnchor> = Vec::new();
 
-        // 1. Hoisted template declarations, in ASCENDING template-index
-        // order regardless of source — official emits `t0`, `t1`, … in
-        // allocation order, and a nested closure (a v-if branch, v-for
-        // item, or slot fallback) allocates its own template BEFORE the
-        // enclosing root's skeleton template (the root's `finalize_root_element`
-        // / `next_template()` call only runs once ALL of its descendants —
-        // including any nested closures — have already left, since the DFS
-        // visits children before their parent). A root's own template and
-        // the closure-hoisted ones are two SEPARATE collections
-        // (`root_elements`' `template_idx` vs `hoisted_templates`) that
-        // must be interleaved by index, not concatenated source-by-source
-        // — confirmed against the pinned rc.3 golden for `slots.vue`
-        // (`t0` = the fallback closure's own template, `t1` = the root
-        // skeleton with the fallback nested INSIDE it).
+        // Hoisted templates in ascending allocation-index order, not source
+        // order. A nested closure allocates its template before the enclosing
+        // root's skeleton (DFS visits children first); the two collections
+        // (`root_elements.template_idx` vs `hoisted_templates`) must interleave
+        // by index (rc.3 `slots.vue`: `t0` = fallback, `t1` = root skeleton).
         //
-        // `root`/`static` bitflags: official `@vue/compiler-vapor`'s
-        // `genTemplates` (confirmed directly against the vendored rc.3
-        // source) — `root` is true ONLY for the SFC's own single top-level
-        // template root (never for a v-if/v-for/slot-fallback closure's own
-        // template, and never for any root when the template has MULTIPLE
-        // top-level roots — a multi-root fragment's `hasSingleRootChild` is
-        // false, confirmed against the pinned rc.1 golden for
-        // `elements-text/multi-root.vue`, where every root template carries
-        // flag 2 only, never 1). `static` mirrors `canUseStaticTemplate()`:
-        // the template's own subtree registered no effects/nav/statements.
+        // Official `genTemplates` (rc.3): `root` is true only for the SFC's
+        // single top-level template — never a closure template, never any root
+        // of a multi-root fragment (`hasSingleRootChild` false; rc.1
+        // `elements-text/multi-root.vue` uses flag 2 only). `static` is
+        // `canUseStaticTemplate()`.
         let single_root = self.root_elements.len() == 1;
         let mut templates: Vec<(u32, &str, bool, bool)> = self
             .root_elements
@@ -2246,16 +1940,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             out.add_vapor_import(VaporHelper::DelegateEvents);
         }
 
-        // 3. Render function signature. Official `@vue/compiler-vapor`
-        // (`generate()`): `if (bindingMetadata && !inline) args.push("$props",
-        // "$emit", "$attrs", "$slots")`. Unlike VDOM/SSR, `bindingMetadata` is
-        // ALWAYS truthy for non-inline vapor regardless of whether a script
-        // exists — `@vue/compiler-sfc`'s `compileTemplate` defaults it to `{}`
-        // specifically for `vapor && !ssr` when the caller passed none
-        // (`compiler-sfc.cjs.js`: `vapor && !ssr && compilerOptions.bindingMetadata
-        // == null ? {} : compilerOptions.bindingMetadata`) — proven against the
-        // exact rc.3 goldens: even the script-less `slots.vue` vapor cell emits
-        // the full 5-param signature. So non-inline vapor is unconditional.
+        // Official `generate()`: `if (bindingMetadata && !inline) args.push(...)`.
+        // Unlike VDOM/SSR, `bindingMetadata` is always truthy for non-inline
+        // vapor — `@vue/compiler-sfc` defaults it to `{}` for `vapor && !ssr`
+        // (`compiler-sfc.cjs.js`). Script-less `slots.vue` still emits the
+        // 5-param signature, so non-inline vapor is unconditional.
         if self.options.is_inline {
             buf.push_str("return (_ctx,_cache) => {\n");
         } else {
@@ -2286,10 +1975,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 buf.push_str(tc);
                 buf.push('\n');
             }
-            // This root's OWN direct text extraction (see `own_text_ref`'s
-            // doc comment and `element::finalize_root_element` for why this
-            // is a separate write from the child-bubbled `text_creations`
-            // above).
+            // This root's own direct text extraction (see `own_text_ref` /
+            // `finalize_root_element`); separate from child-bubbled `text_creations`.
             if let Some(text_ref) = root.own_text_ref {
                 buf.push_str("  const x");
                 push_u32(&mut buf, text_ref);
@@ -2298,14 +1985,10 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 buf.push_str(")\n");
             }
 
-            // Statements — official (`flushPendingOperations`, confirmed
-            // directly against the vendored rc.3 source) ALWAYS emits a
-            // block's non-reactive one-time OPERATIONS (event listeners via
-            // `_on()`, etc.) BEFORE its aggregated `effect` array, regardless
-            // of the directives' own SOURCE order on the element (confirmed
-            // against the pinned rc.3 golden for `props-emit.vue`, whose
-            // `:disabled` — source-first — still prints its `_renderEffect`
-            // AFTER `@click`'s `_on(...)` — source-second).
+            // Official `flushPendingOperations` (rc.3): one-time operations
+            // (`_on()`, etc.) before the aggregated `effect` array, regardless of
+            // source order (`props-emit.vue`: `:disabled` is source-first but
+            // `_renderEffect` prints after `@click`'s `_on`).
             for (stmt, stmt_anchors) in &root.statements {
                 buf.push_str("  ");
                 push_body_with_anchors(&mut buf, stmt, stmt_anchors, &mut anchors);
@@ -2399,16 +2082,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         // Flush any pending v-if chain (e.g., v-if without v-else at end of template)
         self.flush_vif_chain(source, out);
 
-        // Assemble the complete Vapor output, plus every embedded
-        // interpolation/static-attribute anchor (see
-        // `code_transform::segmented`'s module doc).
+        // Full Vapor output plus interpolation/static-attribute anchors.
         let (output, anchors) = self.assemble_output(out);
 
-        // Overwrite the entire template (open tag → close tag) with generated
-        // code through the opt-in segmented primitive: bytes outside every
-        // anchor (including the whole block when `anchors` is empty) are
-        // synthetic scaffolding and carry no source-map token — only each
-        // anchor's own authored position maps back to the source.
+        // Overwrite the whole template via segmented overwrite: only each
+        // anchor maps back to source; everything else is synthetic.
         let start = root.tag_open.start;
         let end = match root.tag_close.as_ref() {
             Some(tc) => tc.end,
@@ -2449,18 +2127,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             && el.tag_type != TagType::SlotOutlet
             && !(el.tag_type == TagType::Template && el.v_slot.is_some());
 
-        // A new template scope begins at every root-level element, at every
-        // component / slot outlet / slot template (each becomes its own
-        // `_template(...)`), and at every v-if/v-else-if/v-else/v-for
-        // element regardless of depth: its content is entirely dynamic and
-        // gets its OWN hoisted template via `build_closure_body`, never the
-        // enclosing static skeleton's buffer. A plain element normally
-        // shares its parent's buffer, which is wrong for structural content
-        // at any depth — sharing it produces an empty hoisted template with
-        // the branch content leaking into the ancestor's own skeleton HTML
-        // instead. Save the
-        // enclosing scope's HTML buffer and start a fresh one; plain
-        // descendants append into it directly.
+        // New HTML scope at every root, every component/slot/slot-template,
+        // and every v-if/v-else-if/v-else/v-for: structural content must not
+        // share the ancestor's skeleton buffer (that leaks branch HTML into
+        // the static template and leaves the hoisted template empty).
         let is_structural_root = el.v_condition.is_some() || el.v_for.is_some();
         if self.depth == 0 || !builds_open_tag || is_structural_root {
             self.html_scope_stack.push(std::mem::replace(
@@ -2468,11 +2138,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                 String::with_capacity(128),
             ));
         }
-        // `!builds_open_tag || is_structural_root` is exactly "this element
-        // creates a new official-compiler block" — see `block_depth`'s doc
-        // comment. Symmetric decrement in `leave_element`, recomputing the
-        // SAME condition (nothing needs to be stored — `el` is available at
-        // both sites).
+        // `!builds_open_tag || is_structural_root` == new official block.
+        // Symmetric decrement in `leave_element` (same condition, `el` is
+        // available at both sites).
         if !builds_open_tag || is_structural_root {
             self.block_depth += 1;
         }
@@ -2481,15 +2149,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             element::build_open_tag(el, source, &mut self.html);
         }
 
-        // Reserve the construct-own id (v-if/v-for) AND burn one wasted
-        // branch/item-entry id, HERE at enter time, before descending into
-        // this element's children — see `pending_construct_ref`'s doc
-        // comment for why leave-time (`handle_v_if_chain`/
-        // `build_v_for_root`) is too late: official's real allocation
-        // order (confirmed by instrumenting the vendored rc.3 compiler
-        // directly) puts these two ids before ANY of a branch's/item's own
-        // content, but a child interpolation's id would otherwise already
-        // be resolved by the time this element's own leave runs.
+        // Reserve construct-own id + burn one wasted branch/item-entry id at
+        // enter, before children. Leave-time is too late: official allocates
+        // these two ids before any branch/item content (rc.3).
         let construct_ref = if let Some(cond) = &el.v_condition {
             let outer = matches!(cond.kind, ElementNodeConditionKind::If)
                 .then(|| self.counters.next_node());
@@ -2498,13 +2160,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         } else if let Some(v_for_prop) = &el.v_for {
             let outer = Some(self.counters.next_node());
             let _item_entry_id = self.counters.next_node();
-            // Push this v-for's loop-variable rename map BEFORE descending
-            // into children — an interpolation/expression inside the v-for
-            // body is resolved during ITS OWN visit (bottom-up), which
-            // happens well before this element's own `leave_element`
-            // (where `build_v_for_root` would otherwise run too late — see
-            // `pending_construct_ref`'s doc comment for the identical
-            // timing reasoning). Popped in `leave_element`.
+            // Push this v-for's rename map before descending — body expressions
+            // resolve during their own visit, well before `leave_element`.
             self.for_scope_depth += 1;
             if let (Some(vs), Some(ve)) = (v_for_prop.value_start, v_for_prop.value_end) {
                 let full_expr = &source[vs as usize..ve as usize];
@@ -2517,15 +2174,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             }
             outer
         } else if el.tag_type == TagType::SlotOutlet {
-            // A slot outlet's OWN construct id, reserved here for the SAME
-            // reason as v-if/v-for above. Fallback content additionally
-            // burns one wasted id entering ITS OWN block scope — matching
-            // `createSlot`'s real `enterBlock()`, confirmed directly
-            // against the vendored rc.3 compiler and the pinned rc.3
-            // golden for `slots.vue` (`const n0 = _createSlot("header",
-            // null, () => { const n2 = t0() ... })` — id 1 is consumed but
-            // never printed). A fallback-less `<slot/>` enters no such
-            // scope, so it burns no wasted id.
+            // Slot outlet's own construct id, same reason as v-if/v-for. Fallback
+            // burns one wasted `enterBlock()` id (rc.3 `slots.vue`:
+            // `const n0 = _createSlot("header", null, () => { const n2 = t0() ... })`
+            // — id 1 is consumed, never printed). Fallback-less `<slot/>` burns none.
             let outer = Some(self.counters.next_node());
             let has_fallback = el
                 .content
@@ -2559,35 +2211,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             el.tag_open.end,
             el.tag_open.name_end,
         );
-        // Flush any pending v-if chain whose recorded true DOM parent is
-        // EXACTLY this element — `chain.target_stack_index` equals this
-        // element's own (not-yet-popped) `element_stack` index — before
-        // that index disappears below. A chain whose last branch has no
-        // following sibling (nothing else ever triggers a flush inside
-        // that branch's own scope) stays pending until whatever leaves
-        // NEXT that IS its recorded parent; for a v-if that is the LAST
-        // child of a structural element (v-for, a component, a `<slot>`
-        // outlet, or ANOTHER v-if/v-else — a conditional element can
-        // itself be the DOM parent of a deeper, unrelated pending chain),
-        // that is exactly THIS element's own `leave_element` call.
-        // Flushing any later than here — after `self.depth -= 1` and the
-        // `element_stack` pop below — merges the chain via a stale index
-        // that no longer names this element, so the chain's construct is
-        // either dropped entirely (`merge_into_stack_index` silently
-        // no-ops against an out-of-bounds index) or lands as a SIBLING of
-        // this element's own construct instead of nested inside it — for a
-        // v-for parent, a runtime `ReferenceError` (the chain can reference
-        // this element's own loop variable, which is then out of scope at
-        // the mis-placed position).
+        // Flush a pending v-if whose recorded parent is this still-on-stack
+        // element, before the index disappears. A last-child chain of a
+        // structural parent (v-for, component, `<slot>`, or another v-if)
+        // flushes here. Later than this, `merge_into_stack_index` hits a
+        // stale index (drop, or sibling of this construct — a v-for parent
+        // then `ReferenceError`s the loop variable).
         //
-        // The index comparison — rather than `el.v_condition.is_none()` —
-        // is what correctly excludes an element that ITSELF continues the
-        // pending chain (v-else-if/v-else): a continuation's chain was
-        // created by ITS OWN preceding v-if sibling and its recorded
-        // target is the SHARED PARENT one level above this element, never
-        // this element's own index, so the comparison naturally leaves it
-        // pending for `handle_v_if_chain` (called later in this function)
-        // to extend instead of complete.
+        // Index comparison, not `el.v_condition.is_none()`: a v-else-if/v-else
+        // continuation records the SHARED parent one level up, so it stays
+        // pending for `handle_v_if_chain` later in this function.
         let my_own_stack_index = self.element_stack.len().checked_sub(1);
         if self
             .pending_vif_chain
@@ -2597,33 +2230,24 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             self.flush_vif_chain(source, out);
         }
         self.depth -= 1;
-        // Symmetric with `enter_element`'s increment — see `block_depth`'s
-        // doc comment. Decremented here, BEFORE `handle_v_if_chain`/
-        // `flush_vif_chain` run below for a v-if/v-else element, so
-        // `write_vif_branches`'s `allow_no_scope` check sees the ENCLOSING
-        // scope's block depth, not this element's own (already-closed)
-        // branch body.
+        // Decrement before `handle_v_if_chain`/`flush_vif_chain` so
+        // `allow_no_scope` sees the enclosing scope, not this closed branch.
         let builds_open_tag_here = el.tag_type != TagType::Component
             && el.tag_type != TagType::SlotOutlet
             && !(el.tag_type == TagType::Template && el.v_slot.is_some());
         if !builds_open_tag_here || el.v_condition.is_some() || el.v_for.is_some() {
             self.block_depth -= 1;
         }
-        // Symmetric with the `push_for_scope` in `enter_element` — pop
-        // BEFORE `build_v_for_root` runs below so a later `:key="..."`
-        // extraction (which official leaves unrenamed, matching its own
-        // `genSimpleIdMap`'s bare key/index treatment) is unaffected either
-        // way, and no v-for scope leaks into this element's own siblings.
+        // Pop before `build_v_for_root` so `:key` stays unrenamed (official
+        // `genSimpleIdMap`) and no v-for scope leaks to siblings.
         if el.v_for.is_some() {
             self.resolver.pop_for_scope();
             self.for_scope_depth -= 1;
         }
 
         let mut state = self.element_stack.pop().expect("leave without enter");
-        // Popped exactly once here (matching every enter_element push,
-        // regardless of which leave path this element takes below) and
-        // threaded into `handle_v_if_chain`/`build_v_for_root` — see
-        // `pending_construct_ref`'s doc comment.
+        // Pop once, matching every enter push; thread into
+        // `handle_v_if_chain`/`build_v_for_root`.
         let construct_ref = self
             .pending_construct_ref
             .pop()
@@ -2640,10 +2264,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             self.take_scope_html(&mut state);
         }
 
-        // === Component elements ===
+        // Component elements
         if el.tag_type == TagType::Component {
-            // Any pending v-if chain has already been flushed above, before
-            // this element's own depth/state teardown.
+            // Pending v-if already flushed above.
             let node_ref = state.ensure_node_ref(&mut self.counters);
             let root =
                 self.build_component_root(el, tag_name, node_ref, source, state, oxc_el, out);
@@ -2655,13 +2278,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             return;
         }
 
-        // === Slot outlets ===
+        // Slot outlets
         if el.tag_type == TagType::SlotOutlet {
-            // Any pending v-if chain has already been flushed above, before
-            // this element's own depth/state teardown.
-            // Reserved at ENTER time above — never mint fresh here (a
-            // fallback's own body, visited before this leave runs, would
-            // otherwise steal this id first).
+            // Pending v-if already flushed above.
+            // Reserved at enter — never mint here (fallback body would steal the id).
             let node_ref = construct_ref.expect("slot outlet always reserves a construct-own id");
             state.node_ref = Some(node_ref);
             let root = self.build_slot_outlet_root(el, source, node_ref, state, out);
@@ -2673,11 +2293,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             return;
         }
 
-        // === Template slot wrappers (<template v-slot:name="params">) ===
+        // Template slot wrappers (`<template v-slot:name="params">`)
         if el.tag_type == TagType::Template && el.v_slot.is_some() {
             let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
-            // No mapped interpolation anchor sits inside a named-slot closure today,
-            // so the returned anchors are discarded.
+            // No mapped interpolation anchor in a named-slot closure today.
             let (body, _is_static, _body_anchors) =
                 self.build_closure_body(state, has_dynamic_text, "    ", out);
 
@@ -2729,14 +2348,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             return;
         }
 
-        // === Normal elements ===
+        // Normal elements
         let is_void = el.is_self_closing || el.content.is_none();
         element::close_html_tag(&mut self.html, tag_name, is_void);
         if self.depth == 0 || el.v_condition.is_some() || el.v_for.is_some() {
-            // Root-level element, or a nested v-if/v-for element (its own
-            // template scope opened on `enter` — see the matching
-            // `is_structural_root` check there), owns the scope buffer it
-            // opened.
+            // Root or nested v-if/v-for owns the scope buffer it opened at enter.
             self.take_scope_html(&mut state);
         }
 
@@ -2758,11 +2374,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         // Derive has_dynamic_text from the AST children flags
         let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
 
-        // === v-if/v-else-if/v-else structural directive ===
-        // Depth-agnostic: `handle_v_if_chain`'s accumulation is a plain
-        // field with no depth gate, and `flush_vif_chain` routes to
-        // `merge_non_root_into_parent` at depth > 0 — the same anchor/
-        // navigation mechanism `<slot>` forwarding uses.
+        // v-if/v-else-if/v-else
+        // Depth-agnostic: `flush_vif_chain` routes to `merge_non_root_into_parent`
+        // at depth > 0 — same anchor/nav as `<slot>` forwarding.
         if el.v_condition.is_some() {
             self.handle_v_if_chain(
                 id,
@@ -2777,10 +2391,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             return;
         }
 
-        // Any pending v-if chain has already been flushed above, before
-        // this element's own depth/state teardown.
+        // Pending v-if already flushed above.
 
-        // === v-for structural directive ===
+        // v-for
         if el.v_for.is_some() {
             let root =
                 self.build_v_for_root(id, el, source, state, has_dynamic_text, construct_ref, out);
@@ -2796,13 +2409,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         element::finalize_text_parts(&mut state, has_dynamic_text);
 
         if self.depth == 0 {
-            // Root element → register template and collect into root_elements
-            //
-            // Resolve any nav requests THIS scope's direct children queued
-            // (see `PendingNavRequest`) BEFORE `finalize_root_element` reads
-            // `state.child_nav`/`child_statements`/`node_ref` — every direct
-            // child has now been visited, so this is the correct point,
-            // official's own `processDynamicChildren` timing.
+            // Resolve this scope's child nav requests before `finalize_root_element`
+            // reads `child_nav`/`child_statements`/`node_ref` (`processDynamicChildren`).
             self.resolve_pending_nav_requests(&mut state, out);
             let mut root =
                 element::finalize_root_element(state, &mut self.counters, out, has_dynamic_text);
@@ -2816,20 +2424,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             }
             self.root_elements.push(root);
         } else {
-            // Resolve any nav requests THIS scope's direct children queued
-            // (see `PendingNavRequest`) BEFORE bubbling `state.child_nav`/
-            // `child_statements` further up — every direct child of `state`
-            // has now been visited, so this is the correct point, matching
-            // official's own `processDynamicChildren` timing.
+            // Same resolve, before bubbling `child_nav`/`child_statements` up.
             self.resolve_pending_nav_requests(&mut state, out);
             // Non-root → merge into parent; DOM index from the parent's running
             // child cursor, advanced once per observed child.
             if let Some(parent) = self.element_stack.last_mut() {
                 let dom_child_index = parent.observe_dom_element();
-                // `merge_into_parent`'s OWN bubble gate — captured BEFORE
-                // the call, since it drains `own_effects`/`child_effects`
-                // (their post-call emptiness can't distinguish "already
-                // handled" from "never had anything").
+                // Capture `merge_into_parent`'s bubble gate before the call; it drains
+                // effects, so post-call emptiness cannot tell "already handled" from
+                // "never had anything".
                 let already_navigated = has_dynamic_text
                     || !state.own_effects.is_empty()
                     || !state.child_effects.is_empty();
@@ -2841,13 +2444,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     has_dynamic_text,
                     out,
                 );
-                // A plain wrapping element (e.g. `<header>` around a
-                // `<slot>`, or `<ul>` around a `v-for`) with no dynamic
-                // text/props/effects of its OWN never reaches
-                // `merge_into_parent`'s bubble condition above — that path
-                // is scoped to this element's OWN dynamic content, not
-                // structural content forwarded from a descendant. Bubble
-                // that separately.
+                // A wrapping element with no own dynamic content never hits
+                // `merge_into_parent`'s bubble; forward descendant structural content
+                // separately.
                 let mut consumed =
                     self.bubble_structural_content_into_parent(consumed, already_navigated, out);
                 // Recycle the consumed state (vecs drained by append; this
@@ -2866,25 +2465,13 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         out: &mut CodeGenOutput<'alloc>,
     ) {
         helpers::debug_assert_slice_bounds(source, text_node.start, text_node.end, "visit_text");
-        // Whitespace-only text CONTAINING a newline between tags (the
-        // common indentation/line-break shape) renders no DOM node at all
-        // under Vue's condense rules — official's own minimized template
-        // strings have ZERO bytes for it (confirmed directly against the
-        // pinned rc.3 golden for both `basic-interpolation.vue` and
-        // `slots.vue`: `<div class=panel><header></header><main>`, no
-        // inter-tag whitespace whatsoever). Emitting it unconditionally
-        // does two things wrong at once: it pollutes the static HTML with
-        // bytes official never produces, and — the actively-breaking part
-        // for nested `_child`/`_next` navigation — it occupies a REAL DOM
-        // sibling position the generated navigation never accounts for, so
-        // a later `_child`/`_next` call lands on the whitespace text node
-        // instead of the intended element (`HierarchyRequestError: Node
-        // can't be inserted in a #text parent`).
-        // Whitespace-only WITHOUT a newline condenses to a single space
-        // (HTML's own inline-whitespace-collapse rule) and DOES still
-        // occupy a real position, so it's kept — as exactly one space,
-        // not the raw run. Reuses `vdom::text`'s existing classifier
-        // rather than a second whitespace-detection implementation.
+        // Newline-containing whitespace-only text between tags is not a DOM
+        // node under Vue condense (rc.3 `basic-interpolation.vue` / `slots.vue`
+        // emit zero inter-tag bytes). Emitting it both pollutes the skeleton
+        // and occupies a real sibling that `_child`/`_next` never skip
+        // (`HierarchyRequestError: Node can't be inserted in a #text parent`).
+        // Whitespace-only WITHOUT a newline condenses to one space and stays.
+        // Reuses `vdom::text::classify_text_kind`.
         use super::vdom::text::classify_text_kind;
         let content = &source[text_node.start as usize..text_node.end as usize];
         if classify_text_kind(content) == Some(super::types::ChildKind::WhitespaceNewline) {

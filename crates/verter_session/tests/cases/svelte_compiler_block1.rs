@@ -40,13 +40,9 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str, lang: FileLanguage) 
         .unwrap_or_else(|e| panic!("upsert {canonical}: {e:?}"));
 }
 
-/// An IDE-target compile profile (`CompileTarget::IDE` ⇒ the `TSX` bit), the
-/// profile the LSP uses. Drives `want_ide` through the carrier.
-///
-/// It asks for the IDE product ONLY. A request under this identity does not ask
-/// for a runtime product, so it neither publishes one nor can be refused one —
-/// tests that assert on a runtime `Main` / `Style` node use
-/// [`runtime_and_ide_profile`] instead.
+/// IDE-only profile (`CompileTarget::IDE` ⇒ `TSX`). Does not request a
+/// runtime product, so it cannot be refused one. Runtime-node tests use
+/// [`runtime_and_ide_profile`].
 fn ide_profile() -> CompileProfile {
     CompileProfile {
         target: CompileTarget::IDE,
@@ -54,12 +50,8 @@ fn ide_profile() -> CompileProfile {
     }
 }
 
-/// A COMBINED compile profile: the runtime products (`BUNDLER` ⇒ style, script,
-/// template) AND the IDE product (`TSX`), asked for by one request identity.
-///
-/// This is the identity for any test that reads BOTH a runtime virtual node and
-/// the IDE projection, since each product is published only to a request that
-/// asked for it.
+/// Combined profile: runtime (`BUNDLER`) plus IDE (`TSX`). Use when a
+/// test reads both a runtime node and the IDE projection.
 fn runtime_and_ide_profile() -> CompileProfile {
     CompileProfile {
         target: CompileTarget::BUNDLER | CompileTarget::IDE,
@@ -986,15 +978,10 @@ fn well_formed_svelte_has_no_parse_diagnostics() {
 #[test]
 fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_scoped_to_that_identity(
 ) {
-    // R6: requesting the runtime `Main` of a Svelte component whose runtime surface
-    // is REFUSED (here a STANDALONE `<svelte:fragment>` — the transparent-wrapper surface,
-    // still refused; the window/document/body host + `<svelte:element>` + `<svelte:boundary>` +
-    // `<svelte:head>` surfaces now EMIT, so a still-refused special fixture is a standalone
-    // `<svelte:fragment>`) yields the EXPLICIT `HostError::RuntimeSurfaceRefused` (carrying the
-    // precise `svelte-runtime-unsupported-*` reason) — NOT a silent `MissingVirtualNode`, and NOT
-    // a successful compile. The refusal is TERMINAL for that identity — it publishes no
-    // sibling product — while a SEPARATE IDE-only identity on the same source still
-    // resolves, so type-checking survives.
+    // Runtime `Main` of a standalone `<svelte:fragment>` is
+    // `HostError::RuntimeSurfaceRefused` (`svelte-runtime-unsupported-*`),
+    // not `MissingVirtualNode`. Terminal for that identity; a separate
+    // IDE-only identity still resolves.
     let host = host();
     let source = "<script>let c = $state(true);</script>\n<svelte:fragment>hi</svelte:fragment>\n";
     upsert(&host, "/src/Refused.svelte", source, FileLanguage::svelte());

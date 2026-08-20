@@ -1,15 +1,7 @@
-//! Heap attribution: a `GlobalAlloc` wrapper that charges every
-//! allocation to the innermost open [`super::scope::ScopeGuard`].
-//!
-//! COMPILED ONLY under the `attribution` feature.
-//!
-//! This is what makes "allocations, copies and retained bytes by
-//! logical identity" measurable without hand-annotating every `Vec`:
-//! any region already wrapped in a scope guard reports its own heap
-//! traffic for free.
-//!
-//! It is a MEASUREMENT HARNESS component, not a production one. A
-//! process installs it by writing
+//! Heap attribution: `GlobalAlloc` wrapper charging every allocation to
+//! the innermost open [`super::scope::ScopeGuard`]. Feature-gated
+//! measurement harness — only a final binary may install it
+//! (`#[global_allocator]` is process-wide).
 //!
 //! ```ignore
 //! #[global_allocator]
@@ -17,23 +9,11 @@
 //!     verter_audit::attribution::AttributingAllocator::new(std::alloc::System);
 //! ```
 //!
-//! in a binary it owns. No library in the workspace installs it, and
-//! nothing in the workspace can: `#[global_allocator]` is a whole-program
-//! choice that only the final binary makes.
-//!
-//! ## Attribution rules
-//!
-//! - An allocation is charged to the innermost open scope on the
-//!   ALLOCATING thread, and a release to the innermost open scope on the
-//!   RELEASING thread. Those can differ; that is the honest reading of
-//!   "who was running when the bytes moved", and it is why a site's
-//!   `alloc_bytes - dealloc_bytes` is a contribution to retention rather
-//!   than a claim about ownership.
-//! - Traffic with no scope open lands on
-//!   [`WorkSite::UnattributedAllocation`], so totals stay closed rather
-//!   than silently dropping the remainder.
-//! - The wrapper never allocates: it reads a `const`-init thread-local
-//!   and touches `Relaxed` atomics only.
+//! - Charge alloc to the allocating thread's innermost scope, release
+//!   to the releasing thread's. They can differ; `alloc_bytes -
+//!   dealloc_bytes` is a retention contribution, not ownership.
+//! - Unscoped traffic lands on [`WorkSite::UnattributedAllocation`].
+//! - The wrapper itself never allocates.
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::Ordering;

@@ -110,7 +110,6 @@ assert.ok(
   `MEMORY_KILL_GRACE_MS (${MEMORY_KILL_GRACE_MS}ms) must stay far below the 5000ms TIMEOUT/STALL default`,
 );
 
-// ----------------------------------------------------------------------------------------------------
 // Discriminating timing check: a MEMORY-triggered reap must escalate to SIGKILL materially faster than a
 // TIMEOUT/STALL reap using the SAME killGraceMs. Both scenarios below run a child that TRAPS SIGTERM (only
 // SIGKILL can end it) and pass the SAME slow explicit killGraceMs — proving the MEMORY path does NOT fall
@@ -123,7 +122,6 @@ assert.ok(
 // TIMEOUT baseline this comparison depends on does not exist there. Skip on Windows rather than assert a
 // property Windows was never guaranteed to have; MEMORY_KILL_GRACE_MS's value-level guard above already
 // covers Windows.
-// ----------------------------------------------------------------------------------------------------
 if (!IS_WINDOWS) {
   const SLOW_SHARED_GRACE_MS = 1500;
   const trapArgs = ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"];
@@ -190,12 +188,10 @@ if (!IS_WINDOWS) {
   }
 }
 
-// ----------------------------------------------------------------------------------------------------
 // Real multi-process tree: the direct child spawns its own child (a grandchild relative to
 // runContainedStep), which allocates. Proves the memory ceiling aggregates RSS across a REAL process tree
 // (not just a single sampled pid) and that the reap kills the whole tree together — the synthetic
 // single-process scenarios above cannot exercise the tree-aggregation/tree-kill path.
-// ----------------------------------------------------------------------------------------------------
 const multiTargetDir = mkdtempSync(join(tmpdir(), "verter-gate-memory-selftest-multiproc-"));
 try {
   // Fill with real random bytes, not a zeroed/constant-fill Buffer.alloc: an all-zero (or all-one-byte)

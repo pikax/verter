@@ -1,86 +1,52 @@
 // Parser-backed cosmetic normalizer (conformance-normalizer.md).
 //
-// Produces a CANONICAL FORM of a generated module by re-parsing it to an
-// ESTree AST and returning a position-free structural tree. Two programs
-// whose canonical forms are deep-equal are cosmetically identical under the
-// allowed normalization rules:
+// Canonical form of a generated module: re-parse to an ESTree AST and
+// return a position-free structural tree. Deep-equal canonical forms are
+// cosmetically identical under the allowed rules:
 //
-//   - whitespace/line-layout: FREE — canonical form never carries
-//     start/end/loc/range, so re-indentation or reflow never affects it.
-//   - quote-delimiter spelling: FREE — acorn decodes string literals to
-//     their `.value`; the canonical form compares decoded values, never raw
-//     source text, so `'x'` and `"x"` canonicalize identically. EXCEPTION:
-//     a TAGGED template's raw spelling is NOT free — the tag function
-//     receives the `.raw` array (`strings.raw`), so raw escape-sequence
-//     spelling is observable program input there and enters the canonical
-//     form (see the TaggedTemplateExpression case in `canonicalize`).
-//   - harmless redundant parentheses: FREE — parentheses are not ESTree
-//     nodes; the parser already resolves precedence, so re-parenthesizing
-//     an equivalent expression produces the identical AST shape.
-//   - comments WITHOUT semantic force (plain prose): FREE — only
-//     tool-consumed comment classes (see `classifySemanticComment`) enter
-//     the canonical form; adding or removing an ordinary explanatory
-//     comment never affects it.
-//   - NAMED import-specifier ORDER within ONE import declaration: FREE —
-//     `import { a, b } from "x"` and `import { b, a } from "x"` bind the
-//     same hoisted ESM bindings to the same module, so the slot a named
-//     specifier occupies in its own declaration is not observable. The
-//     named specifiers of one declaration are therefore canonicalized into
-//     a deterministic content order (see the ImportDeclaration case in
-//     `canonicalize`). This exception is NARROW; each of the following
-//     stays STRUCTURAL and is proven so by a negative test:
-//       * specifier MEMBERSHIP (adding or removing a named specifier),
-//       * the IMPORTED name and the LOCAL alias of each specifier, paired,
-//       * the `source` module,
-//       * DEFAULT and NAMESPACE specifier form and position (at most one of
-//         either may appear and the ECMAScript grammar fixes it ahead of
-//         the named list, so it is never reordered and never sorted),
-//       * import ATTRIBUTES (`with { type: "json" }`),
-//       * the top-level ORDER of the import declarations themselves — the
-//         declarations are ordinary `Program.body` items compared
-//         positionally, and declaration GROUPING is not merged (the same
-//         binding set split across two declarations is a difference),
-//       * the SIDE-EFFECT import sequence (`import "x"` carries no
-//         specifiers at all and is compared in body order like any other
-//         statement).
+//   - whitespace/line-layout: free — no start/end/loc/range.
+//   - quote-delimiter spelling: free — acorn compares decoded `.value`, so
+//     `'x'` and `"x"` match. Exception: a tagged template's raw spelling
+//     is not free — the tag receives `strings.raw`, so raw escapes enter
+//     the canonical form (see TaggedTemplateExpression in `canonicalize`).
+//   - harmless redundant parentheses: free — not ESTree nodes; the parser
+//     already resolved precedence.
+//   - comments without semantic force: free — only tool-consumed classes
+//     (see `classifySemanticComment`) enter the form.
+//   - named import-specifier order within one import declaration: free —
+//     `import { a, b }` and `import { b, a }` bind the same hoisted ESM
+//     bindings. Narrow exception; these stay structural:
+//       * specifier membership
+//       * imported name + local alias, paired
+//       * `source` module
+//       * default and namespace specifier form/position (grammar-fixed
+//         ahead of the named list — never reordered)
+//       * import attributes (`with { type: "json" }`)
+//       * top-level order of import declarations (`Program.body`
+//         positional; grouping is not merged)
+//       * side-effect import sequence (`import "x"` compared in body order)
 //
-// IDENTIFIERS ARE STRUCTURAL — there is NO alpha-renaming. The contract
-// permits "private generated identifier spelling under scope-aware
-// alpha-normalization" only for bindings with private generated provenance.
-// The pinned official Vue 3.6.0-rc.3 / Svelte 5.56.8 compilers emit no
-// structural provenance marker distinguishing a compiler-generated private
-// binding from an authored one in their output (a leading-underscore
-// spelling like `_sfc_main` is a naming convention, and inferring
-// generatedness from spelling is exactly the name-based inference this
-// repository's architecture rules forbid). Without explicit provenance an
-// identifier must be treated as potentially authored/public-adjacent, so
-// EVERY identifier participates in equality like any other token. A
-// candidate that spells a local binding differently from the official
-// output is structurally different — never silently equated.
+// Identifiers are structural — no alpha-renaming. The contract permits
+// alpha-normalization only for bindings with private generated provenance.
+// The pinned official compilers emit no provenance marker distinguishing
+// compiler-generated private bindings from authored ones (`_sfc_main` is a
+// naming convention; inferring generatedness from spelling is forbidden).
+// Without explicit provenance every identifier participates in equality.
 //
-// SEMANTIC COMMENTS ARE PRESERVED — tool-consumed comments (`/*#__PURE__*/`
-// -class annotations, license/preserve blocks, source-map/sourceURL
-// directives, TS directives, triple-slash references, JSDoc, JSX/bundler
-// pragmas, Istanbul coverage directives, ESLint disable/enable directives,
-// Prettier ignore directives) are collected,
-// classified, and attached to the canonical node they precede, in order.
-// Deleting one, mutating its text, or relocating it to a different
-// expression/statement changes the canonical form and is caught as a
-// structural difference. The classifier is deliberately over-inclusive
-// toward "semantic": misclassifying a prose comment as semantic can only
-// produce a false DIFFERENCE (fail closed), never a false equivalence.
+// Semantic comments are preserved: tool-consumed comments (`/*#__PURE__*/`,
+// license/preserve, source-map/sourceURL, TS directives, triple-slash,
+// JSDoc, JSX/bundler pragmas, Istanbul, ESLint, Prettier) attach to the
+// canonical node they precede. Deleting, mutating, or relocating one is a
+// structural difference. Classifier is over-inclusive toward "semantic":
+// misclassifying prose as semantic can only produce a false difference
+// (fail closed), never a false equivalence.
 //
-// Everything else the contract forbids stays live BY CONSTRUCTION:
-//   - import/export sources and specifiers are ordinary struct fields the
-//     deep-equal walk compares verbatim — the single exception being the
-//     ORDER (never the content) of one declaration's named import
-//     specifiers, canonicalized as described above.
-//   - helper/declaration/statement ORDER: the canonical form is a
-//     positional array walk (`Program.body`, `BlockStatement.body`, …) —
-//     reordering two statements changes the canonical array order.
-//   - literal values, property keys, template content, element tags, prop
-//     names, diagnostic text carried as string literals: compared verbatim
-//     (only the `raw` quote/escape spelling is dropped).
+// Everything else the contract forbids stays live by construction:
+//   - import/export sources and specifiers compared verbatim, except named
+//     specifier order within one declaration as above
+//   - helper/declaration/statement order: positional array walk
+//   - literals, property keys, template content, tags, prop names,
+//     diagnostic text: verbatim (only `raw` quote/escape spelling dropped)
 
 import * as acorn from "acorn";
 
@@ -100,9 +66,9 @@ export function parseModule(code, sourceFileForDiagnostics) {
 }
 
 /**
- * Classifies a comment as a tool-consumed (semantic-force) class, or null
- * for plain prose. `type` is acorn's "Line" | "Block"; `value` is the
- * comment text without its delimiters.
+ * Classify a comment as a tool-consumed (semantic-force) class, or null
+ * for plain prose. `type` is acorn's `"Line"` | `"Block"`; `value` is the
+ * text without delimiters.
  *
  * @returns {string|null} the category name, or null when cosmetic
  */
@@ -126,16 +92,13 @@ export function classifySemanticComment(type, value) {
   if (/^@jsx(Runtime|ImportSource|Frag)?\b/.test(trimmed)) return "pragma";
   if (/^@vite-ignore\b/.test(trimmed)) return "pragma";
   if (/^webpack[A-Z]\w*\s*:/.test(trimmed)) return "pragma";
-  // Coverage directives: /* istanbul ignore next */, ignore if/else/file —
-  // consumed by Istanbul/nyc instrumentation; deleting or relocating one
-  // changes which code is exempt from coverage.
+  // Coverage directives: consumed by Istanbul/nyc; deleting or relocating
+  // one changes which code is exempt.
   if (/^istanbul\s+ignore\b/.test(trimmed)) return "coverage-directive";
-  // Lint directives: eslint-disable, eslint-disable-line,
-  // eslint-disable-next-line (and the paired eslint-enable, whose removal
-  // silently EXTENDS a disabled region) — consumed by ESLint.
+  // Lint directives (eslint-disable / enable / *-line / *-next-line).
+  // Removing eslint-enable silently extends a disabled region.
   if (/^eslint-(disable|enable)(-next-line|-line)?\b/.test(trimmed)) return "lint-directive";
-  // Format directives: prettier-ignore (and prettier-ignore-start/end) —
-  // consumed by Prettier; relocation changes which node is exempt.
+  // Format directives: prettier-ignore; relocation changes the exempt node.
   if (/^prettier-ignore\b/.test(trimmed)) return "format-directive";
   return null;
 }
@@ -161,28 +124,21 @@ function collectNodes(root) {
 }
 
 /**
- * Attaches each SEMANTIC comment to the canonical node it precedes: the
- * outermost node whose start is the smallest position >= the comment's end.
- * A trailing comment with no following node (e.g. a sourceMappingURL at
- * end-of-file) attaches to the Program as a trailing list. Attachment is
- * positional and deterministic, so relocating a comment to a different
- * expression/statement moves it to a different canonical node — a
+ * Attach each semantic comment to the canonical node it precedes: the
+ * outermost node whose start is the smallest position ≥ the comment's end.
+ * A trailing comment with no following node (e.g. sourceMappingURL at EOF)
+ * attaches to the Program. Relocating a comment to a different node is a
  * structural difference.
  *
- * ESLint-family directives additionally record their LINE-ADJACENCY to the
- * attached node: `eslint-disable-next-line` suppresses literally the next
- * source LINE, so a blank line opened between the directive and its target
- * changes what ESLint suppresses even though the comment text and the
- * nearest-node attachment are both unchanged. Of the two viable encodings —
- * (a) the exact line-delta between the directive and its target, or (b) a
- * boolean blank-line-adjacency bit — this records (a), the exact delta
- * (`targetLineDelta` = attached node's start line minus the directive's end
- * line), because the existing attachment loop already has both positions in
- * hand and the exact delta discriminates every relocation the boolean
- * would, plus multi-blank-line changes. The delta enters the canonical form
- * for lint directives ONLY: for the other directive families the consumer
- * targets the following NODE, not the following LINE, so pure line reflow
- * around them stays cosmetic as the contract requires.
+ * ESLint-family directives also record line-adjacency: `eslint-disable-next-line`
+ * suppresses the next source line, so a blank line between directive and
+ * target changes what ESLint suppresses even if nearest-node attachment is
+ * unchanged. Records exact `targetLineDelta` (attached start line minus
+ * directive end line), not a boolean adjacency bit — the exact delta
+ * discriminates every relocation the boolean would, plus multi-blank-line
+ * changes. Delta enters the canonical form for lint directives only; other
+ * families target the following node, so line reflow around them stays
+ * cosmetic.
  *
  * @returns {{ leading: WeakMap<object, object[]>, trailing: object[] }}
  */
@@ -240,8 +196,7 @@ function attachSemanticComments(ast) {
 export function canonicalize(ast) {
   const { leading, trailing } = attachSemanticComments(ast);
 
-  // Attaches the AST node's leading semantic comments to a canonical node
-  // built for it — shared by the generic walk and manually-built nodes.
+  // Attach the AST node's leading semantic comments to a canonical node.
   function withComments(astNode, out) {
     const comments = leading.get(astNode);
     if (comments !== undefined) out.semanticComments = comments;
@@ -255,27 +210,18 @@ export function canonicalize(ast) {
     let out;
     switch (node.type) {
       case "Literal":
-        // Quote-delimiter and escape spelling are cosmetic: compare the
-        // DECODED value only, never `raw`.
+        // Quote/escape spelling is cosmetic: compare decoded value, never `raw`.
         out = { type: "Literal", value: node.value, regex: node.regex, bigint: node.bigint };
         break;
       case "TemplateElement":
-        // Same rationale for ORDINARY (untagged) template literals: no
-        // receiver can observe `raw`, so only the decoded `cooked` value is
-        // structural and the escape spelling stays cosmetic. Elements of a
-        // TAGGED template never reach this case — they are canonicalized by
-        // the TaggedTemplateExpression case below, WITH `raw`.
+        // Untagged templates: no receiver observes `raw`; only cooked is
+        // structural. Tagged-template elements go through the case below.
         out = { type: "TemplateElement", tail: node.tail, cooked: node.value?.cooked };
         break;
       case "TaggedTemplateExpression": {
-        // TAGGED templates are different from ordinary ones: the tag
-        // function receives the raw spellings too (`strings.raw`), so a
-        // raw-only change (cooked value identical) is observable program
-        // input — String.raw`a\u0041b` returns the 8-char string
-        // "a\u0041b" while String.raw`aAb` returns "aAb", though both
-        // COOK to "aAb". `raw` enters the canonical form here ONLY.
-        // Expressions interpolated into the tagged template (including any
-        // nested untagged template inside them) canonicalize normally.
+        // Tagged templates: the tag receives `strings.raw`, so a raw-only
+        // change is observable (String.raw`a\u0041b` vs String.raw`aAb`
+        // cook identically). `raw` enters the canonical form here only.
         const quasi = node.quasi;
         out = {
           type: "TaggedTemplateExpression",
@@ -296,9 +242,8 @@ export function canonicalize(ast) {
         break;
       }
       case "ImportDeclaration": {
-        // Only the ORDER of the NAMED specifiers is canonicalized; every
-        // other field (source, attributes, each specifier's own content)
-        // goes through the ordinary walk untouched. See the header.
+        // Only named-specifier order is canonicalized; other fields walk
+        // untouched. See the header.
         out = {};
         for (const [key, value] of Object.entries(node)) {
           if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
@@ -321,18 +266,12 @@ export function canonicalize(ast) {
   }
 
   /**
-   * Canonical specifier list of ONE import declaration: any
-   * default/namespace specifier keeps its exact original slot (the
-   * ECMAScript grammar admits at most one of either and fixes it ahead of
-   * the named list, so this leading run is never permutable in valid
-   * source), and the named specifiers that follow are sorted into a
-   * deterministic order.
-   *
-   * The sort key is the specifier's FULL canonical content — imported name,
-   * local alias, and any attached semantic comments — so the sort is total
-   * and content-complete: a permutation yields an identical sorted list,
-   * while adding, removing, or changing ANY specifier changes the multiset
-   * and therefore the sorted list. Two specifiers are never merged.
+   * Canonical specifier list of one import declaration: default/namespace
+   * keep their original slot (grammar-fixed ahead of the named list);
+   * following named specifiers are sorted. Sort key is full canonical
+   * content (imported name, local alias, semantic comments) — a permutation
+   * yields an identical list; adding, removing, or changing a specifier
+   * changes the multiset. Two specifiers are never merged.
    */
   function canonicalImportSpecifiers(specifiers) {
     const leading = [];

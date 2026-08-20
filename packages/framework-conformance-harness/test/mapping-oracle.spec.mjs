@@ -311,9 +311,7 @@ describe("the oracle covers the whole committed corpus, every backend and target
   }
 });
 
-// ---------------------------------------------------------------------------
 // Axis wiring, and the defect this axis replaces.
-// ---------------------------------------------------------------------------
 
 describe("the mapping axis, end to end through the acceptance primitive", () => {
   it("a committed golden accepted as its own candidate RUNS the axis over real anchors", async () => {
@@ -407,7 +405,6 @@ describe("the mapping axis, end to end through the acceptance primitive", () => 
   });
 });
 
-// ---------------------------------------------------------------------------
 // Position binding and generated-only scaffolding, driven through the REAL
 // acceptance primitive.
 //
@@ -417,7 +414,6 @@ describe("the mapping axis, end to end through the acceptance primitive", () => 
 // received an empty range list at this boundary and therefore never ran on a
 // candidate at all. Each plant is asserted to change the map bytes before it
 // is submitted, so a plant that failed to apply cannot read as a pass.
-// ---------------------------------------------------------------------------
 
 const VUE_GOLDEN = "vue/basic-interpolation__vdom__map1__prod0";
 const SVELTE_GOLDEN = "svelte/basic-runes__client__runes1__dev0";
@@ -659,12 +655,10 @@ describe("position binding: a segment must name its authored POSITION, not merel
     expect(classify("disabled", 1, 2)).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
   // A1: the relation is position-exact because a PARSER says the brace opens a
   // binding pattern that binds this name — not because the word appears
   // somewhere inside a brace span. Every case below survived the previous
   // brace-scan implementation.
-  // -------------------------------------------------------------------------
 
   it("MUTATION: an ACCEPTING-but-WRONG sibling brace containing the same word is REJECTED", async () => {
     // The reviewer's exploit, end to end through the acceptance primitive:
@@ -837,13 +831,11 @@ describe("position binding: a segment must name its authored POSITION, not merel
   });
 });
 
-// ---------------------------------------------------------------------------
 // A2/A3: fabricated authored provenance over compiler scaffolding, in BOTH
 // frameworks. Every case below was ACCEPTED (`verdict: "pass"`, `reasons: []`)
 // before the generated-only rail was widened past its four original shapes,
 // and every one is driven through the real acceptance primitive with
 // `candidate.code === golden.code`, so only the mapping axis can fail.
-// ---------------------------------------------------------------------------
 
 /** Adds ONE fabricated source-bearing segment at a generated position. */
 async function fabricateSegmentAt(goldenName, genLine, genCol, srcLine, srcCol) {
@@ -1215,7 +1207,6 @@ describe("a segment's `names` entry is a claim about a symbol, and is checked as
   });
 });
 
-// ---------------------------------------------------------------------------
 // The no-inherited-provenance boundary, at the column BEFORE a scaffolding
 // statement.
 //
@@ -1229,7 +1220,6 @@ describe("a segment's `names` entry is a claim about a symbol, and is checked as
 // have. Statement-level ranges therefore keep the boundary requirement, and
 // only a range that begins MID-LINE — inside a larger, legitimately mapped
 // expression — is exempt.
-// ---------------------------------------------------------------------------
 
 describe("a fabricated segment ONE COLUMN LEFT of a scaffolding statement is REJECTED", () => {
   for (const [label, goldenName, where, token, srcLine, srcCol] of [

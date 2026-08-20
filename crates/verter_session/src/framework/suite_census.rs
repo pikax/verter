@@ -1,65 +1,30 @@
 //! Each documented suite invocation, proven to select a non-vacuous suite.
 //!
-//! `cargo test`'s filter is a plain substring, and these suites are gated —
-//! `#[cfg(test)]`, and one of them additionally on a cargo feature. So an
-//! invocation whose module is ABSENT (commented out, renamed, gated off, or
-//! deleted) reports `running 0 tests`, then `test result: ok`, then exit 0. A
-//! suite that reports success while executing nothing is a gate-bypass, so
-//! each documented filter must also select a test that FAILS in that case.
+//! Libtest's filter is a substring. These suites are gated (`#[cfg(test)]`,
+//! one also on a cargo feature), so an absent module reports
+//! `running 0 tests`, then `test result: ok`, then exit 0. That is a
+//! gate-bypass: each documented filter must also select a test that FAILS
+//! in that case. Read the `running N tests` line, never the exit code.
 //!
-//! Such a test cannot live inside the suite it protects — deleting the module
-//! would delete the check along with it. It lives here instead, and its name
-//! carries the suite's documented filter substring, so the filter still
-//! selects it once the suite module is gone.
+//! The check cannot live inside the suite it protects. Registration is
+//! mutual and compile-enforced: this module names each suite's witness
+//! test as an ITEM, and each suite calls [`covers`] from that test.
+//! Removing any one of the four `mod` declarations is a build error.
+//! Identity is the function item ([`witness_identity`]), not a string
+//! path a suite could hand over. The counted module is derived from that
+//! item, so a suite cannot clear its floor on a sibling's tests.
 //!
-//! That placement leaves the reverse hole: deleting this module too, in the
-//! same adjacent edit, would restore the vacuous green. The registration is
-//! therefore MUTUAL and compile-enforced rather than conventional — this module
-//! NAMES each suite's own witness test as an ITEM, and each suite calls
-//! [`covers`] from that same test. Removing any ONE of the four `mod`
-//! declarations is a build error, not a filter that quietly matches less.
-//!
-//! Each row is bound to the suite that OWNS it, not merely to a location, and
-//! not to a string that suite chose: the row names the witness test ITEM, the
-//! compiler answers with that item's own path ([`witness_identity`]), this
-//! module requires a test of exactly that path to exist in the listing, and the
-//! module it counts is DERIVED from it. A path a suite could hand over as a
-//! `&str` may name any module — including one that happens to define a
-//! same-named test — whereas a path written here has to RESOLVE, so a row can
-//! only ever count a module that really declares the item this file names.
-//! Location checks alone prove only a location class, so a suite emptied and
-//! repointed at another direct sibling with tests of its own would otherwise
-//! clear its floor on that sibling's tests.
-//!
-//! Removing all four `mod` declarations in ONE edit is not decidable from a
-//! module that goes with them, so the anchor is OUTSIDE this evidence suite
-//! altogether: `framework::script_facts`'s own test module consumes
-//! [`counts_tests_in`], which makes deleting this module a build error there
-//! too. That still does not close the general execution-attestation problem — a
-//! binary cannot attest to a universe it was never given — and no scanner is
-//! added here to pretend otherwise. Closing it needs an inventory derived
-//! OUTSIDE this binary and compared against what the binary reports, which is
-//! not something an in-binary check can supply.
-//!
-//! The count is INDEPENDENTLY DISCOVERED, never a hand-maintained list of
-//! expected test names: the census re-execs this same binary with
-//! `--list --format=terse` and counts the tests it reports under the suite's
-//! own module path. The listing must also contain the census test itself, so
-//! an empty, failed, or unparsed listing cannot read as a pass.
+//! Deleting all four `mod`s in one edit is anchored outside this suite:
+//! `framework::script_facts` consumes [`counts_tests_in`]. That does not
+//! close execution-attestation — a binary cannot attest a universe it
+//! was never given. Counts come from re-execing this binary with
+//! `--list --format=terse`; the listing must contain the census test
+//! itself so an empty/failed listing cannot read as a pass.
 
 use std::process::{Command, Stdio};
 
-/// The compiler's own name for the item `witness` refers to.
-///
-/// `F` is inferred as the referenced function's ITEM type — a distinct
-/// zero-sized type per function DEFINITION — so `type_name` answers with that
-/// definition's full path. This is what makes a census row an identity rather
-/// than a claim: the argument has to resolve to an item the named module really
-/// declares, and no module can hand over a path to a test it does not define.
-///
-/// The reference must never be coerced to a `fn()` POINTER on the way in, which
-/// is why this takes `&F` and not `fn()`: a pointer erases every function to the
-/// single type `fn()`, and with it the identity being measured.
+/// Compiler path of the item `witness` refers to. Takes `&F`, not `fn()`:
+/// a pointer erases every function to `fn()` and loses identity.
 pub(crate) fn witness_identity<F>(_witness: &F) -> &'static str {
     std::any::type_name::<F>()
 }
@@ -131,13 +96,8 @@ fn libtest_witness_path(raw_witness_path: &str) -> String {
     format!("{prefix}{test_name}")
 }
 
-/// The suite paths are USED as counting prefixes, so each must be a unique
-/// suite identity. Each one is DERIVED from the witness item its census row
-/// names, so without this a row whose witness sat in an ancestor module — the
-/// census's own parent, say — would count its siblings' tests, or the census's
-/// own, as its own and clear its floor while carrying nothing.
-///
-/// Each property is asserted separately so the failure names which one broke.
+/// Counting prefixes must be unique suite identities, derived from the
+/// witness item. An ancestor-module witness would steal siblings' tests.
 #[track_caller]
 fn assert_suite_paths_are_distinct_identities() {
     let census = census_module();
@@ -221,25 +181,13 @@ fn censused_witnesses() -> Vec<&'static str> {
 }
 
 /// Whether this census carries a test for the suite that owns `witness`.
-///
-/// Each suite asserts its own membership from INSIDE itself, passing a
-/// reference to its OWN witness test so the identity compared is the compiler's
-/// rather than either side's spelling of it. That call is what closes the second
-/// half of the mutual dependency: deleting this module breaks every suite's
-/// compile, exactly as deleting a suite breaks this one's.
+/// Mutual: deleting this module breaks every suite's compile.
 pub(crate) fn covers<F>(witness: &F) -> bool {
     censused_witnesses().contains(&witness_identity(witness))
 }
 
-/// Whether any census row's count would include tests declared in
-/// `raw_module_path` (a `module_path!()`).
-///
-/// A census row counts by module PREFIX, so a module that is a censused suite —
-/// or that sits inside one — has its tests counted toward that suite's floor.
-/// Modules outside this evidence suite consume this to assert the converse: that
-/// their own tests can never be borrowed to clear somebody else's floor. That
-/// consumption is also the anchor holding this module in the build from outside
-/// the set of `mod` declarations it censuses.
+/// Whether any census row would count tests in `raw_module_path`. Prefix
+/// match; outside modules use this as the compile-time anchor.
 pub(crate) fn counts_tests_in(raw_module_path: &str) -> bool {
     censused_witnesses().into_iter().any(|witness| {
         let counted = witness_module(witness);
@@ -247,11 +195,8 @@ pub(crate) fn counts_tests_in(raw_module_path: &str) -> bool {
     })
 }
 
-/// Every test this binary reports for ITSELF, by full path.
-///
-/// The child is given ONLY `--list --format=terse`. Passing along the parent's
-/// own arguments would let the caller's filter decide what the census can see,
-/// which is exactly the property being measured.
+/// Tests this binary reports for itself. Child gets only
+/// `--list --format=terse` — the parent's filter must not decide the census.
 fn listed_test_paths() -> Vec<String> {
     let exe = std::env::current_exe().expect("the running test binary has a path");
     let output = Command::new(&exe)

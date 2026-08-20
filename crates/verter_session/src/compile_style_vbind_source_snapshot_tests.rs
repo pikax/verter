@@ -63,13 +63,11 @@ fn ide_profile() -> CompileProfile {
     }
 }
 
-/// Drive the IDE identity's compile and report whether it was SERVED WARM.
+/// Drive the IDE-only compile and report whether it was served warm.
 ///
-/// These tests' subject is the published TSX. The identity asks for the IDE
-/// product only — it never asks for a runtime module — so the compile is driven
-/// through the IDE-ensure route, and the warm/cold fact is read from the slot
-/// predicate before the call rather than from a runtime response this identity
-/// does not produce.
+/// Subject is the published TSX. The identity asks for the IDE product
+/// only; warm/cold is read from the slot predicate, not a runtime
+/// response this identity does not produce.
 fn compile(host: &VerterHost) -> bool {
     let served_warm = host.compile_slot_is_warm(CANONICAL, &ide_profile());
     host.ensure_ide_compiled(CANONICAL, &ide_profile())

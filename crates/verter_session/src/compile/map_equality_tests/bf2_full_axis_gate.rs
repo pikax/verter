@@ -1,52 +1,18 @@
-//! The full-axis gate over the exact 36-cell BF2 Vue seed matrix.
+//! Full-axis gate over the same 36-cell Vue seed matrix.
 //!
-//! [`bf2_seed_matrix`](super::bf2_seed_matrix) proves the assembled
-//! code-plus-map RESULT exists, is well-formed, and matches an independent
-//! reference — and it deliberately does NOT gate on the oracle's non-wire
-//! mapping verdict, since that is a compiler-correctness question, not a
-//! composition/assembly one.
+//! [`bf2_seed_matrix`](super::bf2_seed_matrix) does not gate the oracle's
+//! non-wire mapping verdict. This module does: same locked manifest, same
+//! shipped compile, `check-candidate.mjs --authoritative` over the genuine
+//! production result. Every axis must `ran` (`runtime` may be
+//! `not-applicable` for VDOM-client — never `skipped`); overall verdict
+//! `"pass"`.
 //!
-//! This module is that correctness gate. Per cell, it:
-//!
-//! 1. reads the SAME locked manifest [`bf2_seed_matrix::read_seed_matrix`]
-//!    reads (no second hand-written digest-verification copy);
-//! 2. compiles the fixture through the SAME genuine shipped path
-//!    ([`bf2_seed_matrix::compile_cell`] / [`bf2_seed_matrix::assemble`]);
-//! 3. invokes the harness's accepted entry point
-//!    (`bin/check-candidate.mjs --authoritative`), unchanged, over the
-//!    genuine production result — never a harness-synthesized candidate map;
-//! 4. requires EVERY axis (`parse`, `link`, `structural`, `diagnostics`,
-//!    `mapping`, `runtime`) to report `ran` — `runtime` may instead report
-//!    `not-applicable` for a VDOM-client cell, which is a structural fact
-//!    about the artifact, not a skip — and NEVER `skipped`, which
-//!    `--authoritative` turns into a hard failure reason on the CLI's own
-//!    side, so this gate would already see it inside `reasons`; the `axes`
-//!    map is additionally asserted directly so a future harness change that
-//!    stopped surfacing that reason could not silently defeat this gate; and
-//! 5. requires the overall verdict to be `"pass"` — UNLIKE
-//!    [`bf2_seed_matrix`], the full mapping verdict (not just the wire
-//!    subset) is gated here, so every residual mapping violation across
-//!    script, VDOM, Vapor, and SSR paths must be zero for this gate to pass.
-//!
-//! Run it with
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! bf2_full_axis_gate -- --test-threads=1 --nocapture`. Like its sibling,
-//! exactly one test here drives the oracle CLI across all 36 cells
-//! sequentially — `--test-threads=1` keeps the harness's shared link/runtime
-//! scratch single-occupancy even if a later test joins the binary, and
-//! `--nocapture` is what surfaces the per-cell result table.
+//! bf2_full_axis_gate -- --test-threads=1 --nocapture`.
 //!
-//! ## Mutation-discrimination
-//!
-//! [`the_gate_detects_a_planted_defect_on_every_axis_family`] proves this is
-//! not a suite that passes regardless of correctness: it takes ONE genuine
-//! compiled-and-assembled cell per relevant axis family, applies a single
-//! reversible textual mutation to the exact bytes the CLI would otherwise
-//! receive, and requires `check-candidate.mjs` to report a `"fail"` verdict
-//! whose `reasons` name that axis. Every plant is proven to have applied
-//! (the mutated string differs from — and, for the `parse` case, is
-//! textually distinct from — the pristine one) before its verdict is
-//! trusted, and an unplanted control cell in the SAME run stays green.
+//! [`the_gate_detects_a_planted_defect_on_every_axis_family`] plants one
+//! reversible mutation per axis family and requires `"fail"` with that
+//! axis named. Plants are proven applied; an unplanted control stays green.
 
 use std::collections::BTreeMap;
 
@@ -186,9 +152,7 @@ pub(super) fn check_candidate(golden_name: &str, code: &str, map: Option<&str>) 
 /// (`not-applicable` on a VDOM-client artifact).
 const REQUIRED_AXES: &[&str] = &["parse", "link", "structural", "diagnostics", "mapping"];
 
-// ══════════════════════════════════════════════════════════════════════════
 // The gate
-// ══════════════════════════════════════════════════════════════════════════
 
 /// GATED, unlike [`bf2_seed_matrix`]: every axis genuinely runs (or is
 /// structurally `not-applicable`, never `skipped`) AND the full verdict is
@@ -276,9 +240,7 @@ fn full_axis_gate_passes_for_every_seed_matrix_cell() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Mutation-discrimination — the gate is not a stub
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The first cell whose fixture carries a `<script>` block AND requests a
 /// source map, so every axis (including a genuinely populated mapping axis)
@@ -322,7 +284,7 @@ fn the_gate_detects_a_planted_defect_on_every_axis_family() {
         control.reasons
     );
 
-    // ---- parse: corrupt the candidate into invalid JavaScript --------------
+    // parse: corrupt the candidate into invalid JavaScript
     let parse_mutant = format!("{pristine_code}\nconst )(( = ;;;");
     assert_ne!(parse_mutant, pristine_code, "the parse plant did not apply");
     let parse_report = check_candidate(&base_cell.golden_name, &parse_mutant, Some(&pristine_map));
@@ -490,7 +452,7 @@ fn the_gate_detects_a_planted_defect_on_every_axis_family() {
         "mapping plant must still show the mapping axis genuinely ran, not skipped"
     );
 
-    // ---- runtime: change rendered text content on an SSR cell --------------
+    // runtime: change rendered text content on an SSR cell
     // (SSR is the cheapest runtime-applicable backend to plant against — no
     // browser-shape jsdom mount is required, only the pinned server renderer.)
     let ssr_cell = scripted_ssr_cell(&cells, &base_cell.fixture);

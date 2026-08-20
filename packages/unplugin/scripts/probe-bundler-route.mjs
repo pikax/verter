@@ -1,17 +1,13 @@
 #!/usr/bin/env node
-// Executes the public Vue- and Svelte-pinned Vite and Rollup entries, including
-// any virtual-script load that carries the compiled product, and prints the
-// result as JSON for a Rust-side comparison against the in-process host route.
+// Drive the public Vue/Svelte Vite and Rollup entries (including any
+// virtual-script load that carries the compiled product) and print JSON
+// for Rust-side comparison against the in-process host.
 //
-// The plugin is loaded from its BUILT entry (`dist/index.mjs`). A committed
-// source/dist fingerprint makes that prerequisite fail closed when the ignored
-// dist is absent or was not built from the current production sources.
+// Loads the built entry (`dist/index.mjs`). A committed source/dist
+// fingerprint fails closed when dist is missing or stale.
 //
-// Usage: node scripts/probe-bundler-route.mjs
-// Exit codes: 0 = every lane this probe drives produced an observation;
-//             1 = the record was printed, but at least one lane ERRORED (its
-//                 labels are in `erroredCases`) — the run is not a success;
-//             2 = the built plugin is missing, stale, or unloadable.
+// Exit: 0 every lane observed, 1 record printed but a lane errored
+// (`erroredCases`), 2 plugin missing/stale/unloadable.
 
 import { createHash } from "node:crypto";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -458,7 +454,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
   }
 }
 
-// ── the non-Vite CSS scoping lane ──────────────────────────────────────────
+// the non-Vite CSS scoping lane
 //
 // A Rollup-shaped plugin (no resolved Vite config) routes a style sub-request
 // through the native `processStyle` rather than through `compileStyleAsync`.
@@ -516,7 +512,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
   }
 }
 
-// ── the pre-compile + cross-file recompile lane ────────────────────────────
+// the pre-compile + cross-file recompile lane
 //
 // `buildStart` is the only entry to it, and it needs real files on disk: a
 // production-shaped resolved config, `preCompile`, `crossFileOptimize`, and a
@@ -679,7 +675,7 @@ results.nativeEntry = nativeRequire.resolve("@verter/native").split(path.sep).jo
   }
 }
 
-// ── EVERY enumerated export, driven uniformly ──────────────────────────────
+// EVERY enumerated export, driven uniformly
 //
 // The case list below IS the export list: one generic driver, invoked once per
 // name in `results.exports`, reading the value back out of `module_` itself.

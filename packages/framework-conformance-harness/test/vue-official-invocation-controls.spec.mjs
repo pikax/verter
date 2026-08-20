@@ -198,7 +198,6 @@ describe("vapor backend — scriptless SFC synthesized-object marker", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // bindingMetadata ABSENCE for a script-less SFC. Official bundler tooling
 // passes `bindingMetadata: resolvedScript ? resolvedScript.bindings : void 0`
 // (@vitejs/plugin-vue@6.0.7, dist/index.mjs:229) — undefined, not an empty
@@ -208,7 +207,6 @@ describe("vapor backend — scriptless SFC synthesized-object marker", () => {
 // `if (options.bindingMetadata && !options.inline) args.push("$props",
 // "$setup", "$data", "$options")`), so an empty `{}` — truthy — emits a
 // 6-parameter render function official never emits for a script-less SFC.
-// ---------------------------------------------------------------------------
 
 const SCRIPT_BEARING_FIXTURE = JS_FIXTURE;
 
@@ -356,7 +354,6 @@ describe("script-less SFC — bindingMetadata is ABSENT at compileTemplate", () 
   });
 });
 
-// ---------------------------------------------------------------------------
 // transformAssetUrls — the official BUILD-mode resolution. Official bundler
 // tooling never leaves this option undefined: with no user-supplied option
 // and NO dev server — this harness's own posture, an offline non-dev-server
@@ -376,7 +373,6 @@ describe("script-less SFC — bindingMetadata is ABSENT at compileTemplate", () 
 // in the published set; the controls below therefore drive the harness
 // entry point (compileVueFixture) directly, so the divergence is caught at
 // the invocation rather than only once an asset-bearing fixture is authored.
-// ---------------------------------------------------------------------------
 
 const ABSOLUTE_ASSET_FIXTURE = `<template><img src="/logo.png"><img srcset="/a.png 1x, /b.png 2x"></template>
 `;
@@ -533,7 +529,6 @@ describe("ssr backend — templateOptions.ssr visibility at compileScript", () =
   });
 });
 
-// ---------------------------------------------------------------------------
 // Runtime interop — the BEHAVIORAL check. A structural comparison of a
 // candidate against a defective golden cannot catch a marker both sides
 // lost; mounting through the real pinned runtime can: vaporInteropPlugin
@@ -543,7 +538,6 @@ describe("ssr backend — templateOptions.ssr visibility at compileScript", () =
 // mis-renders through the VDOM path with runtime warnings. The mount
 // itself is the shared production primitive (src/execute-vue-vapor.mjs) —
 // the same one checkCandidate's vapor runtime axis drives.
-// ---------------------------------------------------------------------------
 
 afterAll(() => {
   cleanupScratch();

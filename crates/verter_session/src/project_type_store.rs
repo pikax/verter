@@ -113,13 +113,12 @@ pub struct AnalysisArtifactKey {
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
     pub whole_hash: Hash16,
-    /// Runtime-authoritative language under which this exact source was parsed.
+    /// Runtime-authoritative language this exact source was parsed under.
     ///
-    /// This is retained from the scheduler's [`crate::types::EffectiveFileState`]
-    /// for base artifacts. Overlay artifacts retain that same runtime override
-    /// when the canonical already exists, and classify by path only when the
-    /// overlay introduces a genuinely new canonical. Exact artifact writers
-    /// key from this row; they never reclassify the canonical path after parse.
+    /// From [`crate::types::EffectiveFileState`] for base artifacts.
+    /// Overlays keep that override when the canonical exists; path
+    /// classification is only for a new canonical. Exact writers key
+    /// from this row — they never reclassify after parse.
     pub file_language: verter_language::FileLanguage,
     /// Canonical imports / exports + shallow symbol inventory.
     pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,

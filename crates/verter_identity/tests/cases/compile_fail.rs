@@ -1,13 +1,6 @@
-//! Compile-fail proof that the identity types this crate lands are
-//! non-interchangeable, per `identity-encoding.md` §5 ("stable ID versus
-//! session handle misuse compile tests") and architecture.md §3.1
-//! ("Identity types are non-interchangeable").
-//!
-//! `trybuild` spawns a full `cargo build` per fixture; each fixture must
-//! fail to compile with a type-mismatch error (`E0308`), never for an
-//! unrelated reason (an unrelated failure — a missing import, a typo —
-//! would make this a vacuously-passing test, exactly the stub pattern
-//! `CLAUDE.md`'s Stub Prevention section forbids).
+//! Compile-fail: identity types are non-interchangeable (`E0308`).
+//! An unrelated fixture failure (missing import, typo) would pass
+//! vacuously — each fixture must fail on the type mismatch.
 
 #[test]
 fn identity_types_reject_cross_type_misuse() {

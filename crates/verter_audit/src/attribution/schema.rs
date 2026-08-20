@@ -211,46 +211,46 @@ macro_rules! declare_work_sites {
 }
 
 declare_work_sites! {
-    // ── normalization ────────────────────────────────────────────────
+    // normalization
     NormalizeCanonicalId    => "workspace.normalize_canonical_id",   Normalization, Bytes;
     CollapsePath            => "workspace.collapse_path",            Normalization, Bytes;
     NormalizeRelativeSpec   => "workspace.normalize_relative_specifier", Normalization, Calls;
     NormalizeUnion          => "session.normalize_union",            Normalization, Calls;
     NormalizeIntersection   => "session.normalize_intersection",     Normalization, Calls;
 
-    // ── hashing ──────────────────────────────────────────────────────
+    // hashing
     ContentHash             => "session.hash_16",                    Hashing, Bytes;
     SemanticHash            => "session.semantic_hash",              Hashing, Calls;
     CompileProfileHash      => "session.compile_profile_hash",       Hashing, Calls;
     ParseStableHash         => "session.parse_stable_hash",          Hashing, Calls;
     EnvHash                 => "workspace.env_hash",                 Hashing, Bytes;
 
-    // ── parsing ──────────────────────────────────────────────────────
+    // parsing
     CarrierParse            => "compiler.carrier_parse",             Parsing, Bytes;
     ScriptParse             => "session.oxc_script_parse",           Parsing, Bytes;
     EvalProgramParse        => "session.oxc_eval_program_parse",     Parsing, Bytes;
     RetainedSnapshotReuse   => "session.retained_snapshot_reuse",    Parsing, Calls;
     CompilerExpressionParse => "compiler.oxc_expression_parse",      Parsing, Bytes;
 
-    // ── preparation ──────────────────────────────────────────────────
+    // preparation
     IndexedReadyBuild       => "session.indexed_ready_build",        Preparation, Calls;
     ShallowStateBuild       => "session.shallow_file_state_build",   Preparation, Calls;
     EvalEnvBuild            => "session.eval_env_build",             Preparation, Calls;
     PreparedDeclBuild       => "session.prepared_decl_build",        Preparation, Calls;
     DeclBodyLower           => "session.decl_body_lower",            Preparation, Calls;
 
-    // ── planning ─────────────────────────────────────────────────────
+    // planning
     FrameworkPlanSurfaces   => "session.framework_plan_surfaces",    Planning, Items;
     SchedulerSubmitRequest  => "scheduler.submit_request",           Planning, Calls;
     SchedulerSubmitBatch    => "scheduler.submit_batch",             Planning, Items;
 
-    // ── projection ───────────────────────────────────────────────────
+    // projection
     PublishFieldTypes       => "session.publish_field_types",        Projection, Items;
     MacroMemberWalk         => "session.macro_member_walk",          Projection, Items;
     MaterializeStructure    => "session.materialize_structure",      Projection, Calls;
     GraphExportEncode       => "session.graph_export_encode",        Projection, Items;
 
-    // ── resolution ───────────────────────────────────────────────────
+    // resolution
     SemanticDispatch        => "session.semantic_dispatch",          Resolution, Calls;
     SemanticColdBuild       => "session.semantic_cold_build",        Resolution, Calls;
     SemanticWarmHit         => "session.semantic_warm_hit",          Resolution, Calls;
@@ -258,79 +258,79 @@ declare_work_sites! {
     ImportRouteResolve      => "session.import_route_resolve",       Resolution, Calls;
     FrontierResolve         => "session.external_frontier_resolve",  Resolution, Calls;
 
-    // ── relation ─────────────────────────────────────────────────────
+    // relation
     RelationDecide          => "session.relation_decide",            Relation, Calls;
 
-    // ── inference ────────────────────────────────────────────────────
+    // inference
     Instantiate             => "session.instantiate",                Inference, Calls;
     Substitute              => "session.substitute",                 Inference, Items;
     ConditionalReduce       => "session.conditional_reduce",         Inference, Calls;
 
-    // ── flow ─────────────────────────────────────────────────────────
+    // flow
     FlowGraphBuild          => "session.flow_graph_build",           Flow, Calls;
     FlowSliceCompute        => "session.flow_slice_compute",         Flow, Calls;
 
-    // ── css ──────────────────────────────────────────────────────────
+    // css
     CssParse                => "compiler.css_parse",                 Css, Bytes;
     CssTransform            => "compiler.css_transform",             Css, Calls;
     StyleAnalysis           => "compiler.style_analysis",            Css, Calls;
 
-    // ── rendering ────────────────────────────────────────────────────
+    // rendering
     CodeTransformRender     => "compiler.code_transform_render",     Rendering, Bytes;
     TemplateCodegenIde      => "compiler.template_codegen_ide",      Rendering, Calls;
     TemplateCodegenRuntime  => "compiler.template_codegen_runtime",  Rendering, Calls;
 
-    // ── mapping ──────────────────────────────────────────────────────
+    // mapping
     SourceMapBuild          => "compiler.source_map_build",          Mapping, Items;
 
-    // ── provenance ───────────────────────────────────────────────────
+    // provenance
     FactObserve             => "session.fact_observe",               Provenance, Items;
     ReadSetSignatureBuild   => "session.read_set_signature_build",   Provenance, Items;
     OriginEdgeRecord        => "session.origin_edge_record",         Provenance, Items;
 
-    // ── serialization ────────────────────────────────────────────────
+    // serialization
     TypeInfoGraphEncode     => "ffi.typeinfo_graph_encode",          Serialization, Bytes;
     AuditRecordEncode       => "napi.audit_record_encode",           Serialization, Bytes;
 
-    // ── ffi ──────────────────────────────────────────────────────────
+    // ffi
     NapiBoundaryCall        => "napi.boundary_call",                 Ffi, Calls;
     WasmBoundaryCall        => "wasm.boundary_call",                 Ffi, Calls;
 
-    // ── copying ──────────────────────────────────────────────────────
+    // copying
     SourceTextCopy          => "session.source_text_copy",           Copying, Bytes;
     AnalysisSnapshotCopy    => "session.analysis_snapshot_copy",     Copying, Calls;
     CacheCandidateCopy      => "session.cache_candidate_copy",       Copying, Calls;
 
-    // ── allocation ───────────────────────────────────────────────────
+    // allocation
     UnattributedAllocation  => "runtime.unattributed_allocation",    Allocation, Bytes;
 
-    // ── arena ────────────────────────────────────────────────────────
+    // arena
     ParseArenaUsed          => "session.parse_arena_used",           Arena, Bytes;
     ParseArenaCapacity      => "session.parse_arena_capacity",       Arena, Gauge;
 
-    // ── task ─────────────────────────────────────────────────────────
+    // task
     TaskExecute             => "scheduler.task_execute",             Task, Calls;
     TaskDedupJoin           => "scheduler.task_dedup_join",          Task, Calls;
     TaskWait                => "scheduler.task_wait",                Task, Nanoseconds;
 
-    // ── queue ────────────────────────────────────────────────────────
+    // queue
     QueueDepth              => "scheduler.queue_depth",              Queue, Gauge;
 
-    // ── admission ────────────────────────────────────────────────────
+    // admission
     CacheAdmitCacheable     => "session.cache_admit_cacheable",      Admission, Calls;
     CacheAdmitReturnOnly    => "session.cache_admit_return_only",    Admission, Calls;
 
-    // ── eviction ─────────────────────────────────────────────────────
+    // eviction
     FamilyCandidateEvict    => "session.family_candidate_evict",     Eviction, Calls;
 
-    // ── retention ────────────────────────────────────────────────────
+    // retention
     StoreRetainedBytes      => "session.store_retained_bytes",       Retention, Gauge;
 
-    // ── pinning ──────────────────────────────────────────────────────
+    // pinning
     ArtifactPinAcquire      => "session.artifact_pin_acquire",       Pinning, Calls;
     ArtifactPinRelease      => "session.artifact_pin_release",       Pinning, Calls;
 
-    // ── digest ───────────────────────────────────────────────────────
+    // digest
     ComponentMetaDigest     => "session.component_meta_digest",      Digest, Digest;
     CompiledOutputDigest    => "compiler.compiled_output_digest",    Digest, Digest;
 }
@@ -387,9 +387,7 @@ mod tests {
 
     #[test]
     fn every_declared_domain_has_at_least_one_site() {
-        // The domain list is the charter's measurement categories. A
-        // domain with no site is a category the baseline cannot explain,
-        // so it is a schema defect, not a gap to note later.
+        // A domain with no site cannot be explained by the baseline.
         const DOMAINS: &[WorkDomain] = &[
             WorkDomain::Normalization,
             WorkDomain::Hashing,

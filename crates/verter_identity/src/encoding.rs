@@ -1,7 +1,5 @@
-//! Canonical identity encoding — the tagged, length-delimited byte form every
-//! typed identity in this crate hashes through.
-//!
-//! Format, fixed by the identity-encoding contract §2:
+//! Tagged, length-delimited canonical encoding every typed identity hashes
+//! through (`identity-encoding.md` §2):
 //!
 //! ```text
 //! u32 domain_tag_length little-endian
@@ -13,17 +11,13 @@
 //!     payload
 //! ```
 //!
-//! The domain tag is baked into the header, so hashing the finished bytes is
-//! already domain-separated: two descriptors that differ only in domain tag
-//! (or in field tag/order) hash to different digests even when their payload
-//! bytes coincide. Collision-sensitive callers must not treat the digest as a
-//! substitute for full descriptor equality (identity-encoding.md §1) — the
-//! digest is an index, not the identity authority.
+//! The domain tag is in the header, so two descriptors that differ only in
+//! tag or field order hash differently even when payloads coincide. The
+//! digest is an index, not identity authority — collision-sensitive
+//! callers compare full canonical bytes.
 
-/// One canonical-encoding builder. Callers push fields **in schema order**
-/// (the contract's order requirement is the caller's obligation: this type
-/// does not reorder fields itself, because the correct order is a property
-/// of the owning descriptor's schema, not of the encoder).
+/// Canonical-encoding builder. Callers push fields in schema order; this
+/// type does not reorder them.
 #[derive(Debug, Default)]
 pub struct CanonicalEncoder {
     domain_tag: &'static str,
@@ -31,10 +25,7 @@ pub struct CanonicalEncoder {
 }
 
 impl CanonicalEncoder {
-    /// Starts a new canonical encoding under the given domain tag. The
-    /// domain tag is the compatibility-domain/schema namespace for the
-    /// descriptor being encoded (identity-encoding.md §1's "stable
-    /// namespace").
+    /// Start under `domain_tag` (the descriptor's stable namespace).
     pub fn new(domain_tag: &'static str) -> Self {
         Self {
             domain_tag,
@@ -42,10 +33,8 @@ impl CanonicalEncoder {
         }
     }
 
-    /// Appends one raw field. `tag` is the field's fixed schema tag (never
-    /// reused for a different meaning within one domain — a schema change
-    /// bumps the domain tag or the owning type's compatibility epoch
-    /// instead, per identity-encoding.md §2).
+    /// Append one raw field. Do not reuse `tag` for a different meaning
+    /// in the same domain — bump the domain tag or compatibility epoch.
     pub fn field_bytes(&mut self, tag: u16, payload: &[u8]) -> &mut Self {
         self.fields.push((tag, payload.to_vec()));
         self
@@ -61,24 +50,19 @@ impl CanonicalEncoder {
         self.field_bytes(tag, &value.to_le_bytes())
     }
 
-    /// A boolean field, encoded `0`/`1` per the contract (never a text
-    /// "true"/"false").
+    /// Boolean as `0`/`1`, never the text `"true"`/`"false"`.
     pub fn field_bool(&mut self, tag: u16, value: bool) -> &mut Self {
         self.field_bytes(tag, &[u8::from(value)])
     }
 
-    /// A UTF-8 string field. Exact bytes, no Unicode normalization
-    /// (identity-encoding.md §2 forbids implicit normalization — callers
-    /// that need normalized comparison normalize before calling this).
+    /// UTF-8 string, exact bytes, no Unicode normalization.
     pub fn field_str(&mut self, tag: u16, value: &str) -> &mut Self {
         self.field_bytes(tag, value.as_bytes())
     }
 
-    /// An explicit present/absent optional field: a one-byte presence tag
-    /// (`0` absent, `1` present) followed by the payload when present.
-    /// Required because a field simply omitted from the byte stream is
-    /// indistinguishable from a zero-length present value — the contract
-    /// requires an explicit tag.
+    /// Optional field: one-byte presence (`0`/`1`) plus payload when
+    /// present. Omitting the field is indistinguishable from a zero-length
+    /// present value, so the tag is required.
     pub fn field_option(&mut self, tag: u16, value: Option<&[u8]>) -> &mut Self {
         match value {
             None => self.field_bytes(tag, &[0u8]),
@@ -91,11 +75,8 @@ impl CanonicalEncoder {
         }
     }
 
-    /// A set field: canonical element byte-strings sorted before encoding,
-    /// so two sets that differ only in construction/iteration order encode
-    /// identically. Each element is length-delimited (`u64` LE length +
-    /// bytes) inside the field payload so elements cannot be confused by
-    /// concatenation ambiguity.
+    /// Set field: elements sorted, then each length-delimited (`u64` LE +
+    /// bytes) so concatenation cannot fuse neighbours.
     pub fn field_sorted_set<I, B>(&mut self, tag: u16, elements: I) -> &mut Self
     where
         I: IntoIterator<Item = B>,
@@ -112,10 +93,8 @@ impl CanonicalEncoder {
         self.field_bytes(tag, &payload)
     }
 
-    /// A map field: entries sorted by canonical key bytes. Duplicate
-    /// canonical keys are rejected (`None`) rather than silently
-    /// last-wins/first-wins — the contract requires rejection, not an
-    /// implicit merge policy.
+    /// Map field: entries sorted by key. Duplicate keys return `None`
+    /// (no last-wins merge).
     pub fn field_sorted_map<I, K, V>(&mut self, tag: u16, entries: I) -> Option<&mut Self>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -143,9 +122,8 @@ impl CanonicalEncoder {
         Some(self.field_bytes(tag, &payload))
     }
 
-    /// A fixed explicit enum discriminant field. Callers pass the type's
-    /// own assigned discriminant (never `core::mem::discriminant` or
-    /// declaration-order derived hashing, both forbidden by the contract).
+    /// Explicit assigned discriminant — not `mem::discriminant` or
+    /// declaration-order hashing.
     pub fn field_enum_discriminant(&mut self, tag: u16, discriminant: u32) -> &mut Self {
         self.field_u32(tag, discriminant)
     }
@@ -171,13 +149,9 @@ impl CanonicalEncoder {
     }
 }
 
-/// A domain-separated 256-bit digest over a [`CanonicalEncoder`]'s finished
-/// bytes. A digest is an index/fingerprint, never identity authority by
-/// itself (identity-encoding.md §1): collision-sensitive comparisons must
-/// retain, or fall back to, full canonical-byte equality rather than trust
-/// the digest alone. Every identity newtype in this crate stores its
-/// canonical bytes alongside the digest for exactly that reason — see
-/// [`crate::identity`].
+/// Domain-separated 256-bit digest of finished canonical bytes. An index,
+/// not identity authority: collision-sensitive comparisons use the full
+/// bytes. Identity newtypes retain both; see [`crate::identity`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalDigest([u8; 32]);
 
@@ -206,23 +180,17 @@ impl core::fmt::Debug for CanonicalDigest {
     }
 }
 
-/// A field/descriptor byte-encodes itself into a [`CanonicalEncoder`] under
-/// a fixed domain tag. Implementors are the OWNING type of whatever concept
-/// the identity represents (e.g. a future `SourceRevision` descriptor lives
-/// with its owning block, not here) — this crate supplies the encoding
-/// primitive and the identity newtype wrapper, never the domain fields
-/// themselves.
+/// Encode a descriptor into a [`CanonicalEncoder`] under a fixed domain
+/// tag. Implementors own the domain fields; this crate owns the encoding
+/// primitive and the identity wrapper.
 pub trait CanonicalEncode {
-    /// The fixed domain tag for this type's canonical encoding. Changing
-    /// this string is a new compatibility domain, per
-    /// identity-encoding.md §2 ("schema changes bump the compatibility
-    /// epoch or create a new domain").
+    /// Fixed domain tag. Changing it is a new compatibility domain.
     const DOMAIN_TAG: &'static str;
 
-    /// Pushes this value's fields, in schema order, into `encoder`.
+    /// Push fields in schema order.
     fn encode_fields(&self, encoder: &mut CanonicalEncoder);
 
-    /// Builds the full canonical encoding (domain tag + fields).
+    /// Domain tag + fields.
     fn canonical_encode(&self) -> CanonicalEncoder {
         let mut encoder = CanonicalEncoder::new(Self::DOMAIN_TAG);
         self.encode_fields(&mut encoder);
@@ -244,16 +212,11 @@ pub trait CanonicalEncode {
 mod tests {
     use super::*;
 
-    /// Pinned `blake3` digest (hex) of the canonical bytes asserted by
-    /// `golden_bytes_are_pinned`, reproduced with
-    /// `python3 -c "import blake3; print(blake3.blake3(<bytes>).hexdigest())"`
-    /// over the exact byte layout below (Python's `blake3` package is a
-    /// binding over the same Rust `blake3` crate this crate depends on).
+    /// Pinned blake3 hex of the golden layout in `golden_bytes_are_pinned`.
     const GOLDEN_EXAMPLE_DIGEST_HEX: &str =
         "91982d982d09531b56939bb74facbcb655f001d0b17b42162edd3c932b90109a";
 
-    /// A minimal two-field descriptor used to pin the exact byte layout —
-    /// the golden vector identity-encoding.md §5 requires.
+    /// Two-field descriptor pinning the §5 golden byte layout.
     struct GoldenExample {
         name: &'static str,
         count: u64,

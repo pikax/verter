@@ -1,70 +1,32 @@
 //! Host-backed parallel SFC compilation.
 //!
-//! Bundler/runtime output only. Returns the assembled Main virtual
-//! file (script + template render fn). IDE TSX and TSC type-extract
-//! batch surfaces are out of scope here; they would land as separate
-//! `ide_many` / `public_api_many` entry points.
+//! Bundler/runtime output only: assembled Main (script + template
+//! render). IDE TSX / TSC extract would be separate `ide_many` /
+//! `public_api_many` entries.
 //!
-//! ## Four-stage batch
+//! Four stages:
 //!
-//! 1. **Stage A — short-circuit empty input.** Empty input returns
-//!    immediately; no thread pool is constructed.
-//! 2. **Stage B — group + selective upsert.** Group by `canonical_id`.
-//!    Reject groups with conflicting source (every entry for that id
-//!    receives a duplicate-conflict error). For non-conflicting unique
-//!    groups, build the registration — the source plus the language
-//!    derived from the canonical id — and skip the upsert only when the
-//!    scheduler already holds that same registration (preserves the warm
-//!    `compile_slot` cache; a byte-identical relabel is still a change,
-//!    because the language row re-routes parse dispatch).
-//!    Submit the deduped per-canonical source updates as ONE atomic
-//!    batch through the shared upsert engine
-//!    [`VerterHost::upsert_many_with_priority`] (one
-//!    `Scheduler::submit_batch_atomic` + one `wait_batch`, with
-//!    per-canonical post-commit on the calling thread) at the
-//!    caller-configured priority.
-//! 3. **Stage C — compile each unique canonical group exactly once.**
-//!    Call [`VerterHost::get_virtual_file`] for `Main`. Per-input panic
-//!    isolation is owned by the host batch coordinator's generic catch
-//!    boundary (a codegen panic in one input becomes an error
-//!    `CompileBatchEntry` for that slot via `compile_panic_entry`,
-//!    leaving siblings intact). The cache-hit determination and mode
-//!    metadata come back on the response, decided at the single
-//!    classification site. Read/process-once invariant: same
-//!    canonical+profile is never compiled twice within one batch even
-//!    if the input list contains duplicates.
-//! 4. **Stage D — fan out.** For each original input position, look up
-//!    the result for that canonical and clone its `Arc<str>` payloads
-//!    (refcount-only, no string copy).
+//! 1. Empty input returns immediately.
+//! 2. Group by `canonical_id`. Conflicting source → duplicate-conflict
+//!    error. Otherwise register source plus language derived from the
+//!    id; skip upsert only when the scheduler already holds that
+//!    registration (a byte-identical relabel is still a change: the
+//!    language row re-routes parse dispatch). Submit as one
+//!    [`VerterHost::upsert_many_with_priority`] atomic batch. Stage B
+//!    does not fan out through the batch coordinator.
+//! 3. Compile each unique canonical+profile once via
+//!    [`VerterHost::get_virtual_file`] for `Main`. Panic isolation is
+//!    the coordinator catch boundary (`compile_panic_entry`). Stage C
+//!    alone fans out through
+//!    [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]
+//!    on the host-owned [`verter_scheduler::HostCpuPool`] (8 MiB stack;
+//!    no Rayon global 1 MiB Windows default).
+//! 4. Fan out `Arc<str>` clones to original input positions.
 //!
-//! Stage B is a single atomic submission on the calling thread: it does
-//! NOT fan out through the host batch coordinator. The deduped
-//! per-canonical source updates go to the scheduler as ONE
-//! `Scheduler::submit_batch_atomic`, followed by ONE `wait_batch`, with
-//! the per-canonical post-commit running on the calling thread. The
-//! scheduler's own CPU/IO pools execute the parse/analysis work; the
-//! caller thread only submits, waits, and commits.
-//!
-//! Stage C is the parallel stage, and it alone fans out through the host
-//! batch coordinator ([`VerterHost::batch_coordinator`] →
-//! [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]),
-//! the single host-side coordination rule shared with the component-meta
-//! batch path. The coordinator installs on the host-owned
-//! [`verter_scheduler::HostCpuPool`], built once at host construction
-//! with an 8 MiB worker stack so the stack guard applies to every code
-//! path (no fall-through to Rayon's global pool with its 1 MiB Windows
-//! default). `run_batch` is synchronous and the stages are sequential:
-//! Stage B fully completes before the Stage-C coordinator is even
-//! acquired.
-//!
-//! The coordinator pool's workers register as
-//! [`verter_scheduler::caller_kind::CallerKind::External`], so when a
-//! Stage-C compile worker blocks on a scheduler completion handle the
-//! host worker parks on the condvar rather than inline-executing
-//! scheduler CPU tasks. Running Stage C's waits on the coordinator pool
-//! (never the scheduler's stage pool) eliminates the deadlock class
-//! where a saturated scheduler CPU pool could starve `compile_many`'s
-//! compile/collect/order/finalise phase.
+//! Coordinator workers are
+//! [`verter_scheduler::caller_kind::CallerKind::External`]: a Stage-C
+//! wait parks rather than inline-executing scheduler CPU tasks, so a
+//! saturated scheduler pool cannot deadlock `compile_many`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -136,16 +98,10 @@ pub struct CompileBatchEntry {
 
 /// What one batch input's compile produced.
 ///
-/// A sum, not a product set beside an error list. [`Self::Produced`] has no
-/// error field; [`Self::Failed`] has no product field of ANY kind, and its
-/// errors are non-empty BY CONSTRUCTION — the only constructor rejects an empty
-/// list. So "a published product alongside a fatal error" and "a failure that
-/// reports nothing" are both unrepresentable rather than filtered out after the
-/// fact.
-///
-/// Which arm an entry takes is decided by the TYPED terminal result of the
-/// compile — an `Ok` response versus an `Err(HostError)` — never by
-/// severity-filtering a successful response's diagnostics.
+/// A sum: [`Self::Produced`] has no error field; [`Self::Failed`] has no
+/// product and a non-empty error list (the only constructor rejects
+/// empty). Arm is the typed terminal result (`Ok` vs `Err(HostError)`),
+/// never severity-filtering diagnostics.
 #[derive(Clone, Debug)]
 pub enum CompileBatchOutcome {
     /// Compiled. Carries the product, plus any NON-error diagnostics.
@@ -217,13 +173,10 @@ impl CompileBatchOutcome {
     }
 }
 
-/// Arm-by-arm READ projections of [`CompileBatchEntry::outcome`].
+/// Arm-by-arm read projections of [`CompileBatchEntry::outcome`].
 ///
-/// These are the same exhaustive flatten the FFI boundary performs, offered
-/// once so consumers do not each re-derive it. They are reads: the mixed state
-/// stays unconstructible, because there is no constructor here — a produced
-/// entry reports no errors and a failed entry reports no product, by the shape
-/// of the sum rather than by a filter.
+/// Same flatten the FFI boundary performs. Reads only: mixed state stays
+/// unconstructible.
 impl CompileBatchEntry {
     /// The compiled `Main` code; empty on a failure (which published none).
     #[must_use]
@@ -351,26 +304,16 @@ pub struct CompileBatchOptions {
     pub default_mode: Option<CompileCacheMode>,
 }
 
-/// The compile lane a [`VerterHost::compile_many`] batch runs under.
+/// Compile lane for [`VerterHost::compile_many`]. Always explicit —
+/// never inferred from node kind, file, or caller.
 ///
-/// The lane is ALWAYS explicit — it is never inferred from the node kind,
-/// the file, or the caller. One shared runtime substrate
-/// (`compile_bundle` + `assemble_vue_main_module`), two lanes:
+/// One shared substrate (`compile_bundle` + `assemble_vue_main_module`):
 ///
-/// - [`CompileManyTarget::HostBacked`] runs the full Stage-C session
-///   wrapper (`compile_entry`): cache-mode classification, the
-///   fact-observation tracer, warm-hit consult, and session/content
-///   publish. This is the path IDE / analysis / TSC / type-resolution
-///   consumers rely on. Its output is byte-for-byte unchanged.
-/// - [`CompileManyTarget::RuntimeRender`] runs a render-only lane that
-///   produces the SAME `Main` bytes through the SAME shared substrate but
-///   drops the per-file wrapper overhead (source re-clone, cache-mode
-///   classification, the unconditional dependency/semantic-axis sync, and
-///   the store-view/overlay/resolver-context construction on simple
-///   files). Cross-file-macro files still produce request-local semantic
-///   DTOs through the shared TypeInfo dispatch so their render output stays
-///   byte-identical. Authoritative macro-root failures retain the same typed
-///   fatal outcome; row-local runtime-type degradation may surface warnings.
+/// - [`CompileManyTarget::HostBacked`] — full `compile_entry` wrapper
+///   (cache-mode, fact tracer, warm-hit, publish). IDE / analysis path.
+/// - [`CompileManyTarget::RuntimeRender`] — same `Main` bytes without
+///   per-file wrapper overhead. Cross-file macros still go through
+///   TypeInfo dispatch. Authoritative macro-root failures stay fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
@@ -399,26 +342,14 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
     }
 }
 
-/// Build the batch-level base `CompileProfile` for the `RuntimeRender`
-/// lane from the REQUIRED [`CompileBatchRenderProfile`] carried on
-/// [`CompileManyTarget::RuntimeRender`]. Every output-affecting field is
-/// taken from it (reproducing the caller's build profile byte-for-byte
-/// against the HostBacked `get_virtual_file` path); there is no
-/// preset-substitution fallback — the lane is fail-closed by construction
-/// (the profile cannot be absent). `component_id` is per-input and set
-/// later, so it is left `None` here. The compile target stays the default
-/// bundler target (no TSX); the TSX-only knobs keep their defaults (which
-/// match the HostBacked path, whose profile also defaults them).
+/// Base `CompileProfile` for the RuntimeRender lane from the required
+/// [`CompileBatchRenderProfile`]. Fail-closed: no preset fallback.
+/// `component_id` is per-input (`None` here).
 ///
-/// Absent-field semantics mirror the FFI profile conversion
-/// (`ffi_profile_to_host`) field-for-field — `comments: None` stays `None`
-/// (the compiler default `!is_production`), an absent runtime module name
-/// keeps the `CompileProfile` default (`Some("vue")`). This is
-/// hash-load-bearing: the resulting profile must produce the SAME
-/// `compile_profile_hash` as the `CompileProfile` built from the same JS
-/// `HostCompileProfile`, because supplied block content admitted through
-/// `apply_block_overrides` is stored under that hash and the render lane
-/// consumes it through the same profile.
+/// Absent-field semantics match FFI (`ffi_profile_to_host`). Hash-
+/// load-bearing: the profile must hash identically to the
+/// `CompileProfile` from the same JS `HostCompileProfile`, because
+/// `apply_block_overrides` stores supplied content under that hash.
 fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),

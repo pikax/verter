@@ -1,25 +1,13 @@
-//! The carrier-compiler trait and its framework-neutral I/O vocabulary.
+//! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! [`CarrierCompiler`] is the compiler-side mirror of the session-side
-//! `FrameworkAdapterRegistry`: one trait every carrier framework
-//! implements, driving the four compiler-domain operations the host
-//! reaches per carrier file — parse, position-preserving eval-source
-//! blanking, IDE (TSX/JSX) codegen, and template-fact extraction. Vue is
-//! the reference implementation (`vue_bridge::VueCarrierCompiler`),
-//! delegating call-for-call to the existing Vue pipeline.
+//! One trait per carrier: parse, position-preserving eval-source
+//! blanking, IDE codegen, template-fact extraction. Vue is the
+//! reference (`vue_bridge::VueCarrierCompiler`). Script facts go
+//! through the host `ScriptFactProvider` seam — not this trait.
 //!
-//! The trait owns NO script-fact extraction surface: script facts for
-//! EVERY framework (carrier or not) flow through the one host-registered
-//! `ScriptFactProvider` seam in `verter_semantic`. A carrier compiler is
-//! parse / eval / IDE / template ONLY.
-//!
-//! Source maps stay token-precise: each adapter's IDE codegen owns its
-//! own [`crate::code_transform::CodeTransform`] (the single source of
-//! truth for generated-code edits) and returns the rendered
-//! [`IdeOutput`] it produced. The trait does NOT thread a borrowed
-//! `CodeTransform` — a shared one would be a SECOND, coarse map that is
-//! not the codegen authority, which would weaken the
-//! CodeTransform-single-source invariant rather than honour it.
+//! Each adapter's IDE codegen owns its own
+//! [`crate::code_transform::CodeTransform`]. The trait does not thread
+//! a borrowed transform (that would be a second, coarse map).
 
 use std::sync::Arc;
 

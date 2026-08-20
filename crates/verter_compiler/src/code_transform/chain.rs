@@ -1,16 +1,12 @@
-//! Re-expressing an existing source map through a transform's own chunk list.
+//! Re-express an existing source map through a transform's chunk list.
 //!
-//! [`CodeTransform::generate_map`] answers "where did my OUTPUT bytes come from
-//! in my INPUT text". [`CodeTransform::chain_source_map`] answers the composed
-//! question: given a map that already describes my input text in terms of some
-//! further-upstream authored source, what map describes my OUTPUT in terms of
-//! that same authored source?
+//! [`CodeTransform::generate_map`]: output bytes ← this transform's input.
+//! [`CodeTransform::chain_source_map`]: output bytes ← the authored source
+//! an upstream map already describes this input in terms of.
 //!
-//! Both walk the SAME chunk list and share the same
-//! [`advance_generated_position`] primitive, so the two cannot disagree about
-//! geometry. What differs is where the authored payload comes from: the
-//! upstream map's own segments, resolved through the accepted last-applicable
-//! lookup, rather than a position resolver over the transform's input.
+//! Both walk the same chunk list via [`advance_generated_position`].
+//! Authored payload comes from the upstream map's segments (last-
+//! applicable lookup), not a resolver over the transform's input.
 
 use std::borrow::Cow;
 
@@ -22,11 +18,9 @@ use super::source_map::advance_generated_position;
 
 /// A transform whose shape has no chaining semantics.
 ///
-/// Chaining is defined over a chunk list that partitions the input text into
-/// retained and replaced runs. A transform that also inserts, moves, or wraps
-/// content is not describable that way — the inserted bytes correspond to no
-/// input position, so no upstream segment can be carried through them. Such a
-/// transform is refused rather than approximated.
+/// Chaining needs a chunk list that partitions input into retained and
+/// replaced runs. Insert/move/wrap bytes have no input position, so no
+/// upstream segment can follow them. Refuse, do not approximate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceMapChainError {
     /// A chunk kind outside the retained/replaced partition (an insertion, a

@@ -21,7 +21,7 @@ use super::map_input::{
 use super::{assemble_vue_main_module, AssembleMapFailure};
 use crate::types::{CompileProfile, FileMeta};
 
-// ── Fixtures ───────────────────────────────────────────────────────────────
+// Fixtures
 
 fn descriptor(code: &str) -> RuntimeOutputDescriptor {
     RuntimeOutputDescriptor::generated(
@@ -263,9 +263,7 @@ fn expect_script_code(raw_map: &str) -> UncomposableCode {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Enumerated coverage vectors
-// ══════════════════════════════════════════════════════════════════════════
 
 /// V1 — rename token geometry, plus a TERMINAL removal, which therefore has no
 /// following-chunk segment.
@@ -354,15 +352,8 @@ fn vector_v3_coincident_segments_keep_wire_order() {
     );
 }
 
-/// V4 — tables are a stable append with NO deduplication even when both
-/// fragments declare identical spellings, and template indices shift by the
-/// append offset.
-///
-/// The vector's own stated sequence is INCOMPLETE relative to the composition
-/// rules: it lists three of the five segments, omitting both fragment-end
-/// boundary segments. Both fragments here are contributing maps whose final
-/// code ends with a newline, so the boundary rule fires for both — at (1,0) for
-/// the script and (3,0) for the template. This asserts the full five.
+/// V4 — stable append, no table dedup; template indices shift. The vector's
+/// stated sequence omits both fragment-end boundaries; this asserts all five.
 #[test]
 fn vector_v4_stable_append_with_boundary_segments() {
     let compiled = RuntimeCompileOutput {
@@ -537,9 +528,8 @@ fn vector_f3_absent_mappings() {
     );
 }
 
-/// F4 — an out-of-range VLQ quantity is rejected rather than silently wrapping
-/// to zero. The accepted decoders are lenient here: `"A"` and `"ggggggE"` both
-/// yield 0 because a 32-bit shift wraps. Only `"A"` is a conforming encoding.
+/// F4 — out-of-range VLQ is rejected, not wrapped to zero. `"A"` and
+/// `"ggggggE"` both yield 0 in lenient decoders; only `"A"` is conforming.
 #[test]
 fn vector_f4_vlq_out_of_range() {
     assert_eq!(
@@ -631,9 +621,7 @@ fn vector_f7_synthetic_script_is_not_a_missing_required_map() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Composition algebra
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The boundary segment fires for a contributing fragment whose final code ends
 /// with a newline, and it wins the lookup for every column of that line — so
@@ -664,16 +652,10 @@ fn a_trailing_empty_line_segment_is_shadowed_by_the_boundary_segment() {
     );
 }
 
-/// The boundary condition is "the fragment's final code ends with a newline",
-/// NOT "the end cursor column is zero". They disagree on an empty present
-/// fragment, which leaves the cursor at column 0 while its newline patch DOES
-/// fire — and there, firing would be destructive rather than merely redundant:
-/// the boundary would land on the same coordinate as the fragment's own carried
-/// segment and, being placed after it, would shadow a real authored position.
-///
-/// The case is constructible from the rewrites themselves: a script whose
-/// rename output consists of exactly one occurrence of the removal pattern
-/// rewrites to empty.
+/// Boundary condition is "final code ends with a newline", not "end cursor
+/// column is zero". They disagree on an empty present fragment: firing
+/// there would shadow a carried authored segment. Constructible: a script
+/// that rewrites to empty.
 #[test]
 fn an_empty_present_fragment_receives_no_boundary_segment() {
     let (code, artifact) = assemble_script_only(
@@ -1140,9 +1122,7 @@ fn provenance_is_tracked_but_never_serialized() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Fail-closed validation
-// ══════════════════════════════════════════════════════════════════════════
 
 /// A fragment that is both AUTHORED and PRESENT must carry a map. This is a
 /// distinct outcome from the eight uncomposable families, because a missing map

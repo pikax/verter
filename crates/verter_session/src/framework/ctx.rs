@@ -43,12 +43,8 @@ impl<'a> FrameworkAdapterCtx<'a> {
 
     /// The adapter's typed parse carrier for `canonical`, or `None`.
     ///
-    /// Returns `None` cleanly when the adapter has no carrier leg (a
-    /// carrier-less framework), when `canonical` carries no framework parse
-    /// artifact, or when the artifact's carrier is not a `T`. Drives the
-    /// parse-domain artifact materialization internally (ensure-loaded → read
-    /// the `framework_parse` slot → the leg's opener, then the typed
-    /// downcast) and hands back ONLY the typed carrier — never the neutral
+    /// `None` when there is no carrier leg, no parse artifact, or the
+    /// carrier is not a `T`. Hands back only the typed carrier — never
     /// `FrameworkParseArtifact`, never `IndexedReady`.
     pub fn carrier_for<T: CarrierParse>(&self, canonical: &str) -> Option<Arc<T>> {
         let leg = self.registration.carrier.as_ref()?;
@@ -137,8 +133,7 @@ mod tests {
         let host = VerterHost::new_standalone(crate::HostConfig::default());
         let registration = carrier_less_registration();
         let ctx = FrameworkAdapterCtx::new(&registration, &host);
-        // The carrier-less leg returns None BEFORE touching the host — no
-        // panic.
+        // Carrier-less: None before touching the host.
         assert!(ctx.carrier_for::<FixtureCarrier>("/whatever.vue").is_none());
     }
 

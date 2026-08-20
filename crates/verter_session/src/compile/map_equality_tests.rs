@@ -1,45 +1,18 @@
 //! Cross-implementation exact-equality harness.
 //!
-//! This module runs the production assembler ([`assemble_vue_main_module`]) and
-//! the independent JavaScript reference implementation
-//! (`packages/framework-conformance-harness/src/assembled-map-composition-reference.mjs`)
-//! over the SAME pre-assembly input and asserts they produce EXACTLY the same
-//! result: the same code bytes, the same decoded map artifact field for field
-//! and position for position — including the exact ORDERED segment sequence —
-//! and, for a rejected input, the same fail-closed outcome kind, family, code
-//! and fragment attribution.
+//! Runs [`assemble_vue_main_module`] and the independent JS reference
+//! (`assembled-map-composition-reference.mjs`) on the same input and
+//! asserts identical code bytes, decoded map (field- and position-exact,
+//! ordered segments), and fail-closed rejection identity.
 //!
-//! The two implementations were written independently from one frozen semantic
-//! specification (`packages/framework-conformance-harness/spec/assembled-map-composition-layer1.md`),
-//! not from each other. That independence is what makes an equality result
-//! evidence rather than two copies of one bug — so this harness deliberately
-//! adds NO semantics of its own. It bridges two input representations, runs both
-//! implementations, and compares. Where it appears to decide something, it is
-//! restating a rule the specification already fixed, and the section is cited.
+//! Implementations were written independently from
+//! `assembled-map-composition-layer1.md`, not from each other. This
+//! harness adds no semantics: it bridges representations and compares.
 //!
-//! ## The bridge
-//!
-//! The two implementations do not take the same input TYPE. Production reads
-//! [`RuntimeCompileOutput`] / [`FileMeta`] / [`CompileProfile`]; the reference
-//! reads the specification's `AssembleInput` DTO (§3.3), as JSON. [`AssembleInput`]
-//! below is that DTO, expressed once in Rust and projected BOTH ways:
-//!
-//! - [`AssembleInput::to_dto_json`] serializes it to the §3.3 JSON schema, which
-//!   the reference re-validates on arrival (exact field list, no extra and no
-//!   missing member), so a bridge that drifted from the schema fails loudly
-//!   rather than silently comparing something else.
-//! - [`AssembleInput::to_production_inputs`] builds the real production triple.
-//!   It constructs no second composition path: it fills the three input structs
-//!   and calls the same `assemble_vue_main_module` the host calls.
-//!
-//! ## The comparison
-//!
-//! Both sides' emitted artifacts are decoded through ONE reader — the same
-//! [`validate_and_decode`] a fragment's input map goes through — so what is
-//! compared is the artifact a consumer sees, not either implementation's
-//! in-memory form. Decoding the reference's artifact through the production
-//! validator also proves that artifact is itself a well-formed flat v3 map whose
-//! every coordinate lies inside the code it describes.
+//! [`AssembleInput`] is the spec DTO, projected both ways: JSON
+//! (re-validated on arrival) and production host structs (no second
+//! compose path). Both artifacts decode through the same
+//! [`validate_and_decode`].
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,9 +29,7 @@ use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily
 use super::{assemble_vue_main_module, AssembleMapFailure};
 use crate::types::{CompileProfile, FileMeta, HmrStrategy};
 
-// ══════════════════════════════════════════════════════════════════════════
 // The input DTO (§3.3)
-// ══════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
 struct ScriptFragment {
@@ -76,11 +47,9 @@ struct TemplateFragment {
     source_map: String,
 }
 
-/// The pre-assembly input DTO of §3.3: every input the assembler reads, and
-/// nothing else. In particular it carries no placement, offset, splice or
-/// cursor information — placement is DERIVED as each side writes (§6.3), never
-/// supplied, so neither implementation can pass while its write grammar and its
-/// map disagree.
+/// Pre-assembly input DTO of §3.3: every input the assembler reads, and
+/// nothing else. No placement/offset/splice/cursor — those are derived as
+/// each side writes (§6.3).
 #[derive(Debug, Clone)]
 struct AssembleInput {
     canonical_id: String,
@@ -179,10 +148,8 @@ impl AssembleInput {
         self
     }
 
-    /// §3.3 — the DTO's JSON transport encoding. The field list is exact: the
-    /// reference rejects an instance carrying an extra or missing member, so a
-    /// drift here surfaces as a loud malformed-input failure rather than a
-    /// quiet comparison of the wrong thing.
+    /// §3.3 JSON transport. Exact field list — extra or missing members fail
+    /// loudly in the reference.
     fn to_dto_json(&self) -> Value {
         json!({
             "canonicalId": self.canonical_id,
@@ -219,14 +186,9 @@ impl AssembleInput {
         })
     }
 
-    /// The same inputs, in the three structs production actually reads.
-    ///
-    /// Style and custom blocks are placeholders: the assembler reads only their
-    /// COUNT (`compiled.styles.len()` / `compiled.custom_blocks.len()`), while
-    /// the ids it emits come from `meta.style_langs` / `meta.custom_types`. The
-    /// two lengths can legitimately differ (§3.3 field note 1), which is why the
-    /// DTO carries both and why the placeholders' own contents can never reach
-    /// the output.
+    /// Same inputs as the production triple. Style/custom blocks are
+    /// placeholders: assembler reads COUNT; ids come from `meta`. Lengths
+    /// may differ (§3.3 note 1).
     fn to_production_inputs(&self) -> (RuntimeCompileOutput, FileMeta, CompileProfile) {
         let compiled = RuntimeCompileOutput {
             script: self.script.as_ref().map(|script| RuntimeScriptBlock {
@@ -288,14 +250,8 @@ impl AssembleInput {
 }
 
 impl AssembleInput {
-    /// Read the DTO back OUT of a real production triple.
-    ///
-    /// This is the direction the real-compile cases need: a genuine compiler
-    /// bundle is projected into the §3.3 DTO for the reference, while production
-    /// runs on the bundle itself. If the DTO omitted an input the assembler
-    /// actually reads, the two sides would then be composing different modules
-    /// and the comparison would fail — so these cases test the DTO's
-    /// completeness as well as the composition.
+    /// DTO from a real production triple. Tests DTO completeness as well as
+    /// composition: an omitted assembler input would compose different modules.
     fn from_production_inputs(
         canonical_id: &str,
         compiled: &RuntimeCompileOutput,
@@ -342,14 +298,10 @@ fn descriptor(code: &str) -> RuntimeOutputDescriptor {
     )
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The compared artifact (§7.1)
-// ══════════════════════════════════════════════════════════════════════════
 
-/// One decoded segment. The four authored fields are held separately rather
-/// than as one optional payload, so a side that emitted a partly-null authored
-/// group (a source index with a null line, say) is a mismatch rather than
-/// something a payload type could not express.
+/// One decoded segment. Authored fields are separate so a partly-null
+/// group is a mismatch, not inexpressible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComparedSegment {
     gen_line: u32,
@@ -360,19 +312,11 @@ struct ComparedSegment {
     name_idx: Option<u32>,
 }
 
-/// The decoded map artifact of §7.1 — every member whose value VARIES, by
-/// presence and by value, plus the ordered segment sequence.
-///
-/// `version`, `file`, `debugId` and unknown members are absent from this struct
-/// on purpose. §7.1 and §7.2 fix them absolutely — 3, absent, absent, none — so
-/// each is asserted PER SIDE in [`compared_artifact`] instead. That is strictly
-/// stronger than comparing them: an equality check passes when both sides are
-/// wrong in the same way, and dropping `file` is exactly the kind of rule two
-/// implementations could plausibly both get wrong by inheriting it.
-///
-/// `ignore_list` is the LOGICAL member of §7.1/§7.3. The JSON key each side
-/// wrote it under (`ignoreList` or `x_google_ignoreList`) is a serialization
-/// convention (§7.8) and is deliberately NOT compared.
+/// Decoded map of §7.1: members whose value varies, plus ordered segments.
+/// `version`/`file`/`debugId`/unknowns are asserted per side in
+/// [`compared_artifact`] (equality would pass if both sides were wrong the
+/// same way). `ignore_list` is the logical member; JSON spelling is not
+/// compared (§7.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComparedArtifact {
     source_root: Option<String>,
@@ -543,9 +487,7 @@ fn compared_artifact(side: &str, raw: &str, code: &str) -> ComparedArtifact {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The outcome, on both sides
-// ══════════════════════════════════════════════════════════════════════════
 
 /// What one implementation produced for one input: the §4.2 fail-closed kinds,
 /// or a composed module.
@@ -631,9 +573,7 @@ fn production_outcome(input: &AssembleInput) -> ComposeOutcome {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The reference, as a subprocess
-// ══════════════════════════════════════════════════════════════════════════
 
 fn driver_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -813,9 +753,7 @@ fn string_member(value: &Value, member: &str) -> String {
         .to_string()
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The assertion
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Run every case through BOTH implementations and assert exact equality.
 ///
@@ -856,9 +794,7 @@ fn assert_cross_implementation_equality(cases: &[(&str, AssembleInput)]) -> Vec<
     agreed
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Map fixtures
-// ══════════════════════════════════════════════════════════════════════════
 
 /// One INPUT segment: `(genLine, genCol, authored)`, the authored group being
 /// `(srcIdx, srcLine, srcCol, nameIdx)` and absent for a sourceless segment.
@@ -1019,9 +955,7 @@ fn map_of(segments: &[InSeg]) -> String {
     MapBuilder::new(&["Comp.vue"]).segments(segments).build()
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — the harness's own smoke test
-// ══════════════════════════════════════════════════════════════════════════
 
 /// One script fragment, one segment, maps on. If this cannot be made to agree,
 /// nothing below means anything.
@@ -1033,9 +967,7 @@ fn a_minimal_mapped_script_composes_identically_on_both_sides() {
     )]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — the enumerated coverage vectors
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Every composing seed vector, at the ASSEMBLED-module level.
 ///
@@ -1152,9 +1084,7 @@ fn the_synthetic_script_seed_vector_agrees_across_implementations() {
     )]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — the composition's own hard geometry
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The boundary-segment condition and the two topologies that separate it from
 /// the predicate it is easily confused with.
@@ -1519,9 +1449,7 @@ fn mapless_present_fragments_agree_across_implementations() {
     ]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — the assembler write grammar
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Every write-site axis that moves a fragment's placement or changes the
 /// module's bytes. Placement is DERIVED as each side writes, so a divergence in
@@ -1718,9 +1646,7 @@ fn write_grammar_axes_agree_across_implementations() {
     ]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — the fail-closed taxonomy
-// ══════════════════════════════════════════════════════════════════════════
 
 /// A raw map document written out member by member, for the shapes a JSON
 /// serializer cannot produce: a duplicate member, a number outside the
@@ -1747,7 +1673,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
     let bad_script = |raw: &str| AssembleInput::default().with_script(CODE, raw);
 
     let agreed = assert_cross_implementation_equality(&[
-        // ── U1 — malformed map JSON ───────────────────────────────────────
+        // U1 — malformed map JSON
         ("U1.1 map-bytes-not-json", bad_script("{ not json")),
         ("U1.2 map-root-not-object", bad_script("[]")),
         (
@@ -1810,7 +1736,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
                 r#""version":3,"sources":["\ud800"],"names":[],"mappings":"""#,
             )),
         ),
-        // ── U2 — version ──────────────────────────────────────────────────
+        // U2 — version
         (
             "U2.1 version-member-absent",
             bad_script(&raw_map(r#""sources":["a.vue"],"names":[],"mappings":"""#)),
@@ -1833,7 +1759,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
                 r#""version":2,"sources":["a.vue"],"names":[],"mappings":"""#,
             )),
         ),
-        // ── U3 — wire data ────────────────────────────────────────────────
+        // U3 — wire data
         (
             "U3.1 vlq-invalid-character",
             bad_script(
@@ -1858,7 +1784,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
             "U3.6 generated-column-accumulator-decreased",
             bad_script(&mappings_map("E,D")),
         ),
-        // ── U4 — table rows ───────────────────────────────────────────────
+        // U4 — table rows
         (
             "U4.1 source-row-not-a-string",
             bad_script(&raw_map(
@@ -1883,12 +1809,12 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
                 r#""version":3,"sources":["a.vue"],"names":[],"sourcesContent":["x","y"],"mappings":"""#,
             )),
         ),
-        // ── U5 — indexed map ──────────────────────────────────────────────
+        // U5 — indexed map
         (
             "U5.1 sections-member-present",
             bad_script(&raw_map(r#""version":3,"sections":[]"#)),
         ),
-        // ── U6 — dangling index ───────────────────────────────────────────
+        // U6 — dangling index
         (
             "U6.1 source-index-out-of-table",
             bad_script(&mappings_map("ACAA")),
@@ -1929,7 +1855,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
             "U7.3 generated-column-splits-a-surrogate-pair",
             AssembleInput::default().with_script("\u{1d400}\n", &mappings_map("C")),
         ),
-        // ── U8 — cross-fragment metadata ──────────────────────────────────
+        // U8 — cross-fragment metadata
         (
             // Two declared roots cannot both be represented. The conflict is
             // attributed to the LATER contributing map in fixed
@@ -1993,7 +1919,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
                         .build(),
                 ),
         ),
-        // ── The other fail-closed kind ────────────────────────────────────
+        // The other fail-closed kind
         (
             "missing-required-script-map",
             AssembleInput::default().with_script(CODE, ""),
@@ -2021,7 +1947,7 @@ fn every_fail_closed_outcome_agrees_across_implementations() {
                 input
             },
         ),
-        // ── Precedence between checks ─────────────────────────────────────
+        // Precedence between checks
         (
             // Version beats indexed-map: a `version: 2` map that ALSO carries
             // `sections` reports the version.
@@ -2224,9 +2150,7 @@ fn mappings_map(mappings: &str) -> String {
     .to_string()
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cases — genuine compiler output
-// ══════════════════════════════════════════════════════════════════════════
 
 /// One real compile: the canonical id, the neutral bundle the Vue carrier
 /// produced, the parse-derived file meta, and the assembly profile.
@@ -2670,9 +2594,7 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The comparator's own discrimination
-// ══════════════════════════════════════════════════════════════════════════
 //
 // Everything above compares two implementations and passes when they agree.
 // That is silent about the comparator itself: a [`ComparedArtifact`] that
@@ -3061,23 +2983,12 @@ fn the_chained_script_map_carries_both_rewrite_passes_in_sequence() {
     );
 }
 
-/// The layer-2 vector-inventory reproduction — production runs every one of
-/// the frozen suite's 70 entries against its own `expected`, count asserted
-/// against the suite's own length. A CHILD module for the same reason as
-/// `bf2_seed_matrix` below: it reads this harness's own bridge instead of
-/// growing a second DTO projection. Ungated — it needs only the checked-in
-/// vectors file, no provisioned oracle or JavaScript subprocess.
+/// Layer-2 vector inventory: every frozen entry against its `expected`.
+/// Child of this harness (no second DTO). Ungated.
 mod vector_inventory;
 
-/// The BF2-backed seed matrix. A CHILD module so it reads this harness's own
-/// bridge (the input DTO, the artifact decoder, the reference subprocess, the
-/// real-fixture compile) rather than growing a second copy of any of them; a
-/// second DTO projection is exactly the common-mode error the independent
-/// reference exists to rule out.
-///
-/// Gated: unlike the rest of this file it also drives the conformance harness's
-/// authored-source oracle, which needs a provisioned oracle install that a
-/// fresh checkout does not have.
+/// BF2 seed matrix. Child of this harness (no second DTO). Gated: needs
+/// the provisioned oracle install.
 #[cfg(feature = "bf2-authoritative")]
 mod bf2_seed_matrix;
 
@@ -3088,29 +2999,13 @@ mod bf2_seed_matrix;
 #[cfg(feature = "bf2-authoritative")]
 mod bf2_full_axis_gate;
 
-/// Genuine runtime-execution proof that a nested `v-for`/`v-if`/`v-for`
-/// whose inner source references an outer loop variable mounts without a
-/// scope error: mounts the compiled module through the pinned official
-/// with-vapor runtime instead of only string-matching the generated text.
-/// A CHILD module for the same reuse reason as its siblings above (the
-/// real-fixture compile + assembler bridge), reusing `bf2_seed_matrix`'s
-/// subprocess runner. Gated the same way: it needs the provisioned oracle
-/// vapor runtime build.
+/// Nested `v-for`/`v-if` runtime mount through pinned with-vapor, not a
+/// string match. Child of this harness. Gated.
 #[cfg(feature = "bf2-authoritative")]
 mod nested_v_for_runtime_proof;
 
-/// The committed Svelte golden inventory, plus the genuine shipped `.svelte`
-/// compile route that produces a candidate for it. A CHILD module for the
-/// same reuse reason as its siblings: it reads the SAME committed manifest
-/// through the SAME digest-verification and subprocess plumbing rather than
-/// growing a second copy of either.
-///
-/// Gated on the same feature: it drives the same conformance harness CLI,
-/// which needs Node plus the harness's provisioned, gitignored oracle install.
-/// A sibling feature would have to either duplicate that plumbing — the exact
-/// common-mode error the shared reader exists to prevent — or widen the
-/// existing module's `cfg` to an `any(..)`, which makes that feature's meaning
-/// less precise for no gain.
+/// Svelte golden inventory + shipped `.svelte` route. Same manifest and
+/// digest helpers. Gated (oracle install).
 #[cfg(feature = "bf2-authoritative")]
 mod svelte_official_conformance_matrix;
 

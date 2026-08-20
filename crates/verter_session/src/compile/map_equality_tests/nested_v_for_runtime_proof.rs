@@ -1,32 +1,11 @@
-//! Genuine runtime-execution proof that nested `v-for`/`v-if` structural
-//! directives — a source-rewrite regression across `v-for`/`v-if`/`v-for`,
-//! and a flush-ordering regression across nested/sibling `v-if` chains —
-//! neither throw nor silently drop content.
+//! Runtime proof that nested `v-for`/`v-if` neither throw nor drop content.
+//! A `contains()` check cannot see whether a reference sits inside its
+//! scope, or notice a dropped `_createIf`. Compiles through the real
+//! Vapor pipeline and mounts via the pinned with-vapor runtime in jsdom.
+//! Eager `_createIf` during `render()` means an empty `items` still
+//! throws on a misplaced closure.
 //!
-//! A `contains()` check on the generated string cannot see WHERE a matched
-//! substring sits relative to the scope that defines it — a raw
-//! `_for_item0.value.tags` reference is byte-identical whether it sits
-//! inside `(_for_item0) => { ... }` (correct) or immediately outside it (a
-//! `ReferenceError`) — and it cannot see an ABSENT construct at all: a
-//! dropped inner `_createIf` leaves the string simply shorter, which no
-//! substring check flags. This module compiles the exact fixture through
-//! the real Vapor pipeline, assembles a full importable module, and MOUNTS
-//! it through the pinned official with-vapor runtime in jsdom — the same
-//! mechanism `packages/framework-conformance-harness/src/execute-vue-vapor.mjs`
-//! provides for the BF2 runtime axis — so a scope defect fails as an actual
-//! thrown error and a dropped construct fails as missing rendered content,
-//! neither just a string match.
-//!
-//! A `<div>` root's own `_createFor`/`_createIf` is invoked EAGERLY during
-//! `render()` regardless of whether the outer loop's own list is empty: a
-//! misplaced `() => (_for_item0.value.show)` closure throws the moment
-//! `_createIf` calls it to decide the initial branch, before any item is
-//! ever iterated — so this proof does not depend on `items` being
-//! non-empty to be meaningful.
-//!
-//! Gated behind `bf2-authoritative` like its siblings: it needs the same
-//! provisioned oracle install (`ensureOracleDomain("vue")`) that a fresh
-//! checkout does not have.
+//! Behind `bf2-authoritative` (needs the provisioned oracle install).
 
 use std::path::Path;
 use std::process::Command;
@@ -101,18 +80,10 @@ fn harness_root() -> std::path::PathBuf {
 /// thrown error's message when `!ok`, else the mounted container's
 /// `innerHTML`.
 fn execute_through_official_vapor_runtime(module_code: &str) -> (bool, String) {
-    // `run_bounded` always sets the child's stdin to `Stdio::null()` (its
-    // sibling callers never need to feed a child anything), so the module
-    // code is handed over via a temp file path argument instead of a pipe.
-    //
-    // The path must be unique per CALL, not merely per process: this
-    // module's own tests all run inside the SAME `verter_session --lib`
-    // test binary, so under ordinary multi-threaded test execution several
-    // of them mount concurrently — a PID-only name collides across all of
-    // them, and whichever call's `Drop`/cleanup runs first deletes the file
-    // out from under a still-reading sibling (`ENOENT`) or silently swaps
-    // in another call's module code. Same fix as `TempCandidate::write` in
-    // `bf2_seed_matrix.rs`: PID plus a per-process monotonic counter.
+    // stdin is `Stdio::null()`, so the module is a temp file. Path must be
+    // unique per CALL (same `--lib` binary, concurrent mounts): a PID-only
+    // name collides; first Drop deletes the sibling's file. Same as
+    // `TempCandidate::write`: PID plus a monotonic counter.
     static CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp = std::env::temp_dir().join(format!(
         "verter-nested-vfor-runtime-proof-{}-{}.vue.mjs",
@@ -200,18 +171,10 @@ fn nested_v_for_source_rewrite_module_mounts_without_reference_error() {
     );
 }
 
-/// The primary regression shape for the flush-gate fix: a `v-if` element
-/// (`<section v-if="outer">`) that is ITSELF the recorded DOM parent of a
-/// DIFFERENT, deeper pending `v-if` chain (`<p v-if="inner">`, its only
-/// child). Before the fix, `leave_element`'s early-flush gate skipped this
-/// case because it tested `el.v_condition.is_none()` — true only for a
-/// PLAIN parent — so a `v-if` parent's own state popped before the child
-/// chain flushed, and `merge_into_stack_index` silently no-op'd against the
-/// now-stale index: the inner `_createIf` and its `<p>` were dropped from
-/// the generated module entirely, with no error. Expected HTML below is
-/// confirmed byte-identical to the pinned rc.3 compiler's own mount of the
-/// same fixture (reactive `ref` bindings — a literal `const` binding
-/// triggers an unrelated ONCE-optimization that changes the skeleton).
+/// `v-if` parent of a deeper pending `v-if` chain. Early-flush used to skip
+/// because it tested `el.v_condition.is_none()` (plain parents only),
+/// dropping the inner `_createIf`. Expected HTML matches pinned rc.3
+/// (reactive `ref` — a `const` triggers an unrelated ONCE opt).
 #[test]
 fn v_if_nested_in_v_if_mounts_and_renders_inner_content() {
     let source = "<template><div><section v-if=\"outer\"><p v-if=\"inner\">x</p></section></div></template>\
@@ -234,12 +197,7 @@ fn v_if_nested_in_v_if_mounts_and_renders_inner_content() {
     );
 }
 
-/// THREE v-if elements nested in a row (`section > article > p`, each
-/// carrying its own `v-if`): every intermediate element must flush its
-/// deeper child's chain via the SAME index comparison, back to back. A
-/// two-level chain alone cannot show the gate re-triggering correctly at
-/// consecutive levels — this is the direct adversarial generalization
-/// check. Confirmed byte-identical to the pinned rc.3 compiler's own mount.
+/// Three nested `v-if`s: consecutive flush-gate retrigger. Matches pinned rc.3.
 #[test]
 fn triple_nested_v_if_mounts_and_renders_deepest_content() {
     let source = "<template><div><section v-if=\"a\"><article v-if=\"b\"><p v-if=\"c\">deep</p></article></section></div></template>\
@@ -262,14 +220,8 @@ fn triple_nested_v_if_mounts_and_renders_deepest_content() {
     );
 }
 
-/// A generalization one level further than [`v_if_nested_in_v_if_mounts_and_renders_inner_content`]:
-/// `v-for > v-if > v-if > v-for`, where the flush-gate must fire for BOTH
-/// conditional parents (`<p v-if="item.show">` flushing the `<section
-/// v-if="item.deep">` chain, and — via the `v-for`-own merge path (a
-/// separate, direct merge that never goes through `pending_vif_chain` at
-/// all) — the outer `<li v-for>` flushing the `<p>` chain) without dropping
-/// the innermost `v-for`'s own content either. Expected HTML confirmed
-/// byte-identical to the pinned rc.3 compiler.
+/// `v-for > v-if > v-if > v-for`: flush-gate on both conditional parents
+/// plus the `v-for` merge path. Matches pinned rc.3.
 #[test]
 fn v_for_v_if_v_if_v_for_mounts_and_renders_innermost_content() {
     let source = "<template><div><li v-for=\"item in items\"><p v-if=\"item.show\">\
@@ -292,12 +244,8 @@ fn v_for_v_if_v_if_v_for_mounts_and_renders_innermost_content() {
     );
 }
 
-/// A `v-if` chain PRECEDED by an unrelated, already-flushed independent
-/// `v-if` chain as its sibling — the case `handle_v_if_chain`'s own `If`
-/// arm safety-net flush (not the `leave_element` top-of-function gate this
-/// fix changed) must still cover: two SEPARATE single-branch `v-if`
-/// elements sharing one parent, neither continuing the other's chain.
-/// Confirmed byte-identical to the pinned rc.3 compiler's own mount.
+/// Sibling `v-if` chains sharing a parent: safety-net flush, not the
+/// `leave_element` gate. Matches pinned rc.3.
 #[test]
 fn independent_sibling_v_if_chains_both_mount_correctly() {
     let source = "<template><div><p v-if=\"a\">A</p><span v-if=\"b\">B</span></div></template>\
@@ -315,12 +263,8 @@ fn independent_sibling_v_if_chains_both_mount_correctly() {
     );
 }
 
-/// `v-if` flushed by a NON-IMMEDIATE later ancestor: the chain's own
-/// structural parent (`<li>`) has a later PLAIN sibling (`<footer>`) that
-/// leaves before `<li>` itself does. The chain must stay pending across
-/// that plain sibling's own `leave_element` (its own index never matches
-/// the chain's recorded `target_stack_index`) and flush only once `<li>`
-/// itself is reached. Confirmed byte-identical to the pinned rc.3 compiler.
+/// `v-if` flushed by a later ancestor, not a plain sibling that leaves
+/// first. Matches pinned rc.3.
 #[test]
 fn v_if_flushed_by_later_plain_sibling_of_a_non_immediate_ancestor_mounts_correctly() {
     let source =
@@ -339,24 +283,10 @@ fn v_if_flushed_by_later_plain_sibling_of_a_non_immediate_ancestor_mounts_correc
     );
 }
 
-/// **Known, confirmed, standing limitation, structurally distinct from the
-/// flush-gate class this module's other tests cover.** `<template v-if>` is
-/// a virtual/fragment wrapper with no real DOM node in every official form
-/// (`v-slot`, `v-if`, `v-for`, bare); only `<template v-slot>` is currently
-/// treated that way in `enter_element`'s `builds_open_tag` — a `<template
-/// v-if>` still gets its own literal `_template("<template>")` hoist and
-/// `_setInsertionState` call. Because a real `<template>` DOM element's
-/// children live in `.content` (a detached `DocumentFragment`, invisible to
-/// `innerHTML`), the inner `_createIf`'s content is inserted somewhere
-/// structurally inert — reproduced here as a genuine runtime mount, not a
-/// `contains()` guess. The two `_createIf` calls ARE both present and
-/// correctly nested in the generated module (confirmed independently) —
-/// this is purely the transparent-wrapper root-element question, not a
-/// flush-ordering defect. Closing it requires `build_closure_body`/the v-if
-/// branch root-element machinery to recognize a `<template>`-wrapped branch
-/// body as OWNING NO template of its own, forwarding its single child's
-/// construct directly — a materially larger change than a flush-gate
-/// correction. Tracked as confirmed follow-up work, not silently dropped.
+/// Known limitation, not the flush-gate class: `<template v-if>` is not a
+/// transparent wrapper (`builds_open_tag` only special-cases `v-slot`).
+/// Children land in `.content` (invisible to `innerHTML`). Both
+/// `_createIf`s are present and nested. Tracked follow-up.
 #[test]
 #[ignore = "confirmed separate defect: <template v-if> is not a transparent \
             root element in Vapor codegen (needs build_closure_body support \
