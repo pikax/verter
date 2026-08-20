@@ -130,7 +130,7 @@ export class OracleCacheUnprovisionedError extends Error {
 
 /**
  * Realization is offline-only, fail-closed. The provisioned local cache is
- * the sole package source (`scripts/provision-oracle-npm-cache.mjs` is the
+ * the sole package source (`packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs` is the
  * one sanctioned network step). Missing cache refuses with an actionable
  * error — no networked `npm ci`, no opt-in network mode.
  */
@@ -138,7 +138,7 @@ function npmInstallArgs() {
   if (!existsSync(ORACLE_NPM_CACHE_ROOT)) {
     throw new OracleCacheUnprovisionedError(
       `oracle npm cache not provisioned at ${ORACLE_NPM_CACHE_ROOT} — run ` +
-        "`node scripts/provision-oracle-npm-cache.mjs` first; oracle realization is " +
+        "`node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs` first; oracle realization is " +
         "offline-only and never falls back to a networked install",
       { cacheRoot: ORACLE_NPM_CACHE_ROOT },
     );

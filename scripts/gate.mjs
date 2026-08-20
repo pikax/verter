@@ -181,7 +181,7 @@
 //   the tests that compare Verter's Svelte output against the pinned official `svelte@5.56.8` oracle.
 //   Those tests realize their Vue/Svelte oracles OFFLINE from a gitignored local npm cache
 //   (`.oracle-npm-cache`, warmed from the network ONLY by the explicit, never-automatic
-//   `node scripts/provision-oracle-npm-cache.mjs`). A fresh checkout has no cache, and the harness does
+//   `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`). A fresh checkout has no cache, and the harness does
 //   NOT fail loudly when it cannot realize an oracle: it records the affected axis as skipped and keeps
 //   comparing every other axis — an environment absence that reads as a compiled-output divergence.
 //   Same shape as the build-prerequisite preflight: a REAL LOAD, not a stat. The probe calls the SAME
@@ -1336,7 +1336,7 @@ async function runGate(opts, ctx) {
   // tests, including the ENTIRE `svelte_official_conformance_gate` suite: the tests that actually compare
   // Verter's Svelte output against the pinned official `svelte@5.56.8` oracle. Those tests realize their
   // Vue/Svelte oracles OFFLINE from a gitignored local npm cache (`.oracle-npm-cache`, warmed from the
-  // network ONLY by the explicit `node scripts/provision-oracle-npm-cache.mjs`, never by this gate). An
+  // network ONLY by the explicit `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, never by this gate). An
   // absent or unusable cache does not make those tests fail loudly on their own: the harness records the
   // affected axis as skipped and keeps comparing every other axis, so a missing cache reads as compiled-
   // output DIVERGENCES, not as a setup problem.
