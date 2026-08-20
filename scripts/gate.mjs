@@ -1659,6 +1659,12 @@ async function runGate(opts, ctx) {
   if (failures.length > 0) {
     err(`VERDICT: FAIL — ${failures.length} non-tolerated failure(s):`);
     for (const f of failures.slice(0, 50)) err(`  [${f.surface}] ${f.name}`);
+    // Do NOT re-run the gate on any other branch to decide whether this pre-existed — the working branch's
+    // gate is green by invariant, never by comparison. Triage each named failure in isolation instead:
+    err(
+      "next step: triage each named failure in isolation (never re-run the full gate to compare) — " +
+        "node scripts/triage-gate-failure.mjs --log <this captured output>",
+    );
     return EXIT_FAIL;
   }
   if (toleratedOccurred) {
