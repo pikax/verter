@@ -15,8 +15,12 @@
 //! projection.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! bf2_seed_matrix -- --test-threads=1 --nocapture`. One cell at a time;
-//! `--test-threads=1` keeps harness scratch single-occupancy.
+//! bf2_seed_matrix -- --test-threads=1 --nocapture` runs one cell at a
+//! time for readable `--nocapture` output; each cell's `node
+//! bin/check-candidate.mjs` child process gets its own scratch
+//! subdirectory (`packages/framework-conformance-harness/src/compare.mjs`),
+//! so concurrent runs are safe and `--test-threads=1` is a readability
+//! choice here, not a correctness requirement.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

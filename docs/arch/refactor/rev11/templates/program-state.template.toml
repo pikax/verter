@@ -48,6 +48,19 @@ evidence_root = "REQUIRED_REPOSITORY_RELATIVE_PATH"
 # accepted_sha/tree = actual landed commit and full repository tree; they may differ
 # from the reviewed candidate after a base advance. landing_equivalence_digest binds
 # both base/candidate/accepted identities and exact candidate-delta/post-landing proof.
+# conformance_reviewed_sha/architecture_reviewed_sha/adversarial_reviewed_sha = the
+# exact candidate_sha each mandate's PASS verdict was issued against. A PASS mandate
+# MUST carry its paired reviewed SHA equal to the row's current candidate_sha — a
+# stale value (a candidate_sha that advanced past a fix round or rebase without a
+# fresh review) is a validator violation, not a silent carry-over. A non-PASS
+# mandate (PENDING/BLOCKING/NOT_PROVEN/INVALIDATED/NOT_REQUIRED) carries an empty
+# reviewed SHA. This binds a verdict to the exact candidate it was issued against
+# (governance.md:106,277 — "all three review mandates PASS on one exact candidate
+# SHA/tree").
+# enabling_amendment = the AMD-ID (e.g. "AMD-005") whose ratification is this block's
+# execution authority, or "" when the block needs no amendment. When set, the block
+# must not advance beyond LOCKED, and maintainer_decision must not be ACCEPTED, while
+# docs/arch/refactor/rev11/amendments/<AMD-ID>-*.md's own Status is not ratified.
 
 [[block]]
 id = "A0"
@@ -65,9 +78,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -86,9 +103,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -107,9 +128,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -128,9 +153,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -149,9 +178,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -170,9 +203,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -191,9 +228,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -212,9 +253,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -233,9 +278,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -254,9 +303,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -275,9 +328,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -296,9 +353,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -317,9 +378,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by AMD-009. Predecessor BF3; mandatory predecessor of B2 and B3. Not dispatchable before predecessor acceptance."
 
 [[block]]
@@ -338,9 +403,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by AMD-009. Predecessor BF3; mandatory predecessor of B2 and B3. Not dispatchable before predecessor acceptance."
 
 [[block]]
@@ -359,9 +428,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by AMD-009. Predecessor BF3; mandatory predecessor of B2 and B3. Not dispatchable before predecessor acceptance."
 
 [[block]]
@@ -380,9 +453,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by AMD-009. Predecessor BF3; mandatory predecessor of B2 and B3. Not dispatchable before predecessor acceptance."
 
 [[block]]
@@ -401,9 +478,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-007; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -422,9 +503,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-006; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -443,9 +528,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -464,9 +553,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -485,9 +578,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -506,9 +603,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -527,9 +628,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = "Introduced by proposed AMD-005; not dispatchable before ratification and predecessor acceptance."
 
 [[block]]
@@ -548,9 +653,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -569,9 +678,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -590,9 +703,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -611,9 +728,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -632,9 +753,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -653,9 +778,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -674,9 +803,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -695,9 +828,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -716,9 +853,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -737,9 +878,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -758,9 +903,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -779,9 +928,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -800,9 +953,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -821,9 +978,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -842,9 +1003,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -863,9 +1028,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -884,9 +1053,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -905,9 +1078,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -926,9 +1103,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -947,9 +1128,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -968,9 +1153,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -989,9 +1178,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1010,9 +1203,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1031,9 +1228,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1052,9 +1253,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1073,9 +1278,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1094,9 +1303,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1115,9 +1328,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1136,9 +1353,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1157,9 +1378,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1178,9 +1403,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1199,9 +1428,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1220,9 +1453,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1241,9 +1478,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1262,9 +1503,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1283,9 +1528,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1304,9 +1553,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1325,9 +1578,13 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""
 
 [[block]]
@@ -1346,7 +1603,11 @@ stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
 conformance_review = "PENDING"
+conformance_reviewed_sha = ""
 architecture_review = "PENDING"
+architecture_reviewed_sha = ""
 adversarial_review = "PENDING"
+adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
+enabling_amendment = ""
 notes = ""

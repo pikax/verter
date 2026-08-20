@@ -59,6 +59,10 @@ jobs:
               - 'scripts/svelte-golden-lib.mjs'
               - 'scripts/validate-program-state.mjs'
               - 'scripts/validate-program-state.test.mjs'
+              - 'scripts/validate-stack-window.mjs'
+              - 'scripts/validate-stack-window.test.mjs'
+              - 'scripts/lib/rev11-toml.mjs'
+              - 'scripts/lib/stack-window-lib.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:

@@ -3,7 +3,7 @@
 // diagnostic, and mapping checks run outside the normalizer. A normalizer
 // pass cannot override failure of any independent oracle).
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -43,6 +43,17 @@ function barePackageName(specifier) {
 
 const namespaceCache = new Map();
 
+// `baseDir` (the shared per-framework oracle install, e.g.
+// `.oracle-installs/vue`) is the SAME directory across every concurrent
+// process that links against that oracle — one `node
+// bin/check-candidate.mjs` invocation per test, all sharing the install.
+// The scratch importer must therefore be unique PER PROCESS, not merely
+// per imported specifier: two processes importing the same specifier
+// concurrently must never write the same file, and one process's cleanup
+// must never delete a sibling process's still-in-use files. Minted once
+// per process at module load, never reused across a process boundary.
+const PROCESS_SCRATCH_ID = `${process.pid}-${randomUUID()}`;
+
 /**
  * Import `specifier` as an ES module located in `baseDir` would: a scratch
  * importer under `baseDir` so Node's real ESM resolution applies. Returns
@@ -53,7 +64,7 @@ const namespaceCache = new Map();
 async function importNamespace(baseDir, specifier) {
   const key = `${baseDir}\0${specifier}`;
   if (namespaceCache.has(key)) return namespaceCache.get(key);
-  const scratchDir = path.join(baseDir, ".link-scratch");
+  const scratchDir = path.join(baseDir, ".link-scratch", PROCESS_SCRATCH_ID);
   mkdirSync(scratchDir, { recursive: true });
   const digest = createHash("sha256").update(specifier).digest("hex").slice(0, 16);
   const importerPath = path.join(scratchDir, `ns-${digest}.mjs`);
@@ -77,7 +88,13 @@ async function importNamespace(baseDir, specifier) {
 
 export function cleanupLinkScratch(baseDir) {
   namespaceCache.clear();
-  rmSync(path.join(baseDir, ".link-scratch"), { recursive: true, force: true });
+  // Remove only THIS process's own scratch subdirectory — never the shared
+  // `.link-scratch` parent, which sibling processes linking against the
+  // same oracle install may still be writing under concurrently.
+  rmSync(path.join(baseDir, ".link-scratch", PROCESS_SCRATCH_ID), {
+    recursive: true,
+    force: true,
+  });
 }
 
 /** Realized (name, version) of the package a bare specifier resolves to. */

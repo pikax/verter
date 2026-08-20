@@ -76,6 +76,33 @@ before(() => {
   git(["checkout", "-q", "main"], gitRoot);
   git(["branch", "-D", "scratch"], gitRoot);
 });
+
+// Amendment authority gate fixtures. The validator resolves
+// `<amendments-dir>/<AMD-ID>-*.md` relative to the DAG file's own directory
+// (mirroring the real repo, where docs/arch/refactor/rev11/amendments/ is a
+// sibling of docs/arch/refactor/rev11/program-dag.toml) — every DAG fixture
+// below is written via write() into `dir`, so one shared `dir/amendments/`
+// serves every test in this file.
+let amendmentsDir;
+function writeAmendmentFixtures() {
+  amendmentsDir = join(dir, "amendments");
+  mkdirSync(amendmentsDir, { recursive: true });
+  writeFileSync(
+    join(amendmentsDir, "AMD-900-not-ratified-fixture.md"),
+    "# AMD-900 — test fixture\n\n**Status:** PROPOSED — NOT RATIFIED. This candidate has no execution authority.\n",
+  );
+  writeFileSync(
+    join(amendmentsDir, "AMD-901-ratified-fixture.md"),
+    "# AMD-901 — test fixture\n\n**Status:** RATIFIED (see §1). Landed at cafebabe12.\n",
+  );
+  // Deliberately no **Status:** line at all — the unparseable case.
+  writeFileSync(
+    join(amendmentsDir, "AMD-902-no-status-fixture.md"),
+    "# AMD-902 — test fixture\n\nThis file never declares a Status field.\n",
+  );
+  // AMD-999 intentionally has no file at all — the not-found case.
+}
+before(writeAmendmentFixtures);
 after(() => {
   rmSync(dir, { recursive: true, force: true });
   rmSync(gitRoot, { recursive: true, force: true });
@@ -88,11 +115,15 @@ function write(name, content) {
   return p;
 }
 
-function run(dagPath, statePath, mode, cwd) {
-  const res = spawnSync(process.execPath, [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode], {
-    encoding: "utf8",
-    cwd: cwd ?? gitRoot,
-  });
+function run(dagPath, statePath, mode, cwd, extraArgs = []) {
+  const res = spawnSync(
+    process.execPath,
+    [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode, ...extraArgs],
+    {
+      encoding: "utf8",
+      cwd: cwd ?? gitRoot,
+    },
+  );
   return { status: res.status, out: res.stdout ?? "", err: res.stderr ?? "" };
 }
 
@@ -163,8 +194,11 @@ function block(id, status, overrides = {}) {
     stack_snapshot_digest: "",
     stack_layer: 0,
     conformance_review: "PENDING",
+    conformance_reviewed_sha: "",
     architecture_review: "PENDING",
+    architecture_reviewed_sha: "",
     adversarial_review: "PENDING",
+    adversarial_reviewed_sha: "",
     maintainer_decision: "PENDING",
     notes: "",
     ...overrides,
@@ -196,8 +230,11 @@ function acceptedBlock(id, overrides = {}) {
     landing_equivalence_digest: DIGEST,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
+    conformance_reviewed_sha: SHA,
     architecture_review: "PASS",
+    architecture_reviewed_sha: SHA,
     adversarial_review: "PASS",
+    adversarial_reviewed_sha: SHA,
     maintainer_decision: "ACCEPTED",
     ...overrides,
   });
@@ -216,8 +253,11 @@ function checkpointBlock(id, overrides = {}) {
     candidate_tree: TREE,
     evidence_digest: DIGEST,
     conformance_review: "PASS",
+    conformance_reviewed_sha: SHA,
     architecture_review: "PASS",
+    architecture_reviewed_sha: SHA,
     adversarial_review: "PASS",
+    adversarial_reviewed_sha: SHA,
     ...overrides,
   });
 }
@@ -765,7 +805,7 @@ test("mandate class gate: architecture_review NOT_REQUIRED on a subsystem-class 
     header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_SUB_DIGEST }) +
       acceptedBlock("A0") +
       "\n" +
-      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED" }) +
+      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED", architecture_reviewed_sha: "" }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -922,6 +962,240 @@ test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT 
   assert.match(
     r.err,
     /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
+  );
+});
+
+// -- AMD-001 §1 discriminating D1/D2 transition test (A1/A2 stand in for
+// D1/D2, same convention as the two fail-closed tests above). Each negative
+// case fails for its OWN reason — see scripts/validate-stack-window.test.mjs
+// for the underlying model's own unit coverage; this proves the real
+// end-to-end wiring through validate-program-state.mjs's --stack-window flag.
+function stackWindowText({ acceptanceId = "A2", a1Kind = "NON_MERGEABLE_PRIVATE_LAYER" } = {}) {
+  return `schema = 1
+revision = 11
+status = "ACTIVE"
+mode = "ATOMIC_REVIEW"
+stack_id = "S1"
+acceptance_block_id = "${acceptanceId}"
+authority_package_digest = "${DIGEST}"
+implementation_lock_digest = "${DIGEST}"
+program_state_basis_digest = "${DIGEST}"
+previous_stack_snapshot_digest = "NOT_APPLICABLE"
+root_branch = "main"
+root_base_sha = "${SHA}"
+root_base_tree = "${SHA}"
+stack_tool = "LOCAL_BRANCH_CHAIN"
+stack_tool_version = "git 2.x"
+landing_mode = "bottom-up"
+max_open_layers = 2
+owner = "orchestrator"
+evidence_root = "docs/arch/refactor/rev11/evidence"
+shared_writer_surfaces = []
+integration_commands = []
+notes = ""
+
+[[layer]]
+index = 1
+layer_id = "A1"
+block_id = "A1"
+charter_digest = "${DIGEST}"
+kind = "${a1Kind}"
+branch = "a1-branch"
+base_branch = "main"
+worktree = "wt-a1"
+worker = "w1"
+pr_number = 0
+pr_url = ""
+base_sha = "${SHA}"
+base_tree = "${SHA}"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = ${a1Kind === "mergeable"}
+notes = ""
+
+[[layer]]
+index = 2
+layer_id = "A2"
+block_id = "A2"
+charter_digest = "${DIGEST}"
+kind = "mergeable"
+branch = "a2-branch"
+base_branch = "a1-branch"
+worktree = "wt-a2"
+worker = "w2"
+pr_number = 0
+pr_url = ""
+base_sha = "${SHA}"
+base_tree = "${SHA}"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = true
+notes = ""
+`;
+}
+
+function digestOf(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+test("D1/D2 transition (AMD-001): PRIVATE_CHECKPOINT A1 inside a validated ATOMIC_REVIEW window with A2 as acceptance_block_id VALIDATES", () => {
+  const dag = write("dag-cp-d1d2-ok.toml", DAG_CP);
+  const windowText = stackWindowText();
+  const windowPath = write("stack-window-ok.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-ok.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("D1/D2 transition (AMD-001), negative (a): no --stack-window given REJECTS with the fail-closed message", () => {
+  const dag = write("dag-cp-d1d2-a.toml", DAG_CP);
+  const state = write(
+    "state-d1d2-a.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: DIGEST, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: DIGEST,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live"); // no --stack-window
+  assert.notEqual(r.status, 0);
+  assert.match(
+    r.err,
+    /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
+  );
+});
+
+test("D1/D2 transition (AMD-001), negative (b): mismatched snapshot digest REJECTS", () => {
+  const dag = write("dag-cp-d1d2-b.toml", DAG_CP);
+  const windowText = stackWindowText();
+  const windowPath = write("stack-window-b.toml", windowText);
+  const snap = digestOf(windowText);
+  const wrongSnap = digestOf("not the window contents");
+  const state = write(
+    "state-d1d2-b.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: wrongSnap, // MISMATCH
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(r.err, /block A2 ledger stack_snapshot_digest .* does not match the SHA-256 of the validated stack-window file/);
+});
+
+test("D1/D2 transition (AMD-001), negative (c): acceptance_block_id names a block OTHER than A2 REJECTS", () => {
+  const dag = write("dag-cp-d1d2-c.toml", DAG_CP);
+  const windowText = stackWindowText({ acceptanceId: "SOMETHING_ELSE" });
+  const windowPath = write("stack-window-c.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-c.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(r.err, /acceptance_block_id is "SOMETHING_ELSE", not the successor block "A2"/);
+});
+
+test("D1/D2 transition (AMD-001), negative (d): A1 landed independently (its layer is kind = mergeable, not NON_MERGEABLE_PRIVATE_LAYER) REJECTS", () => {
+  const dag = write("dag-cp-d1d2-d.toml", DAG_CP);
+  const windowText = stackWindowText({ a1Kind: "mergeable" });
+  const windowPath = write("stack-window-d.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-d.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(
+    r.err,
+    /layer for predecessor block "A1" has kind "mergeable", not NON_MERGEABLE_PRIVATE_LAYER — a checkpoint predecessor's layer must never be independently mergeable/,
   );
 });
 
@@ -1514,4 +1788,371 @@ untracked_count = 0
   const r = run(dag, state, "template", notGitDir);
   assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
   assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+// -- Amendment authority gate (enabling_amendment) --
+//
+// The BV1 shape: a block introduced by a PROPOSED (not yet ratified) amendment
+// must not advance past LOCKED, and must not carry maintainer_decision =
+// ACCEPTED, until that amendment's own Status line is ratified.
+
+test("amendment authority gate: READY block with an unratified enabling_amendment is a violation (BV1 shape)", () => {
+  const dag = write("dag-amd-ready.toml", DAG);
+  const state = write(
+    "state-amd-ready.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "an unratified enabling_amendment must fail a begun block");
+  assert.match(
+    r.err,
+    /state block A1 has enabling_amendment AMD-900 but .*AMD-900-not-ratified-fixture\.md is not ratified \(Status: \*\*Status:\*\* PROPOSED — NOT RATIFIED\. This candidate has no execution authority\.\) — an unratified enabling amendment has no execution authority, so the block must not advance beyond LOCKED: status is READY/,
+  );
+});
+
+test("amendment authority gate: the same block at LOCKED with an unratified enabling_amendment passes", () => {
+  const dag = write("dag-amd-locked.toml", DAG);
+  const state = write(
+    "state-amd-locked.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `LOCKED must not be gated by enabling_amendment, got:\n${r.err}\n${r.out}`);
+});
+
+test("amendment authority gate: ACCEPTED block with an unratified enabling_amendment is a violation", () => {
+  const dag = write("dag-amd-accepted.toml", DAG);
+  const state = write(
+    "state-amd-accepted.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { enabling_amendment: "AMD-900" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "ACCEPTED with an unratified enabling_amendment must fail");
+  assert.match(
+    r.err,
+    /state block A1 has enabling_amendment AMD-900 but .*AMD-900-not-ratified-fixture\.md is not ratified .* status is ACCEPTED, maintainer_decision is ACCEPTED/,
+  );
+});
+
+test("amendment authority gate: a ratified enabling_amendment imposes no restriction at READY or ACCEPTED", () => {
+  const dag = write("dag-amd-ratified.toml", DAG);
+  const stateReady = write(
+    "state-amd-ratified-ready.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "AMD-901" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const rReady = run(dag, stateReady, "live");
+  assert.equal(rReady.status, 0, `expected pass, got:\n${rReady.err}\n${rReady.out}`);
+
+  const stateAccepted = write(
+    "state-amd-ratified-accepted.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { enabling_amendment: "AMD-901" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const rAccepted = run(dag, stateAccepted, "live");
+  assert.equal(rAccepted.status, 0, `expected pass, got:\n${rAccepted.err}\n${rAccepted.out}`);
+});
+
+test("amendment authority gate: enabling_amendment naming a file that does not exist is a violation, even at LOCKED", () => {
+  const dag = write("dag-amd-missing.toml", DAG);
+  const state = write(
+    "state-amd-missing.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-999" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a nonexistent enabling_amendment file must fail closed, not guess");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-999" but expected exactly one file matching AMD-999-\*\.md under .*amendments, found 0/,
+  );
+});
+
+test("amendment authority gate: an unparseable Status line is a violation, not a silent pass, even at LOCKED", () => {
+  const dag = write("dag-amd-unparseable.toml", DAG);
+  const state = write(
+    "state-amd-unparseable.toml",
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-902" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "an unparseable Status line must fail closed, not pass silently");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-902" but amendment file .*AMD-902-no-status-fixture\.md has no \*\*Status:\*\* line — its ratification state cannot be parsed/,
+  );
+});
+
+test("amendment authority gate: an empty enabling_amendment is unaffected", () => {
+  const dag = write("dag-amd-empty.toml", DAG);
+  const state = write(
+    "state-amd-empty.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      block("A1", "READY", { enabling_amendment: "" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("amendment authority gate: an ambiguous enabling_amendment match (multiple files) is a violation", () => {
+  // Amendments dir is resolved relative to the DAG file's own directory, so
+  // this fixture gets its own directory (distinct from the shared `dir`) with
+  // the DAG living beside a fresh `amendments/` subdirectory.
+  const dupDir = join(dir, "amendments-dup");
+  const dupAmendmentsDir = join(dupDir, "amendments");
+  mkdirSync(dupAmendmentsDir, { recursive: true });
+  writeFileSync(join(dupAmendmentsDir, "AMD-950-one.md"), "**Status:** RATIFIED.\n");
+  writeFileSync(join(dupAmendmentsDir, "AMD-950-two.md"), "**Status:** RATIFIED.\n");
+  const dagPath = join(dupDir, "dag-amd-ambiguous.toml");
+  writeFileSync(dagPath, DAG);
+  const state = join(dupDir, "state-amd-ambiguous.toml");
+  writeFileSync(
+    state,
+    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+      block("A0", "LOCKED") +
+      "\n" +
+      block("A1", "LOCKED", { enabling_amendment: "AMD-950" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dagPath, state, "live");
+  assert.notEqual(r.status, 0, "an ambiguous enabling_amendment match must fail closed, not guess");
+  assert.match(
+    r.err,
+    /state block A1 declares enabling_amendment "AMD-950" but expected exactly one file matching AMD-950-\*\.md under .*amendments, found 2/,
+  );
+});
+
+// Review verdict identity binding: conformance_reviewed_sha/architecture_
+// reviewed_sha/adversarial_reviewed_sha bind a PASS mandate to the exact
+// candidate_sha it was issued against — the stale-verdict defect this change
+// closes (a fix round/rebase/restack advances candidate_sha and the old PASS
+// silently carries over).
+
+test("review verdict binding: a PASS mandate whose reviewed SHA differs from candidate_sha is a stale verdict — REJECTED", () => {
+  const dag = write("dag-reviewed-stale.toml", DAG);
+  const state = write(
+    "state-reviewed-stale.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha stays SHA (acceptedBlock default); conformance_reviewed_sha
+      // is bound to SHA_BASE — a DIFFERENT, real commit — exactly the shape of a
+      // PASS verdict left over after candidate_sha advanced past a fix round.
+      acceptedBlock("A1", { conformance_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a reviewed SHA that differs from candidate_sha must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = PASS but conformance_reviewed_sha = ${SHA_BASE} does not equal candidate_sha = ${SHA} — the verdict was issued against a different candidate and is stale`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a PASS mandate with an EMPTY reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-empty.toml", DAG);
+  const state = write(
+    "state-reviewed-empty.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      acceptedBlock("A1", { adversarial_reviewed_sha: "" }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a PASS mandate with an empty reviewed SHA must fail");
+  assert.match(
+    r.err,
+    /state block A1 has adversarial_review = PASS but adversarial_reviewed_sha is not a non-empty 40-char lowercase git object id: "" — a PASS verdict must bind the exact candidate it was issued against/,
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a PENDING mandate that wrongly carries a reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-pending-carries.toml", DAG);
+  const state = write(
+    "state-reviewed-pending-carries.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // A1 stays IN_PROGRESS (no gated-status obligation), conformance_review
+      // is PENDING (block() default) but conformance_reviewed_sha is
+      // wrongly bound anyway — a mandate that has not passed cannot have a
+      // reviewed candidate.
+      block("A1", "IN_PROGRESS", { conformance_reviewed_sha: SHA }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a non-PASS mandate carrying a reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = "PENDING" \\(not PASS\\) but conformance_reviewed_sha = "${SHA}" is non-empty — a non-PASS mandate must not carry a reviewed candidate SHA`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: NOT_REQUIRED wrongly carrying a reviewed SHA is rejected", () => {
+  const dag = write("dag-reviewed-notreq-carries.toml", DAG_SUB);
+  const state = write(
+    "state-reviewed-notreq-carries.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_SUB_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // architecture_review NOT_REQUIRED is legal on this subsystem-class row,
+      // but binding a reviewed SHA to a mandate that was never run is not.
+      acceptedBlock("A1", { architecture_review: "NOT_REQUIRED", architecture_reviewed_sha: SHA }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "NOT_REQUIRED carrying a reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has architecture_review = "NOT_REQUIRED" \\(not PASS\\) but architecture_reviewed_sha = "${SHA}" is non-empty — a non-PASS mandate must not carry a reviewed candidate SHA`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: a reviewed SHA naming a non-existent commit is rejected (live git existence)", () => {
+  const dag = write("dag-reviewed-nonexistent.toml", DAG);
+  const state = write(
+    "state-reviewed-nonexistent.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha and conformance_reviewed_sha are EQUAL (so the structural
+      // stale-verdict check above is satisfied) but name a commit that was
+      // never committed — only the live git-existence batch can catch this.
+      acceptedBlock("A1", {
+        candidate_sha: SHA_NONEXISTENT,
+        conformance_reviewed_sha: SHA_NONEXISTENT,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a never-committed reviewed SHA must fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 field conformance_reviewed_sha = ${SHA_NONEXISTENT} does not resolve to an existing git commit object \\(git reports: missing\\)`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
+});
+
+test("review verdict binding: all three mandates correctly bound to a NON-DEFAULT candidate_sha passes", () => {
+  const dag = write("dag-reviewed-ok.toml", DAG);
+  const state = write(
+    "state-reviewed-ok.toml",
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
+      acceptedBlock("A0") +
+      "\n" +
+      // candidate_sha/candidate_tree moved off the acceptedBlock() default (SHA)
+      // onto a DIFFERENT real commit (SHA_BASE); every reviewed SHA is bound to
+      // that same candidate — proving the check follows the live value, not a
+      // coincidental shared default. accepted_sha stays SHA (a real descendant
+      // of SHA_BASE), so base_sha/accepted_sha ancestry still holds and the
+      // already-bound landing_equivalence_digest covers the divergence.
+      acceptedBlock("A1", {
+        candidate_sha: SHA_BASE,
+        candidate_tree: TREE_BASE,
+        conformance_reviewed_sha: SHA_BASE,
+        architecture_reviewed_sha: SHA_BASE,
+        adversarial_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  assert.match(r.out, /validated 3 blocks \(non-zero work asserted\)/);
+});
+
+test("review verdict binding: applies in template mode too (structural, not git-dependent)", () => {
+  const dag = write("dag-reviewed-template.toml", DAG);
+  const state = write(
+    "state-reviewed-template.toml",
+    `schema = 1
+revision = 11
+status = "TEMPLATE"
+authority_package_digest = "REQUIRED_PACKAGE_DIGEST"
+current_block = "A0"
+
+[repository]
+remote = "REQUIRED_REMOTE"
+branch = "REQUIRED_BRANCH"
+head_sha = "REQUIRED_FULL_SHA"
+head_tree = "REQUIRED_TREE_OID"
+dirty = false
+untracked_count = 0
+
+` +
+      block("A0", "READY") +
+      "\n" +
+      // A stale PASS/reviewed-SHA mismatch — the structural check is
+      // independent of --mode and of git; template mode must still reject it.
+      block("A1", "LOCKED", {
+        conformance_review: "PASS",
+        candidate_sha: SHA,
+        conformance_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("A2", "LOCKED"),
+  );
+  const r = run(dag, state, "template");
+  assert.notEqual(r.status, 0, "a stale reviewed SHA must fail even in template mode");
+  assert.match(
+    r.err,
+    new RegExp(
+      `state block A1 has conformance_review = PASS but conformance_reviewed_sha = ${SHA_BASE} does not equal candidate_sha = ${SHA} — the verdict was issued against a different candidate and is stale`,
+    ),
+  );
+  assert.doesNotMatch(r.out, /^OK:/);
 });
