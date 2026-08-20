@@ -2,18 +2,27 @@
 
 **Status:** NOT RATIFIED — awaiting the designated maintainer's decision. The
 preparer did not and cannot ratify, review, or satisfy any independent mandate.
-Nothing in this document changes the DAG until it is ratified; the edit in §4 is
-proposed text, not applied text.
+Nothing in this document changes the DAG until it is ratified; the edits in §4
+are proposed text, not applied text.
+
+**Advisory review:** an independent architecture consult returned RATIFY WITH
+CORRECTIONS on an earlier draft — the edge sound, the premise independently
+verified, no DAG defect, but seven factual defects in the supporting prose. All
+seven are applied here. That consult is advisory; it does not ratify.
 
 **Prepared against:** local `program/architecture-lock` commit
-`07b1e4358c1690085ee26f212b85c212ab79104e`, tree
-`8a34233c99fe6368b27803376103e49b29da2344`, working tree with 0 uncommitted change(s) at preparation time.
+`537cdfcd2a17f36f5bb13e03e2368896675441e8`, tree
+`dee02c5b0f126aaec7be8656b48e169b40632435`.
 Every `file:line` citation below was read directly on that tree.
 
-**Amends on ratification:** [`../program-dag.toml`](../program-dag.toml) — the
-single `predecessors` line of the `C2` block row (line 181). **It changes one
-DAG edge set, adds no block, retires no block, and moves no acceptance owner off
-any capability-matrix cell.**
+**Amends on ratification:** three files —
+[`../program-dag.toml`](../program-dag.toml) (the `predecessors` line of the
+`C2` block row, line 181), [`../program.md`](../program.md) (C2's
+**Predecessors** line, 201, which would otherwise go stale), and the
+`program_dag_digest` field in
+[`../../architecture-lock/ledger/program-state.toml`](../../architecture-lock/ledger/program-state.toml),
+rebound to the edited DAG. **It changes one DAG edge set, adds no block, retires
+no block, and moves no acceptance owner off any capability-matrix cell.**
 
 ## 1. Why this exists
 
@@ -31,18 +40,21 @@ under the governance the ruling itself demanded. It re-decides nothing.
 C2's first normative stage returns a `PreparedCarrier`
 ([`../contracts/compile-transaction.md`](../contracts/compile-transaction.md), lines 8–15).
 B6 expressly owns the preparation/reuse lifecycle and makes the direct core ready
-for semantic projection ([`../charters/B6.md`](../charters/B6.md), lines 5–12).
+for semantic projection ([`../charters/B6.md`](../charters/B6.md), lines 3–12).
 
 C2 therefore consumes a type B6 owns, while the DAG does not record B6 as a C2
-predecessor. The ruling's words: *"A separate C2-local preparation type would
-violate the one-path cutover … The current DAG is therefore wrong at
-`program-dag.toml:165-169`."*
+predecessor. The defective row is C2's, at `program-dag.toml` lines 177–181.
+(The ruling's own prose cites lines 165–169, which is B6's row — a slip in the
+ruling, not a second defect.)
 
-## 3. Independent detection
+The premise was verified independently of the ruling: the contract's stage 1 does
+produce `PreparedCarrier`, B6's charter does own preparation and prepared-first
+routes, and no C2 charter exists to contradict either.
 
-This contradiction is not asserted on the strength of a human cross-read. It is
-reported mechanically by `scripts/effective-state.mjs`, which derives the
-effective program view from the DAG, the ledger, and the ruling corpus:
+## 3. Mechanical consistency check
+
+`scripts/effective-state.mjs` reports this as its only finding against the live
+ledger:
 
 ```
 [ERROR] MISSING_DAG_EDGE_IMPLIED_BY_RULING: ruling C2-FIVE-FORKS
@@ -50,10 +62,15 @@ effective program view from the DAG, the ledger, and the ruling corpus:
 block C2 does not list B6 as a predecessor
 ```
 
-It is the only finding that generator reports against the live ledger. Ratifying
-this amendment and applying §4 clears it to zero.
+Read this for exactly what it is: a **ruling/DAG consistency check**. The
+generator scans ruling text for an explicit "add edge X -> Y" statement and
+compares it against the DAG's direct predecessor arrays
+(`scripts/effective-state.mjs:497`). It does **not** re-derive the dependency
+from the contract or the charters, and it is not independent evidence that the
+edge is correct — §2 is. Its result is accurate: the current tree yields this one
+finding, and the §4 row yields zero.
 
-## 4. The proposed change — exactly one line
+## 4. The proposed change
 
 `docs/arch/refactor/rev11/program-dag.toml`, the `C2` block row at line 181:
 
@@ -66,43 +83,71 @@ this amendment and applying §4 clears it to zero.
 +predecessors = ["B3", "B6", "C1"]
 ```
 
-## 5. Why B5 leaves the direct set rather than joining B6 in it
+`docs/arch/refactor/rev11/program.md`, line 201, which restates the same set and
+would otherwise contradict the DAG it is subordinate to:
 
-The ruling normalizes the set to `["B3", "B6", "C1"]` rather than
-`["B3", "B5", "B6", "C1"]`. That is a deliberate normalization, not an omission:
-`B6.predecessors = ["B5"]` (`program-dag.toml`, line 169), so B5 is already
-transitively required through B6. Listing it directly as well would record the
-same constraint twice and invite the two copies to drift.
+```diff
+-**Predecessors:** `B3`, `B5`, `C1`.
++**Predecessors:** `B3`, `B6`, `C1`.
+```
 
-**This is the one substantive consequence a reader should check.** The edit is
-not purely additive: C2 stops naming B5 directly. Any tooling that reads direct
-predecessor sets without computing transitive closure will see B5 disappear from
-C2's list. The ordering constraint is unchanged — B5 still precedes C2 — but it
-is now expressed once, through B6.
+## 5. Why B5 leaves the direct set
 
-## 6. What this does NOT do
+The ruling normalizes to `["B3", "B6", "C1"]` rather than
+`["B3", "B5", "B6", "C1"]`. Dropping the direct B5 edge loses no acceptance
+constraint: `B6.predecessors = ["B5"]` (`program-dag.toml`, line 169), and the
+validator checks the direct predecessors of **every** begun or accepted block
+(`scripts/validate-program-state.mjs:623`), so an accepted B6 already entails an
+accepted B5. The ordering constraint survives, expressed once.
+
+This is **not** a general no-redundant-edge policy, and this amendment does not
+introduce one. The DAG is not transitively reduced elsewhere and this amendment
+does not make it so: C4 names both B6 and C3 directly (line 193), and F1 names
+A6, B6, C4 and D2 (line 271). Those redundancies stay exactly as they are.
+
+## 6. Disclosed consequences
+
+- **C2 stops naming B5 directly.** Tooling that reads direct predecessor arrays
+  without computing transitive closure will no longer see B5 in C2's list.
+- **C2 and C3 gain B6 in their transitive closure.** C3's only predecessor is C2
+  (line 187), so C3 inherits the new edge.
+- **C4's direct B6 edge becomes redundant**, since C4 also depends on C3, which
+  now reaches B6 transitively. It is left in place — see §5.
+- Full traversal of the proposed graph finds a single root (`A0`), no cycle, and
+  no unreachable block. C4's and F1's B6 edges become or remain redundant, never
+  cyclic.
+
+## 7. What this does NOT do
 
 - It does not accept, unlock, or dispatch B6, C2, or any other block.
 - It does not change any charter, contract, ADR, or capability-matrix cell.
-- It does not change the program outcome. The ruling's own governance line for
-  Fork B reads: *"accepted ADR unchanged; DAG edge changed—formal amendment
-  required; program outcome unchanged."*
-- It does not re-open the other four forks, all of which the ruling settled with
-  "DAG unchanged".
+- It does not change the program outcome. The ruling's governance line for Fork B
+  reads: *"accepted ADR unchanged; DAG edge changed—formal amendment required;
+  program outcome unchanged."*
+- It does not re-open the other four forks, all settled "DAG unchanged".
 
-## 7. Verification on ratification
+## 8. Verification on ratification
 
-1. Apply the §4 diff.
-2. `node scripts/validate-program-state.mjs` — passes; the DAG stays acyclic and
-   every predecessor id remains a known block.
-3. `node scripts/effective-state.mjs` — reports zero findings and exits 0
+1. Apply both §4 diffs.
+2. Rebind `program_dag_digest` in `program-state.toml` to the edited DAG, in
+   the same change, or validation fails closed on the stale digest.
+3. ```
+   node scripts/validate-program-state.mjs \
+     --dag docs/arch/refactor/rev11/program-dag.toml \
+     --state docs/arch/architecture-lock/ledger/program-state.toml \
+     --mode live
+   ```
+   The DAG stays acyclic and every predecessor id remains a known block. (A bare
+   invocation with no arguments exits 2 on usage — it is not a validation run.)
+   Note this command currently FAILS for an unrelated reason: five accepted
+   blocks carry no authorization record. See
+   [`UNAUTHORIZED-TRANSITIONS.md`](../../architecture-lock/ledger/UNAUTHORIZED-TRANSITIONS.md).
+   Ratifying this amendment neither causes nor clears that failure.
+4. `node scripts/effective-state.mjs` — reports zero findings and exits 0
    (it exits 1 today on the finding quoted in §3).
-4. The `program_dag_digest` recorded in
-   `docs/arch/architecture-lock/ledger/program-state.toml` is rebound to the
-   edited DAG in the same change, or validation fails closed on the stale digest.
 
-## 8. Maintainer decision
+## 9. Maintainer decision
 
 _Unrecorded._ This section is completed by the designated maintainer, not by the
-preparer. Until it carries a decision, the DAG is unchanged and C2's predecessor
-set remains `["B3", "B5", "C1"]`.
+preparer and not by an advisory consult. Until it carries a decision, the DAG is
+unchanged and C2's predecessor set remains `["B3", "B5", "C1"]`.
