@@ -7257,7 +7257,7 @@ async function main() {
         framework: "vue",
         detail:
           "OracleCacheUnprovisionedError: oracle npm cache not provisioned at /synthetic/.oracle-npm-cache " +
-          "— run `node scripts/provision-oracle-npm-cache.mjs` first",
+          "— run `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs` first",
       }),
     }).lines.join("\n");
     if (
@@ -7723,7 +7723,9 @@ async function main() {
     });
     completeSuites.push({
       "package-name": "verter_session",
-      testcases: { "types::tests::compile_failure_code_classification": { kind: "test", ignored: false } },
+      testcases: {
+        "types::tests::compile_failure_code_classification": { kind: "test", ignored: false },
+      },
     });
     const complete = countTrybuildExclusionMatches(completeSuites);
     if (complete.total !== TRYBUILD_EXCLUDED_SUITES.length) {
@@ -7735,7 +7737,9 @@ async function main() {
       ok = false;
     }
     if (complete.missing.length !== 0) {
-      fail(`(GB13.4) a complete listing must report zero missing rows; got ${JSON.stringify(complete.missing)}`);
+      fail(
+        `(GB13.4) a complete listing must report zero missing rows; got ${JSON.stringify(complete.missing)}`,
+      );
       ok = false;
     }
 
@@ -7743,7 +7747,11 @@ async function main() {
     // verter_audit testcase, modelling `attribution_compile_fail.rs` renamed without updating the registry)
     // must be reported as exactly that ONE missing row, never silently folded into a still-nonzero total.
     const staleSuites = completeSuites.filter(
-      (s) => !(s["package-name"] === "verter_audit" && "cases::attribution_compile_fail::some_harness_fn" in (s.testcases || {})),
+      (s) =>
+        !(
+          s["package-name"] === "verter_audit" &&
+          "cases::attribution_compile_fail::some_harness_fn" in (s.testcases || {})
+        ),
     );
     const stale = countTrybuildExclusionMatches(staleSuites);
     if (
@@ -7818,15 +7826,21 @@ async function main() {
     }
     const toleratedParsed = parseGateVerdict("[gate] VERDICT: PASS-WITH-TOLERATED (...)\n");
     if (toleratedParsed.kind !== "pass") {
-      fail(`(GB14.1) PASS-WITH-TOLERATED must parse kind=pass, got ${JSON.stringify(toleratedParsed)}`);
+      fail(
+        `(GB14.1) PASS-WITH-TOLERATED must parse kind=pass, got ${JSON.stringify(toleratedParsed)}`,
+      );
       ok = false;
     }
     const noneParsed = parseGateVerdict("nothing resembling a gate verdict here\n");
     if (noneParsed.kind !== "none") {
-      fail(`(GB14.1) a log with no VERDICT line must parse kind=none, got ${JSON.stringify(noneParsed)}`);
+      fail(
+        `(GB14.1) a log with no VERDICT line must parse kind=none, got ${JSON.stringify(noneParsed)}`,
+      );
       ok = false;
     }
-    const emptyBlockParsed = parseGateVerdict("[gate][error] VERDICT: FAIL — 0 non-tolerated failure(s):\n");
+    const emptyBlockParsed = parseGateVerdict(
+      "[gate][error] VERDICT: FAIL — 0 non-tolerated failure(s):\n",
+    );
     if (emptyBlockParsed.kind !== "fail" || emptyBlockParsed.failures.length !== 0) {
       fail(
         `(GB14.1) a FAIL verdict with zero following [surface] lines must parse failures=[] (the CLI, not ` +
@@ -7858,7 +7872,9 @@ async function main() {
     // A name that merely CONTAINS angle brackets mid-string (a legitimate, if unusual, Rust test name)
     // must not be swept up by a substring check — only a full wrap counts.
     if (isSyntheticFailureName("cases::generic::Foo<Bar>::works")) {
-      fail("(GB14.2) a name with embedded angle brackets that does not WRAP the whole name is not synthetic");
+      fail(
+        "(GB14.2) a name with embedded angle brackets that does not WRAP the whole name is not synthetic",
+      );
       ok = false;
     }
     if (ok) {
@@ -7909,7 +7925,9 @@ async function main() {
       byName["uri::tests::a"].cargoProfile !== null ||
       byName["uri::tests::a"].caveat !== ""
     ) {
-      fail(`(GB14.3) SURFACE 1 target should recover binary-id 'verter_span', dev profile, no caveat`);
+      fail(
+        `(GB14.3) SURFACE 1 target should recover binary-id 'verter_span', dev profile, no caveat`,
+      );
       ok = false;
     }
     if (
@@ -7920,13 +7938,20 @@ async function main() {
       fail(`(GB14.3) SURFACE 3 target should recover binary-id + the shipped-cfg profile`);
       ok = false;
     }
-    if (!byName["cases::other::y"] || byName["cases::other::y"].binaryId !== "verter_session::main") {
-      fail(`(GB14.3) libtest-surface target's binary-id comes directly from the surface tag, no recap search`);
+    if (
+      !byName["cases::other::y"] ||
+      byName["cases::other::y"].binaryId !== "verter_session::main"
+    ) {
+      fail(
+        `(GB14.3) libtest-surface target's binary-id comes directly from the surface tag, no recap search`,
+      );
       ok = false;
     }
     const missing = byName["uri::tests::MISSING_FROM_RECAP"];
     if (!missing || missing.binaryId !== null || !missing.caveat) {
-      fail(`(GB14.3) a name absent from its surface's recap must degrade to a name-only filter WITH a caveat`);
+      fail(
+        `(GB14.3) a name absent from its surface's recap must degrade to a name-only filter WITH a caveat`,
+      );
       ok = false;
     }
     if (missing && missing.filter !== "test(=uri::tests::MISSING_FROM_RECAP)") {
@@ -7937,7 +7962,9 @@ async function main() {
       !unclassifiable.some((u) => u.name.startsWith("<")) ||
       !unclassifiable.some((u) => u.surface === "some-unrecognized-surface")
     ) {
-      fail("(GB14.3) both the synthetic name and the unrecognized-surface tag must land in unclassifiable");
+      fail(
+        "(GB14.3) both the synthetic name and the unrecognized-surface tag must land in unclassifiable",
+      );
       ok = false;
     }
     if (
@@ -7945,7 +7972,9 @@ async function main() {
       quoteNextestFilterValue('has "quote" and \\backslash') !==
         '"has \\"quote\\" and \\\\backslash"'
     ) {
-      fail("(GB14.3) quoteNextestFilterValue must pass bare-safe names through and escape unsafe ones");
+      fail(
+        "(GB14.3) quoteNextestFilterValue must pass bare-safe names through and escape unsafe ones",
+      );
       ok = false;
     }
     if (buildIsolationFilter(null, "x::y") !== "test(=x::y)") {
@@ -7994,7 +8023,9 @@ async function main() {
     }
     const partial = classifyAttempts([attempt("fail"), attempt("abort"), attempt("fail")]);
     if (partial.classification !== "REAL" || partial.complete !== false || partial.aborted !== 1) {
-      fail(`(GB14.4) a partially-aborted REAL run must still classify REAL and report complete=false, aborted=1`);
+      fail(
+        `(GB14.4) a partially-aborted REAL run must still classify REAL and report complete=false, aborted=1`,
+      );
       ok = false;
     }
     if (ok) {

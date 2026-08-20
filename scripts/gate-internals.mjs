@@ -1243,7 +1243,7 @@ export function checkBuildPrerequisites(opts) {
 // (`crates/verter_session/src/compile/map_equality_tests/bf2_full_axis_gate.rs`), which calls
 // `ensureOracleDomain(framework)` (`packages/framework-conformance-harness/src/oracle-install.mjs`) to
 // realize each oracle (`vue`, `svelte`) OFFLINE from `.oracle-npm-cache` — a GITIGNORED local cache
-// `scripts/provision-oracle-npm-cache.mjs` warms from the network — into `.oracle-installs`. In a fresh
+// `packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs` warms from the network — into `.oracle-installs`. In a fresh
 // checkout or worktree the cache does not exist, and `check-candidate.mjs` does NOT fail when
 // `ensureOracleDomain` cannot realize an oracle: it records the affected axis as `"authoritative mode:
 // link axis skipped (oracle install unavailable: …)"` and keeps comparing every OTHER axis — an
@@ -1264,12 +1264,13 @@ export function checkBuildPrerequisites(opts) {
 // call, which is exactly what happens automatically the first time a `bf2-authoritative` test runs
 // regardless of whether this preflight exists. Running it here only makes the SAME automatic step happen
 // loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
-// networked step, `scripts/provision-oracle-npm-cache.mjs`, is never invoked here or anywhere else in the
+// networked step, `packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, is never invoked here or anywhere else in the
 // gate — an absent or unusable cache fails setup and names that exact command; the gate does not run it.
 // ----------------------------------------------------------------------------------------------------
 export const ORACLE_CACHE_PREREQUISITE_MARKER = "ORACLE-CACHE PREREQUISITE MISSING";
 
-export const ORACLE_CACHE_PROVISION_COMMAND = "node scripts/provision-oracle-npm-cache.mjs";
+export const ORACLE_CACHE_PROVISION_COMMAND =
+  "node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs";
 
 // The two oracle domains `bf2-authoritative` tests realize from `.oracle-npm-cache`
 // (`packages/framework-conformance-harness/src/oracle-install.mjs`'s `FRAMEWORKS` map).
