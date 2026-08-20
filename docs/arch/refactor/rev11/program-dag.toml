@@ -327,7 +327,7 @@ predecessors = ["F1", "H1", "H2"]
 [[block]]
 id = "J1"
 name = "CSS owner reconciliation"
-class = "subsystem"
+class = "foundational"
 predecessors = ["A4", "A6"]
 
 [[block]]

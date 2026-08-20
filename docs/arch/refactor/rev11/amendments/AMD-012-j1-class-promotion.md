@@ -1,8 +1,7 @@
 # AMD-012 — J1 is promoted from subsystem to foundational
 
-**Status:** NOT RATIFIED — awaiting the codex architect, to whom the maintainer
-delegated amendment ratification. The edit in §3 is proposed text, not applied
-text.
+**Status:** RATIFIED 2026-08-20 by the codex architect, to whom the maintainer
+delegated amendment ratification. See §7.
 
 **Prepared against:** local `program/architecture-lock` commit `6afba972d403ad1b8779983884b40ff02ce4f24b`.
 
@@ -60,13 +59,21 @@ The template's condition has fired. The amendment records that it fired.
 
 ## 4. Consequences
 
+- **`class` is machine-enforced, and this is the substantive consequence.** The
+  validator permits `architecture_review = NOT_REQUIRED` only for a `subsystem`
+  block. Promotion therefore REMOVES J1's machine-permitted architecture-review
+  waiver: J1 will require an architecture review of `PASS`, bound to the exact
+  candidate, before an acceptance recommendation or acceptance. Sequencing and
+  stack-window rules do not distinguish the two values; the review gate is the
+  whole of the enforced difference.
 - J1 is held to the foundational bar rather than the subsystem bar. Given that
   J1 now also absorbs J4's parser-coverage, no-duplicate-grammar and
   no-fallback-dependency evidence (per the same ruling's fork 1), and is
   parity-gated for every currently retained Native operation (fork 5), the
   foundational bar is the one it was already going to have to clear.
-- `foundational` is the DAG's most common class — 40 of 64 rows carry it, and
-  `subsystem` drops from 13 rows to 12. No new class is introduced.
+- `foundational` is the DAG's most common class. The counts move from 40
+  foundational / 13 subsystem to **41 foundational / 12 subsystem**. No new
+  class is introduced.
 - No edge changes. The ruling examined J2's and J3's predecessor needs
   explicitly and found both already satisfied, with B4's mapping substrate
   reaching J3 transitively through `B4 → BV1/BS1 → B5 → B6 → J3`.
@@ -95,5 +102,20 @@ The template's condition has fired. The amendment records that it fired.
 
 ## 7. Ratification
 
-_Unrecorded._ Completed by the codex architect. Until it carries a decision, J1's
-class remains `subsystem`.
+**RATIFIED**, 2026-08-20, by the codex architect — the authority to whom the
+maintainer delegated amendment ratification.
+
+The verdict was RATIFIED WITH CORRECTIONS on two defects, both applied above:
+
+1. §4 understated the change. `class` is machine-enforced — the validator
+   permits `architecture_review = NOT_REQUIRED` only for `subsystem` — so
+   promotion removes J1's architecture-review waiver. §4 now states that
+   directly.
+2. The class counts mixed pre- and post-edit figures. Current is 40/13;
+   proposed is 41/12.
+
+Confirmed against the tree: both promotion limbs are genuinely met (sole shared
+CSS syntax ownership, and explicit breaking changes to public `processStyle`
+compatibility); the J1 row and template line references are correct; the
+transitive `B4 → BV1/BS1 → B5 → B6 → J3` paths exist; and the scope, edge,
+digest-rebind and validation claims check out.
