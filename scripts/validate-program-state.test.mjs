@@ -115,11 +115,15 @@ function write(name, content) {
   return p;
 }
 
-function run(dagPath, statePath, mode, cwd) {
-  const res = spawnSync(process.execPath, [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode], {
-    encoding: "utf8",
-    cwd: cwd ?? gitRoot,
-  });
+function run(dagPath, statePath, mode, cwd, extraArgs = []) {
+  const res = spawnSync(
+    process.execPath,
+    [VALIDATOR, "--dag", dagPath, "--state", statePath, "--mode", mode, ...extraArgs],
+    {
+      encoding: "utf8",
+      cwd: cwd ?? gitRoot,
+    },
+  );
   return { status: res.status, out: res.stdout ?? "", err: res.stderr ?? "" };
 }
 
@@ -958,6 +962,240 @@ test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT 
   assert.match(
     r.err,
     /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
+  );
+});
+
+// -- AMD-001 §1 discriminating D1/D2 transition test (A1/A2 stand in for
+// D1/D2, same convention as the two fail-closed tests above). Each negative
+// case fails for its OWN reason — see scripts/validate-stack-window.test.mjs
+// for the underlying model's own unit coverage; this proves the real
+// end-to-end wiring through validate-program-state.mjs's --stack-window flag.
+function stackWindowText({ acceptanceId = "A2", a1Kind = "NON_MERGEABLE_PRIVATE_LAYER" } = {}) {
+  return `schema = 1
+revision = 11
+status = "ACTIVE"
+mode = "ATOMIC_REVIEW"
+stack_id = "S1"
+acceptance_block_id = "${acceptanceId}"
+authority_package_digest = "${DIGEST}"
+implementation_lock_digest = "${DIGEST}"
+program_state_basis_digest = "${DIGEST}"
+previous_stack_snapshot_digest = "NOT_APPLICABLE"
+root_branch = "main"
+root_base_sha = "${SHA}"
+root_base_tree = "${SHA}"
+stack_tool = "LOCAL_BRANCH_CHAIN"
+stack_tool_version = "git 2.x"
+landing_mode = "bottom-up"
+max_open_layers = 2
+owner = "orchestrator"
+evidence_root = "docs/arch/refactor/rev11/evidence"
+shared_writer_surfaces = []
+integration_commands = []
+notes = ""
+
+[[layer]]
+index = 1
+layer_id = "A1"
+block_id = "A1"
+charter_digest = "${DIGEST}"
+kind = "${a1Kind}"
+branch = "a1-branch"
+base_branch = "main"
+worktree = "wt-a1"
+worker = "w1"
+pr_number = 0
+pr_url = ""
+base_sha = "${SHA}"
+base_tree = "${SHA}"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = ${a1Kind === "mergeable"}
+notes = ""
+
+[[layer]]
+index = 2
+layer_id = "A2"
+block_id = "A2"
+charter_digest = "${DIGEST}"
+kind = "mergeable"
+branch = "a2-branch"
+base_branch = "a1-branch"
+worktree = "wt-a2"
+worker = "w2"
+pr_number = 0
+pr_url = ""
+base_sha = "${SHA}"
+base_tree = "${SHA}"
+head_sha = ""
+head_tree = ""
+patch_digest = ""
+generated_digest = ""
+evidence_digest = ""
+ci_state = "PENDING"
+review_state = "PENDING"
+mergeable = true
+notes = ""
+`;
+}
+
+function digestOf(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+test("D1/D2 transition (AMD-001): PRIVATE_CHECKPOINT A1 inside a validated ATOMIC_REVIEW window with A2 as acceptance_block_id VALIDATES", () => {
+  const dag = write("dag-cp-d1d2-ok.toml", DAG_CP);
+  const windowText = stackWindowText();
+  const windowPath = write("stack-window-ok.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-ok.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("D1/D2 transition (AMD-001), negative (a): no --stack-window given REJECTS with the fail-closed message", () => {
+  const dag = write("dag-cp-d1d2-a.toml", DAG_CP);
+  const state = write(
+    "state-d1d2-a.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: DIGEST, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: DIGEST,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live"); // no --stack-window
+  assert.notEqual(r.status, 0);
+  assert.match(
+    r.err,
+    /block A2 is REVIEW with predecessor A1 in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block \(contracts\/stacked-prs\.md\), which this validator does not model — fail closed/,
+  );
+});
+
+test("D1/D2 transition (AMD-001), negative (b): mismatched snapshot digest REJECTS", () => {
+  const dag = write("dag-cp-d1d2-b.toml", DAG_CP);
+  const windowText = stackWindowText();
+  const windowPath = write("stack-window-b.toml", windowText);
+  const snap = digestOf(windowText);
+  const wrongSnap = digestOf("not the window contents");
+  const state = write(
+    "state-d1d2-b.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: wrongSnap, // MISMATCH
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(r.err, /block A2 ledger stack_snapshot_digest .* does not match the SHA-256 of the validated stack-window file/);
+});
+
+test("D1/D2 transition (AMD-001), negative (c): acceptance_block_id names a block OTHER than A2 REJECTS", () => {
+  const dag = write("dag-cp-d1d2-c.toml", DAG_CP);
+  const windowText = stackWindowText({ acceptanceId: "SOMETHING_ELSE" });
+  const windowPath = write("stack-window-c.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-c.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(r.err, /acceptance_block_id is "SOMETHING_ELSE", not the successor block "A2"/);
+});
+
+test("D1/D2 transition (AMD-001), negative (d): A1 landed independently (its layer is kind = mergeable, not NON_MERGEABLE_PRIVATE_LAYER) REJECTS", () => {
+  const dag = write("dag-cp-d1d2-d.toml", DAG_CP);
+  const windowText = stackWindowText({ a1Kind: "mergeable" });
+  const windowPath = write("stack-window-d.toml", windowText);
+  const snap = digestOf(windowText);
+  const state = write(
+    "state-d1d2-d.toml",
+    header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
+      acceptedBlock("A0") +
+      "\n" +
+      checkpointBlock("A1", { stack_id: "S1", stack_snapshot_digest: snap, stack_layer: 1 }) +
+      "\n" +
+      block("A2", "REVIEW", {
+        stack_id: "S1",
+        stack_snapshot_digest: snap,
+        stack_layer: 2,
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }),
+  );
+  const r = run(dag, state, "live", undefined, ["--stack-window", windowPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /composite stack-window validation via --stack-window/);
+  assert.match(
+    r.err,
+    /layer for predecessor block "A1" has kind "mergeable", not NON_MERGEABLE_PRIVATE_LAYER — a checkpoint predecessor's layer must never be independently mergeable/,
   );
 });
 

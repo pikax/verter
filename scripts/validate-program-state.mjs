@@ -15,134 +15,8 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
-
-// Minimal strict TOML reader.
-//
-// Supported shapes (the full set used by program-dag.toml and
-// templates/program-state.template.toml): full-line comments, `[table]`,
-// `[[array-of-tables]]`, and `key = value` where value is a basic
-// double-quoted string (no escapes), a single-line array of basic strings,
-// an integer, or a boolean. A trailing `# comment` after a value is allowed.
-// Everything else fails loudly with the file/line.
-
-class TomlError extends Error {}
-
-function parseToml(text, label) {
-  const root = Object.create(null);
-  let current = root; // table currently receiving keys
-  const lines = text.split(/\r?\n/);
-  const fail = (lineNo, msg) => {
-    throw new TomlError(`${label}:${lineNo}: unparseable TOML — ${msg}`);
-  };
-
-  const parseValue = (raw, lineNo) => {
-    const s = raw.trim();
-    if (s.startsWith('"')) {
-      // Basic string, no escape support: fail loudly if a backslash appears
-      // before the closing quote rather than mis-reading it.
-      const end = s.indexOf('"', 1);
-      if (end === -1) fail(lineNo, "unterminated string");
-      const body = s.slice(1, end);
-      if (body.includes("\\")) fail(lineNo, "escape sequences are not supported");
-      const rest = s.slice(end + 1).trim();
-      if (rest !== "") {
-        if (!rest.startsWith("#")) {
-          fail(lineNo, `trailing content after string: ${JSON.stringify(rest)}`);
-        }
-        // A double-quote inside the trailing "comment" is indistinguishable from
-        // an unbalanced/ambiguous string (`"ACT"#IVE"`, `""#REQUIRED_X"`): the
-        // reader closed at the FIRST inner quote and would otherwise silently
-        // mis-read the value (and bypass the live-mode REQUIRED_ scan). Loud
-        // failure, per this file's header promise.
-        if (rest.includes('"')) {
-          fail(
-            lineNo,
-            `trailing comment after string contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`,
-          );
-        }
-      }
-      return body;
-    }
-    if (s.startsWith("[")) {
-      // Single-line array of basic strings (e.g. predecessors = ["A0", "A1"]).
-      const end = s.lastIndexOf("]");
-      if (end === -1) fail(lineNo, "unterminated array (multi-line arrays unsupported)");
-      const rest = s.slice(end + 1).trim();
-      if (rest !== "") {
-        if (!rest.startsWith("#")) {
-          fail(lineNo, `trailing content after array: ${JSON.stringify(rest)}`);
-        }
-        if (rest.includes('"')) {
-          fail(
-            lineNo,
-            `trailing comment after array contains a double-quote — ambiguous/unbalanced quoting: ${JSON.stringify(rest)}`,
-          );
-        }
-      }
-      const inner = s.slice(1, end).trim();
-      if (inner === "") return [];
-      return inner.split(",").map((piece) => {
-        const p = piece.trim();
-        if (p === "") fail(lineNo, "empty array element");
-        if (!(p.startsWith('"') && p.endsWith('"') && p.length >= 2)) {
-          fail(lineNo, `non-string array element: ${JSON.stringify(p)}`);
-        }
-        const body = p.slice(1, -1);
-        if (body.includes('"') || body.includes("\\")) {
-          fail(lineNo, `unsupported array element: ${JSON.stringify(p)}`);
-        }
-        return body;
-      });
-    }
-    // Bare scalar: strip a trailing comment, then integer or boolean only.
-    const bare = s.split("#")[0].trim();
-    if (bare === "true") return true;
-    if (bare === "false") return false;
-    if (/^[+-]?\d+$/.test(bare)) {
-      // TOML forbids leading zeros on integers (`007` is invalid TOML, not 7).
-      // Silently reading it as 7 would contradict this file's loud-failure
-      // promise, so reject it here.
-      if (/^[+-]?0\d/.test(bare)) {
-        fail(lineNo, `integer with leading zero(s) is not valid TOML: ${JSON.stringify(bare)}`);
-      }
-      return Number.parseInt(bare, 10);
-    }
-    fail(lineNo, `unsupported value: ${JSON.stringify(s)}`);
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const lineNo = i + 1;
-    const line = lines[i].trim();
-    if (line === "" || line.startsWith("#")) continue;
-
-    let m;
-    if ((m = /^\[\[([A-Za-z0-9_-]+)\]\]$/.exec(line))) {
-      const name = m[1];
-      if (!Array.isArray(root[name])) {
-        if (name in root) fail(lineNo, `[[${name}]] conflicts with existing key`);
-        root[name] = [];
-      }
-      current = Object.create(null);
-      root[name].push(current);
-      continue;
-    }
-    if ((m = /^\[([A-Za-z0-9_-]+)\]$/.exec(line))) {
-      const name = m[1];
-      if (name in root) fail(lineNo, `duplicate table [${name}]`);
-      current = Object.create(null);
-      root[name] = current;
-      continue;
-    }
-    if ((m = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line))) {
-      const key = m[1];
-      if (key in current) fail(lineNo, `duplicate key ${JSON.stringify(key)}`);
-      current[key] = parseValue(m[2], lineNo);
-      continue;
-    }
-    fail(lineNo, `unrecognized line: ${JSON.stringify(line)}`);
-  }
-  return root;
-}
+import { TomlError, parseToml } from "./lib/rev11-toml.mjs";
+import { evaluateCheckpointException } from "./lib/stack-window-lib.mjs";
 
 function resolveExistingDir(raw, statePath) {
   const candidates = [];
@@ -479,7 +353,7 @@ function verifyLiveGitIdentities(stateById, v) {
 
 function usageFail(msg) {
   process.stderr.write(
-    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live\n`,
+    `${msg}\nusage: node scripts/validate-program-state.mjs --dag <program-dag.toml> --state <program-state.toml> --mode template|live [--stack-window <stack-window.toml>]\n`,
   );
   process.exit(2);
 }
@@ -489,7 +363,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
     const value = argv[i + 1];
-    if (!["--dag", "--state", "--mode"].includes(flag)) usageFail(`unknown argument: ${flag}`);
+    if (!["--dag", "--state", "--mode", "--stack-window"].includes(flag))
+      usageFail(`unknown argument: ${flag}`);
     if (value === undefined) usageFail(`missing value for ${flag}`);
     opts[flag.slice(2)] = value;
   }
@@ -755,16 +630,36 @@ function main() {
     const dagBlock = dagById.get(id);
     if (!dagBlock) continue; // already reported as extra
 
-    // Fail closed on what this validator does not fully model:
     // (a) a PRIVATE_CHECKPOINT predecessor. contracts/stacked-prs.md:39,53 let a
     //     PRIVATE_CHECKPOINT predecessor satisfy sequencing only inside a
-    //     validated stack window and only for the final acceptance block —
-    //     conditions this validator cannot check (they live in the stack-window
-    //     validator). Reject rather than silently pass or silently never-satisfy.
+    //     validated stack window and only for the final acceptance block.
+    //     AMD-001 §3: this refusal is SUPERSEDED (never simply deleted) by
+    //     the composite stack-window cross-validation when the caller passes
+    //     --stack-window — evaluateCheckpointException (scripts/lib/
+    //     stack-window-lib.mjs) is the SOLE model of that exception, shared
+    //     with scripts/validate-stack-window.mjs, so this validator never
+    //     grows a second, parallel notion of the same question. With no
+    //     --stack-window given, the original fail-closed refusal stands
+    //     unchanged.
     for (const p of dagBlock.predecessors ?? []) {
-      if (stateById.get(p)?.status === "PRIVATE_CHECKPOINT") {
+      if (stateById.get(p)?.status !== "PRIVATE_CHECKPOINT") continue;
+      const stackWindowPath = opts["stack-window"];
+      if (!stackWindowPath) {
         v(
           `block ${id} is ${b.status} with predecessor ${p} in PRIVATE_CHECKPOINT — a PRIVATE_CHECKPOINT predecessor satisfies sequencing only inside a validated stack window for the final acceptance block (contracts/stacked-prs.md), which this validator does not model — fail closed`,
+        );
+        continue;
+      }
+      const result = evaluateCheckpointException({
+        windowPath: stackWindowPath,
+        predecessorId: p,
+        successorId: id,
+        stateById,
+        dagById,
+      });
+      if (!result.ok) {
+        v(
+          `block ${id} is ${b.status} with predecessor ${p} in PRIVATE_CHECKPOINT — composite stack-window validation via --stack-window ${stackWindowPath} did not establish the checkpoint exception (AMD-001 §2): ${result.problems.join("; ")}`,
         );
       }
     }
