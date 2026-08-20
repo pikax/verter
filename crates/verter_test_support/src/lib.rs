@@ -141,6 +141,9 @@ mod tests {
     fn unique_temp_dir_paths_are_writable_scratch_directories() {
         let dir = unique_temp_dir("verter_test_support_selftest");
         assert!(!dir.exists(), "a freshly minted path must not pre-exist");
+        // `#[cfg(test)]`-only self-test of the path this crate mints — no
+        // NativeFs/VFS boundary to route through. See D14_ALLOW_LIST /
+        // guard2_allowlist in `crates/verter_session/tests/cases/architecture_guards.rs`.
         std::fs::create_dir_all(&dir).expect("create the minted scratch directory");
         std::fs::write(dir.join("marker.txt"), b"ok").expect("write into the scratch directory");
         assert!(dir.join("marker.txt").is_file());

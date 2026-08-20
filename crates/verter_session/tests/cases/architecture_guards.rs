@@ -5240,6 +5240,12 @@ pub(crate) mod foundations_guards {
             // state. Test-fixture I/O — sibling of the
             // `verter_svelte_conformance` generator entry.
             "crates/verter_vue_conformance/src/lib.rs",
+            // dev-dependency-only shared test-harness crate — the only
+            // `std::fs::` calls are inside `#[cfg(test)] mod tests`, a
+            // self-test of the minted scratch path. No production-path
+            // call, no VerterHost/WorkspaceAccess context to route
+            // through. `D14_ALLOW_LIST` carries the full rationale.
+            "crates/verter_test_support/src/lib.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -9353,6 +9359,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_session/src/compile/map_equality_tests/nested_v_for_runtime_proof.rs",
             "nested v-for/v-if runtime-execution proof (`#[cfg(test, feature = \"bf2-authoritative\")]`) — writes the compiled module's own generated code to a scratch temp file so an EXTERNAL Node/jsdom subprocess can read it off real disk (a subprocess cannot read Verter's in-memory VFS), then removes it. External-tool scaffolding, sibling of the `oracle_gen_spike.rs`/`vue_assets.rs` entries above — not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_test_support/src/lib.rs",
+            "dev-dependency-only shared test-harness crate (`unique_temp_dir` etc.), never depended on by production code. The only `std::fs::` calls are inside `#[cfg(test)] mod tests` — a self-test that the minted path is actually a writable scratch dir. No production-path call, and the crate has no `VerterHost`/`WorkspaceAccess` context to route through — sibling of the `verter_lsp/src/config.rs` and `verter_lsp/src/test_utils.rs` test-fixture entries above.",
         ),
 ];
 
