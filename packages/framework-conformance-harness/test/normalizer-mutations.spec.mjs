@@ -605,7 +605,6 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
   });
 });
 
-// ---------------------------------------------------------------------------
 // Import-specifier order. Named specifier order WITHIN ONE import declaration
 // is cosmetic — two modules importing the same names from the same source in a
 // different order are the same program (ESM bindings are hoisted, and the
@@ -628,7 +627,6 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
 // The negative half of this block is the over-broadening control: a fix that
 // canonicalized "all import facts" as a set, or that sorted whole declarations,
 // would pass the permutation test and FAIL these.
-// ---------------------------------------------------------------------------
 
 /**
  * ROTATES the named specifiers of `code`'s import declaration for `source` —

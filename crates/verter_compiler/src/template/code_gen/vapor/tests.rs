@@ -273,11 +273,9 @@ fn html_unquoted_img_attrs() {
 
 #[test]
 fn html_render_function_signature() {
-    // Official `@vue/compiler-vapor` `generate()`: non-inline vapor ALWAYS
-    // gets the full `$props, $emit, $attrs, $slots` signature — bindingMetadata
-    // defaults to `{}` (truthy) for `vapor && !ssr` even with no script
-    // (`compiler-sfc.cjs.js`), proven against the rc.3 seed goldens (even the
-    // script-less `slots.vue` vapor cell emits this exact signature).
+    // Official `generate()`: non-inline vapor always gets the 5-param
+    // signature — `bindingMetadata` defaults to `{}` for `vapor && !ssr`
+    // (`compiler-sfc.cjs.js`; rc.3 script-less `slots.vue`).
     let source = "<template><div>hi</div></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -305,12 +303,10 @@ fn html_set_attr_for_data_attributes() {
 
 #[test]
 fn event_click_bare_uses_on_not_delegated() {
-    // Official rc.3 `@vue/compiler-vapor` `transformVOn`: delegation is now
-    // OPT-IN via an explicit `.delegate` modifier
+    // Official rc.3 `transformVOn`: delegation is opt-in via `.delegate`
     // (`isDelegatableEvent = !!delegateModifier && arg.isStatic &&
-    // delegatedEvents(arg.content)`) — a bare `@click="handler"` binds
-    // directly through `_on()`, matching the exact rc.3 seed goldens
-    // (`vue/props-emit__vapor__*`: `_on(n0, "click", $setup.onClick)`).
+    // delegatedEvents(arg.content)`). Bare `@click="handler"` uses `_on()`
+    // (`vue/props-emit__vapor__*`).
     let source = "<template><button @click=\"handler\">click</button></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -325,8 +321,7 @@ fn event_click_bare_uses_on_not_delegated() {
 
 #[test]
 fn event_click_delegate_modifier_delegates() {
-    // Positive control: the explicit `.delegate` modifier is what activates
-    // the delegation path (`_createInvoker` + `n0.$evtclick` + `_delegateEvents`).
+    // Positive control: `.delegate` activates `_createInvoker` + `$evtclick` + `_delegateEvents`.
     let source = "<template><button @click.delegate=\"handler\">click</button></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -365,8 +360,7 @@ fn event_multiple_delegate_modifier_delegates() {
 
 #[test]
 fn event_multiple_bare_use_on_not_delegated() {
-    // Negative control: without .delegate, multiple events all bind via
-    // _on() and none of the delegation machinery appears.
+    // Negative control: without `.delegate`, all events bind via `_on()`.
     let source = "<template><button @click=\"a\" @mouseover=\"b\">hi</button></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -543,10 +537,8 @@ fn component_with_default_slot() {
 
 #[test]
 fn slot_default_outlet() {
-    // Confirmed directly against the real vendored @vue/compiler-vapor
-    // rc.3: an unnamed slot with no fallback content omits ALL trailing
-    // default-valued args (name="default", props=null, fallback=undefined)
-    // — `_createSlot()`, not `_createSlot("default", null)`.
+    // Official rc.3: unnamed slot with no fallback omits trailing defaults —
+    // `_createSlot()`, not `_createSlot("default", null)`.
     let source = "<template><slot></slot></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -636,11 +628,8 @@ fn v_for_simple() {
 
 #[test]
 fn v_for_preserves_user_params() {
-    // Official's real Vapor v-for RENAMES loop variables to
-    // `_for_item{depth}`/`_for_key{depth}` (position 1 is always "key" at
-    // compile time, regardless of whether the source is an array or
-    // object) — confirmed directly against the real @vue/compiler-sfc.
-    // The user's own names never survive into the closure signature.
+    // Official v-for renames loop vars to `_for_item{depth}`/`_for_key{depth}`
+    // (position 1 is always "key"). User names do not survive the signature.
     let source = "<template><div v-for=\"(item, index) in items\">{{ item }}</div></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -1086,10 +1075,8 @@ fn non_root_slot_emits_insertion_state() {
         result.contains("_setInsertionState("),
         "Expected _setInsertionState for non-root slot, got: {result}"
     );
-    // Confirmed against the real vendored @vue/compiler-vapor rc.3: an
-    // unnamed slot with no fallback omits all trailing default-valued args
-    // (see `slot_default_outlet`) — the slot is the div's ONLY content, so
-    // insertion is the 1-arg append form.
+    // Unnamed fallback-less slot omits trailing defaults; only content of the
+    // div, so insertion is 1-arg append.
     assert!(
         result.contains("_createSlot()"),
         "Expected _createSlot() with all trailing default args omitted, got: {result}"
@@ -1120,13 +1107,8 @@ fn non_root_component_after_sibling() {
         result.contains("_setInsertionState("),
         "Expected _setInsertionState, got: {result}"
     );
-    // The component is the second child (index 1) — mounted once, so a
-    // one-time numeric index suffices, no `<!>` anchor node. Confirmed
-    // directly against the real vendored @vue/compiler-vapor rc.3
-    // (`<div><a>x</a><b>y</b><c>z</c></div>` → `_setInsertionState(n2, 2)`,
-    // not the former 4-argument `_setInsertionState(n, null, N, true)`
-    // shape, which passed two arguments the real function doesn't accept
-    // at all).
+    // Second child (index 1), mounted once — numeric index, no `<!>`.
+    // Official rc.3: `_setInsertionState(n2, 2)`, not the former 4-arg call.
     assert!(
         result.contains(", 1)"),
         "Expected child index 1 for component after span, got: {result}"
@@ -1338,24 +1320,15 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
     (
         "mixed_static_dynamic_children",
         "<template><div><span>static</span><p>{{ msg }}</p><span>more</span></div></template>",
-        // The dynamic <p>'s own text ref consumes id 0 before the root's own
-        // nav ref (official's dynamic-before-navigation ordering).
+        // Dynamic <p> text ref consumes id 0 before the root nav ref.
         "const t0 = _template(\"<div><span>static</span><p> </p><span>more\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 1)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.msg))\n  })\n  return n1\n}",
     ),
     (
         "dynamic_after_siblings",
         "<template><div><a>x</a><b>y</b><c>{{ z }}</c></div></template>",
-        // This pin reflects two real defects fixed here: (1)
-        // hoisted templates emit in ascending allocation-index order
-        // regardless of source (a nested closure's own template allocates
-        // BEFORE the enclosing root's skeleton template, since the DFS
-        // visits children before their parent) — `t0` (the component's
-        // default-slot content) now precedes `t1` (the root skeleton),
-        // matching official; (2) `_setInsertionState` for a mounted-once
-        // component uses the real 2-argument `(parent, index)` form, not
-        // the former 4-argument shape that passed two arguments the real
-        // `setInsertionState` function doesn't accept at all — confirmed
-        // directly against the vendored rc.3 runtime and compiler.
+        // (1) Hoisted templates emit in allocation-index order (nested
+        // closure template before enclosing root — DFS visits children first).
+        // (2) Mounted-once component uses 2-arg `_setInsertionState(parent, index)`.
         "const t0 = _template(\" \")\nconst t1 = _template(\"<div><a>x</a><b>y\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1, 2)\n  const _component_c = _resolveComponent(\"c\")\n  const n0 = _createComponentWithFallback(_component_c, null, { default: () => {\n      const n0 = t0()\n      const x0 = _txt(n0)\n      _renderEffect(() => _setText(x0, _toDisplayString(_ctx.z)))\n      return n0\n    }, _: 2 })\n  return n1\n}",
     ),
     (
@@ -1366,19 +1339,14 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
     (
         "comment_between_siblings",
         "<template><div><span>a</span><!-- c --><p>{{ b }}</p></div></template>",
-        // The dynamic <p>'s own text ref consumes id 0 before the root's
-        // own nav ref (official's dynamic-before-navigation ordering).
+        // Dynamic <p> text ref consumes id 0 before the root nav ref.
         "const t0 = _template(\"<div><span>a</span><!-- c --><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 2)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.b))\n  })\n  return n1\n}",
     ),
     (
         "component",
         "<template><div><MyComp :title=\"t\">child</MyComp></div></template>",
-        // Template allocation order (nested closure before
-        // enclosing root) and the real 1-arg `_setInsertionState(parent)`
-        // append form (the component is the div's ONLY content — no index,
-        // no anchor) — confirmed directly against the vendored rc.3
-        // runtime and compiler (`<div><MyComp title="t">child</MyComp></div>`
-        // → `_setInsertionState(n2)`).
+        // Nested closure template before enclosing root; 1-arg append
+        // (`_setInsertionState(n2)` — component is the div's only content).
         "const t0 = _template(\"child\", 2)\nconst t1 = _template(\"<div>\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponentWithFallback(_component_MyComp, { title: () => (_ctx.t) }, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 })\n  return n1\n}",
     ),
     (
@@ -1389,57 +1357,32 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
     (
         "slot_outlet",
         "<template><div><slot name=\"head\"/></div></template>",
-        // The real 1-arg append form (confirmed against
-        // the vendored rc.3 runtime) and trailing default-valued
-        // `_createSlot` args omitted (a named slot with no fallback omits
-        // `props: null`, not `_createSlot("head", null)` — confirmed
-        // against the vendored rc.3 compiler).
+        // 1-arg append; named fallback-less slot omits `props: null`
+        // (`_createSlot("head")`, not `_createSlot("head", null)`).
         "const t0 = _template(\"<div>\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  _setInsertionState(n1)\n  const n0 = _createSlot(\"head\")\n  return n1\n}",
     ),
     (
         "v_if_else",
         "<template><div v-if=\"a\">A {{ x }}</div><div v-else>B</div></template>",
-        // The `_createIf` call's 4th (flags) argument now
-        // matches official's `genIfFlags`/`genIfFlagNames` bit-for-bit —
-        // confirmed directly against the vendored rc.3 compiler AND the
-        // pinned rc.3 golden for basic-interpolation.vue's own v-if/v-else,
-        // which emits this EXACT value for the structurally identical
-        // shape (single-root positive with an effect, single-root static
-        // negative, index 0). The id SEQUENCE now
-        // ALSO matches official's real transform-order allocation
-        // (construct-own id FIRST, then one wasted branch-entry id, then
-        // the branch's own content) — confirmed by instrumenting the
-        // vendored rc.3 compiler directly: `n0`=if's own, `n2`=true-branch
-        // content, `4`=false-branch content (1 and 3 are the wasted
-        // branch-entry ids, never printed).
+        // Flags match official `genIfFlags` (rc.3 `basic-interpolation.vue`
+        // v-if/v-else: 325, same shape). Id order: construct-own, wasted
+        // branch-entry, then content (`n0`=if, `n2`=true, `n4`=false; 1 and 3
+        // wasted, never printed).
         "const t0 = _template(\"<div>A  \")\nconst t1 = _template(\"<div>B\", 2)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = _createIf(() => (_ctx.a), () => {\n    const n2 = t0()\n    const x2 = _txt(n2)\n    _renderEffect(() => _setText(x2, \"A \" + _toDisplayString(_ctx.x)))\n    return n2\n  }, () => {\n    const n4 = t1()\n    return n4\n}, 325 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, FALSE_NO_SCOPE, KEYED_INDEX_0 */)\n  return n0\n}",
     ),
     (
         "v_for",
         "<template><li v-for=\"item in items\">{{ item }}</li></template>",
-        // The for-construct's own id (`n0`) is
-        // followed by ONE wasted item-entry id (never printed — see
-        // `handle_v_if_chain`'s doc comment; the same `enterBlock` pattern
-        // applies to v-for's own item template scope), THEN the item's own
-        // content id (`n2`, not `n1`) — confirmed against basic-
-        // interpolation.vue's golden (`n5`=for's own, `n7`=item content).
-        // The v-for loop-variable renaming: the closure's own
-        // param and every in-body reference are renamed to
-        // `_for_item0`/`_for_item0.value` — confirmed directly against the
-        // real @vue/compiler-sfc and the pinned rc.3 golden. The trailing
-        // `undefined, 8 /* IS_SINGLE_NODE */` is the flags-present,
-        // key-absent shape: official always positions the key callback slot
-        // (here `undefined`, no `:key` authored) before the trailing
-        // bitflags — confirmed directly against the real compiler for this
-        // exact fixture.
+        // For-construct id `n0`, one wasted item-entry id, then content `n2`
+        // (same `enterBlock` pattern as v-if). Loop vars renamed
+        // `_for_item0`/`_for_item0.value`. Flags-present + no `:key` uses
+        // `undefined` in the key slot before `8 /* IS_SINGLE_NODE */`.
         "const t0 = _template(\"<li> \")\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = _createFor(() => (_ctx.items), (_for_item0) => {\n    const n2 = t0()\n    const x2 = _txt(n2)\n    _renderEffect(() => _setText(x2, _toDisplayString(_for_item0.value)))\n    return n2\n  }, undefined, 8 /* IS_SINGLE_NODE */)\n  return n0\n}",
     ),
     (
         "multi_root",
         "<template><div>a</div><span>{{ b }}</span></template>",
-        // `x`/`n` share ONE counter — the span's own
-        // text ref is `x1` (its own node id), not an independently-counted
-        // `x0` (see the `VaporCounters` doc comment).
+        // `x`/`n` share one counter — span text ref is `x1`, not `x0`.
         "const t0 = _template(\"<div>a\", 2)\nconst t1 = _template(\"<span> \")\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = t0()\n  const n1 = t1()\n  const x1 = _txt(n1)\n  _renderEffect(() => {\n    _setText(x1, _toDisplayString(_ctx.b))\n  })\n  return [n0, n1]\n}",
     ),
     (
@@ -1455,42 +1398,19 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
     (
         "deep_dynamic",
         "<template><div><section><article><p>{{ deep }}</p></article></section></div></template>",
-        // The deep interpolation's own text ref (x0) now consumes id 0
-        // before the root's own nav ref, per the n/x merge — shifting the
-        // root's id from n2 to n3 (see the `VaporCounters` doc comment).
+        // Deep interpolation text ref (x0) consumes id 0 before root nav
+        // (n/x merge shifts root from n2 to n3).
         "const t0 = _template(\"<div><section><article><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t0()\n  const p2 = _child(n3)\n  const p1 = _child(n2)\n  const p0 = _child(n1)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.deep))\n  })\n  return n3\n}",
     ),
     (
         "component_in_element_with_trailing_text",
         "<template><div><MyComp>x</MyComp>after {{ a }}</div></template>",
-        // The component IS followed by dynamic text in the
-        // SAME parent, which needs to `_next()` past it — so (unlike the
-        // `component`/`slot_outlet` cases above, which have no following
-        // content) this DOES need a persistent `<!>` anchor, confirmed
-        // directly against the vendored rc.3 runtime and compiler
-        // (`<div><MyComp>x</MyComp>after {{ a }}</div>` →
-        // `t1 = "<div><!> "`, `_setInsertionState(n4, n3)`). The real
-        // factor is purely whether something else in the parent scope
-        // needs to navigate past this position, not what kind of element
-        // this is — so this case needs the anchor even though it is
-        // neither v-if nor v-for. The baked-in "after " text alongside the
-        // SEPARATE runtime `_setText(x0, "after " + …)` concatenation is a
-        // separate, unrelated quirk (mixed literal+interpolation text-run
-        // templating), not touched here. `x`/`n` share ONE counter — the
-        // root's own text ref is `x1` (its own node id), not an
-        // independently-counted `x0` (see the `VaporCounters` doc comment).
-        // `_setInsertionState`+component-creation must come BEFORE
-        // `_renderEffect` — verified directly against the real vendored
-        // rc.3 `@vue/compiler-sfc`'s `compileTemplate({vapor: true, ...})`
-        // for this exact template shape (`<div><MyComp>x</MyComp>after {{ a
-        // }}</div>`): official emits `_setInsertionState`+
-        // `_createComponent(...)` BEFORE `_renderEffect`, matching
-        // `flushPendingOperations`'s general rule (operations always flush
-        // before the aggregated effects block) confirmed via `props-emit.vue`'s
-        // own golden. The `_createComponentWithFallback`+`{default:...}`
-        // slot-object shape (vs. official's bare `_createComponent(comp,
-        // null, () => {...})` 3rd-positional-arg form for a single default
-        // slot) is a SEPARATE, disclosed divergence, not addressed here.
+        // Following dynamic text in the same parent needs `_next()` past
+        // this position → persistent `<!>` even though this is a component
+        // (`t1 = "<div><!> "`, `_setInsertionState(n4, n3)`). `x`/`n` share
+        // one counter (`x1`). `_setInsertionState`+create before
+        // `_renderEffect` (`flushPendingOperations`). Official 3rd-arg
+        // default-slot form vs `{default:...}` is a disclosed divergence.
         "const t0 = _template(\"x\", 2)\nconst t1 = _template(\"<div><!>after  \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  const n2 = _child(n1)\n  const x1 = _txt(n1)\n  _setInsertionState(n1, n2)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponentWithFallback(_component_MyComp, null, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 })\n  _renderEffect(() => {\n    _setText(x1, \"after \" + _toDisplayString(_ctx.a))\n  })\n  return n1\n}",
     ),
 ];
@@ -1526,10 +1446,7 @@ fn vapor_codegen_is_byte_identical_across_corpus() {
 #[test]
 fn dom_child_index_counts_preceding_siblings_exactly() {
     // A dynamic element after three static element siblings → DOM index 3.
-    // The dynamic 4th span's own text ref consumes id 0 (official's
-    // dynamic-content-before-navigation-id ordering — see
-    // `handle_v_if_chain`'s doc comment and the `VaporCounters` doc), so the
-    // root's own nav ref is `n1`, not `n0`.
+    // Dynamic 4th span text ref consumes id 0 (dynamic-before-nav), so root is `n1`.
     let r = run_full_pipeline(
         "<template><div><span>0</span><span>1</span><span>2</span><span>{{ d }}</span></div></template>",
     );
@@ -1550,11 +1467,7 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
         "an enabled comment must advance the DOM index to 2, got:\n{r}"
     );
 
-    // A component after two element siblings is inserted at index 2 — a
-    // one-time numeric position (confirmed against the real vendored
-    // @vue/compiler-vapor rc.3: `_setInsertionState(n2, 2)`, not the
-    // former 4-argument shape that passed two arguments the real
-    // `setInsertionState(parent, anchor)` function doesn't accept at all).
+    // Component after two siblings: numeric index 2 (rc.3 2-arg form).
     let r = run_full_pipeline("<template><div><a>x</a><b>y</b><c>{{ z }}</c></div></template>");
     assert!(
         r.contains("_setInsertionState(n1, 2)"),
@@ -1701,12 +1614,9 @@ fn vapor_render_lines_use_format_sink_not_in_place_string_edits() {
     );
 }
 
-// A root element whose ENTIRE dynamic content is its own
-// direct interpolation (no static text, no element children — so its text
-// never goes through the child-bubbling path that already worked) was
-// missing both the `const xN = _txt(nN)` statement and the Txt/SetText
-// imports, producing `_setText(x0, ...)` — a runtime `ReferenceError` for
-// `x0` (and, before the import fix, for `_setText` itself).
+// Root whose only dynamic content is its own interpolation must emit
+// `const xN = _txt(nN)` + Txt/SetText — otherwise `_setText(x0, ...)` is a
+// `ReferenceError`.
 #[test]
 fn root_element_own_interpolation_gets_txt_statement_and_imports() {
     let result = run_full_pipeline("<template><p>{{ msg }}</p></template>");
@@ -1718,19 +1628,13 @@ fn root_element_own_interpolation_gets_txt_statement_and_imports() {
         result.contains("_setText(x0, _toDisplayString("),
         "got:\n{result}"
     );
-    // `run_full_pipeline` returns the template's code only, not its import
-    // list — the Txt/SetText import registration for this exact shape is
-    // covered end-to-end by the seed-matrix runtime axis (a missing
-    // import is a real `ReferenceError` there), and directly by
-    // `finalize_root_element`'s own unit coverage.
+    // `run_full_pipeline` returns template code only; Txt/SetText imports are
+    // covered by the seed-matrix runtime axis and `finalize_root_element`.
 }
 
 #[test]
 fn root_element_own_interpolation_plus_dynamic_prop_gets_txt_statement() {
-    // The same defect, but with a sibling dynamic prop present too (the
-    // originally-reported shape: a root button with both `:disabled` and a
-    // sole interpolation child) — proves the fix isn't specific to a
-    // props-free root.
+    // Same defect with a sibling dynamic prop (`:disabled` + interpolation).
     let result =
         run_full_pipeline("<template><button :disabled=\"d\">{{ msg }}</button></template>");
     assert!(result.contains("const x0 = _txt(n0)"), "got:\n{result}");
@@ -1744,45 +1648,29 @@ fn root_element_own_interpolation_plus_dynamic_prop_gets_txt_statement() {
     );
 }
 
-// ==================== nested v-if/v-for/<slot> topology ====================
+// Nested v-if/v-for/<slot> topology
 //
-// Official Vapor's real target topology for mixed static/dynamic content
-// splits ONE static region into MULTIPLE separate `_template(...)` calls: a
-// skeleton with `<!>` comment-anchor placeholders marking each dynamic
-// region's insertion point, plus one small template per dynamic branch/
-// slot/for-item, wired via `_child`/`_next` DOM-traversal and
-// `_setInsertionState` before each `_createIf`/`_createFor`/`_createSlot`.
-// Confirmed directly against the pinned rc.3 goldens for both
-// `basic-interpolation.vue` (4 separate templates) and `slots.vue` (2
-// separate templates) — this was previously gated to `depth == 0` only
-// (the template's own single/multi-root children), producing ONE combined
-// template string with ALL branches' HTML literally concatenated for
-// anything nested deeper — semantically wrong on its own terms (v-if means
+// Official splits one static region into multiple `_template(...)` calls: a
+// skeleton with `<!>` anchors plus one template per dynamic branch/slot/item,
+// wired via `_child`/`_next` and `_setInsertionState`. Gating this to
+// `depth == 0` concatenated all branch HTML into one template (v-if means
 // only one branch exists at runtime).
 
-/// A `<slot>` wrapped by a plain element (`<header>`) that has no dynamic
-/// text/props of its own must forward `_createSlot(...)` + a correct
-/// `_setInsertionState` up to whichever ancestor is actually
-/// `_child`/`_next`-navigable — a plain wrapping element like `<header>`
-/// never reaches `merge_into_parent`'s existing bubble condition (that
-/// path is scoped to an element's OWN dynamic text/effects), so the
-/// slot's creation statements were silently dropped entirely before this
-/// fix (matches the golden's real shape for `slots.vue`).
+/// A `<slot>` inside a plain wrapper (`<header>`) with no own dynamic
+/// content must forward `_createSlot` + `_setInsertionState` — `merge_into_parent`
+/// only bubbles the element's own dynamic text/effects, so the slot was
+/// dropped (`slots.vue`).
 #[test]
 fn nested_slot_forwards_through_plain_wrapper_element() {
     let result = run_full_pipeline(
         "<template><div class=\"panel\"><header><slot name=\"header\">Untitled</slot></header><main><slot /></main></div></template>",
     );
-    // The fallback content ("Untitled") gets its OWN hoisted template,
-    // exactly like a v-if branch — never discarded.
+    // Fallback ("Untitled") gets its own hoisted template, like a v-if branch.
     assert!(
         result.contains(r#"_template("Untitled""#),
         "fallback content must hoist to its own template, got:\n{result}"
     );
-    // Neither `<header>` nor `<main>` has any OTHER content besides its
-    // slot, so BOTH insertion states are the 1-arg "append" form — no `<!>`
-    // anchor needed (matches golden exactly: neither header nor main gets
-    // a comment placeholder).
+    // Each wrapper's only content is its slot — 1-arg append, no `<!>`.
     assert!(
         !result.contains("<!>"),
         "neither slot needs an anchor (each is the sole content of its \
@@ -1790,14 +1678,12 @@ fn nested_slot_forwards_through_plain_wrapper_element() {
     );
     assert!(result.contains("_createSlot("), "got:\n{result}");
     assert!(result.contains("_setInsertionState("), "got:\n{result}");
-    // The skeleton must be whitespace-clean between tags — matches golden
-    // exactly: `<div class=panel><header></header><main>`.
+    // Skeleton is whitespace-clean: `<div class=panel><header></header><main>`.
     assert!(
         result.contains(r#""<div class=panel><header></header><main>""#),
         "inter-tag whitespace must be stripped (WhitespaceNewline), got:\n{result}"
     );
-    // `_createSlot()` (zero args) for the unnamed, fallback-less default
-    // slot — trailing default-valued args omitted.
+    // Unnamed fallback-less default slot: `_createSlot()`.
     assert!(
         result.contains("_createSlot()"),
         "an unnamed slot with no fallback must omit all trailing default \
@@ -1805,14 +1691,10 @@ fn nested_slot_forwards_through_plain_wrapper_element() {
     );
 }
 
-/// A nested `v-if`/`v-else` pair (NOT at the template's own root/depth 0)
-/// must split into separate hoisted templates per branch, insert a `<!>`
-/// anchor at the branch's mount position (something follows it — the
-/// sibling `<ul>`), and wire `_createIf` via `_setInsertionState` — not
-/// get concatenated into the ancestor's own static skeleton HTML — that
-/// wrong shape would put ALL branches' HTML literally next to each other
-/// in one `_template()` call, and leave a stray reference to an undefined
-/// node in the generated effect code.
+/// Nested `v-if`/`v-else` (not depth 0) must hoist one template per branch,
+/// insert `<!>` where a sibling follows, and wire `_createIf` via
+/// `_setInsertionState` — not concatenate both branches into the ancestor
+/// skeleton (that also leaves a stray undefined-node ref in effects).
 #[test]
 fn nested_v_if_else_splits_into_separate_anchored_templates() {
     let result = run_full_pipeline(
@@ -1826,10 +1708,7 @@ fn nested_v_if_else_splits_into_separate_anchored_templates() {
         result.contains(r#"_template("<p>zero""#),
         "the v-else branch must hoist to its own template, got:\n{result}"
     );
-    // The chain is followed by `<ul>`, so its mount position needs an
-    // anchor — the outer skeleton must be exactly `<!>` at that position,
-    // NOT either branch's HTML (each branch's HTML is asserted above to
-    // exist ONLY in its own hoisted template).
+    // Followed by `<ul>` → skeleton is `<!>` there, not either branch's HTML.
     assert!(
         result.contains(r#""<div class=root><!><ul>""#),
         "the ancestor's own skeleton must contain just the `<!>` anchor \
@@ -1839,10 +1718,8 @@ fn nested_v_if_else_splits_into_separate_anchored_templates() {
     assert!(result.contains("_setInsertionState("), "got:\n{result}");
 }
 
-/// The SAME nested `v-if`/`v-else`, but as the ONLY (last) content of its
-/// parent — no following sibling — must NOT insert a `<!>` anchor at all;
-/// `_setInsertionState` takes the 1-arg append form, matching official's
-/// own rule (an anchor is only needed when something follows).
+/// Same nested `v-if`/`v-else` as last content of its parent — no `<!>`;
+/// `_setInsertionState` is 1-arg append.
 #[test]
 fn nested_v_if_else_without_following_sibling_needs_no_anchor() {
     let result = run_full_pipeline(
@@ -1855,14 +1732,8 @@ fn nested_v_if_else_without_following_sibling_needs_no_anchor() {
     assert!(result.contains("_createIf("), "got:\n{result}");
 }
 
-/// A nested `v-for` with an explicit `:key` (basic-interpolation.vue's
-/// exact shape, `<li v-for=\"item in items\" :key=\"item\">`) must NOT
-/// double-handle the key: `extract_key_expr`/`build_v_for_root` already
-/// reads it for `_createFor`'s trailing `(item) => (item)` key callback,
-/// so `process_dynamic_props` must skip it entirely — emitting a
-/// `_setProp(nN, "key", item)` would render a bogus literal `key="…"` DOM
-/// attribute, a genuine runtime HTML mismatch against the pinned rc.3
-/// golden.
+/// Nested `v-for` with `:key` must not also `_setProp(..., "key", ...)` —
+/// `extract_key_expr` already feeds `_createFor`'s key callback.
 #[test]
 fn nested_v_for_with_key_does_not_double_handle_key_as_a_prop() {
     let result = run_full_pipeline(
@@ -1879,22 +1750,12 @@ fn nested_v_for_with_key_does_not_double_handle_key_as_a_prop() {
     assert!(result.contains("_createFor("), "got:\n{result}");
 }
 
-/// A nested v-for whose SOURCE references an outer v-for's own loop
-/// variable through a member-access chain (`item.tags`, not a bare `item`)
-/// must rewrite that reference exactly like every other in-body reference
-/// does — official rc.3 emits `_for_item0.value.tags`, confirmed directly
-/// against the real `@vue/compiler-sfc` `compileTemplate({ vapor: true })`
-/// for this exact three-level nest. Verter previously fed the v-for SOURCE
-/// through `resolve_simple_expr` alone, which passes any non-simple
-/// (dotted) expression through UNCHANGED — a raw `item.tags` reference is a
-/// runtime `ReferenceError` (`item` is not in scope; only `_for_item0`
-/// is), not merely a cosmetic divergence.
-///
-/// The same nest also pins the inner v-for's FAST_REMOVE flag: official
-/// still treats the inner `v-for` as the SOLE child of the `<p v-if>` for
-/// `onlyChild` purposes even though it sits inside a v-if branch, so BOTH
-/// `_createFor` calls end `9 /* FAST_REMOVE, IS_SINGLE_NODE */` — a v-if
-/// parent does not, by itself, disqualify `onlyChild`.
+/// Nested v-for source that is a member chain on an outer loop var
+/// (`item.tags`) must rewrite like other in-body refs (`_for_item0.value.tags`).
+/// `resolve_simple_expr` alone leaves dotted exprs unchanged — a runtime
+/// `ReferenceError`. Inner FAST_REMOVE still fires: a v-if parent does not
+/// itself disqualify `onlyChild` (both `_createFor`s end `9 /* FAST_REMOVE,
+/// IS_SINGLE_NODE */`).
 #[test]
 fn nested_v_for_source_rewrites_outer_loop_variable_through_member_access() {
     let result = run_full_pipeline(
@@ -1917,14 +1778,8 @@ fn nested_v_for_source_rewrites_outer_loop_variable_through_member_access() {
         "the v-if condition's own outer-loop-variable member access must also rewrite \
          (already covered by the existing in-body mechanism), got:\n{result}"
     );
-    // Isolate exactly the INNER `_createFor(...)` call's own argument list —
-    // a fixed-width text window (the prior version of this assertion) can
-    // incidentally still contain the OUTER `_createFor`'s own `9` flags,
-    // staying green even when the INNER call's own flags are wrong.
-    // `isolate_call`'s balanced-paren scan is immune to that: it bounds the
-    // check to exactly this call's own arguments, however much nested
-    // paren-balanced content (the closure body, `_toDisplayString(...)`,
-    // ...) sits inside.
+    // Bound the INNER `_createFor` args with a paren scan — a fixed-width
+    // window can still contain the OUTER call's `9` flags.
     let inner_call = isolate_call(&result, "_createFor(() => (_for_item0.value.tags)");
     assert!(
         inner_call.contains("9 /* FAST_REMOVE, IS_SINGLE_NODE */"),
@@ -1939,12 +1794,8 @@ fn nested_v_for_source_rewrites_outer_loop_variable_through_member_access() {
     );
 }
 
-/// Isolate one `_createFor(`/`_createIf(`-prefixed call's own argument list
-/// via balanced-paren scanning from `start` (which must point at the start
-/// of the helper name) to its own matching close paren — see the primary
-/// nested-`v-for` regression's identical inline scan for why a fixed-width
-/// text window cannot be trusted to bound a SPECIFIC call among several
-/// textually nearby ones.
+/// Isolate one `_createFor(`/`_createIf(` call's args via balanced-paren
+/// scan. A fixed-width window cannot bound one call among several nearby.
 fn isolate_call<'a>(text: &'a str, needle: &str) -> &'a str {
     let start = text
         .find(needle)
@@ -1966,14 +1817,9 @@ fn isolate_call<'a>(text: &'a str, needle: &str) -> &'a str {
     panic!("{needle:?}'s call has no matching close paren in:\n{text}");
 }
 
-/// A DIFFERENT nesting shape from the primary regression above (4 levels,
-/// `v-for` > `v-for` > `v-if` > `v-for`, with the v-if's own condition ALSO
-/// referencing the innermost active loop variable) — confirms the
-/// `flush_vif_chain` placement fix generalizes rather than merely matching
-/// the one shape the primary regression exercises. Verified directly
-/// against the real `@vue/compiler-sfc` `compileTemplate({ vapor: true })`
-/// for this exact fixture: ids, nesting, and flags all match exactly (the
-/// three assertions below).
+/// Four-level nest (`v-for` > `v-for` > `v-if` > `v-for`) with the v-if
+/// condition also referencing an active loop var — `flush_vif_chain`
+/// placement must generalize. Official ids/nesting/flags match.
 #[test]
 fn quadruple_nested_v_for_v_if_v_for_matches_official_nesting_and_flags() {
     let result = run_full_pipeline(
@@ -2033,7 +1879,7 @@ fn quadruple_nested_v_for_v_if_v_for_matches_official_nesting_and_flags() {
     );
 }
 
-// ==================== compute_if_flags ====================
+// compute_if_flags
 //
 // Bit-for-bit / name-for-name against official's `genIfFlags`/
 // `genIfFlagNames` (vendored rc.3 `@vue/compiler-vapor`), confirmed against
@@ -2042,18 +1888,14 @@ fn quadruple_nested_v_for_v_if_v_for_matches_official_nesting_and_flags() {
 
 #[test]
 fn compute_if_flags_bare_if_no_else_dynamic_positive_omits_argument() {
-    // Official's `flags === 1` special case: a bare v-if (no negative) whose
-    // positive branch isn't NO_SCOPE-eligible has nothing but
-    // TRUE_SINGLE_ROOT — the whole 4th argument is omitted.
+    // Official `flags === 1`: omit the 4th arg (bare v-if, not NO_SCOPE).
     let flags = compute_if_flags(false, IfNegative::None, Some(0), true, false);
     assert_eq!(flags, None);
 }
 
 #[test]
 fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
-    // Static positive, no negative at all — TRUE_NO_SCOPE only, no
-    // FALSE_* bits and no KEYED_INDEX (index is never consumed without a
-    // negative branch).
+    // Static positive, no negative — TRUE_NO_SCOPE only (index unused).
     let flags = compute_if_flags(true, IfNegative::None, Some(0), true, false);
     assert_eq!(
         flags.as_deref(),
@@ -2063,8 +1905,7 @@ fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
 
 #[test]
 fn compute_if_flags_dynamic_positive_static_negative_matches_basic_interpolation_golden() {
-    // The exact shape confirmed against the pinned rc.3 golden for
-    // basic-interpolation.vue's `<p v-if>{{ count }}</p><p v-else>zero</p>`.
+    // rc.3 `basic-interpolation.vue` `<p v-if>{{ count }}</p><p v-else>zero</p>`.
     let flags = compute_if_flags(false, IfNegative::Terminal(true), Some(0), true, false);
     assert_eq!(
         flags.as_deref(),
@@ -2083,9 +1924,7 @@ fn compute_if_flags_both_branches_dynamic_no_no_scope_bits() {
 
 #[test]
 fn compute_if_flags_else_if_chain_never_gets_false_no_scope() {
-    // A v-else-if continuation is NEVER NO_SCOPE-eligible regardless of
-    // what's inside it — official's `negativeNoScope` explicitly requires
-    // `negative.type !== 14`.
+    // `v-else-if` is never NO_SCOPE (`negative.type !== 14`).
     let flags = compute_if_flags(true, IfNegative::Chain, Some(1), true, false);
     assert_eq!(
         flags.as_deref(),
@@ -2095,10 +1934,7 @@ fn compute_if_flags_else_if_chain_never_gets_false_no_scope() {
 
 #[test]
 fn compute_if_flags_nested_v_if_never_gets_no_scope_bits() {
-    // `allow_no_scope=false` (v-if nested inside another dynamic construct,
-    // e.g. v-for) suppresses BOTH NO_SCOPE bits even when both branches are
-    // static — official's `allowNoScope = context.block ===
-    // context.root.block` is false for a nested block.
+    // Nested v-if (`allowNoScope` false) suppresses both NO_SCOPE bits.
     let flags = compute_if_flags(true, IfNegative::Terminal(true), Some(0), false, false);
     assert_eq!(
         flags.as_deref(),
@@ -2112,12 +1948,8 @@ fn compute_if_flags_production_mode_omits_comment() {
     assert_eq!(flags.as_deref(), Some("325"));
 }
 
-/// Official's `genMulti` placeholder rule: a present (truthy) flags argument
-/// with an ABSENT negative renders an explicit `null` for the skipped 3rd
-/// argument slot — confirmed directly against the vendored rc.3
-/// `genCall`/`genMulti` source (trailing falsy args are trimmed, but a
-/// falsy arg followed by a truthy one is replaced with the placeholder, not
-/// dropped).
+/// Official `genMulti`: present flags + absent negative → explicit `null`
+/// for the skipped 3rd arg (falsy followed by truthy is a placeholder, not dropped).
 #[test]
 fn bare_static_v_if_with_no_scope_emits_explicit_null_negative_placeholder() {
     let result = run_full_pipeline("<template><div v-if=\"a\">static</div></template>");
@@ -2128,15 +1960,10 @@ fn bare_static_v_if_with_no_scope_emits_explicit_null_negative_placeholder() {
     );
 }
 
-// ==================== dynamic-id allocation order ====================
+// Dynamic-id allocation order
 //
-// Official rc.3's real transform-order allocation (confirmed by
-// instrumenting the vendored compiler directly, cross-checked against 2
-// independent pinned goldens — see `handle_v_if_chain`'s doc comment):
-// EVERY v-if/v-for construct's own id is allocated BEFORE its branch/item's
-// own rendered-content id. These tests prove that ORDERING PROPERTY holds
-// across nested and sibling constructs — not merely that one fixture's
-// exact numbers match.
+// Official rc.3: every v-if/v-for construct-own id is allocated before its
+// branch/item content id. These tests pin that ordering, not exact numbers.
 
 /// Extract the integer id from a `const nN = ` (or `xN`) declaration
 /// appearing at or after `from`, returning `(id, position_after_match)`.
@@ -2188,13 +2015,9 @@ fn dynamic_id_ordering_for_construct_own_id_precedes_item_content_id() {
     );
 }
 
-/// The construct-own id bound by `const nN = {call_marker}`, where
-/// `call_marker` (e.g. `"_createIf("`) is searched starting at `from`.
-/// Returns `(id, position of the call_marker match)`. Walks BACKWARDS from
-/// the call marker to find its OWN `const nN = ` rather than scanning
-/// "const n" left to right, so it is immune to unrelated `const nN = `
-/// declarations (e.g. a v-for item's own template instantiation) appearing
-/// between two constructs in TEXT order despite a DIFFERENT numeric order.
+/// Construct-own id of `const nN = {call_marker}`. Walks backwards from the
+/// call so an intervening `const nN` (e.g. a v-for item template) cannot
+/// steal the match.
 fn construct_own_id_from(haystack: &str, from: usize, call_marker: &str) -> (u32, usize) {
     let call_pos = from
         + haystack[from..]
@@ -2215,18 +2038,10 @@ fn construct_own_id_from(haystack: &str, from: usize, call_marker: &str) -> (u32
     (id, call_pos)
 }
 
-/// NESTED controls: a v-if inside a v-for's item body. The OUTER for's own
-/// id must precede the NESTED if-construct's own id, and the nested
-/// if-construct's own id must precede ITS OWN branch content — official
-/// allocates a construct's own id before descending into its body, and a
-/// nested construct is part of that body's descent.
-///
-/// This does NOT assert the for-ITEM's own rendered element (the `<li>`
-/// itself, here `n7`) sits between the for's own id and the nested if's ids
-/// — the item's own id is allocated LATE, via the same deferred,
-/// unconditional-wrapper-reference mechanism root-level static content
-/// uses, so its numeric id value does not reflect DFS allocation order the
-/// way a construct's own id does.
+/// Nested: v-if inside a v-for item. Outer for-id precedes nested if-id,
+/// which precedes its branch content (official allocates construct-own
+/// before descending). Does not assert the item `<li>` id sits between —
+/// that id is allocated late (deferred wrapper-ref), unlike construct-own.
 #[test]
 fn dynamic_id_ordering_nested_v_if_inside_v_for() {
     let r = run_full_pipeline(
@@ -2251,14 +2066,9 @@ fn dynamic_id_ordering_nested_v_if_inside_v_for() {
     );
 }
 
-/// SIBLING controls: two INDEPENDENT (not else-if-chained) v-if constructs
-/// at the same level. Each construct's OWN internal ordering (its own id,
-/// then its branch content, strictly increasing) holds independently — the
-/// two constructs' id RANGES are not asserted to be non-interleaved here:
-/// the enclosing root element's own nav ref is allocated between the first
-/// construct finishing and the second starting (a separate, disclosed
-/// residual — root-nav-ref timing relative to
-/// MULTIPLE structural children — not covered by this test).
+/// Sibling independent v-ifs: each construct's own-id-then-content order
+/// holds independently. Ranges may interleave — root nav-ref is allocated
+/// between them (disclosed residual).
 #[test]
 fn dynamic_id_ordering_sibling_if_constructs_do_not_collide() {
     let r = run_full_pipeline(
@@ -2289,21 +2099,13 @@ fn dynamic_id_ordering_sibling_if_constructs_do_not_collide() {
     );
 }
 
-// ==================== v-on handler wrapping ====================
+// v-on handler wrapping
 //
-// Official (`@vue/compiler-vapor`'s `genEventHandler`, confirmed directly
-// against the vendored rc.3 source): a member-expression-shaped handler
-// (`isMemberExpression`) is wrapped as `e => handler(e)` ONLY when it is
-// NOT a "constant binding" — `isConstantBinding` checks
-// `bindingMetadata[value.content] === SETUP_CONST`, and ONLY applies when
-// `value.ast === null` (a BARE identifier with no further parsed
-// sub-expression — a genuinely dotted path like `foo.bar` always has a
-// parsed `ast` and is therefore ALWAYS wrapped, regardless of binding
-// type). A `function onClick() {}` declaration in `<script setup>` is a
-// SETUP_CONST binding (Vue's own `analyzeScriptBindings`: function/class/
-// enum declarations and imports → `SETUP_CONST`), so `@click="onClick"`
-// emits the BARE reference `_ctx.onClick`, never a wrapper — confirmed
-// against the pinned rc.3 golden for `props-emit.vue`.
+// Official `genEventHandler` (rc.3): wrap `e => handler(e)` only when not a
+// constant binding. `isConstantBinding` is `bindingMetadata[…] === SETUP_CONST`
+// AND `value.ast === null` (bare identifier). Dotted `foo.bar` always has an
+// ast → always wrapped. `function onClick() {}` is SETUP_CONST → bare
+// `_ctx.onClick` (`props-emit.vue`).
 
 #[test]
 fn v_on_bare_setup_const_function_reference_is_not_wrapped() {
@@ -2321,9 +2123,7 @@ fn v_on_bare_setup_const_function_reference_is_not_wrapped() {
     );
 }
 
-/// A handler backed by a REASSIGNABLE binding (e.g. a `ref`) still needs
-/// the arrow wrap — the SETUP_CONST exemption is narrow, not a blanket
-/// "any bare identifier" rule.
+/// Reassignable binding (e.g. `ref`) still needs the arrow wrap.
 #[test]
 fn v_on_bare_non_const_reference_is_still_wrapped() {
     let r = run_full_pipeline(
@@ -2336,9 +2136,7 @@ fn v_on_bare_non_const_reference_is_still_wrapped() {
     );
 }
 
-/// A genuinely dotted member expression (`foo.bar`) is ALWAYS wrapped,
-/// regardless of `foo`'s own binding type — official's `isConstantBinding`
-/// only ever applies to a BARE identifier (`value.ast === null`).
+/// Dotted `foo.bar` is always wrapped (`isConstantBinding` is bare-ident only).
 #[test]
 fn v_on_dotted_member_expression_is_always_wrapped() {
     let r = run_full_pipeline(
@@ -2351,16 +2149,11 @@ fn v_on_dotted_member_expression_is_always_wrapped() {
     );
 }
 
-// ==================== operation/statement vs effect emission order ====================
+// Operation vs effect emission order
 //
-// Official (`@vue/compiler-vapor`'s `flushPendingOperations`, confirmed
-// directly against the vendored rc.3 source): a block's `operation` array
-// (non-reactive one-time registrations — event listeners via `_on()`, etc.)
-// is ALWAYS flushed BEFORE its `effect` array (aggregated into ONE
-// `_renderEffect(...)` call), regardless of the directives' own SOURCE
-// order on the element — confirmed against the pinned rc.3 golden for
-// `props-emit.vue`, whose `:disabled` (source-first) still gets its
-// `_renderEffect` printed AFTER `@click`'s `_on(...)` (source-second).
+// Official `flushPendingOperations` (rc.3): operations (`_on()`, etc.) always
+// flush before the aggregated `_renderEffect`, regardless of source order
+// (`props-emit.vue`: `:disabled` source-first, `_renderEffect` after `_on`).
 
 #[test]
 fn root_element_statements_are_emitted_before_effects() {
@@ -2381,19 +2174,11 @@ fn root_element_statements_are_emitted_before_effects() {
     );
 }
 
-// ==================== deferred parent-ref id allocation ====================
+// Deferred parent-ref id allocation
 //
-// Official (`@vue/compiler-vapor`'s `processDynamicChildren`, confirmed
-// directly against the vendored rc.3 source): a scope's OWN node ref
-// (needed by a descendant construct as its `_setInsertionState` container,
-// or by a wrapping element establishing itself from its own parent) is
-// minted via a MEMOIZED `context.reference()` call inside
-// `processDynamicChildren`, which runs ONCE, AFTER `transformChildren`'s
-// full loop over ALL of that scope's direct children — never eagerly on
-// the first child that asks. A root `<div>` with an `if`/`else` pair
-// FOLLOWED by an unrelated `<ul>` wrapping a `v-for` must give the ROOT
-// the HIGHEST id (allocated last, after the `<ul>` subtree's own ids), not
-// a low one minted the moment the if-chain flushes.
+// Official `processDynamicChildren` (rc.3): a scope's own node ref is a
+// memoized `context.reference()` after ALL direct children, never eagerly.
+// Root `<div>` with if/else then `<ul>`+v-for: root gets the highest id.
 
 #[test]
 fn root_own_ref_deferred_past_later_sibling_subtree() {
@@ -2426,10 +2211,7 @@ fn root_own_ref_deferred_past_later_sibling_subtree() {
         r.contains("const n0 = _createIf("),
         "the if construct's own id must stay 0 (first allocated), got:\n{r}"
     );
-    // Negative: root's own ref must NOT be minted too early — a scope's own
-    // ref minted the moment a child requests it (instead of once every
-    // direct child has been visited) would give the root id 5, colliding
-    // with the for-construct's own id.
+    // Negative: eager mint would give root id 5, colliding with the for-construct.
     assert!(
         !r.contains("const n5 = t3()"),
         "root's own ref must not be prematurely minted as id 5, got:\n{r}"
@@ -2469,16 +2251,12 @@ fn wrapping_elements_own_refs_deferred_past_later_sibling() {
     );
 }
 
-// ==================== block-depth vs AST-depth for allow_no_scope ====================
+// Block-depth vs AST-depth for `allow_no_scope`
 //
-// Official's `allowNoScope = context.block === context.root.block`: a v-if
-// nested ANY number of plain-element levels below the document root (but
-// with NO intervening block-creating ancestor — v-for, a slot fallback, a
-// component's default slot) is STILL eligible for the FALSE_NO_SCOPE /
-// TRUE_NO_SCOPE optimization. `self.depth == 0` (AST/DOM nesting) wrongly
-// required the v-if to BE the document root itself — confirmed wrong
-// against the pinned rc.3 golden for `basic-interpolation.vue`, whose
-// `<p v-if>`/`<p v-else>` sit one level inside the root `<div>`.
+// Official `allowNoScope = context.block === context.root.block`: a v-if
+// inside any number of plain wrappers (no intervening block) stays
+// NO_SCOPE-eligible. `depth == 0` was the wrong proxy (`basic-interpolation.vue`:
+// `<p v-if>` one level inside the root `<div>`).
 
 #[test]
 fn v_if_nested_in_plain_wrapper_still_gets_false_no_scope() {
@@ -2492,11 +2270,8 @@ fn v_if_nested_in_plain_wrapper_still_gets_false_no_scope() {
     );
 }
 
-/// The narrowing must stay a REAL block-nesting check, not simply "not the
-/// document root" — a v-if genuinely nested inside a v-for's own item body
-/// must still be denied NO_SCOPE, matching
-/// `compute_if_flags_nested_v_if_never_gets_no_scope_bits`'s unit-level
-/// contract at the full-pipeline level.
+/// Not merely "not the document root": v-if inside a v-for item is denied
+/// NO_SCOPE (`compute_if_flags_nested_v_if_never_gets_no_scope_bits`).
 #[test]
 fn v_if_nested_in_v_for_still_denied_no_scope() {
     let r = run_full_pipeline(
@@ -2509,15 +2284,11 @@ fn v_if_nested_in_v_for_still_denied_no_scope() {
     );
 }
 
-// ==================== v-for flags ====================
+// v-for flags
 //
-// Official's `genForFlags` (confirmed directly against the vendored rc.3
-// source): `_createFor`'s trailing bitflags argument was entirely absent
-// from Verter's Vapor emitter. FAST_REMOVE (1) fires when the v-for is the
-// sole meaningful child of a plain (non-block-creating) parent element;
-// IS_SINGLE_NODE (8) fires whenever the item body has its own real
-// template — unconditionally true for the current emitter, which always
-// registers one via `build_closure_body`.
+// Official `genForFlags` (rc.3): FAST_REMOVE (1) when the v-for is the sole
+// meaningful child of a plain parent; IS_SINGLE_NODE (8) when the item body
+// has a real template (always true here via `build_closure_body`).
 
 #[test]
 fn v_for_sole_child_of_plain_wrapper_gets_fast_remove_and_single_node() {
@@ -2549,7 +2320,7 @@ fn v_for_with_sibling_omits_fast_remove() {
     );
 }
 
-// ==================== v-for loop-variable renaming ====================
+// v-for loop-variable renaming
 //
 // Official (`@vue/compiler-vapor`'s real `genFor`/`processFor`, confirmed
 // directly against the vendored rc.3 source): a v-for's loop variable is

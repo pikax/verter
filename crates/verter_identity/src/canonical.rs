@@ -1,16 +1,9 @@
-//! [`Canonical`] — the shared representation behind every digest-backed
-//! identity newtype in [`crate::identity`].
+//! Shared payload behind every digest-backed identity newtype.
 //!
-//! Every such newtype retains BOTH the compact [`CanonicalDigest`] (cheap to
-//! copy, hash, and compare in the common case) AND the full canonical bytes
-//! (`identity-encoding.md` §1: "collision-sensitive use performs full
-//! descriptor equality ... silent aliasing is prohibited"). Equality on
-//! [`Canonical`] compares the retained bytes, not merely the digest — so two
-//! values are never observed equal because of a digest collision. Hashing
-//! and ordering key off the digest for speed; because equal bytes always
-//! hash to an equal digest, `Hash`'s "equal values, equal hash" obligation
-//! still holds — byte-equality is strictly finer than digest-equality, never
-//! coarser.
+//! Retains both the compact [`CanonicalDigest`] and the full canonical
+//! bytes. Equality compares bytes, so a digest collision cannot make two
+//! values compare equal. Hashing/ordering use the digest; equal bytes
+//! always share a digest, so `Hash`/`Eq` stay consistent.
 
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 
@@ -47,9 +40,7 @@ impl Canonical {
 
 impl PartialEq for Canonical {
     fn eq(&self, other: &Self) -> bool {
-        // Full-byte comparison: correctness-sensitive equality never trusts
-        // the digest alone. The digest short-circuits the common
-        // not-equal case cheaply before the byte compare.
+        // Digest short-circuits the common not-equal case; bytes decide.
         self.digest == other.digest && self.bytes == other.bytes
     }
 }
@@ -57,10 +48,7 @@ impl Eq for Canonical {}
 
 impl core::hash::Hash for Canonical {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        // Hashing the digest (not the raw bytes) keeps hashing O(1) for
-        // large descriptors. Sound: equal `Canonical` values always have
-        // equal digests (the digest is a pure function of the bytes), so
-        // the Hash/Eq contract ("equal values hash equal") holds.
+        // O(1) hash. Sound because equal bytes always share a digest.
         self.digest.hash(state);
     }
 }

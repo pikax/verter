@@ -1,24 +1,14 @@
-//! Distinct identity types, per architecture.md §3.1: "Identity types are
-//! non-interchangeable." Every type below is a DIFFERENT nominal Rust type
-//! (never a `type Alias = OtherType;`), so the compiler — not review —
-//! rejects passing one where another is expected. `StableEntityId` and
-//! `SessionHandle` additionally differ in internal SHAPE (one is a single
-//! canonical digest, the other is a three-part owner-cohort/generation/
-//! nonce record) because they are not just distinct labels on the same
-//! representation: a `SessionHandle` is not serializable as a stable
-//! reference at all (identity-encoding.md §3), so giving it the same shape
-//! as a `StableEntityId` would invite exactly the misuse this module exists
-//! to prevent.
+//! Distinct identity types: each is a different nominal Rust type (never a
+//! `type Alias = OtherType;`), so passing one where another is expected is
+//! a compile error. `StableEntityId` and `SessionHandle` also differ in
+//! shape (digest vs owner-cohort/generation/nonce): a `SessionHandle` is
+//! not a serializable stable reference (`identity-encoding.md` §3), so
+//! sharing `StableEntityId`'s shape would invite that misuse.
 //!
-//! Scope: this crate lands the NEUTRAL identity type and its canonical
-//! construction primitive. The DOMAIN FIELDS a given identity closes over
-//! (what exactly makes two `SourceRevision`s equal, for example) are owned
-//! by whichever later block converges that concept — landing invented
-//! domain fields here would create a second owner for something this crate
-//! does not and should not own. Each constructor below therefore accepts a
-//! caller-supplied [`CanonicalEncode`] descriptor (or, where the
-//! architecture text fixes a concrete shape, that exact shape) rather than
-//! a fixed field list.
+//! Constructors take a caller-supplied [`CanonicalEncode`] descriptor (or
+//! an architecturally fixed shape). Domain-field equality — what makes two
+//! `SourceRevision`s equal — is owned by the type that defines those
+//! fields, not this crate.
 
 use core::cmp::Ordering;
 use core::marker::PhantomData;
@@ -27,16 +17,14 @@ use crate::canonical::Canonical;
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 
 digest_identity!(
-    /// Exact byte content identity (architecture.md §3.1).
+    /// Exact byte content identity.
     ContentId
 );
 
 impl ContentId {
-    /// Domain tag for the direct raw-content constructor below.
     const RAW_CONTENT_DOMAIN_TAG: &'static str = "verter.identity.content_id.raw.v1";
 
-    /// Hashes exact content bytes directly — the common case, where the
-    /// "descriptor" IS the byte content and no further schema applies.
+    /// Hash exact content bytes; no further descriptor schema.
     pub fn from_content_bytes(bytes: &[u8]) -> Self {
         let mut encoder = CanonicalEncoder::new(Self::RAW_CONTENT_DOMAIN_TAG);
         encoder.field_bytes(1, bytes);
@@ -45,134 +33,105 @@ impl ContentId {
 }
 
 digest_identity!(
-    /// Logical source identity (architecture.md §3.1).
+    /// Logical source identity.
     SourceId
 );
 digest_identity!(
-    /// Exact source version (architecture.md §3.1).
+    /// Exact source version.
     SourceRevision
 );
 digest_identity!(
-    /// Stable logical carrier unit identity (architecture.md §3.1).
+    /// Stable logical carrier-unit identity.
     SourceUnitId
 );
 digest_identity!(
-    /// Project topology identity (architecture.md §3.1).
+    /// Project topology identity.
     ProjectRevision
 );
 digest_identity!(
-    /// Configuration identity (architecture.md §3.1).
+    /// Configuration identity.
     ConfigurationRevision
 );
 digest_identity!(
-    /// Grammar/source-type/recovery/options identity (architecture.md
-    /// §3.1).
+    /// Grammar / source-type / recovery / options identity.
     SyntaxProfileId
 );
 digest_identity!(
-    /// Exact syntax construction identity (architecture.md §3.1).
+    /// Exact syntax-construction identity.
     ParseKey
 );
 digest_identity!(
-    /// Open/close lifecycle identity (architecture.md §3.1). Deliberately
-    /// NOT a monotonic counter: two incarnations of the same document
-    /// opened/closed in different orders across restarts are not
-    /// comparable, only distinguishable.
+    /// Open/close lifecycle identity. Not a monotonic counter: two
+    /// incarnations of the same document opened in different orders
+    /// across restarts are distinguishable, not comparable.
     DocumentIncarnation
 );
 digest_identity!(
-    /// Provider route/version/capability interpretation (architecture.md
-    /// §3.1).
+    /// Provider route / version / capability interpretation.
     ProviderContractId
 );
 digest_identity!(
-    /// Deterministic public/content-relative identity (architecture.md
-    /// §3.1). Collision-sensitive by definition (it is meant to be
-    /// publicly compared) — callers holding a suspected collision compare
-    /// [`Self::canonical_bytes`], never the digest alone.
+    /// Deterministic public/content-relative identity. Collision-sensitive:
+    /// compare [`Self::canonical_bytes`], never the digest alone.
     StableEntityId
 );
 digest_identity!(
-    /// Exact captured semantic observation basis (architecture.md §3.1).
-    /// Scopes in-flight semantic production; deliberately NOT part of
-    /// cross-snapshot candidate lookup (`result-contract-and-flight.md`
-    /// §1) — that is [`QueryIdentity`]'s role.
+    /// In-flight semantic observation basis. Not part of cross-snapshot
+    /// candidate lookup (`result-contract-and-flight.md` §1) — that is
+    /// [`QueryIdentity`].
     InputBasisId
 );
 digest_identity!(
-    /// Observable semantics/exactness/capability/approximation contract
-    /// (architecture.md §3.1, `result-contract-and-flight.md` §1). Does
-    /// NOT duplicate the separately-keyed profile IDs — it covers
-    /// operation/product shape, required capability set, required
-    /// exactness/completeness, unsupported/degradation policy, requested
-    /// approximation mode, and required mapping/diagnostic/serialization
-    /// outcome.
+    /// Observable semantics / exactness / capability / approximation
+    /// contract (`result-contract-and-flight.md` §1). Does not duplicate
+    /// separately-keyed profile IDs.
     ResultContractId
 );
 
-/// LSP client document version (architecture.md §3.1). A plain ordered
-/// integer, not digest-backed: it is literally the client-assigned
-/// version number, and the LSP protocol already defines its comparison
-/// semantics (monotonically non-decreasing per document).
+/// LSP client document version: the client-assigned integer, not digest
+/// backed. Comparison is the protocol's (monotonically non-decreasing).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DocumentVersion(pub i64);
 
-/// Committed-input ordering aid (architecture.md §3.1): "orders commits and
-/// captures snapshots. It is not a universal cache key." A monotonic
-/// counter, not a digest — its whole purpose is `Ord`.
+/// Committed-input ordering aid. A monotonic counter (`Ord`), not a
+/// digest and not a universal cache key.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EngineRevision(pub u64);
 
-/// Selected provider lifecycle identity (architecture.md §3.1) — a
-/// monotonic epoch, not a digest.
+/// Selected-provider lifecycle epoch — monotonic, not a digest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ProviderEpoch(pub u64);
 
-/// Supersession order for one request stream (architecture.md §3.1) — a
-/// monotonic generation counter, not a digest. Two requests on different
-/// streams are not comparable by this value alone; ordering is meaningful
-/// only within one stream, which is the owning caller's obligation to
-/// track (this crate does not invent a stream identity).
+/// Supersession order for one request stream. Not comparable across
+/// streams; this crate does not invent a stream identity.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RequestGeneration(pub u64);
 
-/// Serialized/persistent interpretation namespace (architecture.md §3.1,
-/// ADR-002). A stable interned name, not a digest or a counter — the
-/// counter lives in [`CompatibilityEpoch`], kept as a SEPARATE type per
-/// ADR-002 ("one domain has one owner and a monotonic epoch sequence";
-/// namespace and epoch are different concerns, so they are different
-/// types here rather than one struct that could be constructed with a
-/// namespace/epoch pair from unrelated domains).
+/// Serialized/persistent interpretation namespace. Kept separate from
+/// [`CompatibilityEpoch`]: namespace and epoch are different concerns
+/// (ADR-002), so they are not one struct that could mix unrelated pairs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct CompatibilityDomainId(pub &'static str);
 
-/// Monotonic epoch inside a [`CompatibilityDomainId`] (architecture.md
-/// §3.1, ADR-002). `0` is a valid first epoch, never an uninitialized
-/// sentinel — there is deliberately no `NonZeroU32` here, unlike the
-/// existing `nonzero_version!`-generated wire newtypes elsewhere in the
-/// workspace, whose `new` returns `None` for epoch zero and so forbid the
-/// exact clean-replacement move ADR-002 prescribes.
+/// Monotonic epoch inside a [`CompatibilityDomainId`]. `0` is a valid
+/// first epoch, not an uninitialized sentinel — unlike
+/// `nonzero_version!` wire newtypes, whose `new` rejects zero.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct CompatibilityEpoch(pub u32);
 
-/// Direct invocation/batch, `PreparedCarrier`, or managed owner/shard
-/// (architecture.md §3.1's literal enumeration for `ParseOwnerDomainId`).
-/// A closed enum, not a digest: the three kinds are architecturally fixed,
-/// and `Managed` carries the shard identity that distinguishes one managed
-/// owner from another.
+/// Parse-owner kind. Closed enum, not a digest; `Managed` carries the
+/// shard that distinguishes one managed owner from another.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum ParseOwnerDomainId {
-    /// A one-shot direct invocation or a batch of them — no retained
-    /// owner state across calls.
+    /// One-shot direct invocation or batch — no retained owner state.
     DirectOrBatch,
-    /// The `PreparedCarrier` progressive-execution owner.
+    /// `PreparedCarrier` progressive-execution owner.
     PreparedCarrier,
-    /// A managed-engine owner/shard, identified by its shard index.
+    /// Managed-engine owner/shard.
     Managed { shard: u32 },
 }
 
-/// `(ParseOwnerDomainId, ParseKey, instance generation)` (architecture.md
-/// §3.1's literal tuple shape).
+/// `(ParseOwnerDomainId, ParseKey, instance generation)`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ParseInstanceId {
     pub owner_domain: ParseOwnerDomainId,
@@ -194,12 +153,9 @@ impl Ord for ParseInstanceId {
     }
 }
 
-/// Typed artifact construction identity (architecture.md §3.1). The `T`
-/// marker keeps two `ArtifactKey<Foo>` / `ArtifactKey<Bar>` non-
-/// interchangeable at the type level even when their underlying canonical
-/// bytes happen to coincide — this is the compile-time half of "no current
-/// owner duplicated merely to host new types": two artifact kinds cannot
-/// silently alias one key space.
+/// Typed artifact construction identity. The `T` marker keeps
+/// `ArtifactKey<Foo>` and `ArtifactKey<Bar>` distinct even when their
+/// canonical bytes coincide.
 pub struct ArtifactKey<T> {
     canonical: Canonical,
     marker: PhantomData<fn() -> T>,
@@ -222,8 +178,8 @@ impl<T> ArtifactKey<T> {
     }
 }
 
-// Manual impls (not `#[derive]`): a derive would incorrectly require
-// `T: Clone + PartialEq + ...`, but `T` is a phantom marker, never stored.
+// Manual impls: a derive would require `T: Clone + PartialEq + …`, but
+// `T` is a phantom marker.
 impl<T> Clone for ArtifactKey<T> {
     fn clone(&self) -> Self {
         Self {
@@ -249,30 +205,20 @@ impl<T> core::fmt::Debug for ArtifactKey<T> {
     }
 }
 
-/// Semantic arguments + only the profile IDs observed by one typed query
-/// boundary + [`ResultContractId`] (architecture.md §3.1,
-/// `result-contract-and-flight.md` §1). Snapshot-independent: no
-/// [`InputBasisId`] enters this type — that is exactly what makes it usable
-/// as a cross-snapshot cache-CANDIDATE lookup key, with [`SemanticFlightKey`]
-/// adding the basis for in-flight production identity.
-///
-/// The `Q` marker distinguishes query KINDS at the type level (a
-/// `QueryIdentity<ResolveImport>` cannot be confused with a
-/// `QueryIdentity<ComponentMeta>` even if their bytes coincide), mirroring
-/// [`ArtifactKey`].
+/// Semantic arguments + observed profile IDs + [`ResultContractId`].
+/// Snapshot-independent: no [`InputBasisId`], so this is a cross-snapshot
+/// cache-candidate key. [`SemanticFlightKey`] adds the basis for in-flight
+/// production. The `Q` marker distinguishes query kinds
+/// (`QueryIdentity<ResolveImport>` vs `QueryIdentity<ComponentMeta>`),
+/// same as [`ArtifactKey`].
 pub struct QueryIdentity<Q> {
     canonical: Canonical,
     marker: PhantomData<fn() -> Q>,
 }
 
 impl<Q> QueryIdentity<Q> {
-    /// Composes the three architecturally-fixed parts. `semantic_arguments`
-    /// is the caller's own canonical digest over the query's semantic
-    /// argument descriptor; `observed_profiles` is the (possibly empty) set
-    /// of profile-id digests this typed query boundary actually observes —
-    /// encoded as a canonical SORTED set, so profile order never affects
-    /// identity; `result_contract` closes over exactness/capability/
-    /// approximation policy.
+    /// Compose the three parts. `observed_profiles` is a canonical sorted
+    /// set — profile order must not affect identity.
     pub fn compose(
         query_kind_domain_tag: &'static str,
         semantic_arguments: CanonicalDigest,
@@ -323,23 +269,17 @@ impl<Q> core::fmt::Debug for QueryIdentity<Q> {
     }
 }
 
-/// `(QueryIdentity<Q>, InputBasisId)` — exact literal shape from
-/// architecture.md §3.1 and `result-contract-and-flight.md` §1. Distinct
-/// from [`QueryIdentity`] by construction (it is a strictly bigger tuple, so
-/// no coercion between the two exists), and cross-snapshot joining is
-/// disabled by default at this key (§2.2 of the same contract) — a property
-/// enforced by the owning flight runtime, not representable in the key type
-/// alone, so it is documented rather than encoded here.
+/// `(QueryIdentity<Q>, InputBasisId)`. Strictly bigger than
+/// [`QueryIdentity`], so the two cannot coerce. Cross-snapshot joining is
+/// disabled by default (`result-contract-and-flight.md` §2.2) in the
+/// flight runtime, not in this key type.
 pub struct SemanticFlightKey<Q> {
     pub query_identity: QueryIdentity<Q>,
     pub input_basis: InputBasisId,
 }
 
-// Manual impls, matching `QueryIdentity<Q>`: a `#[derive]` here would add an
-// implicit `Q: Trait` bound to every impl even though `Q` is only ever used
-// as a phantom marker inside `QueryIdentity<Q>` — `FakeQuery`-style marker
-// types used at call sites are not expected to implement `Clone`/`Debug`/
-// `PartialEq` themselves.
+// Manual impls: a derive would require `Q: Trait` even though `Q` is only
+// a phantom marker inside `QueryIdentity<Q>`.
 impl<Q> Clone for SemanticFlightKey<Q> {
     fn clone(&self) -> Self {
         Self {
@@ -369,18 +309,12 @@ impl<Q> core::fmt::Debug for SemanticFlightKey<Q> {
     }
 }
 
-/// Opaque owner/cohort-bound continuation handle (architecture.md §3.1).
-/// Deliberately NOT [`StableEntityId`]-shaped: identity-encoding.md §3
-/// requires a `SessionHandle` to include/validate owner cohort and
-/// generation, and forbids serializing it as a stable reference unless an
-/// explicit protocol translates it — giving it `StableEntityId`'s single-
-/// digest shape would make that translation look free when it is not. The
-/// fields are deliberately private: an owner mints a handle only through
-/// [`Self::mint`], never by constructing the tuple directly, which is what
-/// keeps a `SessionHandle` from being forged from arbitrary bytes the way a
-/// [`StableEntityId`] legitimately can be (a `StableEntityId` earns its
-/// identity FROM its content; a `SessionHandle` earns it from a live
-/// owner's act of minting).
+/// Opaque owner/cohort-bound continuation handle. Not
+/// [`StableEntityId`]-shaped (`identity-encoding.md` §3): a session handle
+/// must carry owner cohort and generation, and must not serialize as a
+/// stable reference without an explicit protocol. Fields are private;
+/// mint only through [`Self::mint`] so it cannot be forged from bytes the
+/// way a content-addressed [`StableEntityId`] can.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SessionHandle {
     owner_cohort: CanonicalDigest,
@@ -389,11 +323,9 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Mints a handle for a live owner cohort at a given generation, with a
-    /// caller-supplied uniqueness nonce (e.g. a random or counter-derived
-    /// value the owner is responsible for not reusing within a cohort/
-    /// generation pair). This crate does not generate randomness itself —
-    /// that would make it a service, not a neutral type.
+    /// Mint for a live owner cohort. The caller supplies a uniqueness
+    /// nonce and must not reuse it within a cohort/generation pair. This
+    /// crate does not generate randomness.
     pub fn mint(owner_cohort: CanonicalDigest, generation: u64, nonce: CanonicalDigest) -> Self {
         Self {
             owner_cohort,
@@ -424,9 +356,6 @@ mod tests {
         }
     }
 
-    /// Content-addressed identity: identical content produces an identical
-    /// [`ContentId`] regardless of how many times it is recomputed, and
-    /// different content produces a different one.
     #[test]
     fn content_id_is_content_addressed() {
         let a1 = ContentId::from_content_bytes(b"hello");
@@ -436,15 +365,6 @@ mod tests {
         assert_ne!(a1, b);
     }
 
-    /// Two identity TYPES built from field-identical descriptors under
-    /// different domain tags must not collide — this is the domain
-    /// separation half of "non-interchangeable": even if `SourceId` and
-    /// `SourceRevision` were (hypothetically) built from the same field
-    /// bytes, their digests differ because their Rust types are declared
-    /// via separate `digest_identity!` invocations with independent
-    /// internal state (macro hygiene gives each a private
-    /// `PhantomData`-free but nominally distinct wrapper), so no explicit
-    /// domain-tag choice by a caller can accidentally alias them.
     #[test]
     fn stable_entity_id_is_deterministic_and_content_sensitive() {
         let a = StableEntityId::from_canonical(&Args(1));
@@ -454,9 +374,6 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    /// `SessionHandle` is NOT content-addressed: two mints with the same
-    /// cohort/generation but different nonces are different handles, and
-    /// minting is the only constructor (no `from_canonical`).
     #[test]
     fn session_handle_mint_is_nonce_sensitive() {
         let cohort = StableEntityId::from_canonical(&Args(1)).digest();
@@ -467,10 +384,6 @@ mod tests {
         assert_eq!(a.generation(), b.generation());
     }
 
-    /// `QueryIdentity<Q>` excludes the input basis and is therefore stable
-    /// across different bases; `SemanticFlightKey<Q>` adds the basis, so
-    /// two flight keys over the same query identity but different bases are
-    /// different, even though their `query_identity` fields compare equal.
     #[test]
     fn query_identity_excludes_basis_but_flight_key_includes_it() {
         struct FakeQuery;
@@ -505,9 +418,7 @@ mod tests {
         );
     }
 
-    /// Observed-profile order must not affect `QueryIdentity` — profiles
-    /// are encoded as a canonical SORTED set (encoding.rs's
-    /// `field_sorted_set`), not a positional list.
+    /// Profiles are a sorted set (`field_sorted_set`), not a positional list.
     #[test]
     fn query_identity_is_profile_order_independent() {
         struct FakeQuery;
@@ -529,10 +440,7 @@ mod tests {
         assert_eq!(forward, reverse);
     }
 
-    /// `ParseInstanceId` orders lexicographically over
-    /// `(owner_domain, parse_key, instance_generation)` — exercising the
-    /// hand-written `Ord` impl (not derivable because `Canonical`-backed
-    /// `ParseKey` orders by digest, not by field content).
+    /// Hand-written `Ord`: `ParseKey` orders by digest, not field content.
     #[test]
     fn parse_instance_id_orders_by_generation_within_same_owner_and_key() {
         let key = ParseKey::from_canonical(&Args(1));
@@ -549,11 +457,6 @@ mod tests {
         assert!(low < high);
     }
 
-    /// `ArtifactKey<T>`'s marker keeps two artifact KINDS from aliasing even
-    /// when built from field-identical descriptors — proven at the type
-    /// level by the distinct `enum` markers below never unifying, and here
-    /// at the value level by each instantiation still comparing equal to
-    /// itself and to another build from the same descriptor.
     #[test]
     fn artifact_key_is_deterministic_per_kind() {
         enum KindA {}
@@ -562,11 +465,7 @@ mod tests {
         assert_eq!(a1, a2);
     }
 
-    /// `ExecutionPolicy` never enters a `QueryIdentity`/`ResultContractId`
-    /// — this test exists to keep the two files' intended relationship
-    /// exercised by the same test binary that carries the identity
-    /// invariants above, not to test anything about `ExecutionPolicy`
-    /// itself in isolation.
+    /// `ExecutionPolicy` has no `CanonicalEncode` and must not grow one.
     #[test]
     fn execution_policy_is_not_identity_shaped() {
         let policy = ExecutionPolicy::<()> {
@@ -576,11 +475,7 @@ mod tests {
             work_budget: WorkBudget(10),
             memory_budget: MemoryBudget(1024),
         };
-        // No `CanonicalEncode` impl exists (and must not exist) for
-        // `ExecutionPolicy` — this line would fail to compile if one were
-        // ever added and used here, which is exactly the guard this test
-        // provides: it must keep compiling using only `ExecutionPolicy`'s
-        // own fields, never a digest.
+        // Compiles only against `ExecutionPolicy` fields, never a digest.
         assert_eq!(policy.work_budget, WorkBudget(10));
     }
 }

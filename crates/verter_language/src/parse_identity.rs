@@ -15,12 +15,9 @@ use crate::{
     FileLanguage, FrameworkAdapterId, JsModuleKind, LanguageId, ScriptFlavor, ScriptSourceType,
 };
 
-/// Vue's own spec-defined standard interpolation delimiters
-/// (`compiler-core:ParserOptions.delimiters`' official default). A named
-/// constant a caller opts into explicitly — never a value this crate
-/// substitutes silently for an unspecified option. Deciding public/host
-/// option defaults belongs to whichever layer owns option normalization;
-/// this crate only names Vue's own well-known literal.
+/// Vue's spec-defined standard interpolation delimiters (official
+/// `ParserOptions.delimiters` default). A named constant the caller
+/// opts into — never substituted for an unspecified option.
 pub const VUE_STANDARD_DELIMITER_OPEN: &str = "{{";
 /// See [`VUE_STANDARD_DELIMITER_OPEN`].
 pub const VUE_STANDARD_DELIMITER_CLOSE: &str = "}}";
@@ -41,20 +38,13 @@ pub const SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN: CompatibilityDomainId =
 /// Initial compatibility epoch for script syntax construction.
 pub const SCRIPT_SYNTAX_COMPATIBILITY_EPOCH: CompatibilityEpoch = CompatibilityEpoch(0);
 
-/// Parse-affecting options threaded into a carrier frontend.
+/// Parse-affecting options for a carrier frontend.
 ///
-/// `delimiters`/`custom_elements` are Vue-only; Svelte ignores them.
-/// `svelte_loose` is Svelte-only; Vue ignores it. Every field defaults to
-/// its safe, currently-supported value — this crate never widens a
-/// caller's request, it only rejects one it cannot honor.
-///
-/// All fields are mandatory, not `Option` — this type is the boundary
-/// where already-normalized, already-defaulted option values enter the
-/// syntax-profile encoding. Whoever constructs a `ParseOptions` decides
-/// what "the caller didn't ask for anything specific" means (e.g. Vue's
-/// own standard delimiters, [`VUE_STANDARD_DELIMITER_OPEN`] /
-/// [`VUE_STANDARD_DELIMITER_CLOSE`]) — this type and its consumers never
-/// substitute a default for an absent value.
+/// `delimiters`/`custom_elements` are Vue-only; `svelte_loose` is
+/// Svelte-only. This crate never widens a request — it rejects one it
+/// cannot honor. Fields are mandatory, not `Option`: the constructor
+/// decides what "unspecified" means. Consumers never substitute a default
+/// for an absent value.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParseOptions {
     /// Custom interpolation delimiters (Vue-only; ignored by Svelte).
@@ -71,12 +61,8 @@ pub struct ParseOptions {
 }
 
 impl ParseOptions {
-    /// A `ParseOptions` requesting Vue's own standard delimiters and no
-    /// custom elements — the explicit, named "ordinary Vue parse" choice,
-    /// not an implicit fallback. Callers that mean "plain Vue parsing"
-    /// opt into this constructor by name; `ParseOptions::default()`
-    /// carries no opinion about Vue's delimiters at all (empty strings,
-    /// meaningless to Svelte/script profiles, wrong for a real Vue parse).
+    /// Ordinary Vue parse: standard delimiters, no custom elements.
+    /// `ParseOptions::default()` leaves delimiters empty — wrong for Vue.
     #[must_use]
     pub fn vue_standard() -> Self {
         Self {
@@ -156,11 +142,8 @@ impl SyntaxProfileDescriptor {
         };
 
         let profile = if language.is_vue() {
-            // Consume the caller's already-decided values as-is — this
-            // encoder normalizes for CANONICAL EQUIVALENCE only (two
-            // requests differing solely in custom-element order/duplicates
-            // must encode identically); it does not decide what value an
-            // unspecified delimiter/element set would have meant.
+            // Canonical equivalence only (custom-element order/duplicates).
+            // Does not invent unspecified delimiters.
             let (delimiter_open, delimiter_close) = options.delimiters.clone();
             let custom_elements = options
                 .custom_elements

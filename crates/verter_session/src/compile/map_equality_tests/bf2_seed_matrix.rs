@@ -1,50 +1,22 @@
-//! The 36-cell seed matrix, driven through the genuine production assembler and
-//! handed to the conformance harness's authored-source mapping oracle.
+//! 36-cell seed matrix through the production assembler and the harness
+//! authored-source mapping oracle.
 //!
-//! WHAT THIS PROVES, cell by cell:
+//! Applicability comes from the locked manifest's `options.sourceMap`
+//! request — never from whether a map turned up. Map-enabled cells:
+//! well-formed v3 artifact, byte-stable serialization, decoded artifact
+//! equals the independent JS reference. Map-disabled cells produce no
+//! map. The oracle RAN (`mapping` reports `ran`); its mapping *verdict*
+//! is not gated (fragment-emitter residuals are not this composition's).
+//! Wire subset (`map-presence` / `map-version` / `mappings-decode`) is
+//! owned here. Code bytes do not move vs the reference, or vs the
+//! map-disabled twin.
 //!
-//! 1. **Applicability comes from the LOCKED manifest.** Every cell is classified
-//!    map-enabled or map-disabled from the committed golden record's OWN
-//!    `options.sourceMap` REQUEST input — never from whether a candidate map
-//!    turned up, never from anything the production assembler emitted. All 36
-//!    cells are accounted for, none unclassified.
-//! 2. **Map-enabled cells** get code and a map together from
-//!    [`assemble_vue_main_module`]; the emitted map decodes as a well-formed
-//!    flat v3 artifact whose every coordinate lies inside the module it
-//!    describes; production's own SERIALIZATION is byte-stable across repeated
-//!    identical invocations; and the complete DECODED artifact — ordered segment
-//!    sequence included — equals the independent JavaScript reference's exactly.
-//! 3. **Map-disabled cells** produce NO map, asserted positively.
-//! 4. **The oracle RAN.** The harness's accepted entry point
-//!    (`bin/check-candidate.mjs`) is invoked once per cell over the genuine
-//!    production result, unchanged, in authoritative mode, and its mapping axis
-//!    is required to report `ran`. Its MAPPING VERDICT is deliberately NOT
-//!    gated: residual fragment-emitter violations are the fragment emitters'
-//!    problem, not this composition's. What the oracle reported is recorded for
-//!    each cell instead — see [`bf2_authored_source_oracle_runs_over_every_seed_matrix_cell`].
-//!    The one exception is the WIRE subset of its rules (`map-presence`,
-//!    `map-version`, `mappings-decode`), which describe the artifact's own
-//!    well-formedness rather than where it points, and which composition
-//!    therefore does own.
-//! 5. **Code bytes do not move.** Two independent rails: production's code
-//!    equals the independent reference's code byte for byte (2 above compares
-//!    both halves of the result); and the map-enabled arm's code equals its
-//!    map-disabled twin's byte for byte, so enabling composition perturbs no
-//!    output byte (see [`enabling_source_maps_perturbs_no_assembled_code_byte`]).
+//! Child of the equality harness: uses that bridge, no second DTO
+//! projection.
 //!
-//! This is a CHILD of the cross-implementation equality harness so it reads that
-//! harness's own bridge — the §3.3 input DTO projection, the artifact decoder,
-//! the reference subprocess, the real-fixture compile — instead of growing a
-//! second copy. A second hand-written DTO projection is precisely the
-//! common-mode error the independent reference exists to rule out.
-//!
-//! Run it with
-//! `cargo test -p verter_session --lib --features bf2-authoritative bf2_seed_matrix
-//! -- --test-threads=1 --nocapture`. Exactly one test here spawns the oracle CLI
-//! and it does so one cell at a time, so the harness's shared link/runtime
-//! scratch is never entered concurrently; `--test-threads=1` keeps that true
-//! even if a later test joins it, and `--nocapture` is what surfaces the
-//! per-cell record.
+//! `cargo test -p verter_session --lib --features bf2-authoritative
+//! bf2_seed_matrix -- --test-threads=1 --nocapture`. One cell at a time;
+//! `--test-threads=1` keeps harness scratch single-occupancy.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -61,9 +33,7 @@ use crate::compile::AssembledVueModule;
 /// this bounds the latter without ever being reached by the former.
 pub(super) const ORACLE_TIMEOUT: Duration = Duration::from_secs(180);
 
-// ══════════════════════════════════════════════════════════════════════════
 // The locked seed manifest
-// ══════════════════════════════════════════════════════════════════════════
 
 // `pub(super)` on this module's manifest-reading/compile/oracle-invocation
 // plumbing (`Backend`, `SeedCell`, `read_seed_matrix`, `compile_cell`,
@@ -289,9 +259,7 @@ pub(super) fn assemble(case: &RealCompile) -> AssembledVueModule {
     })
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Required exit 1 — applicability from the locked manifest
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Every cell is accounted for, and the accounting reads the manifest's own
 /// request input rather than anything the candidate produced.
@@ -361,9 +329,7 @@ fn seed_matrix_applicability_is_partitioned_from_the_locked_manifest() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Required exits 2 and 3 — the production result, per cell
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Map presence follows the manifest's request input, the emitted map is a
 /// well-formed flat v3 artifact in bounds of its own module, and production's
@@ -453,9 +419,7 @@ fn map_presence_wire_validity_and_serialization_stability_hold_for_every_cell() 
     println!("segments per map-enabled cell: {segment_counts:#?}");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Required exits 2 and 5 — equality with the independent reference
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Every cell, through both implementations, compared exactly.
 ///
@@ -500,9 +464,7 @@ fn every_seed_matrix_cell_composes_identically_to_the_independent_reference() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Required exit 5 — assembled code bytes
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Turning source maps on changes no assembled byte.
 ///
@@ -539,9 +501,7 @@ fn enabling_source_maps_perturbs_no_assembled_code_byte() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Required exit 4 — BF2's authored-source oracle, once per cell
-// ══════════════════════════════════════════════════════════════════════════
 
 /// A candidate file that removes itself, at a path unique to this process and
 /// this call.

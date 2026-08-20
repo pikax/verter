@@ -1,21 +1,16 @@
 //! Framework-neutral parse vocabulary and the unregistered carrier payload.
 //!
-//! [`UnregisteredFrameworkParseArtifact`] is the frontend result before the
-//! compiler-owned registered projector proves carrier geometry. It carries
-//! parse identity, mapped diagnostics, and a private type-erased carrier, but
-//! deliberately exposes no inventory or block lookup surface.
+//! [`UnregisteredFrameworkParseArtifact`] is the frontend result before
+//! the compiler-owned projector proves carrier geometry: parse identity,
+//! mapped diagnostics, and a private type-erased carrier. No inventory or
+//! block lookup.
 //!
-//! Carrier privacy is public-hidden + statically guarded, not
-//! capability-token-gated: the raw downcast helpers
-//! ([`__carrier_downcast_ref`] / [`__carrier_downcast_arc`]) are
-//! `#[doc(hidden)]` and stay confined to each adapter's own bridge module
-//! (a foreign artifact's erased payload is a DIFFERENT concrete
-//! `CarrierParse` type, so the `Any` downcast already fails structurally
-//! for it — no separate adapter-identity gate is needed). The
-//! `carrier_downcast_confined_to_owning_adapter` static guard (in
-//! `verter_session`'s architecture-guard suite) is the enforcement
-//! authority across the crate seam, where a literal `pub(crate)` cannot
-//! compile.
+//! Downcast helpers ([`__carrier_downcast_ref`] /
+//! [`__carrier_downcast_arc`]) are `#[doc(hidden)]` and confined to each
+//! adapter's own bridge. A foreign artifact's payload is a different
+//! `CarrierParse` type, so `Any` downcast already fails. Cross-crate
+//! enforcement is the `carrier_downcast_confined_to_owning_adapter`
+//! guard — `pub(crate)` cannot span the seam.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -148,19 +143,10 @@ pub struct LanguageDiagnostic {
     pub arguments: Vec<DiagnosticArg>,
     /// Human-readable message.
     pub message: String,
-    /// Whether an `Error`-severity instance of this diagnostic should gate
-    /// downstream compilation (refuse to produce IDE/runtime output for the
-    /// whole file) — `true` for almost every diagnostic on this channel,
-    /// including every genuinely fatal parse-time defect (a carrier with no
-    /// real template/script entry, an unsupported construct the compiler
-    /// cannot safely lower). `false` marks a diagnostic that is accurate and
-    /// IDE-visible (the editor still shows it at full severity) but
-    /// describes a RECOVERABLE parser defect the carrier already produced a
-    /// faithful, usable tree for — the compiler can and should still emit
-    /// output for the rest of the file. Consumers that gate compilation on
-    /// "does this file have an error" must consult this flag rather than
-    /// severity alone; consumers that only DISPLAY diagnostics (hover,
-    /// `textDocument/publishDiagnostics`) read severity as before.
+    /// When `true`, an `Error` refuses IDE/runtime output for the file.
+    /// When `false`, the diagnostic is still shown at full severity but
+    /// the parser already produced a usable tree — do not gate
+    /// compilation on severity alone.
     pub blocks_compile: bool,
 }
 

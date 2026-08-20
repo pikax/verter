@@ -1,20 +1,16 @@
-// Validation: the total order and the `UncomposableInputMap` taxonomy.
+// Validation: total order and the `UncomposableInputMap` taxonomy.
 //
-// Implements LAYER 1 §4.1 (contract), §4.2 (the two fail-closed outcome kinds),
-// §4.3 (the total order over every individual check), §4.4 (the exhaustive
-// taxonomy) and §4.5 (the interoperable JSON domain) of
-// `spec/assembled-map-composition-layer1.md`.
+// Implements layer 1 §4.1 (contract), §4.2 (fail-closed outcome kinds),
+// §4.3 (total order over every check), §4.4 (exhaustive taxonomy), §4.5
+// (interoperable JSON domain) of `spec/assembled-map-composition-layer1.md`.
 //
-// Two properties this module exists to hold:
+// Validation runs to completion before any composition work begins: no
+// segment is translated, no table row appended, no artifact field computed
+// until §4.3's steps have all passed (§4.1).
 //
-//   - Validation runs TO COMPLETION BEFORE ANY COMPOSITION WORK BEGINS. "No
-//     segment is translated, no table row is appended and no artifact field is
-//     computed until §4.3's steps have all passed" (§4.1).
-//   - Every rejection reports EXACTLY ONE outcome. §4.3 is a total order over
-//     every individual check — including element order within each scanned
-//     array and field order within one segment — so any input for which two or
-//     more conditions hold has one determined reported outcome. The first
-//     failing check in that order is the outcome; validation stops there.
+// Every rejection reports exactly one outcome. §4.3 is a total order over
+// every check (including element order within each scanned array and field
+// order within one segment). First failing check is the outcome.
 
 import { TextGeometry } from "./assembled-map-coordinates.mjs";
 import {
@@ -38,14 +34,14 @@ function uncomposable(code) {
 /**
  * §4.3 stage 1 — every per-map check, in order, for ONE contributing map.
  *
- * @param {string} rawMap the fragment's RAW, unparsed `sourceMap` string (§3.3)
- * @param {string} fragmentCode the fragment's own `code`, in its own PRE-REWRITE
+ * @param {string} rawMap the fragment's raw, unparsed `sourceMap` string (§3.3)
+ * @param {string} fragmentCode the fragment's own `code`, in its own pre-rewrite
  *   coordinate space — what `U7` is checked against (§4.4)
  */
 export function validateContributingMap(rawMap, fragmentCode) {
-  // ---- 1.1 the interoperable JSON domain (§4.5) ---------------------------
-  // Three ordered clauses, first failure wins, "checked before any member of
-  // the document is read".
+  // 1.1 interoperable JSON domain (§4.5)
+  // Three ordered clauses, first failure wins, checked before any member of
+  // the document is read.
   let document;
   try {
     document = readJsonDocument(rawMap);
@@ -54,50 +50,50 @@ export function validateContributingMap(rawMap, fragmentCode) {
     throw error;
   }
   for (const number of document.numbers) {
-    // (b) — every JSON number denotes a finite IEEE-754 double, in source
-    // order. `DECISION` D-7: the predicate is over the CONVERTED binary64
-    // value, and the conversion is round-ties-to-even over the exact lexeme.
+    // (b) every JSON number denotes a finite IEEE-754 double, in source
+    // order. Predicate is over the converted binary64 value; conversion is
+    // round-ties-to-even over the exact lexeme.
     if (!Number.isFinite(number.value)) return uncomposable("U1.9");
   }
   for (const text of document.strings) {
-    // (c) — every JSON string, after unescaping, is well-formed Unicode.
+    // (c) every JSON string, after unescaping, is well-formed Unicode.
     if (hasUnpairedSurrogate(text)) return uncomposable("U1.10");
   }
 
-  // ---- 1.2 duplicate object member ---------------------------------------
+  // 1.2 duplicate object member
   // Precedes every member read, so no later check can silently read whichever
-  // duplicate the parser happened to keep (`DECISION` D-2).
+  // duplicate the parser happened to keep.
   if (document.hasDuplicateMember) return uncomposable("U1.8");
 
-  // ---- 1.3 root is an object ----------------------------------------------
+  // 1.3 root is an object
   const root = document.value;
   if (!isJsonObject(root)) return uncomposable("U1.2");
 
   const member = (name) => root.get(name);
   const has = (name) => root.has(name);
 
-  // ---- 1.4 – 1.6 version --------------------------------------------------
+  // 1.4 – 1.6 version
   if (!has("version")) return uncomposable("U2.1");
   const version = member("version");
   if (typeof version !== "number" || !Number.isInteger(version)) return uncomposable("U2.2");
   if (version !== 3) return uncomposable("U2.3");
 
-  // ---- 1.7 indexed map ----------------------------------------------------
+  // 1.7 indexed map
   // Version beats indexed-map; indexed-map beats missing `mappings`.
   if (has("sections")) return uncomposable("U5.1");
 
-  // ---- 1.8 – 1.9 mappings -------------------------------------------------
+  // 1.8 – 1.9 mappings
   if (!has("mappings")) return uncomposable("U1.3"); // never read as an empty map
   const mappings = member("mappings");
   if (typeof mappings !== "string") return uncomposable("U1.4");
 
-  // ---- 1.10 – 1.11 table containers ---------------------------------------
+  // 1.10 – 1.11 table containers
   const sources = member("sources");
   if (!has("sources") || !isJsonArray(sources)) return uncomposable("U1.5");
   const names = member("names");
   if (!has("names") || !isJsonArray(names)) return uncomposable("U1.6");
 
-  // ---- 1.12 – 1.16 metadata member types ----------------------------------
+  // 1.12 – 1.16 metadata member types
   const sourcesContent = has("sourcesContent") ? member("sourcesContent") : undefined;
   if (sourcesContent !== undefined && !isJsonArray(sourcesContent)) return uncomposable("U1.7");
 
@@ -133,7 +129,7 @@ export function validateContributingMap(rawMap, fragmentCode) {
 
   if (has("debugId") && typeof member("debugId") !== "string") return uncomposable("U1.7");
 
-  // ---- 1.17 – 1.19 table rows, ascending index order ----------------------
+  // 1.17 – 1.19 table rows, ascending index order
   // `sources` rows beat `names` rows beat `sourcesContent` rows.
   for (const row of sources) {
     if (typeof row !== "string") return uncomposable("U4.1");
@@ -145,16 +141,16 @@ export function validateContributingMap(rawMap, fragmentCode) {
     for (const row of sourcesContent) {
       if (typeof row !== "string" && row !== null) return uncomposable("U4.3");
     }
-    // ---- 1.20 -------------------------------------------------------------
+    // 1.20
     if (sourcesContent.length !== sources.length) return uncomposable("U4.4");
   }
 
-  // ---- 1.21 the wire decode (phases A → B → C) ----------------------------
+  // 1.21 the wire decode (phases A → B → C)
   const decoded = decodeMappingsStrict(mappings);
   if (!decoded.ok) return uncomposable(decoded.code);
   const segments = decoded.segments;
 
-  // ---- 1.22 table indices, wire order, `srcIdx` before `nameIdx` ----------
+  // 1.22 table indices, wire order, `srcIdx` before `nameIdx`
   // Both checks are guarded on the field being NON-NULL: a 1-field segment is
   // sourceless by definition (§2.2) and `null` is in no index range; an
   // unguarded check would reject every sourceless segment and take the whole
@@ -168,7 +164,7 @@ export function validateContributingMap(rawMap, fragmentCode) {
     }
   }
 
-  // ---- 1.23 ignore-list indices, ascending index order --------------------
+  // 1.23 ignore-list indices, ascending index order
   const ignoreList = ignoreListSpellings.length > 0 ? ignoreListSpellings[0] : null;
   if (ignoreList !== null) {
     for (const entry of ignoreList) {
@@ -176,7 +172,7 @@ export function validateContributingMap(rawMap, fragmentCode) {
     }
   }
 
-  // ---- 1.24 generated coordinates, wire order -----------------------------
+  // 1.24 generated coordinates, wire order
   const geometry = new TextGeometry(fragmentCode);
   for (const segment of segments) {
     if (segment.genLine < 0 || segment.genLine >= geometry.lines.length) {

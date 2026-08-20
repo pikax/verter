@@ -105,7 +105,7 @@ fn apply_to_preserves_same_position_prepend_order() {
     );
 }
 
-// ==================== overwrite_or_root_prefix / _suffix mapping truthfulness ====================
+// overwrite_or_root_prefix / _suffix mapping truthfulness
 //
 // A nonzero-width tag (`<script setup>`, `<template>`) replaced by wholly
 // synthetic wrapper code has NO character-level correspondence to that tag
@@ -189,7 +189,7 @@ fn overwrite_or_root_prefix_zero_width_still_inserts_unmapped_at_start() {
     assert_eq!(ct.build_string(), "<root>rest");
 }
 
-// ==================== add_sourcemap_location ====================
+// add_sourcemap_location
 //
 // An `Original`/`Moved` chunk's default mapping (`emit_mapped_content`)
 // tokens only its own start and newline boundaries — a mid-line identifier

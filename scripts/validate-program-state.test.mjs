@@ -1,27 +1,12 @@
-// Tests for scripts/validate-program-state.mjs, run with:
+// Tests for scripts/validate-program-state.mjs:
 //   node --test scripts/validate-program-state.test.mjs
 //
-// Fixture set (maintainer-scoped): positive fixtures (template + live + legal
-// same-snapshot stacking + subsystem NOT_REQUIRED + proven private checkpoint)
-// and discriminating negative controls for the checks that carry weight — the
-// sequencing invariant (including stackless READY and a premature
-// PRIVATE_CHECKPOINT), the stacked-work exception gate (unestablished stack;
-// mismatched snapshot digest; equal predecessor layer; terminated predecessor),
-// the block-set match, the status-dependent review/identity gates (including
-// the NOT_REQUIRED class gate, the diverged-accepted-identity
-// landing-equivalence gate, and the PRIVATE_CHECKPOINT class/proof gates), the
-// live-mode status = "ACTIVE" and program_dag_digest bindings, evidence_digest
-// content binding (unresolvable evidence_root, mismatched/missing artifact),
-// the DAG-root
-// entry-lock digest gate (empty/missing rejected at the gated statuses; a bound
-// digest passes), the fail-closed PRIVATE_CHECKPOINT-predecessor rejection
-// (both stackless and with otherwise-perfect stack fields — the stacked variant
-// is the ONLY check standing between a claimed stack and a silently accepted
-// checkpoint predecessor, see AMD-001), the strict TOML
-// reader, and the zero-blocks-validated case. Every negative asserts BOTH a
-// non-zero exit AND the specific violation text, and every positive asserts
-// the validator's own OK output line, so none of these tests can pass against
-// a validator stubbed to always exit 0.
+// Positives (template, live, legal stacking, NOT_REQUIRED, proven checkpoint)
+// and negatives that assert both a non-zero exit and the specific violation
+// text — including fail-closed PRIVATE_CHECKPOINT-predecessor rejection
+// (stackless and with otherwise-perfect stack fields) and evidence_digest
+// content binding (unresolvable evidence_root, mismatched/missing artifact).
+// A validator stubbed to always exit 0 cannot pass.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -819,12 +804,9 @@ test("entry lock: the DAG root block in REVIEW requires the digest; a bound dige
 
 test("private-checkpoint predecessor: a STACKLESS REVIEW successor over a PRIVATE_CHECKPOINT predecessor is rejected with the fail-closed stack-window message", () => {
   const dag = write("dag-cp-pred.toml", DAG_CP);
-  // A2 (predecessors [A0, A1]) in REVIEW while A1 sits in a fully-proven
-  // PRIVATE_CHECKPOINT. The AMD-001 fail-closed rejection must name the
-  // unmodelled stack-window path — asserting THAT message (not merely a
-  // non-zero exit) keeps this test discriminating: the generic stackless
-  // sequencing violation also fires here, so exit code alone cannot tell the
-  // fail-closed check from the generic one.
+  // REVIEW over a proven PRIVATE_CHECKPOINT. Assert the fail-closed
+  // stack-window message, not merely a non-zero exit — the generic
+  // stackless sequencing violation also fires here.
   const state = write(
     "state-cp-pred-stackless.toml",
     header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +
@@ -851,13 +833,9 @@ test("private-checkpoint predecessor: a STACKLESS REVIEW successor over a PRIVAT
 
 test("private-checkpoint predecessor: a REVIEW successor with OTHERWISE-PERFECT stack fields over a PRIVATE_CHECKPOINT predecessor is still rejected", () => {
   const dag = write("dag-cp-pred-stack.toml", DAG_CP);
-  // The AMD-001 D1/D2 interaction: PRIVATE_CHECKPOINT is a begun status, so a
-  // claimed stack over a checkpoint predecessor ESTABLISHES cleanly (same
-  // stack_id, identical well-formed snapshot digest, strictly lower layer,
-  // begun predecessor) — the fail-closed PRIVATE_CHECKPOINT-predecessor check
-  // is then the ONLY thing rejecting this state. Neutralising that check makes
-  // the validator ACCEPT it (exit 0), so this test fails — the mutation
-  // coverage the stackless variant cannot provide.
+  // PRIVATE_CHECKPOINT is begun, so a claimed stack over a checkpoint
+  // predecessor establishes cleanly. The fail-closed predecessor check is
+  // then the only rejection — neutralizing it would accept this state.
   const state = write(
     "state-cp-pred-stacked.toml",
     header({ status: "ACTIVE", current: "A2", repoSha: SHA, dagDigest: DAG_CP_DIGEST }) +

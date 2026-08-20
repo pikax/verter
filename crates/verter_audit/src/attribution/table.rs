@@ -1,22 +1,13 @@
-//! The counter table and its reader.
-//!
-//! COMPILED ONLY under the `attribution` feature. This is the whole
-//! reader path: without the feature there is no table, no
-//! [`snapshot`], no [`reset`] and no `record_*` entry point, so no
-//! production build can resolve a path from a counter value back into
-//! a decision. See [`super`] for the full no-semantic-authority
-//! argument.
+//! Counter table and reader. Compiled only under `attribution` — without
+//! it there is no table, no [`snapshot`]/[`reset`]/`record_*`, so a
+//! production build cannot branch on a counter. See [`super`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::schema::{WorkDomain, WorkSite, WorkUnit};
 
-/// One site's accumulators.
-///
-/// All fields are `Relaxed` atomics: the substrate never orders program
-/// state against a counter, so no stronger ordering is required, and
-/// `Relaxed` is what keeps an enabled build's per-hit cost at a single
-/// uncontended `lock xadd`.
+/// One site's accumulators. `Relaxed` atomics: counters never order
+/// program state, so a hit is one uncontended `lock xadd`.
 pub(super) struct SiteCell {
     /// Number of times the site was hit.
     pub(super) calls: AtomicU64,

@@ -1,20 +1,16 @@
-// Candidate-vs-golden acceptance check — the reusable primitive a consumer
-// (a Rust conformance suite, CI) drives to compare one produced artifact
-// against one committed golden across every independent axis: parse,
-// structural, diagnostics, mapping, link, and runtime execution.
+// Candidate-vs-golden acceptance check: one produced artifact against one
+// committed golden across parse, structural, diagnostics, mapping, link,
+// and runtime execution.
 //
-// SKIP SEMANTICS. Default behavior preserves the harness's ordinary
-// skip-with-reason discipline: an axis whose environment prerequisite is
-// absent (the isolated oracle install not realizable on this machine)
-// reports `skipped` with its reason and does not fail the check. The
-// AUTHORITATIVE mode (`authoritative: true`, or the CLI's --authoritative /
-// BF2_AUTHORITATIVE=1) is the fail-closed contract: every applicable axis
-// must genuinely RUN — a skipped axis is a hard failure, so a consumer can
-// prove its acceptance evidence actually executed instead of silently
-// narrowing. `not-applicable` (a runtime axis on a VDOM client artifact —
-// ssr artifacts execute through the pinned server renderer and vapor
-// artifacts mount through the pinned with-vapor interop runtime) is a
-// structural fact, not a skip, and never fails authoritative mode.
+// Default skip-with-reason: an axis whose environment prerequisite is
+// absent (isolated oracle install not realizable) reports `skipped` and
+// does not fail. Authoritative mode (`authoritative: true`, CLI
+// `--authoritative` / `BF2_AUTHORITATIVE=1`) is fail-closed: every
+// applicable axis must run — a skipped axis is a hard failure.
+// `not-applicable` (runtime axis on a VDOM client artifact — ssr executes
+// through the pinned server renderer, vapor mounts through the pinned
+// with-vapor interop) is a structural fact, not a skip, and never fails
+// authoritative mode.
 
 import path from "node:path";
 

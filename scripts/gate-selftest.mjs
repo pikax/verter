@@ -643,9 +643,7 @@ async function main() {
   // Each POSIX-only scenario below opens a LABELED block and, on Windows, emits a TRUE skip (not counted in
   // the pass total) then `break`s out — so the platform-independent scenarios still run on Windows.
 
-  // --------------------------------------------------------------------------------------------------
   // (i) MUTEX — a second concurrent run must REFUSE with LOCK-REFUSED (126).
-  // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(i) MUTEX\n");
   posix_i: {
     if (IS_WINDOWS) {

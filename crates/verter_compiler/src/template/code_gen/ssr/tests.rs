@@ -563,24 +563,12 @@ fn ssr_component() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════
 // Script SSR flags (non-inline: attached ssrRender, plain setup return)
 //
-// Verter's SSR `ssrRender` uses official's real non-inline shape — the
-// 8-param signature (`_ctx, _push, _parent, _attrs, $props, $setup, $data,
-// $options`) with `$setup.*`/`$props.*` member routing, never a free
-// `_ctx.*` alias for setup bindings (see `ssr_setup_bindings_route_through_setup_param`
-// below). The EARLIER 4-param/all-`_ctx.`-routing shape this comment block
-// used to describe as a "ratified interim divergence" (with the
-// `__isScriptSetup` marker withheld to avoid `hasSetupBinding` hiding
-// bindings from that proxy) has been superseded — confirmed directly
-// against the real `@vue/compiler-sfc` (`compileScript({ssr:true})` and
-// `{ssr:false}` produce a byte-identical script tail, marker included) and
-// the pinned rc.3 SSR goldens (`vue/*__ssr__*`, all of which carry the
-// marker). `docs/arch/ssr-noninline-shape-divergence.md` is deleted in the
-// same change — its own stated exit criterion (8-param `ssrRender`,
-// `$setup.*` routing, and the `__isScriptSetup` marker all present) is met.
-// ══════════════════════════════════════════════════════════════════
+// Official non-inline shape: 8-param `ssrRender` with `$setup.*`/`$props.*`
+// routing, never a free `_ctx.*` alias for setup bindings. Matches
+// `@vue/compiler-sfc` (`ssr:true` and `ssr:false` share a byte-identical
+// script tail, `__isScriptSetup` included) and the pinned rc.3 SSR goldens.
 
 /// Non-inline SSR must NOT set `__ssrInlineRender` (that flag means setup
 /// returns the render function — true-inline SSR, which Verter doesn't do).

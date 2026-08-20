@@ -1,33 +1,21 @@
-//! Whole-workspace forbidden-dependency-edge closure test — the SOLE
-//! dependency-direction authority for the workspace's crate graph,
-//! superseding the narrower per-manifest and per-source-text scanners it
-//! replaces.
+//! Workspace dependency-direction authority.
 //!
-//! Walks the REAL resolved dependency graph — `cargo metadata
-//! --format-version 1 --all-features` (the same resolve cargo builds from)
-//! — and asserts, for every layered workspace crate, that its production
-//! closure (normal + build edges, transitively; dev edges excluded) never
-//! reaches a crate in a strictly higher layer, except one recorded,
-//! equality-pinned exception (below).
+//! Walks `cargo metadata --format-version 1 --all-features` and asserts
+//! every layered crate's production closure (normal + build, no dev) never
+//! reaches a strictly higher layer, except one equality-pinned exception.
 //!
-//! Layer matrix: the binding inward dependency chain is identity/span/
-//! language/contracts -> shared syntax frontends and dependency-neutral
-//! DTOs -> semantic kernel/module resolver/relation/flow -> compiler ->
-//! managed engine/session -> LSP/provider/MCP/NAPI/WASM/CLI adapters, with
-//! harnesses outside the chain (nothing may depend on them). This crate
-//! lives at the innermost layer alongside the other identity/span/
-//! language/contracts crates.
+//! Inward chain: identity/span/language/contracts → syntax frontends /
+//! DTOs → semantic kernel → compiler → session/engine → adapters.
+//! Harnesses sit outside; nothing may depend on them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Layer matrix. Lower layer = more foundational (inward). A crate's
 // production closure may reach its own layer or any lower layer; reaching
 // a strictly higher layer is a firewall breach unless explicitly,
 // equality-pinned excepted.
-// ─────────────────────────────────────────────────────────────────────────
 
 const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     "verter_span",
@@ -87,11 +75,8 @@ const LAYER_7_HARNESSES: &[&str] = &[
     "verter_session_oracle_macro",
 ];
 
-/// Not a layer at all: `xtask` is repository build/task tooling, never a
-/// dependency of anything the layer matrix covers. Checked separately
-/// (`xtask_is_never_a_production_dependency_of_a_layered_crate`) rather
-/// than assigned a layer number, since it sits outside the inward
-/// dependency chain entirely.
+/// Build tooling, not a layer. Checked by
+/// `xtask_is_never_a_production_dependency_of_a_layered_crate`.
 const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &["xtask"];
 
 fn layer_map() -> HashMap<&'static str, u8> {
@@ -120,33 +105,16 @@ fn layer_map() -> HashMap<&'static str, u8> {
     m
 }
 
-/// The ONE recorded exception. `verter_semantic` and `verter_diagnostics`
-/// (layer 3) both depend on `verter_workspace` (layer 5), which in turn
-/// depends on `verter_scheduler` (unconditionally) and `verter_tsgo_api`
-/// (on native targets only). That upward reach is real today and is
-/// tolerated here as an explicit, equality-pinned exception rather than
-/// silently permitted or hidden by weakening the test: removing it means
-/// removing the underlying `verter_semantic`/`verter_diagnostics` ->
-/// `verter_workspace` dependency, not editing this map.
+/// Recorded upward exception: layer-3 `verter_semantic` /
+/// `verter_diagnostics` → `verter_workspace` (layer 5) →
+/// `verter_scheduler` (unconditional) and `verter_tsgo_api` (native-only).
+/// Equality-pinned, never subset-checked — shrinking or growing the set
+/// fails until this map is deliberately updated.
 ///
-/// Equality-pinned, never subset-checked: each excepted crate's UPWARD
-/// reach must equal exactly this set, not merely be contained in it — so
-/// once the underlying dependency is removed, this assertion starts
-/// failing and forces a deliberate test update (the intended "removal
-/// gate" behaviour), and if a NEW upward crate ever appears it is caught
-/// immediately rather than silently absorbed into an overly generous
-/// allowance.
-///
-/// `verter_workspace -> verter_scheduler` is UNCONDITIONAL
-/// (`crates/verter_workspace/Cargo.toml` `[dependencies]`); `verter_workspace
-/// -> verter_tsgo_api` is NATIVE-ONLY
-/// (`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`). Both still
-/// appear in `cargo metadata`'s default (non-`--filter-platform`) resolve,
-/// which reports the union of every target-gated dependency rather than
-/// resolving for one concrete target — so a `wasm32`-only resolve is never
-/// what this test reads, and the target condition on each edge is verified
-/// directly (not assumed) by
-/// `the_ratified_exception_records_its_target_condition_precisely` below.
+/// `cargo metadata` without `--filter-platform` unions every target-gated
+/// edge, so both scheduler and tsgo_api appear. Target conditions are
+/// pinned by
+/// `the_ratified_exception_records_its_target_condition_precisely`.
 fn ratified_upward_exceptions() -> HashMap<&'static str, BTreeSet<&'static str>> {
     let allowed: BTreeSet<&'static str> =
         ["verter_workspace", "verter_scheduler", "verter_tsgo_api"]
@@ -158,10 +126,8 @@ fn ratified_upward_exceptions() -> HashMap<&'static str, BTreeSet<&'static str>>
     m
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Resolve-graph plumbing (modelled exactly on
 // `crates/verter_macro_dto/tests/cases/dependency_closure_guard.rs`).
-// ─────────────────────────────────────────────────────────────────────────
 
 fn workspace_manifest() -> PathBuf {
     // tests/cases/ lives at crates/verter_identity/, two levels below the
@@ -285,13 +251,10 @@ impl ResolveGraph {
         self.production_closure_names_with_boundary(root_name, &BTreeSet::new())
     }
 
-    /// BFS over production edges from `root_name`, but does NOT expand
-    /// past a crate named in `boundary` — such a crate still appears in the
-    /// result (reaching it is still real), but its OWN further dependencies
-    /// are not explored. Used to answer "what does `root_name` reach
-    /// WITHOUT relying on `boundary`'s own transitive reach" — i.e. to
-    /// separate a crate's OWN upward violations from upward reach it merely
-    /// INHERITS by legitimately depending on an already-excepted violator.
+    /// BFS from `root_name` that does not expand past `boundary`. The
+    /// boundary crate is still counted as reached; its own deps are not.
+    /// Separates a crate's own upward edges from reach inherited through
+    /// an already-excepted violator.
     fn production_closure_names_with_boundary(
         &self,
         root_name: &str,
@@ -304,9 +267,7 @@ impl ResolveGraph {
         queue.push_back(root);
         let mut names = BTreeSet::new();
         while let Some(id) = queue.pop_front() {
-            // A boundary crate still counts as reached (it was already
-            // enqueued and its name recorded when discovered below), but we
-            // do not read ITS OWN deps to keep expanding past it.
+            // Reached, but do not walk its deps.
             if boundary.contains(self.name_of(&id)) && id != self.id_of(root_name) {
                 continue;
             }
@@ -345,26 +306,11 @@ impl ResolveGraph {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
-/// The two root crates the recorded exception covers (`verter_semantic`,
-/// `verter_diagnostics`). This test must be CLOSURE-based, not
-/// direct-edge-based: a direct-edge test passes while a two-hop violation
-/// walks straight through it, and the exception's own upward reach
-/// (`verter_semantic -> verter_workspace -> verter_scheduler`) IS itself
-/// exactly that two-hop shape. Consequently every OTHER layered crate that
-/// legitimately depends on one of these two roots (a same-or-lower-layer,
-/// otherwise unremarkable edge — e.g. `verter_compiler -> verter_semantic`,
-/// `verter_actions -> verter_semantic`) mechanically inherits the same
-/// upward reach through no additional edge of its own. Treating each such
-/// inheritor as an independent, separately-approvable violation would be
-/// incoherent with a closure-based design: the recorded root edges'
-/// whole *point* is that their consequences propagate through the closure.
-/// So this set is not "crates the exception covers" but "the two EDGES
-/// whose consequences are attributed away from their consumers" — see
-/// `workspace_production_closures_never_cross_upward_except_the_recorded_exception`.
+/// Exception roots. Closure-based (not direct-edge): the upward reach is
+/// two-hop, and every legitimate consumer of these crates inherits it.
+/// Inheritors are not separate violations.
 const RATIFIED_ROOT_CRATES: &[&str] = &["verter_semantic", "verter_diagnostics"];
 
 #[test]
@@ -381,9 +327,7 @@ fn workspace_production_closures_never_cross_upward_except_the_recorded_exceptio
     for &crate_name in &layered_names {
         let own_layer = layers[crate_name];
 
-        // The two roots themselves: checked against the ORIGINAL,
-        // fully-expanded closure and the EXACT recorded set — this is the
-        // literal equality pin ("equality-pinned, never subset-checked").
+        // Roots: fully expanded closure must equal the recorded set.
         if RATIFIED_ROOT_CRATES.contains(&crate_name) {
             let closure = graph.production_closure_names(crate_name);
             let upward: BTreeSet<&str> = closure
@@ -433,9 +377,8 @@ fn workspace_production_closures_never_cross_upward_except_the_recorded_exceptio
     }
 }
 
-/// Non-vacuity canary: a closure walk that went blind (empty deps, dropped
-/// edges, name mismatches) would make the assertion above pass trivially.
-/// This proves the walk genuinely reaches crates several hops away.
+/// Blind walk (empty deps / name mismatches) would pass the firewall
+/// vacuously. This proves the walk still reaches several hops away.
 #[test]
 fn closure_walk_is_non_vacuous_for_known_deep_reaches() {
     let metadata = workspace_metadata();
@@ -466,22 +409,8 @@ fn closure_walk_is_non_vacuous_for_known_deep_reaches() {
     );
 }
 
-/// Sub-layer ordering WITHIN layer 5 that the coarse 7-layer matrix does not
-/// itself express: `verter_session` depends on `verter_scheduler` (and
-/// `verter_workspace`/`verter_tsgo_api`/`verter_type_runtime`/
-/// `verter_protocol`), never the reverse. The layer matrix places all six
-/// crates at layer 5 for the coarse macro-layer purpose, so a plain
-/// "no strictly-higher layer" check cannot see a same-layer back-edge —
-/// this dedicated assertion is what makes the closure walk STRICTLY IMPLY
-/// the invariant the deleted scheduler-crate source-text scanner held:
-/// `verter_scheduler`'s production closure excludes `verter_session`. (A
-/// cargo dependency CYCLE would in fact reject a real `verter_scheduler ->
-/// verter_session` edge outright before this test could even run —
-/// `verter_session` already depends on `verter_scheduler` — but that is
-/// cargo's own global cycle rule, not this test; asserting it here keeps
-/// the invariant discoverable by name and documented as a firewall
-/// property, not merely an incidental consequence of the graph being
-/// acyclic.)
+/// Same-layer direction: `verter_session` → `verter_scheduler`, never the
+/// reverse. The 7-layer matrix cannot see this back-edge.
 #[test]
 fn verter_scheduler_closure_excludes_verter_session() {
     let metadata = workspace_metadata();
@@ -494,11 +423,8 @@ fn verter_scheduler_closure_excludes_verter_session() {
     );
 }
 
-/// Verifies — rather than assumes — the exact target-cfg declaration the
-/// recorded exception's source edge carries
-/// (`verter_workspace -> {verter_scheduler,verter_tsgo_api}`), so a
-/// `wasm32`-only resolve can never silently read this exception as
-/// satisfied by a narrower edge than the one actually recorded.
+/// Pin the exception edges' target cfgs so a wasm32-only resolve cannot
+/// silently shrink the recorded reach.
 #[test]
 fn the_ratified_exception_records_its_target_condition_precisely() {
     let metadata = workspace_metadata();

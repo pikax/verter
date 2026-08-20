@@ -1,25 +1,22 @@
-// The v3 `mappings` wire codec: a STRICT decoder and the canonical encoder.
+// v3 `mappings` wire codec: a strict decoder and the canonical encoder.
 //
-// Implements LAYER 1 §4.3 step 1.21 (the three ordered decode phases and the
-// `U3.*` taxonomy) and §7.6 (canonical `mappings` encoding) of
+// Implements layer 1 §4.3 step 1.21 (three ordered decode phases, `U3.*`
+// taxonomy) and §7.6 (canonical `mappings` encoding) of
 // `spec/assembled-map-composition-layer1.md`.
 //
-// WHY NOT `src/sourcemap.mjs`'s CODEC. Its `decodeMappings` is the accepted
-// WIRE-FORMAT authority — layer 1 cites it for the shape of a decoded segment
-// (§2.2) and for the fact that a zero column delta pushes an ADDITIONAL segment
-// rather than replacing one (§7.6). It is deliberately LENIENT where layer 1 is
-// strict: `U3.4`'s own table row records that `"A"` and `"ggggggE"` both decode
-// to 0 there "because a 32-bit shift wraps", and layer 1 requires the second to
-// be REJECTED. It also raises untyped errors where layer 1 requires six
-// distinguishable sub-codes in a mandated order. So the decode is reimplemented
-// to layer 1's contract; `test/` cross-checks this module's ENCODER against
-// that accepted decoder, which is where the wire-format authority belongs.
+// Not `src/sourcemap.mjs`: that `decodeMappings` is the accepted wire-format
+// authority (decoded segment shape §2.2; a zero column delta pushes an
+// additional segment rather than replacing one, §7.6) but is lenient where
+// layer 1 is strict — `"A"` and `"ggggggE"` both decode to 0 there because
+// a 32-bit shift wraps; layer 1 requires the second rejected. It also
+// raises untyped errors where layer 1 requires six distinguishable
+// sub-codes in mandated order. Decode is reimplemented to that contract;
+// tests cross-check this encoder against the accepted decoder.
 //
-// Its `encodeMappings` sorts by `(genLine, genCol)` first. §7.6 requires the
-// sequence to be encoded "in sequence order, never re-sorted" and states that
-// "an implementation must not rely on the sort to impose order". It also encodes
-// through `<<`, which wraps for the largest in-range field values. Hence a local
-// encoder.
+// That `encodeMappings` sorts by `(genLine, genCol)` first. §7.6 requires
+// sequence order, never re-sorted, and forbids relying on the sort to
+// impose order. It also encodes through `<<`, which wraps for the largest
+// in-range field values. Hence a local encoder.
 
 const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const BASE64_DIGIT = new Map([...BASE64].map((character, index) => [character, index]));
@@ -32,20 +29,18 @@ function reject(code) {
 }
 
 /**
- * §4.3 step 1.21 — decodes `mappings` into an absolute segment sequence, or
- * reports the FIRST violation in wire order.
+ * §4.3 step 1.21 — decode `mappings` into an absolute segment sequence, or
+ * report the first violation in wire order.
  *
- * The decode is a single left-to-right pass and segments are examined in wire
- * order. Within one segment the checks run in three ordered phases:
+ * Single left-to-right pass. Within one segment, three ordered phases:
  *
- *   Phase A — lexical and per-field, as each field is read, in wire order:
- *     `U3.1` invalid character, `U3.2` truncated segment, `U3.4` field range.
- *   Phase B — arity, once the segment has been read in full: `U3.3`.
- *   Phase C — accumulator application, and ONLY if phase B passed: `U3.5`
- *     then, for `genCol` only, `U3.6`.
+ *   A — lexical and per-field as each field is read: `U3.1` invalid
+ *     character, `U3.2` truncated segment, `U3.4` field range.
+ *   B — arity once the segment is fully read: `U3.3`.
+ *   C — accumulator application, only if B passed: `U3.5`, then `U3.6`
+ *     for `genCol` only.
  *
- * "Arity therefore beats every accumulator property" and, within phase C,
- * "range beats ordering".
+ * Arity beats every accumulator property; within C, range beats ordering.
  *
  * @returns {{ ok: true, segments: object[] } | { ok: false, code: string }}
  */
@@ -59,15 +54,14 @@ export function decodeMappingsStrict(mappings) {
   const groups = mappings.split(";");
   for (let genLine = 0; genLine < groups.length; genLine += 1) {
     const group = groups[genLine];
-    // An empty group is a generated line with no segments — not a zero-field
-    // segment. (`"A,,B"`'s middle token IS an empty segment token and is
-    // `U3.3` under phase B.)
+    // Empty group = generated line with no segments, not a zero-field
+    // segment (`"A,,B"` middle token is `U3.3` under B).
     if (group === "") continue;
 
     let genCol = 0;
     let previousGenColOnLine = null;
     for (const token of group.split(",")) {
-      // ---- phase A -------------------------------------------------------
+      // A
       const fields = [];
       let at = 0;
       while (at < token.length) {
@@ -81,18 +75,16 @@ export function decodeMappingsStrict(mappings) {
           at += 1;
           continues = (digit & 32) !== 0;
           const bits = digit & 31;
-          // "the field's encoding continues past bit 31": a digit group that
-          // lies wholly beyond bit 31, or one that sets a bit at position ≥ 32.
-          // At shift 30 (the seventh digit) the legal value bits are 0..3; the
-          // `U3.4` row's own example `"ggggggE"` sets bit 32 there.
+          // Field encoding continues past bit 31: a digit group wholly
+          // beyond bit 31, or one that sets a bit at position ≥ 32. At
+          // shift 30 the legal value bits are 0..3; `"ggggggE"` sets bit 32.
           if (shift >= 32) pastBit31 = true;
           else if (bits >= 2 ** (32 - shift)) pastBit31 = true;
           if (!pastBit31) value += bits * 2 ** shift;
           shift += 5;
           if (!continues) break;
         }
-        // The bullets are ordered `U3.1`, `U3.2`, `U3.4`, so a segment that
-        // both ends mid-field AND ran past bit 31 reports `U3.2`.
+        // Ordered `U3.1`, `U3.2`, `U3.4`: mid-field end + past bit 31 → `U3.2`.
         if (continues) return reject("U3.2");
         if (pastBit31) return reject("U3.4");
         const negative = value % 2 === 1;
@@ -102,12 +94,12 @@ export function decodeMappingsStrict(mappings) {
         fields.push(decoded);
       }
 
-      // ---- phase B -------------------------------------------------------
+      // B
       if (fields.length !== 1 && fields.length !== 4 && fields.length !== 5) {
         return reject("U3.3");
       }
 
-      // ---- phase C -------------------------------------------------------
+      // C
       const nextGenCol = genCol + fields[0];
       if (nextGenCol < 0 || nextGenCol > INT32_MAX) return reject("U3.5");
       if (previousGenColOnLine !== null && nextGenCol < previousGenColOnLine) {

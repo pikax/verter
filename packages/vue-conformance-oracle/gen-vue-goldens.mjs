@@ -1,70 +1,29 @@
 #!/usr/bin/env node
 /**
- * Generator — official Vue 3.6 RC conformance goldens (oracle).
+ * Official Vue RC conformance golden generator.
  *
- * Runs the PINNED official Vue RC compiler (`vue` / `@vue/compiler-dom` /
- * `@vue/compiler-sfc` / `@vue/compiler-vapor`, all exactly
- * `VUE_ORACLE_VERSION` from `./vue-golden-lib.mjs`) over every committed
- * corpus SFC under `crates/verter_vue_conformance/corpus/cases/` and writes
- * VENDORED, COMMITTED goldens: the official emitted render/component module
- * per backend (`vdom` + `vapor`), its source map, and a per-cell metadata
- * JSON (schema, package versions, source/options/code/map SHA-256, backend,
- * disposition, interleaved diagnostics, helper inventory, generator
- * version). It then rewrites `corpus/manifest.json` (case-id → SFC →
- * per-backend golden/map/meta paths + disposition).
+ * Runs the pinned official Vue RC compiler (`VUE_ORACLE_VERSION` from
+ * `./vue-golden-lib.mjs`) over every corpus SFC and writes committed
+ * goldens: per-backend module + source map + metadata JSON, then
+ * `corpus/manifest.json`.
  *
- * The goldens are the release ORACLE the `verter_vue_conformance` Rust suite
- * compares Verter output against (structurally, not byte-wise — cosmetic JS
- * formatting and private local names are waived). They are NEVER hand-edited:
- * this script is the only writer, and `node gen-vue-goldens.mjs --check`
- * regenerates everything in-memory and fails on any missing / drifted /
- * stale committed artifact.
+ * Oracle for `verter_vue_conformance` (structural compare, not
+ * byte-wise). Never hand-edit. `node gen-vue-goldens.mjs --check`
+ * regenerates in-memory and fails on drift.
  *
- * TOPOLOGY: the goldens cover BOTH official emission topologies. The default
- * (`non-inline`) cells use the official NON-inline emission — the same
- * `_sfc_main`-shaped module with a SEPARATE render function that Verter
- * ships at runtime (`verter_session::assemble_vue_main_module`). Script-setup
- * cells: `compileScript({ inlineTemplate: false })` for the component object
- * + `compileTemplate({ compilerOptions: { bindingMetadata } })` for the
- * separate render fn (identical invocation shape for VDOM via compiler-dom
- * and Vapor via compiler-vapor — vapor's render is a separate exported
- * function just like VDOM's), assembled as
- * `[render import line][script component object][function render][_sfc_main.render
- * = render][export default _sfc_main]`. Template-only cells get the
- * bundler-equivalent `const _sfc_main = {}` + attach wrapper.
+ * Two official topologies. Default `non-inline`: separate render function
+ * (`compileScript({ inlineTemplate: false })` + `compileTemplate`), the
+ * same `_sfc_main` shape `assemble_vue_main_module` ships. `inline`
+ * (VDOM script-setup only): one `compileScript({ inlineTemplate: true })`
+ * whose setup already holds the render closure. Inline maps are the
+ * whole-module compileScript map; non-inline maps are the render-fn map.
  *
- * The `inline` cells (VDOM script-setup cases only — Vapor inline is
- * deferred) use the official PRODUCTION topology: a single
- * `compileScript({ inlineTemplate: true, vapor: false })` call whose content
- * already carries the render closure inside `setup()` (official does NOT
- * split compileTemplate for inline), with `export default` rebound to
- * `const _sfc_main =` and a trailing `export default _sfc_main` — the same
- * module shape Verter's inline assembly ships. Inline goldens live under
- * `goldens/<ver>/vdom-inline/…`; each cell's `.meta.json` records
- * `topology` and `inlineTemplate`. The vendored inline `.map.json` is the
- * whole-module `compileScript` map (already SFC-absolute; no re-anchor).
- * The vendored non-inline `.map.json` is the render-fn (compileTemplate)
- * map; the script block's own map is not vendored.
+ * Pinned: Vue packages + esbuild must match `./vue-golden-lib.mjs` exactly.
+ * Hermetic: compile reads only `corpus/` (resolved). Deterministic: sorted
+ * cases, hashed options, no timestamps or absolute paths.
  *
- * Guarantees:
- *   - PINNED: all four Vue packages AND esbuild must resolve to the exact
- *     versions declared in `./vue-golden-lib.mjs`; the generator refuses to
- *     run on any drift (no ranges, no dist-tags).
- *   - HERMETIC: compilation may only read inside `corpus/`. The `compileScript`
- *     type-resolution `fs` is replaced with a guard that denies (throws on)
- *     any read outside the corpus root (symlinks resolved); shared support
- *     files are vendored under `corpus/support/`.
- *   - DETERMINISTIC: case order is sorted, options are fixed and hashed, no
- *     timestamps, no absolute paths (all recorded paths are corpus-relative
- *     POSIX). Re-running with the same pins reproduces identical bytes.
- *
- * TypeScript cells: `compileScript` keeps TS syntax in its emitted script
- * (the official SFC loaders strip types downstream). For `lang="ts"` cells
- * the emitted script is type-stripped with the pinned esbuild
- * (`{ loader: "ts" }` only — no format conversion, so PURE annotations and
- * the official export shape survive). Every stripped cell records the
- * post-process in its metadata. All other cells vendor the raw compiler
- * bytes untouched.
+ * `lang="ts"` script is type-stripped with pinned esbuild `{ loader: "ts" }`
+ * only (no format conversion). Other cells vendor raw compiler bytes.
  *
  * Usage:
  *   node gen-vue-goldens.mjs           # clean regenerate (rewrites goldens + manifest)

@@ -1,14 +1,13 @@
-// Exact, immutable official-core compatibility domains this harness may ever
+// Exact, immutable official-core compatibility domains this harness may
 // invoke. Mirrors
-// docs/arch/refactor/rev11/evidence/framework-conformance/version-domain.md
-// byte-for-byte. This module is the SOLE authority other harness modules read
-// pin identities from; nothing here is fetched at runtime, and nothing here
-// may be widened to a range or dist-tag (official-core-oracles.md).
+// `docs/arch/refactor/rev11/evidence/framework-conformance/version-domain.md`
+// byte-for-byte. Sole authority other harness modules read pin identities
+// from; nothing here is fetched at runtime, and nothing here may be
+// widened to a range or dist-tag (official-core-oracles.md).
 //
 // A newer Vue RC, Vue stable, or Svelte release is a distinct compatibility
-// domain requiring its own amendment and regenerated evidence — see that
-// contract's "Domain changes" section. This module intentionally has no
-// upgrade path.
+// domain requiring its own amendment and regenerated evidence. No upgrade
+// path.
 
 export const VUE_DOMAIN = Object.freeze({
   framework: "vue",

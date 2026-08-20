@@ -1,12 +1,7 @@
-//! Deterministic rendering of a [`snapshot`](super::snapshot).
+//! Deterministic snapshot rendering (`attribution` feature only).
 //!
-//! COMPILED ONLY under the `attribution` feature.
-//!
-//! Both renderers walk [`WorkSite::ALL`] in declaration order and format
-//! integers only, so two runs that observed the same work produce
-//! byte-identical output. That is what lets a baseline capture be
-//! diffed, and what lets the determinism digests be compared without a
-//! bespoke comparison tool.
+//! Walks [`WorkSite::ALL`] in declaration order and formats integers
+//! only, so two equal observations produce byte-identical output.
 
 use std::fmt::Write as _;
 

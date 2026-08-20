@@ -1,41 +1,19 @@
-//! The reachable-success surface of the host's framework product routes, and
-//! the publication contract each route actually honours.
+//! Reachable-success surface of host framework product routes (not Vue
+//! runtime-render content). Vue `Main`/`Template` appear only for their
+//! publication contract.
 //!
-//! Scope: every PUBLIC or DEFAULT spelling by which a caller can request a
-//! framework product OTHER than Vue runtime-render output. Vue's `Main` and
-//! `Template` virtual nodes appear here only for their PUBLICATION contract —
-//! which products exist, under which profile axes, and what survives a refusal.
-//! Nothing here asserts anything about their rendered content.
-//!
-//! The inventory itself is the committed
-//! `framework_product_surface_inventory.json` beside this file. These tests are
-//! what make it machine-checkable:
-//!
-//! * [`every_virtual_node_kind_is_named_by_the_inventory`] and
-//!   [`every_public_api_mode_is_named_by_the_inventory`] map each product-axis
-//!   enum variant onto its inventory id through an EXHAUSTIVE `match` with no
-//!   wildcard arm. A new `VirtualNodeKind` / `PublicApiMode` variant is a
-//!   COMPILE error here, not a silently-unnamed product — the completeness
-//!   check is the type system's, not a scan over the source tree.
-//! * Every `hostEntryPoint` the inventory names is CALLED by the tests below,
-//!   so its continued existence is compiler-enforced too.
-//!
-//! What this cannot enforce structurally, and does not pretend to: the
-//! transport `routeAliases` (NAPI / WASM / bundler). Those live in crates and
-//! packages `verter_session` cannot call, and the project forbids landing a
-//! name-keyed source-tree scanner as a guard, so they are read-verified
-//! citations recorded in the artifact rather than executed here.
-//!
-//! Run it with:
+//! Inventory: `framework_product_surface_inventory.json`. Exhaustive
+//! `match` maps every `VirtualNodeKind` / `PublicApiMode` onto an id —
+//! a new variant is a compile error. Every named `hostEntryPoint` is
+//! called. Transport `routeAliases` live outside this crate and are
+//! recorded citations, not executed here.
 //!
 //! ```text
 //! cargo test -p verter_session --lib framework_product_surface -- --test-threads=1
 //! ```
 //!
-//! No feature is required. Add `--ignored` for the conformance target, which
-//! fails by design. Read the `running N tests` line, never the exit code:
-//! libtest's filter is one literal substring with no alternation, so `"a\|b"`
-//! matches nothing and still exits 0.
+//! Read the `running N tests` line, never the exit code: a libtest
+//! filter that matches nothing still exits 0.
 
 use std::sync::Arc;
 
@@ -46,20 +24,12 @@ use crate::{
     VirtualNodeKind, VirtualQuery,
 };
 
-/// This module's half of a MUTUAL, compile-enforced registration.
+/// Mutual, compile-enforced census registration.
 ///
-/// The census lives OUTSIDE this module deliberately — a check placed inside a
-/// suite is deleted by the same edit that empties it. That leaves the reverse
-/// hole: deleting the census too. This test consumes an item the census owns,
-/// and the census in turn NAMES this test as an item, so removing EITHER `mod`
-/// declaration is a COMPILE error rather than a filter that silently matches
-/// nothing and still exits 0.
-///
-/// The identity the census counts by is this function ITEM, not a path this
-/// module writes down: it is passed by reference and the compiler answers with
-/// the definition's own path. A suite therefore cannot nominate a module it does
-/// not live in, and the census requires a test with exactly that path to be
-/// present in the binary's own listing before counting anything under it.
+/// The census lives outside this module so emptying the suite cannot
+/// delete the check. This test consumes a census-owned item and the
+/// census names this function, so removing either `mod` is a compile
+/// error — not a filter that matches nothing and still exits 0.
 #[test]
 pub(crate) fn this_suite_is_registered_with_the_census() {
     assert!(
@@ -211,15 +181,10 @@ fn ssr_profile() -> CompileProfile {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The inventory is complete over every product axis the type system has
-// ══════════════════════════════════════════════════════════════════════════
 
-/// The inventory id for one virtual-node product.
-///
-/// EXHAUSTIVE, no wildcard arm: a new `VirtualNodeKind` variant fails to
-/// compile here until the inventory names its product. That is the
-/// completeness mechanism — the type system, not a source scan.
+/// Inventory id for one virtual-node product. Exhaustive match: a new
+/// `VirtualNodeKind` is a compile error until the inventory names it.
 fn product_id_for(kind: &VirtualNodeKind) -> &'static str {
     match kind {
         VirtualNodeKind::Main => "virtual-node.main",
@@ -253,9 +218,7 @@ fn every_virtual_node_kind_is_named_by_the_inventory() {
         );
         seen.insert(id);
     }
-    // The sweep must reach every arm the mapping can produce; an arm reachable
-    // through `product_id_for` but absent from `all_node_kinds` would be
-    // named-but-never-probed.
+    // Every `product_id_for` arm must be in `all_node_kinds`.
     assert_eq!(
         seen.len(),
         5,
@@ -319,9 +282,7 @@ fn the_inventory_is_internally_well_formed() {
                 .is_empty(),
             "{id}: names no product"
         );
-        // Every case must be reachable by at least one spelling: a host entry
-        // point or a transport alias. A case with neither is not a reachable
-        // surface and does not belong in this inventory.
+        // Every case needs a host entry point or a transport alias.
         let has_host = case["hostEntryPoint"].is_string();
         let aliases = case["routeAliases"]
             .as_array()
@@ -340,9 +301,7 @@ fn the_inventory_is_internally_well_formed() {
         }
     }
 
-    // The one case recorded as having NO host route must stay marked that way:
-    // it is the reason the standalone CSS product has no publication
-    // relationship to any other product.
+    // Standalone CSS has no host route.
     assert!(
         inventory_product_ids().contains(TSC_PRODUCT_ID),
         "the inventory names no `{TSC_PRODUCT_ID}` product, but the TSC target bit publishes one"
@@ -359,9 +318,7 @@ fn the_inventory_is_internally_well_formed() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Every enumerated cell, driven, with its exact result recorded
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn the_vue_virtual_node_surface_publishes_exactly_the_listed_nodes() {
@@ -401,11 +358,8 @@ fn the_vue_virtual_node_surface_publishes_exactly_the_listed_nodes() {
     }
 }
 
-/// The source-map axis, per node kind, exactly as it behaves.
-///
-/// Recorded rather than assumed: the profile's `source_map` reaches the
-/// main/script/template products on Vue and the module and CSS products on
-/// Svelte, but NOT the Vue style product.
+/// Source-map axis as recorded: Vue main/script/template and Svelte
+/// module/CSS, not Vue style.
 #[test]
 fn the_source_map_axis_reaches_the_products_it_currently_reaches() {
     let vue = "/probe/Styled.vue";
@@ -495,11 +449,8 @@ fn the_public_api_product_resolves_per_framework_and_mode() {
             .get_public_api_with_mode(svelte, mode, None)
             .unwrap_or_else(|error| panic!("svelte public api {mode:?}: {error:?}"))
             .unwrap_or_else(|| panic!("svelte publishes a public API for {mode:?}"));
-        // The props / exports / bindings SEMANTICS of this surface are asserted
-        // by `a_typed_svelte_props_surface_types_its_props_exports_and_bindings`,
-        // which reads the CHECKER's own view of it inside the pinned Svelte
-        // closure. What this route test owns is that the surface publishes at
-        // all, and that it carries its map.
+        // Semantics live in the TypeScript observation suite; this owns
+        // publication and map presence.
         assert!(
             !response.ts_labeled_code().is_empty(),
             "svelte {mode:?} public API published an empty surface"
@@ -570,9 +521,7 @@ fn the_scalar_batch_and_projection_public_api_spellings_agree_byte_for_byte() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Atomic publication, both directions
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Whether a typed unsupported-surface variant is DRIVEN by this suite's
 /// atomic-publication cells, or is not reachable through the shipped `.svelte`
@@ -587,17 +536,9 @@ enum RefusalCoverage {
     NotReachableHere(&'static str),
 }
 
-/// The refusal inventory, DERIVED from the compiler's own typed
-/// unsupported-surface taxonomy.
-///
-/// EXHAUSTIVE `match`, no wildcard arm: a new
-/// `UnsupportedSvelteRuntimeSurface` variant fails to COMPILE here until it is
-/// classified, so the atomic-publication contract can never silently cover only
-/// the refusals someone happened to think of. The classifier takes a value it
-/// never needs to be called with — exhaustiveness is checked at compile time
-/// regardless — and the two `Driven` arms are additionally called with
-/// constructed samples below, so a variant marked `Driven` without a cell is
-/// caught too.
+/// Refusal inventory from the compiler's typed taxonomy. Exhaustive
+/// `match`: a new variant is a compile error until classified. `Driven`
+/// without a cell fails below.
 fn refusal_coverage(surface: &UnsupportedSvelteRuntimeSurface) -> RefusalCoverage {
     use UnsupportedSvelteRuntimeSurface as S;
     const PROFILE_ONLY: &str =
@@ -679,12 +620,7 @@ fn refusal_cells() -> Vec<(
     ]
 }
 
-/// Every variant the classifier marks `Driven` has a cell, and every cell's
-/// code is a `Driven` variant's own code.
-///
-/// This is the half the exhaustive match alone cannot give: adding a variant
-/// forces a classification at compile time, and marking one `Driven` without
-/// adding its cell fails here.
+/// Every `Driven` variant has a cell; every cell names a `Driven` variant.
 #[test]
 fn every_driven_refusal_variant_has_a_cell_and_every_cell_names_a_driven_variant() {
     let samples: Vec<UnsupportedSvelteRuntimeSurface> = vec![
@@ -730,10 +666,7 @@ fn a_refused_runtime_surface_publishes_no_javascript_no_css_and_no_source_map() 
             "[{label}] the runtime product must be an explicit typed refusal"
         );
 
-        // Every OTHER node kind must be absent — in particular no CSS, and no
-        // partially-emitted script or template. `Missing` is the only
-        // acceptable outcome: a `Published` here is a partial product
-        // surviving a refusal.
+        // Other node kinds must be Missing — a Published is a partial product.
         for kind in all_node_kinds() {
             if kind == VirtualNodeKind::Main {
                 continue;
@@ -748,25 +681,15 @@ fn a_refused_runtime_surface_publishes_no_javascript_no_css_and_no_source_map() 
     }
 }
 
-/// The other direction: the refusal is scoped to the REQUESTING IDENTITY, not
-/// to the component.
-///
-/// The same source that refuses a runtime request still publishes its IDE
-/// product under a SEPARATE IDE-only identity, and its public-API declaration
-/// under the separate PublicApi identity. So atomicity is a property of one
-/// request's product set — not a blanket "this component publishes nothing".
-///
-/// The refusing cells' own profiles ask for the runtime product (they are
-/// bundler / SSR profiles), so the IDE half is deliberately driven under a
-/// DISTINCT identity here; asking the refusing identity for its IDE product is
-/// [`a_refused_combined_request_publishes_no_product_at_all`]'s subject.
+/// Refusal is scoped to the requesting identity, not the component. IDE
+/// and PublicApi identities still publish. Combined-identity refusal is
+/// [`a_refused_combined_request_publishes_no_product_at_all`].
 #[test]
 fn a_runtime_refusal_is_scoped_to_its_identity_and_leaves_the_other_identities_publishing() {
     for (label, canonical, source, profile, _) in refusal_cells() {
         let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
 
-        // The IDE-only identity: same knobs, but asking for the IDE product
-        // alone — so no runtime surface is requested and none can be refused.
+        // IDE-only identity: no runtime surface requested.
         let ide_profile = CompileProfile {
             target: crate::CompileTarget::IDE,
             ..profile.clone()
@@ -857,16 +780,10 @@ fn a_success_publishes_no_unrequested_source_map() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Cold-path preservation
-// ══════════════════════════════════════════════════════════════════════════
 
-/// A supported Svelte client component keeps publishing its runtime module and
-/// its scoped CSS together, each carrying its own map on demand.
-///
-/// This is the cell no recorded finding implicates, and the one a
-/// correction to the refusal or publication paths is most likely to over-reach
-/// into.
+/// Cold path: supported Svelte client still publishes module + scoped CSS
+/// with maps. The cell a refusal/publication fix is most likely to over-reach.
 #[test]
 fn a_supported_svelte_client_component_keeps_publishing_its_module_and_its_css() {
     let canonical = "/probe/Cold.svelte";
@@ -876,10 +793,7 @@ fn a_supported_svelte_client_component_keeps_publishing_its_module_and_its_css()
         verter_language::FileLanguage::svelte(),
     );
 
-    // BEHAVIOUR, not existence: the exact emitted bytes. A correction that
-    // over-reached into this cell — a different helper sequence, a dropped
-    // scope class, a changed template shape — fails here; a length check would
-    // not.
+    // Exact bytes, not a length check.
     let response = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
@@ -923,14 +837,8 @@ fn a_supported_svelte_client_component_keeps_publishing_its_module_and_its_css()
     );
 }
 
-/// A Vue SFC keeps publishing its NON-runtime products: the script node with
-/// its map, and a declaration surface whose declared prop and declaration-only
-/// property are read from the CHECKER, not from its bytes.
-///
-/// The prop and the ambient-context property are asserted by
-/// `public_api_typescript_observation`, which observes the same surface inside
-/// the pinned Vue closure. What this cold-path test pins is that the products
-/// still publish and that the script node's exact bytes and map are unchanged.
+/// Vue non-runtime cold path: script node bytes + map. Prop semantics live
+/// in `public_api_typescript_observation`.
 #[test]
 fn a_vue_carrier_keeps_publishing_its_non_runtime_products() {
     let canonical = "/probe/Cold.vue";
@@ -957,17 +865,14 @@ fn a_vue_carrier_keeps_publishing_its_non_runtime_products() {
         script.source_map.is_some(),
         "the Vue script node's map was withheld"
     );
-    // BEHAVIOUR: the script node's own declarations, pinned exactly. Any
-    // change to what the setup block emits fails here.
+    // Exact script-node bytes.
     assert_eq!(
         script.code.as_ref(),
         include_str!("cold_path_vue_script_node.txt"),
         "the Vue script node's emitted bytes moved"
     );
 
-    // The declaration surface still publishes for the same canonical, and both
-    // declaration modes still differ from each other (so a correction cannot
-    // silently collapse `Declaration` into `Public`).
+    // Declaration and Public surfaces must stay distinct.
     let declaration = host
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
         .expect("vue declaration mode")
@@ -987,15 +892,8 @@ fn a_vue_carrier_keeps_publishing_its_non_runtime_products() {
     );
 }
 
-/// The OPTIONS-taking audited compile entry is a distinct public spelling from
-/// [`VerterHost::compile_with_audit`] — the convenience wrapper hard-codes
-/// `source_map: true` while this one takes an explicit `VerterCompileOptions`
-/// (`crates/verter_session/src/host_compile_audit.rs:90-116`).
-///
-/// The `source_map` axis is asserted on the PRODUCT, not on the record's
-/// canonical: with the axis on, the compiled script block carries a non-empty
-/// source map; with it off, that map is empty. A route that ignored the axis
-/// would produce the same map both ways and fail here.
+/// Options-taking audited compile vs the wrapper (hard-coded `source_map:
+/// true`). Axis is on the product, not the audit record.
 #[test]
 fn the_options_taking_audited_compile_entry_honours_its_explicit_source_map_axis() {
     use crate::host_compile_audit::CompileAuditOverrides;
@@ -1110,15 +1008,9 @@ fn the_audited_wrapper_equals_the_options_entry_at_the_axis_the_wrapper_fixes() 
     }
 }
 
-/// The audited compile entry, pinned by the BYTES and the block shape it
-/// publishes for each carrier — not by the mere existence of a record.
-///
-/// Vue publishes a script block and a template block; the exact script bytes are
-/// committed beside this file, so a change to the audited lane's output fails
-/// here whether it improves or regresses. Svelte publishes NO neutral block at
-/// all through this entry — its module comes from the carrier bundle — while the
-/// same host's virtual-file route publishes a non-empty module for the identical
-/// request. Both directions of that asymmetry are asserted.
+/// Audited compile: Vue script/template bytes (committed); Svelte publishes
+/// no neutral block here (module is the carrier bundle). Virtual-file
+/// route still publishes a non-empty module for both.
 #[test]
 fn the_audited_compile_entry_publishes_these_exact_blocks_for_both_frameworks() {
     const AUDITED_VUE_SCRIPT: &str = include_str!("audited_entry_vue_script_block.txt");
@@ -1180,9 +1072,7 @@ fn the_audited_compile_entry_publishes_these_exact_blocks_for_both_frameworks() 
             );
         }
 
-        // The route answers the same request through the carrier registry. For
-        // Svelte that is where the module lives, so an empty audited block set
-        // must NOT mean an empty product.
+        // Virtual-file route still publishes (Svelte's module lives there).
         let response = host
             .get_virtual_file(VirtualQuery {
                 raw_id: None,
@@ -1198,22 +1088,9 @@ fn the_audited_compile_entry_publishes_these_exact_blocks_for_both_frameworks() 
     }
 }
 
-/// The standalone CSS spelling, driven at the exact function the transport
-/// calls.
-///
-/// `processStyle` (`crates/verter_napi/src/lib.rs:157`) forwards straight to
-/// `verter_compiler::css::process_style` (`crates/verter_compiler/src/css/mod.rs:92`)
-/// with no `VerterHost` anywhere in the call. That is what this drives: the
-/// same function, with the same option shape the transport builds.
-///
-/// Two facts are recorded. The CSS product itself is produced and carries the
-/// requested scope id. The `sourcemap` REQUEST AXIS is inert: both return sites
-/// of `process_style` hard-code `source_map: None`
-/// (`crates/verter_compiler/src/css/mod.rs:110` and `:145`), so the option is
-/// accepted and ignored and the transport's `sourceMap` result field can never
-/// be populated through this route. This test states that as it stands — it
-/// fails if the axis becomes live, which is exactly the change a correction
-/// would make.
+/// Standalone CSS via `process_style` (no host). Product carries the
+/// requested scope id. The `sourcemap` axis is inert (`source_map: None`
+/// hard-coded) — fails if the axis becomes live.
 #[test]
 fn the_standalone_css_spelling_publishes_css_and_ignores_its_source_map_axis() {
     let options = verter_compiler::css::ProcessStyleOptions {
@@ -1316,9 +1193,7 @@ fn the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_t
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The remaining enumerated products
-// ══════════════════════════════════════════════════════════════════════════
 
 /// The TSC product, driven.
 ///
@@ -1637,10 +1512,8 @@ fn a_refused_combined_request_publishes_no_product_at_all() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // One transaction boundary: every route observes the same terminal answer,
 // and a request publishes all and only the products it asked for.
-// ══════════════════════════════════════════════════════════════════════════
 
 /// A Vue SFC carrying every runtime block kind — script, template, scoped
 /// style, AND a custom block — so a publication sweep can observe each virtual

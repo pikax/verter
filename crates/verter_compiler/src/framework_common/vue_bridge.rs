@@ -1,15 +1,10 @@
-//! The Vue carrier bridge.
+//! Vue carrier bridge.
 //!
-//! Owns [`VueParseCarrier`] — the concrete [`CarrierParse`] payload
-//! wrapping a parsed Vue SFC — and [`build_vue_parse_artifact`], the
-//! Vue producer that wraps a [`ParsedSfc`] for the registered projector. The
-//! projector is the sole owner of the neutral inventory geometry.
-//!
-//! Consumers outside the Vue adapter read the artifact's typed
-//! [`FrameworkParseCommon`] surface; the typed carrier is reachable
-//! ONLY through this module's inherent downcast methods or the
-//! [`open_vue_carrier`] opener (see the
-//! `carrier_downcast_confined_to_owning_adapter` architecture guard).
+//! [`VueParseCarrier`] wraps a parsed SFC. [`build_vue_parse_artifact`]
+//! produces the unregistered artifact; the projector owns inventory
+//! geometry. Typed carrier is reachable only through this module's
+//! downcasts or [`open_vue_carrier`]
+//! (`carrier_downcast_confined_to_owning_adapter`).
 
 use std::any::Any;
 use std::sync::Arc;

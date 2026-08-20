@@ -1,17 +1,12 @@
-//! Scope guards and the innermost-open-site thread-local.
+//! Scope guards and the innermost-open-site thread-local (`attribution`
+//! feature only).
 //!
-//! COMPILED ONLY under the `attribution` feature.
+//! A guard times its region (inclusive of nested guards) and publishes
+//! its site so [`super::alloc`] can charge heap traffic to it.
 //!
-//! A scope guard does two things: it times its region (inclusive of
-//! nested guards, so a caller's number contains its callees'), and it
-//! publishes its site as the thread's innermost open scope so
-//! [`super::alloc`] can attribute heap traffic to it.
-//!
-//! The thread-local is a `const`-initialised [`Cell`] on purpose: a
-//! `const`-init TLS has no lazy initialiser and no destructor, so
-//! reading it never allocates. That is a hard requirement, because the
-//! global allocator reads it on every allocation and an allocating read
-//! would recurse forever.
+//! TLS is a `const`-init [`Cell`]: no lazy init, no destructor, so a
+//! read never allocates. Required — the global allocator reads it on
+//! every allocation.
 
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -39,15 +34,10 @@ pub(super) fn current_site_index() -> Option<usize> {
 
 /// Times a region and owns it for allocation attribution.
 ///
-/// Created by [`crate::attribute_scope!`]. Nesting is innermost-wins for
-/// allocation and inclusive for time.
-///
-/// The guard is `!Send`: it saves the PREVIOUS site of the thread that
-/// opened it and restores that value on drop, so dropping it on another
-/// thread would write one thread's scope stack into another's and
-/// mis-attribute every allocation that follows. The raw-pointer
-/// `PhantomData` makes that a compile error rather than a silent
-/// measurement bug for anyone extending the substrate.
+/// Created by [`crate::attribute_scope!`]. Innermost-wins for allocation,
+/// inclusive for time. `!Send`: drop on another thread would write one
+/// thread's scope stack into another's. The raw-pointer `PhantomData`
+/// makes that a compile error.
 pub struct ScopeGuard {
     site: WorkSite,
     previous: u32,

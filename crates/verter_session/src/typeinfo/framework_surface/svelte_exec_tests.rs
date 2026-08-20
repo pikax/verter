@@ -208,11 +208,8 @@ fn an_untyped_props_destructure_resolves_through_the_shared_surface() {
 
 #[test]
 fn a_component_with_no_props_call_keeps_the_legacy_surface_reachable() {
-    // LOAD-BEARING, not merely honest: the public-API projector reads a MISSING
-    // runes surface as "this is a legacy component, ask the `export let`
-    // surface instead". Resolving present-but-empty here would silently hide
-    // every legacy prop, so a component with no `$props()` call at all must
-    // stay Missing.
+    // Missing runes surface tells the projector to ask `export let`.
+    // Present-but-empty would hide every legacy prop.
     let outcome = runes_props_surface(
         "/LegacyOnly.svelte",
         "<script>\n  export let title = \"Untitled\";\n</script>\n\n<p>{title}</p>\n",

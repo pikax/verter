@@ -540,12 +540,10 @@ describe("requirement 6 — generated-only ranges carry no authored provenance",
   });
 });
 
-// ---------------------------------------------------------------------------
 // The three properties the derived rail asserts about ITSELF: which ranges
 // carry the no-inherited-provenance requirement, which module specifiers are
 // runtime helpers, and which identifier positions are binding positions.
 // Each was silently unasserted, and each had a live consequence.
-// ---------------------------------------------------------------------------
 
 describe("a generated-only range carries the boundary requirement when it STARTS ITS OWN LINE", () => {
   const VUE = MAPPING_PROFILES["vue:vdom"];

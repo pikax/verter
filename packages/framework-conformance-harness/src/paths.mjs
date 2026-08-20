@@ -3,10 +3,10 @@ import { fileURLToPath } from "node:url";
 
 export const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const REPO_ROOT = resolve(HARNESS_ROOT, "..", "..");
-// BF2_EVIDENCE_ROOT exists ONLY so drift-refusal self-tests can point the
-// harness at a deliberately-mutated COPY of the evidence tree in a child
-// process and prove rejection happens before any compiler invocation. It is
-// never set in normal operation.
+// BF2_EVIDENCE_ROOT exists only so drift-refusal self-tests can point the
+// harness at a mutated copy of the evidence tree in a child process and
+// prove rejection before any compiler invocation. Never set in normal
+// operation.
 export const EVIDENCE_ROOT = process.env.BF2_EVIDENCE_ROOT
   ? resolve(process.env.BF2_EVIDENCE_ROOT)
   : resolve(REPO_ROOT, "docs/arch/refactor/rev11/evidence/framework-conformance");
@@ -14,9 +14,9 @@ export const VUE_EVIDENCE_LOCK = resolve(EVIDENCE_ROOT, "oracles/vue/package-loc
 export const SVELTE_EVIDENCE_LOCK = resolve(EVIDENCE_ROOT, "oracles/svelte/package-lock.json");
 export const VUE_EVIDENCE_CLOSURE = resolve(EVIDENCE_ROOT, "oracles/vue/closure.tsv");
 export const SVELTE_EVIDENCE_CLOSURE = resolve(EVIDENCE_ROOT, "oracles/svelte/closure.tsv");
-// BF2_GOLDENS_ROOT exists ONLY so self-tests can run the generator's
-// --check against a deliberately-doctored COPY of the golden set in a
-// child process and prove refusal. It is never set in normal operation.
+// BF2_GOLDENS_ROOT exists only so self-tests can run the generator's
+// `--check` against a doctored copy of the golden set in a child process
+// and prove refusal. Never set in normal operation.
 export const GOLDENS_ROOT = process.env.BF2_GOLDENS_ROOT
   ? resolve(process.env.BF2_GOLDENS_ROOT)
   : resolve(HARNESS_ROOT, "goldens");

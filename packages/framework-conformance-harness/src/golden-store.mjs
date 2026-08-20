@@ -1,49 +1,33 @@
-// Immutable, ATOMICALLY-PUBLISHED golden storage (conformance-goldens.md
-// "Golden provenance"; BF2 required exit "atomic result accounting").
+// Immutable, atomically published golden storage (conformance-goldens.md).
 //
-// LAYOUT: each golden record is an immutable CONTENT-ADDRESSED file at
-// `goldens/records/<sha256-of-record-text>.json`, and ONE manifest file
-// (`goldens/manifest.json`) names which records constitute the current
-// valid set (logical name -> record digest). The manifest is replaced via
-// write-to-temp-then-rename — atomic on a same-filesystem rename — so the
-// ENTIRE golden set has exactly ONE reader-visible commit point:
+// Each record is a content-addressed file at
+// `goldens/records/<sha256-of-record-text>.json`. One manifest
+// (`goldens/manifest.json`) names the current valid set (logical name →
+// record digest). The manifest is replaced via write-to-temp-then-rename,
+// so the entire set has one reader-visible commit point:
 //
-//  - a generation run that fails after writing any number of record files
-//    has not touched the manifest, so every reader still sees the complete
-//    PREVIOUS set — never a mixed or partial set, not even transiently
-//    (orphan record files are invisible: readers resolve only through the
-//    manifest);
-//  - a record file is write-once: publishing a record whose digest already
-//    exists verifies byte-identity instead of rewriting (a digest collision
-//    with different bytes is a hard error, never a silent overwrite).
+//  - a generation run that fails after writing records has not touched the
+//    manifest; readers still see the previous complete set (orphan records
+//    are invisible — readers resolve only through the manifest);
+//  - a record file is write-once: a digest that already exists verifies
+//    byte-identity instead of rewriting (collision with different bytes is
+//    a hard error).
 //
-// READER-SCHEDULE SAFETY (generation-grace retention): the atomic-commit
-// PRIMITIVE above only makes the manifest swap itself un-torn; a reader
-// that loaded the OLD manifest and is about to read the records it lists
-// is a separate hazard — an immediate post-commit sweep of every record
-// the NEW manifest no longer references would delete those records out
-// from under it. So each manifest carries a monotonic `generation` plus a
-// `graceEntries` copy of the entries of the manifest it replaced, and
-// post-commit GC retains the union of THREE generations of records: the
-// NEW manifest's, the IMMEDIATELY-REPLACED manifest's, and the
-// manifest-before-that's (TWO full generations of grace — generations N,
-// N-1, and N-2 relative to the newest). Two generations, not one, because
-// a reader may observe manifest N and take a bounded-but-nonzero time
-// before dereferencing individual records — long enough for TWO further
-// publishes (N+1 and N+2) to complete in between; one generation of grace
-// provably lost that reader's records, and two bounds the schedule without
-// unbounded retention. An in-flight reader of manifest generation N can
-// therefore read every record N lists until a THIRD publish completes — a
-// bounded, testable window, not a probabilistic one. Records unreferenced
-// for three consecutive generations are collected.
+// Reader-schedule safety: an immediate post-commit sweep of records the
+// new manifest no longer references would delete them under a reader that
+// loaded the old manifest. Each manifest carries a monotonic `generation`
+// plus `graceEntries` of the manifest it replaced. Post-commit GC retains
+// three generations (N, N-1, N-2). Two generations of grace, not one: a
+// reader of N may take long enough that N+1 and N+2 complete before it
+// dereferences records; one generation of grace lost those records. An
+// in-flight reader of N can read every record N lists until a third
+// publish completes. Records unreferenced for three consecutive
+// generations are collected.
 //
-// WRITE PATH: exactly one function publishes a golden set
-// (`publishGoldenSet`), called ONLY from `bin/generate-goldens.mjs` — never
-// from the comparator, never from a candidate-producing module. The
-// comparator (`src/compare.mjs`) never imports `node:fs` write functions at
-// all, so "candidate output cannot update its own expectation" holds
-// structurally. Readers return deep-frozen objects so an accidental
-// in-memory mutation cannot silently succeed either.
+// Write path: only `publishGoldenSet`, called only from
+// `bin/generate-goldens.mjs`. The comparator (`src/compare.mjs`) never
+// imports `node:fs` write functions, so candidate output cannot update its
+// own expectation. Readers return deep-frozen objects.
 
 import { createHash } from "node:crypto";
 import {

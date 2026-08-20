@@ -1,11 +1,7 @@
-//! `impl VerterHost` — the SFC virtual-file pipeline.
+//! `impl VerterHost` — SFC virtual-file pipeline.
 //!
-//! Owns the public `resolve` / `ensure_compiled` / `compile_slot_is_warm`
-//! / `get_virtual_file` / `list_virtual_files` / `get_ide` /
-//! `get_public_api*` accessors, the `store_latest_diagnostics` writer,
-//! and the internal `compile_entry` / `hydrate_compile_blockers` helpers
-//! that drive on-demand SFC compilation through the scheduler-backed
-//! cache substrate.
+//! Public resolve / ensure / get / list accessors and the on-demand
+//! compile path through the scheduler-backed cache.
 
 use std::sync::Arc;
 
@@ -30,16 +26,11 @@ use verter_compiler::framework_common::{
     CarrierCompileOutcome, CompileUnsupported, RuntimeDiagnosticSeverity,
 };
 
-/// Surface a fail-closed assembled-map outcome as a compile error.
+/// Fail-closed assembled-map outcome as a compile error.
 ///
-/// A missing or uncomposable required input map produces NO successful result:
-/// not the code without a map, not the code with an empty map. Both would be
-/// the unmapped successful result this path exists to prevent, and both callers
-/// of the assembler require code and map together.
-///
-/// The failure concerns the whole assembled module, not one authored
-/// location, so `source_len` anchors the diagnostic to the whole document —
-/// an honest "somewhere in this file" span rather than a fabricated point.
+/// A missing or uncomposable required map produces no success — not
+/// code without a map, not code with an empty map. `source_len` spans
+/// the whole document; the failure is not one authored location.
 fn assembled_map_failure_diagnostics(
     failure: AssembleMapFailure,
     source_len: u32,
@@ -60,12 +51,9 @@ pub(crate) fn vue_macro_output_matches_revision(
     output.origin_whole_hash == Some(expected)
 }
 
-/// The render-only `Main` output of the
-/// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
-/// assembled `_sfc_main` module bytes, its optional source map, and the
-/// soft (warning-severity) diagnostics of a SUCCESSFUL render.
-///
-/// `host_compile` — the only consumer — is native-only.
+/// Render-only `Main` from the runtime-render lane: assembled
+/// `_sfc_main` bytes, optional map, and warning diagnostics of a
+/// successful render. Native-only (`host_compile`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RenderOnlyMain {
     pub(crate) code: Arc<str>,
@@ -77,14 +65,9 @@ pub(crate) struct RenderOnlyMain {
     pub(crate) diagnostics: Vec<HostDiagnostic>,
 }
 
-/// Host-scoped RAII guard that arms and clears the per-host compile-tier
-/// fact-injection knob [`VerterHost::compile_force_overflow_observations`].
-///
-/// Test setup calls [`CompileForceOverflowGuard::arm`] with the desired
-/// observation count; the guard borrows the host and clears the host's
-/// field on drop so a panic / early return does not leak the forced
-/// state. The knob is per-host, so arming it on one host never poisons a
-/// concurrent compile on a different host running on another test thread.
+/// RAII arm/clear of per-host `compile_force_overflow_observations`.
+/// Drop clears so a panic cannot leak the forced state. Per-host: does
+/// not poison a concurrent compile on another host.
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-support"))]
 pub struct CompileForceOverflowGuard<'h> {
@@ -110,11 +93,8 @@ impl Drop for CompileForceOverflowGuard<'_> {
     }
 }
 
-/// Reset `host`'s compile-tier prefetch invocation counter
-/// [`VerterHost::compile_tier_prefetch_invocations`] to zero. Test setup
-/// calls this immediately before a cold compute so the post-compute read
-/// reflects only that compute's prefetch invocations, independent of any
-/// earlier compile on the same host.
+/// Zero the compile-tier prefetch counter so a following cold compute
+/// is observed in isolation.
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_compile_tier_prefetch_invocations(host: &VerterHost) {
@@ -122,10 +102,8 @@ pub fn reset_compile_tier_prefetch_invocations(host: &VerterHost) {
         .store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Current value of `host`'s
-/// [`VerterHost::compile_tier_prefetch_invocations`]. Reads the relaxed
-/// atomic; pair with [`reset_compile_tier_prefetch_invocations`] around a
-/// single cold compute for a deterministic observation.
+/// Current compile-tier prefetch count (relaxed). Pair with
+/// [`reset_compile_tier_prefetch_invocations`].
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-support"))]
 pub fn compile_tier_prefetch_invocations(host: &VerterHost) -> usize {
@@ -133,11 +111,8 @@ pub fn compile_tier_prefetch_invocations(host: &VerterHost) -> usize {
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Compile-mode discriminator for the content-addressed cache key:
-/// the `Content` cache-mode stable hash folded with the full profile
-/// identity. The profile (`DefaultHasher`-based; in-memory only, never
-/// persisted) captures every codegen-affecting flag so two `Content`
-/// requests with different profiles do not collide on one content entry.
+/// Content-mode cache key: content-mode hash folded with the full
+/// profile. In-memory only. Different profiles must not share an entry.
 fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
     let mut buf = Vec::with_capacity(40);
     buf.extend_from_slice(b"verter.content_mode_profile.v1:");
@@ -164,11 +139,8 @@ fn validate_registered_carrier_inputs(
     Ok(())
 }
 
-/// Deployment version hash for the compiler crate. Two builds of a
-/// different compiler version must not share a content-addressed cache
-/// entry (the codegen may differ byte-for-byte). Derived from the
-/// crate semantic version; the compiler and session crates version in
-/// lockstep across the workspace.
+/// Compiler-crate version hash. Different versions must not share a
+/// content-addressed cache entry.
 fn compiler_version_hash() -> Hash16 {
     crate::hash::hash_16(concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
 }
@@ -183,18 +155,13 @@ fn plugin_versions_hash() -> Hash16 {
 
 /// What a compile request demands of the shared compile result.
 ///
-/// On a fresh SUCCESSFUL compile, the shared compile
-/// (`ensure_compile_artifacts`) produces the products the request's TARGET
-/// asked for — not a whole artifact set — in one pass; a compile that FAILED
-/// under the dev last-known-good policy instead serves the PREVIOUS compile's
-/// products. Either way the demand is checked AFTER that shared result. `get_virtual_file` demands a
-/// specific virtual node; the IDE-ensure path demands the IDE projection
-/// WITHOUT requesting any virtual node (notably NOT `Main`), so a carrier that
-/// projects only an IDE surface satisfies it without a runtime `Main`.
-///
-/// The demand does NOT steer the compute, and for a validated serve it no
-/// longer gates a `VirtualNode` read either: see
-/// [`VerterHost::compile_serve_satisfies_demand`] for why absence is terminal.
+/// Demand is checked after the shared compile. Fresh success produces
+/// the products the target asked for; last-known-good serves the
+/// previous compile's products. `get_virtual_file` demands a virtual
+/// node; IDE-ensure demands the IDE projection without `Main`. Demand
+/// does not steer compute. See
+/// [`VerterHost::compile_serve_satisfies_demand`] for why a validated
+/// `VirtualNode` absence is terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompileDemand {
     /// A specific virtual node (the `get_virtual_file` projection target).
@@ -202,31 +169,23 @@ pub(crate) enum CompileDemand {
     /// The IDE (`CachedTsx`) projection — satisfied iff the served result
     /// carries a `tsx`. NEVER routed through `VirtualNode(Main)`.
     Ide,
-    /// The TRANSACTION itself, with no specific product demanded: satisfied by
-    /// any completed compile for this identity. This is `ensure_compiled`'s
-    /// demand — it asks whether the compile has run and been cached, not
-    /// whether some particular node is present. Demanding a product here would
-    /// misreport a component that legitimately has none (a style-less SFC, or
-    /// an identity whose target asks for no runtime module) as a failure.
+    /// The compile transaction itself — `ensure_compiled`. Satisfied by
+    /// any completed compile. Demanding a product would fail a style-less
+    /// SFC or a no-runtime target.
     Compiled,
 }
 
-/// The shared compile result `ensure_compile_artifacts` returns: the served
-/// virtual-node map, the IDE `CachedTsx`, and the request metadata callers
-/// project from.
+/// Shared compile result: virtual nodes, IDE `CachedTsx`, request metadata.
 ///
-/// On a fresh SUCCESSFUL compile the served set is exactly the products this
-/// identity's target asked for, and the `tsx` is present iff the target carries
-/// the `TSX` bit. One exception: a compile that FAILED under the dev
-/// last-known-good policy serves `stale = true` with the PREVIOUS compile's
-/// virtual nodes and NO `tsx` at all, even for a TSX-bearing target. So an
-/// absent `tsx` means either "the target did not ask for one" or "this serve is
-/// a stale fallback"; `stale` is what tells them apart.
+/// Fresh success serves exactly the products the target asked for (`tsx`
+/// iff the target has the `TSX` bit). A failed compile under last-known-
+/// good serves `stale = true` with the previous nodes and no `tsx`.
+/// Absent `tsx` is either "not asked" or "stale fallback" — `stale`
+/// distinguishes them.
 pub(crate) struct CompileServe {
-    /// What the compile transaction committed for this `(canonical, profile)`
-    /// — the produced product set (virtual nodes + the IDE `tsx`), OR a
-    /// payload-free runtime refusal. A SUM, so a refused request cannot serve a
-    /// sibling product under the same identity.
+    /// Committed products or a payload-free runtime refusal. A sum: a
+    /// refused request cannot serve a sibling product under the same
+    /// identity.
     pub(crate) products: ServedProducts,
     /// The effective file meta for `render_single_id`.
     pub(crate) meta: FileMeta,
@@ -244,14 +203,11 @@ pub(crate) struct CompileServe {
     pub(crate) downgrade_reason: Option<DowngradeReason>,
 }
 
-/// The product half of a [`CompileServe`], as a sum.
+/// Product half of a [`CompileServe`], as a sum.
 ///
-/// A carrier that fail-closed on the runtime surface a request asked for serves
-/// [`Self::RuntimeSurfaceRefused`], which carries NO product — not a virtual
-/// node, not the IDE `tsx`. That is what makes a refused request atomic: there
-/// is no representation in which it also published something. The refusal
-/// reason is carried STRUCTURALLY, never recovered by scanning the diagnostics
-/// for a framework-specific code prefix.
+/// A runtime-surface fail-closed serve is [`Self::RuntimeSurfaceRefused`]:
+/// no virtual node, no IDE `tsx`. The reason is structural, never
+/// recovered by scanning diagnostics for a framework code prefix.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ServedProducts {
     Produced {
@@ -312,12 +268,11 @@ fn served_products_from_cached(cached: crate::types::CompileProducts) -> ServedP
     }
 }
 
-/// What a FRESH cold compile committed, before the last-good rail is composed.
+/// Fresh cold-compile commit, before last-good is composed.
 ///
-/// The pipeline-local sum the cold path carries between `compile_entry` and the
-/// two sinks (the cache publish and the serve). Both sinks are fed by an
-/// exhaustive projection off this value, so neither can pair a refusal with a
-/// product.
+/// Pipeline-local sum between `compile_entry` and the cache/serve
+/// sinks. Exhaustive projection: neither sink can pair a refusal with
+/// a product.
 #[allow(clippy::large_enum_variant)]
 enum CompiledProducts {
     Produced {
@@ -2270,36 +2225,25 @@ impl VerterHost {
         })
     }
 
-    /// Whether a served compile result satisfies the demand — the shared
-    /// authority for the WARM-hit serve gate.
+    /// Whether a served compile satisfies the demand — the warm-hit serve
+    /// gate.
     ///
-    /// A validated serve is TERMINAL for a `VirtualNode` demand whether or not
-    /// the node is present. A SUCCESSFUL compile is deterministic for a given
-    /// `(canonical, profile)` once the slot's own-content hashes and cross-file
-    /// fact signature validate, so recompiling cannot turn an absent node into a
-    /// present one — it would re-derive byte-identical outputs. (A slot
-    /// published by the dev last-known-good fallback is the exception: it holds
-    /// a FAILED compile's stale outputs, so a recompile could differ. Its
-    /// virtual nodes are still not re-demanded here — only the `Ide` arm below
-    /// retries — because a stale runtime node is served, not absent.) And with
-    /// target-scoped publication a node's absence is usually the CORRECT
-    /// terminal answer: the identity's target never asked for it. Treating that
-    /// absence as an incomplete compile would recompile on every read of a
-    /// target-excluded node, forever, and still return `MissingVirtualNode`.
-    /// Product absence is not a recovery signal; an incomplete compile would be
-    /// a bug to fix at its source, not to paper over here.
+    /// A validated serve is terminal for a `VirtualNode` demand whether
+    /// or not the node is present. A successful compile is deterministic
+    /// for `(canonical, profile)` once own-content hashes and the
+    /// cross-file fact signature validate, so recompiling cannot create
+    /// a missing node. Last-known-good is the exception (stale failed
+    /// outputs); its runtime nodes are still served, not re-demanded.
+    /// Target-scoped absence is the correct terminal answer: treating
+    /// it as incomplete would recompile forever and still return
+    /// `MissingVirtualNode`.
     ///
-    /// A RUNTIME REFUSAL likewise satisfies EVERY demand. It is the FINAL,
-    /// payload-free answer for that identity — no product was committed and none
-    /// ever will be for these inputs — so `get_virtual_file` and
-    /// `ensure_ide_compiled` both project a typed outcome from it.
+    /// A runtime refusal satisfies every demand: payload-free final
+    /// answer for those inputs.
     ///
-    /// The `Ide` demand is the ONE arm that still requires its product, and
-    /// deliberately so: a `Produced` slot carrying `tsx: None` under a
-    /// TSX-bearing profile is exactly what the dev last-known-good fallback
-    /// publishes when a compile FAILS (it republishes the previous outputs with
-    /// no IDE artifact), and that policy is the host default. Recomputing there
-    /// is the retry that lets a transient failure heal, not a futile re-derive.
+    /// `Ide` still requires its product: last-known-good publishes
+    /// `tsx: None` under a TSX-bearing profile, and recomputing is the
+    /// retry that lets a transient failure heal.
     fn compile_serve_satisfies_demand(serve: &CompileServe, demand: &CompileDemand) -> bool {
         match &serve.products {
             ServedProducts::RuntimeSurfaceRefused { .. } => true,

@@ -1,24 +1,18 @@
-// The independent JavaScript reference implementation of the assembled Vue
-// main-module source-map composition algebra.
+// Independent JavaScript reference for assembled Vue main-module source-map
+// composition. Input-only oracle: computes the expected map from inputs
+// alone. Not a second production assembler; never supplied as a candidate
+// map. The acceptance harness runs production's assembler and compares the
+// two decoded artifacts field-for-field and position-for-position,
+// including ordered segment sequence.
 //
-// WHAT THIS IS. AMD-008 §2 item 2's mandated artifact: an independent,
-// input-only, cross-language reference that computes the expected map artifact
-// FROM INPUTS ALONE. It is an ORACLE, not a second production assembler — it is
-// never supplied to BF2 as a candidate map. Its only consumer is an acceptance
-// harness that also runs production's real assembler and compares the two
-// decoded artifacts for exact equality, field for field and position for
-// position, including the exact ORDERED sequence of segments.
+// Sole authority: the frozen layer-1 spec at
+// `spec/assembled-map-composition-layer1.md`. No dependency (import, FFI,
+// generated binding, or fixture) on Rust composition, rewrite, placement,
+// or map-emission code, and not a translation of the production
+// implementation. Independence is what makes equality evidence rather than
+// two copies of one bug.
 //
-// WHAT IT IS BUILT FROM. Exactly one authority: the FROZEN layer-1 semantic
-// specification at `spec/assembled-map-composition-layer1.md`. Every section
-// reference below is to that document. It carries NO dependency — import, FFI,
-// generated binding, or fixture produced by — on Rust composition, rewrite,
-// placement, or map-emission code, and it is not a translation of the
-// production implementation, which is developed independently and concurrently
-// from the same frozen specification. That independence is what makes the later
-// equality comparison evidence rather than two copies of one bug.
-//
-// MODULE MAP (each file names the sections it implements):
+// Module map (each file names the sections it implements):
 //   assembled-map-coordinates.mjs    §2.1–§2.3, §2.6, §5.2
 //   assembled-map-json.mjs           §4.3 step 1.1–1.2, §4.5
 //   assembled-map-wire.mjs           §4.3 step 1.21, §7.6
@@ -39,17 +33,13 @@ export const ORIGIN_TEMPLATE = "Template";
 export const ORIGIN_ASSEMBLY_BOUNDARY = "AssemblyBoundary";
 
 /**
- * §11.4 — a DTO instance that violates §3.3's schema or §3.5's precondition P1
- * is OUT OF LAYER-1 SCOPE and gets no `UncomposableInputMap` family. It is a
- * defective vector, caught at suite load, not a composition outcome — so it is
- * raised as a distinct error rather than modelled as either fail-closed
- * outcome kind of §4.2.
+ * §11.4 — a DTO that violates §3.3 schema or §3.5 P1 is out of layer-1
+ * scope and gets no `UncomposableInputMap` family. Defective vector, caught
+ * at suite load, not a composition outcome.
  */
 export class MalformedAssembleInputError extends Error {}
 
-// ---------------------------------------------------------------------------
 // §3 — the pre-assembly input DTO
-// ---------------------------------------------------------------------------
 
 const ASSEMBLE_INPUT_FIELDS = [
   "canonicalId",
@@ -193,14 +183,11 @@ function mapIsRequired(fragment, authored) {
   return authored && fragment !== null;
 }
 
-// ---------------------------------------------------------------------------
 // §4 / §5 / §6 / §7 — the composition
-// ---------------------------------------------------------------------------
 
 /**
- * The mandated oracle entry point: computes the assembled module's code and,
- * when a map is requested, the complete decoded map artifact — from ONE
- * `AssembleInput` and nothing else.
+ * Oracle entry: assembled module code and, when a map is requested, the
+ * complete decoded map artifact — from one `AssembleInput` and nothing else.
  *
  * @param {object} input an `AssembleInput` matching §3.3 exactly
  * @returns {
@@ -215,7 +202,7 @@ function mapIsRequired(fragment, authored) {
 export function composeAssembledVueMainModule(input) {
   assertValidAssembleInput(input);
 
-  // ---- Stage 0.1 — request ------------------------------------------------
+  // Stage 0.1 — request
   // "If `sourceMapRequested` is `false`: composition is not performed; the
   // result carries code and no map (§7.7). No further check runs." A non-empty
   // `sourceMap` string is ignored (§3.4). The passes still run: they determine
@@ -237,7 +224,7 @@ export function composeAssembledVueMainModule(input) {
     };
   }
 
-  // ---- Stage 0.2 / 0.3 — inventory ---------------------------------------
+  // Stage 0.2 / 0.3 — inventory
   if (mapIsRequired(input.script, input.authored.script) && input.script.sourceMap === "") {
     return { outcome: "MissingRequiredInputMap", fragment: "script" };
   }
@@ -245,7 +232,7 @@ export function composeAssembledVueMainModule(input) {
     return { outcome: "MissingRequiredInputMap", fragment: "template" };
   }
 
-  // ---- Stage 1 — per contributing map, script THEN template ---------------
+  // Stage 1 — per contributing map, script THEN template
   // §5.8: a "contributing map" is a fragment that is present and carries a
   // non-empty `sourceMap` which passed §4's validation. A present fragment with
   // an empty `sourceMap` string is not one: its code is still written, and for
@@ -269,7 +256,7 @@ export function composeAssembledVueMainModule(input) {
     contributing.push({ fragment, map: validated.map });
   }
 
-  // ---- Stage 2 — across the contributing maps -----------------------------
+  // Stage 2 — across the contributing maps
   const agreement = checkSourceRootAgreement(contributing);
   if (!agreement.ok) {
     // §4.3 stage 2 runs over the contributing SET; the conflict is reported
@@ -290,7 +277,7 @@ export function composeAssembledVueMainModule(input) {
   // computed before this point.
   const contributingByFragment = new Map(contributing.map((entry) => [entry.fragment, entry.map]));
 
-  // ---- §5 — chain each fragment through its rewrite passes ----------------
+  // §5 — chain each fragment through its rewrite passes
   let rewrittenScriptCode = null;
   let chainedScriptSegments = null;
   if (input.script !== null) {
@@ -312,7 +299,7 @@ export function composeAssembledVueMainModule(input) {
       ? null
       : templateMap.segments.map((segment) => ({ ...segment, origin: ORIGIN_TEMPLATE }));
 
-  // ---- §6.2 / §6.3 — write the module and derive placement ----------------
+  // §6.2 / §6.3 — write the module and derive placement
   const assembled = assembleModule(input, rewrittenScriptCode);
 
   // ---- §7.4 — tables: stable append in contribution order, NO dedup -------
@@ -340,7 +327,7 @@ export function composeAssembledVueMainModule(input) {
     for (const entry of map.ignoreList) ignoreList.push(entry + base);
   }
 
-  // ---- §6.3 placement, §7.4 index remap, §6.4 BR-3 ------------------------
+  // §6.3 placement, §7.4 index remap, §6.4 BR-3
   const assembledSegments = [];
 
   const emitFragment = (fragment, segments, placement, finalCode) => {
@@ -390,7 +377,7 @@ export function composeAssembledVueMainModule(input) {
     emitFragment("template", templateSegments, assembled.templatePlacement, input.template.code);
   }
 
-  // ---- §7.1 / §7.2 — the artifact -----------------------------------------
+  // §7.1 / §7.2 — the artifact
   // `file`, `debugId` and unknown/extension members are DROPPED, never
   // inherited: metadata describing the GENERATED document is dropped because
   // the document it described no longer exists.

@@ -1,12 +1,11 @@
 // Verifies a local git checkout is byte-exactly the pinned official source
-// commit/tree from domain-pin.mjs, and refuses (throws) on any drift: wrong
-// HEAD, wrong tree, or a dirty working tree. This is the harness's
-// source-drift refusal for the two GIT SOURCE domains (Vue, Svelte).
+// commit/tree from domain-pin.mjs, and throws on any drift: wrong HEAD,
+// wrong tree, or a dirty working tree. Source-drift refusal for the Vue
+// and Svelte git source domains.
 //
-// Mirrors the assertCheckout() pattern already proven in
-// docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs,
-// factored out so the harness's own self-tests can exercise it directly
-// against a deliberately-mutated checkout.
+// Mirrors `assertCheckout()` in
+// `docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs`,
+// factored out so self-tests can exercise it against a mutated checkout.
 
 import { execFileSync } from "node:child_process";
 

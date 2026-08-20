@@ -628,16 +628,9 @@ pub(crate) const CORPUS: &[Row] = &[
     // A disjoint predicate inside an already-narrowed arm is impossible. Its
     // value contributes neither to the ternary result nor to the warm graph.
     Row { id: "N24_impossible_predicate_ternary_omits_dead_contributor", script: "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6NarrowLattice, demand: Demand::Narrowing(NarrowBlock::NarrowLattice), flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
-    // KNOWN OWED — the statement spelling does NOT omit the dead return
-    // contributor. The checker types `v: "no" | "ok"` (the `isB(x)` arm
-    // inside the `isA(x)` branch is impossible, so `x` contributes nothing);
-    // the current tree publishes `v: A | B | "ok" | "no"` — the dead `x`
-    // contributor survives, CLEAN AND WARM. The root member pin
-    // (`v: Union`) could not see this; the recursive expect pin records the
-    // ACTUAL constituent set as the expected-versus-actual gap, so a further
-    // degradation fails AND the owner's fix fails (forcing a re-pin), and
-    // the boundary pin records that the wrong answer is admitted warm today
-    // (`warm_replay: true`) so the flow-gap retraction also surfaces here.
+    // Known owed: statement spelling keeps the dead `x` contributor
+    // (`A | B | "ok" | "no"` vs checker `"no" | "ok"`). Recursive expect
+    // pins the actual set; the boundary records the warm admission.
     Row { id: "N25_impossible_predicate_statement_keeps_dead_contributor", script: "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: (() => { if (isA(x)) { if (isB(x)) return x; return \"ok\" as const } return \"no\" as const })() } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"no\" | \"ok\"; }", owner: Owner::U6NarrowLattice, demand: Demand::Narrowing(NarrowBlock::NarrowLattice), flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Union)], degradation: Degr::FlowGap(FlowGap::GuardNarrowing), candidates: 0 }, expect: Expect::Node(&ExpectedNode::Object(&[("v", ExpectedNode::Union(&[ExpectedNode::DeclRef { name: "A" }, ExpectedNode::DeclRef { name: "B" }, ExpectedNode::Literal(Lit::Str("ok")), ExpectedNode::Literal(Lit::Str("no"))]))])), boundary: Boundary::Audit { json: r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"ref","name":"A","typeArguments":[]},{"kind":"ref","name":"B","typeArguments":[]},{"kind":"literal","literalKind":"string","value":"ok"},{"kind":"literal","literalKind":"string","value":"no"}]}}]}"#, degradation: Degr::FlowGap(FlowGap::GuardNarrowing), warm_replay: false }, verdict: Verdict::KnownOwed { owed_absent: &[], note: "The current approximation remains `A | B | \"ok\" | \"no\"` where the checker computes `\"no\" | \"ok\"`; it is typed partial and recomputes cold." }, ..Row::BLANK },
     // Non-discriminated object predicates can overlap structurally. Their
     // intersection remains possible and therefore remains a contributor.

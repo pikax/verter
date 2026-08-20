@@ -1,17 +1,11 @@
-//! The Svelte carrier bridge.
+//! Svelte carrier bridge.
 //!
-//! Owns [`SvelteParseCarrier`] — the concrete [`CarrierParse`] payload wrapping
-//! a [`ParsedSvelte`] — and [`build_svelte_parse_artifact`], the producer that
-//! wraps a parse for the registered projector. The projector is the sole owner
-//! of the framework-neutral inventory geometry.
-//!
-//! [`SvelteCarrierCompiler`] is the second [`CarrierCompiler`] (Vue is the
-//! reference). `parse` produces the neutral artifact, `eval_source` blanks
-//! everything but BOTH script contents at their raw offsets (output length ==
-//! input length), `template_data` extracts the framework-neutral
-//! component-usage facts from the typed template tree (see
-//! [`template_facts`](super::template_facts)), and `compile_ide` projects the
-//! type-checked IDE TSX.
+//! [`SvelteParseCarrier`] wraps [`ParsedSvelte`]. [`build_svelte_parse_artifact`]
+//! produces the unregistered artifact; the projector owns inventory
+//! geometry. [`SvelteCarrierCompiler`]: `parse` → neutral artifact;
+//! `eval_source` blanks everything but both scripts at their raw offsets
+//! (output length == input length); `template_data` extracts component-usage
+//! facts; `compile_ide` projects IDE TSX.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -129,35 +123,17 @@ pub(crate) fn svelte_script_source_type(script: Option<&SvelteScript>) -> Script
 }
 
 /// The Svelte carrier parser version stamped on produced artifacts.
-/// Map the parser's own diagnostic rails onto the framework-neutral mapped
-/// channel.
+/// Map parser diagnostic rails onto the framework-neutral mapped channel.
+/// Close-tag / parse-reject facts come from typed rails (no code-string
+/// classification); every entry has a retained span.
 ///
-/// This is the diagnostic stream for publishable parser recovery. Close-tag
-/// and parse-reject facts are mapped from their typed parser rails; no
-/// code-string classification or raw-source inference is involved. Every
-/// entry carries a real retained span.
-///
-/// STRICT-parse facts (`ParsedSvelte::strict_parse_errors`) ARE mapped here,
-/// exactly like every other parser-owned recovery point on this channel
-/// (close-tag violations, parse-reject facts, deferred script/CSS/custom-
-/// element defects): the recovery itself keeps the carrier usable — `parse`
-/// never refuses publication for these (see `parse`'s doc) — but a recovery
-/// point official REJECTS still needs its own diagnostic, matching official
-/// Svelte's parser, which also recovers a usable tree after most syntax
-/// errors while still recording the diagnostic. UNLIKE every other rail on
-/// this channel, a strict fact carries `blocks_compile: false`
-/// ([`verter_language::LanguageDiagnostic::blocks_compile`]): it is
-/// IDE-visible at full `Error` severity (hover/completion keep working off
-/// the recovered tree; a real editor squiggle appears, exactly as accurate
-/// as official's own), but it must NOT make `compile_entry`'s "does this
-/// file have an error" gate refuse IDE/runtime output for the WHOLE file
-/// over one small recoverable defect — that fail-closed shape is exactly
-/// what `9865c27ff` already fixed once, one layer down at carrier publish.
-/// The CLIENT-runtime "Verter emits a `Main` ⇔ official ACCEPTS" contract
-/// still sees every strict fact, at `official_reject_gate` (compile time) —
-/// that is where a strict fact turns into a full (but typed, non-fatal)
-/// runtime-surface refusal, never an `Err` that blocks the rest of the
-/// file's IDE surface too.
+/// Strict-parse facts (`ParsedSvelte::strict_parse_errors`) are mapped too —
+/// official recovers a usable tree while still recording the diagnostic.
+/// Unlike other rails they carry `blocks_compile: false`: IDE-visible at
+/// `Error` severity, but `compile_entry` must not refuse the whole file over
+/// one recoverable defect. Client-runtime "emits `Main` ⇔ official ACCEPTS"
+/// still sees every strict fact at `official_reject_gate` (typed non-fatal
+/// runtime refusal, never an `Err` that blocks IDE).
 fn svelte_parse_diagnostics(
     source: &str,
     parsed: &ParsedSvelte,
@@ -183,17 +159,8 @@ fn svelte_parse_diagnostics(
         };
         recovered_svelte_diagnostic(violation.span, code, true)
     }));
-    // STRICT-parse facts alone are `blocks_compile: false`: the recovery
-    // itself already proved the carrier has a faithful, usable tree (see
-    // this function's doc), so a strict fact is IDE-visible at full `Error`
-    // severity WITHOUT gating `compile_entry`'s "does this file have an
-    // error" check — that gate refusing the WHOLE file's IDE/runtime output
-    // over one small recoverable defect anywhere in it is exactly the
-    // fail-closed regression `9865c27ff` fixed once already, one layer down
-    // at carrier publish. Every OTHER rail on this channel (close-tag
-    // violations, parse-reject facts, deferred defects) keeps its
-    // pre-existing `blocks_compile: true` — unchanged, out of this fix's
-    // scope.
+    // Strict-parse facts: `blocks_compile: false` (usable recovered tree).
+    // Other rails stay `blocks_compile: true`.
     diagnostics.extend(
         parsed
             .strict_parse_errors
@@ -206,12 +173,8 @@ fn svelte_parse_diagnostics(
             .iter()
             .map(|fact| recovered_svelte_diagnostic(fact.span, fact.official_code, true)),
     );
-    // Non-CSS deferred parse-phase defects only (script-body parse faults,
-    // `<svelte:options customElement>` resolution faults). CSS style-body
-    // parsing/rejection is runtime-gate territory
-    // (`official_reject::deferred_parse_defects`), never the carrier's
-    // mapped-diagnostic channel: carrier geometry recognizes a `<style>`
-    // block's byte boundaries and stops there.
+    // Non-CSS deferred parse defects only. CSS style-body rejection is
+    // `official_reject::deferred_parse_defects`, not this mapped channel.
     diagnostics.extend(
         super::runtime::deferred_parse_defects_excluding_css(source, parsed)
             .into_iter()

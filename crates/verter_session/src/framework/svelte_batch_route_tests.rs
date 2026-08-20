@@ -1,40 +1,17 @@
-//! The Svelte batch route, executed.
+//! Svelte batch route, executed.
 //!
-//! `compile_many` is a distinct capability cell from `get_virtual_file`: the
-//! route is part of the cell's identity, and delegation shown in source is
-//! route-identity evidence, not an executed result. So this drives real Svelte
-//! inputs through the batch boundary and compares each item against the
-//! single-file route for the same typed request.
+//! `compile_many` is a distinct capability from `get_virtual_file`. This
+//! drives real Svelte inputs through the batch and compares each item
+//! to the single-file route. Language comes from each input's canonical
+//! id — not a caller field — so `.svelte` reaches the Svelte carrier.
 //!
-//! Executing it establishes that the two routes ARE equivalent for Svelte.
-//! [`CompileBatchInput`] carries no source-language field because the language
-//! is not the caller to state: the batch derives it from each input canonical
-//! id, so a `.svelte` input reaches the Svelte carrier and a `.vue` input in
-//! the same batch reaches the Vue one. The batch used to register every input
-//! as a Vue carrier, which is why it published Vue-assembled bytes for a Svelte
-//! source and why the Svelte runtime refusals could not fire on this route at
-//! all.
+//! Asserts input order, per-item independence, optional-product
+//! (source-map), and per-entry atomicity
+//! ([`a_genuinely_failing_batch_entry_publishes_no_partial_product`]).
 //!
-//! What the batch boundary DOES honour today is asserted green: input ordering,
-//! per-item independence, and the optional-product (source-map) axis.
-//!
-//! It also owns this route's PER-ENTRY ATOMICITY regression — a table driven
-//! over every failing-entry class the public `compile_many` API can genuinely
-//! reach (duplicate-canonical conflict, compile failure, other typed host
-//! error, caught panic), on both lanes where the class exists on that lane,
-//! with ordinary-success and warning-only controls so a diagnostic is never
-//! equated with a refusal. Two further classes are recorded as NOT REACHABLE
-//! with their source reason rather than represented by a target that would
-//! fail for some other reason; see
-//! [`a_genuinely_failing_batch_entry_publishes_no_partial_product`].
-//!
-//! Run with
 //! `cargo test -p verter_session --lib svelte_batch_route -- --test-threads=1`
-//! (add `--ignored` for the conformance target, which fails by design).
 //!
-//! Read the `running N tests` line, never the exit code: libtest's filter is a
-//! single literal substring with no alternation, so `"a\\|b"` matches nothing
-//! and still exits 0.
+//! Read the `running N tests` line, never the exit code.
 
 use std::sync::Arc;
 
@@ -46,20 +23,12 @@ use crate::{
     CompileProfile, HostConfig, HostError, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
-/// This module's half of a MUTUAL, compile-enforced registration.
+/// Mutual, compile-enforced census registration.
 ///
-/// The census lives OUTSIDE this module deliberately — a check placed inside a
-/// suite is deleted by the same edit that empties it. That leaves the reverse
-/// hole: deleting the census too. This test consumes an item the census owns,
-/// and the census in turn NAMES this test as an item, so removing EITHER `mod`
-/// declaration is a COMPILE error rather than a filter that silently matches
-/// nothing and still exits 0.
-///
-/// The identity the census counts by is this function ITEM, not a path this
-/// module writes down: it is passed by reference and the compiler answers with
-/// the definition's own path. A suite therefore cannot nominate a module it does
-/// not live in, and the census requires a test with exactly that path to be
-/// present in the binary's own listing before counting anything under it.
+/// The census lives outside this module so emptying the suite cannot
+/// delete the check. This test consumes a census-owned item and the
+/// census names this function, so removing either `mod` is a compile
+/// error — not a filter that matches nothing and still exits 0.
 #[test]
 pub(crate) fn this_suite_is_registered_with_the_census() {
     assert!(
@@ -181,14 +150,9 @@ fn run_batch(inputs: &[CompileBatchInput], target: CompileManyTarget) -> Vec<Com
     host().compile_many(inputs.to_vec(), CompileBatchOptions::default(), target)
 }
 
-/// The bytes the SINGLE-FILE route produces for the same source registered
-/// under the adapter the batch actually used.
-///
-/// It pins what the batch emits to an independently-produced reference rather
-/// than merely asserting that something is absent, so arbitrarily different
-/// output fails. The language is passed explicitly here BECAUSE the reference
-/// must be able to name a carrier the batch would not derive — that is what
-/// makes it a control.
+/// Single-file bytes for the same source under an explicit language.
+/// Language is passed because the control must name a carrier the batch
+/// would not derive.
 fn single_file_reference_under(
     canonical: &str,
     source: &str,
@@ -208,17 +172,8 @@ fn single_file_reference_under(
     single_file(&reference, canonical, profile)
 }
 
-/// The TYPED route evidence of which framework adapter a host registered a
-/// canonical under: the file's own `FileLanguage` row, read from the host's
-/// source snapshot.
-///
-/// This is the SAME field every dispatch decision reads — the carrier registry
-/// looks its compiler up by the language's adapter id
-/// (`crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2907-2911`),
-/// and the declaration-carrier surface resolves its adapter from it
-/// (`virtual_file_pipeline.rs:2340-2352`). So it is the route's own record of
-/// which carrier handled the file, obtained without inspecting one byte of
-/// generated output.
+/// Adapter id the host registered for `canonical`, from the file's
+/// `FileLanguage` row — the same field dispatch reads, not generated bytes.
 fn registered_adapter_id(host: &VerterHost, canonical: &str) -> Option<String> {
     host.scheduler
         .try_get_source(canonical)
@@ -233,21 +188,12 @@ fn registered_adapter_id(host: &VerterHost, canonical: &str) -> Option<String> {
         })
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The batch route's carrier selection
-// ══════════════════════════════════════════════════════════════════════════
 
-/// A `.svelte` batch input is registered under the SVELTE carrier, and a `.vue`
-/// input in the same batch under the Vue one.
-///
-/// `CompileBatchInput` carries no source-language field: the language is
-/// derived from the canonical id, so the carrier registry dispatches the right
-/// compiler per input. The batch used to register every input as Vue, which is
-/// why it published Vue-assembled bytes for a Svelte source.
-///
-/// Discriminating in BOTH directions: it fails if the batch reverts to a fixed
-/// Vue carrier, if it substitutes a fixed SVELTE carrier (the `.vue` input in
-/// the same batch), and if the single-file route stops agreeing with it.
+/// A `.svelte` batch input is registered under Svelte, and a `.vue` input
+/// in the same batch under Vue. Language is derived from the canonical id
+/// (`CompileBatchInput` has no language field). Fails if the batch uses one
+/// fixed carrier, or if the single-file route stops agreeing.
 #[test]
 fn a_svelte_batch_input_is_registered_under_the_svelte_carrier() {
     let inputs = vec![
@@ -273,9 +219,7 @@ fn a_svelte_batch_input_is_registered_under_the_svelte_carrier() {
         );
     }
 
-    // TYPED route evidence, not a look at the bytes: the batch host's own
-    // registered adapter per canonical. Each input got ITS OWN carrier, so the
-    // language is derived per path rather than fixed for the batch.
+    // Registered adapter per canonical — language is derived per path.
     assert_eq!(
         registered_adapter_id(&batch_host, "/batch/One.svelte").as_deref(),
         Some("svelte"),
@@ -308,10 +252,8 @@ fn a_svelte_batch_input_is_registered_under_the_svelte_carrier() {
         "the batch and single-file routes publish different bytes for the same Svelte source"
     );
 
-    // The NEGATIVE half, kept explicit: the batch's bytes are no longer what a
-    // Vue-registered single-file route produces for the same source. Without
-    // this, a batch that reverted to the fixed Vue carrier while the reference
-    // above also drifted could still read as agreement.
+    // Negative: batch bytes must not match a Vue-registered single-file
+    // compile of the same `.svelte` source.
     let vue_registered = single_file_reference_under(
         "/batch/One.svelte",
         SUPPORTED,
@@ -329,13 +271,9 @@ fn a_svelte_batch_input_is_registered_under_the_svelte_carrier() {
     );
 }
 
-/// The Svelte runtime refusals fire on the batch route, carrying the SAME
-/// typed code the single-file route reports and NO product beside them.
-///
-/// Both refusal cases are covered: the advanced-rune refusal (a per-component
-/// property) and the `generate: "server"` refusal (a batch-level profile axis).
-/// They were unreachable on this route while every input was registered under
-/// the Vue carrier.
+/// Svelte runtime refusals fire on the batch with the same typed code as
+/// the single-file route and no product beside them (advanced-rune and
+/// `generate: "server"`).
 #[test]
 fn the_svelte_runtime_refusals_fire_on_the_batch_route() {
     // (a) the advanced-rune refusal.
@@ -355,9 +293,7 @@ fn the_svelte_runtime_refusals_fire_on_the_batch_route() {
     );
     // The refusal is atomic: no product travels beside it.
     assert_publishes_no_product("advanced-rune refusal", &advanced[0]);
-    // The single-file route refuses the same bytes with the same typed code —
-    // the comparison that makes this equivalence rather than a property of the
-    // batch's own error text.
+    // Same typed code as the single-file route, not the batch's own error text.
     let single = host();
     upsert_svelte(&single, "/batch/Refused.svelte", ADVANCED_RUNE_REFUSAL);
     assert_eq!(
@@ -402,10 +338,7 @@ fn the_svelte_runtime_refusals_fire_on_the_batch_route() {
         "the single-file server route stopped refusing"
     );
 
-    // The NEGATIVE control on the same axis: the server profile refuses the
-    // SVELTE carrier, not every carrier. A Vue input under the identical
-    // profile still publishes, so the refusals above are carrier-derived rather
-    // than a batch that fails whenever `ssr` is set.
+    // Server profile refuses Svelte, not every carrier: Vue still publishes.
     let vue_server = run_batch(
         &[batch_input("/batch/ServerVue.vue", VUE_SOURCE)],
         CompileManyTarget::RuntimeRender {
@@ -424,8 +357,7 @@ fn the_svelte_runtime_refusals_fire_on_the_batch_route() {
     );
 }
 
-/// The same equivalence on the HOST-BACKED lane — the one IDE / analysis / TSC
-/// consumers use — so the correction is not confined to the render lane.
+/// Same language derivation on the host-backed lane (IDE / analysis / TSC).
 #[test]
 fn the_host_backed_batch_lane_derives_the_svelte_language_too() {
     let batch_host = host();
@@ -459,9 +391,7 @@ fn the_host_backed_batch_lane_derives_the_svelte_language_too() {
     );
     assert_publishes_no_product("host-backed advanced-rune refusal", &entries[1]);
 
-    // The published entries carry exactly the single-file route's bytes for the
-    // same source registered under ITS OWN language, under the host-backed
-    // lane's bundler preset.
+    // Host-backed bytes equal the single-file route under the bundler preset.
     let bundler = crate::host_compile::compile_profile_for_bundler();
     for (entry, source, language) in [
         (
@@ -488,9 +418,7 @@ fn the_host_backed_batch_lane_derives_the_svelte_language_too() {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // The batch contract the route DOES honour — asserted green
-// ══════════════════════════════════════════════════════════════════════════
 
 /// Ordering is the caller's input order, and no item's result contaminates
 /// another's — with a refusal-shaped input in the MIDDLE so a shift would be
@@ -523,10 +451,7 @@ fn batch_ordering_is_stable_and_items_do_not_contaminate_each_other() {
         "the batch reordered its results"
     );
 
-    // Each entry's bytes belong to ITS OWN input, proven by EQUALITY against a
-    // batch of that input alone — not by looking for a substring in the output.
-    // A fanned-out or shifted result fails here, and so does arbitrarily
-    // different output.
+    // Equality against the same input compiled alone — not a substring search.
     for (index, input) in inputs.iter().enumerate() {
         let alone = run_batch(
             std::slice::from_ref(input),
@@ -603,23 +528,11 @@ fn the_batch_source_map_axis_publishes_only_what_was_requested() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Conformance target — the equivalence the batch route must reach
-// ══════════════════════════════════════════════════════════════════════════
 
-/// ROUTE EQUIVALENCE — for each item, the batch result equals the single-file
-/// route's result for the same typed request: the same module bytes and map
-/// presence for a published item, and the same typed refusal code with NO
-/// partial product for a refused one.
-///
-/// The batch used to register every input under the Vue carrier regardless of
-/// the path, so it published Vue-assembled bytes for a `.svelte` source and
-/// neither Svelte runtime refusal could fire. The language is now derived from
-/// the canonical id by the host's classifier, which is what makes a refusal
-/// reachable on this route at all.
-///
-/// The refusal item is in the MIDDLE, so a shifted or fanned-out result is
-/// visible in both directions.
+/// Per item, the batch equals the single-file route: same bytes and map
+/// presence, or the same typed refusal with no partial product. Refusal
+/// sits in the middle so a shift is visible both ways.
 #[test]
 fn a_svelte_batch_matches_the_single_file_route_item_for_item() {
     let inputs = vec![
@@ -690,29 +603,17 @@ fn a_svelte_batch_matches_the_single_file_route_item_for_item() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // Per-entry atomicity, over every failing-entry class the public batch API
 // can genuinely reach
-// ══════════════════════════════════════════════════════════════════════════
 
-/// A Vue-carrier source whose TEMPLATE genuinely fails to parse.
-///
-/// The rows below drive their failing classes through `.vue` inputs, so a
-/// genuinely failing entry here is a Vue-carrier failure. Malformed SCRIPT is
-/// not one:
-/// the carrier's error recovery still publishes a module for it (a
-/// `<script setup>` body of `const a = (((` emits `const _sfc_main = { … }`
-/// with the broken text passed through, no error at all). An unterminated
-/// interpolation does fail, and each entry PROVES which construction produced
-/// it — see [`assert_entry_entered_class`].
+/// Vue-carrier template that fails to parse. Malformed script is not a
+/// failure (recovery still publishes a module); unterminated interpolation
+/// is. Each entry proves its construction via [`assert_entry_entered_class`].
 const TEMPLATE_THAT_FAILS_TO_PARSE: &str =
     "<template>\n  <div>{{ x }} {{ unclosed\n  <span>{{ also-unclosed\n</template>";
 
-/// A Vue-carrier source that compiles SUCCESSFULLY while carrying a
-/// non-error diagnostic: the member-position macro type `Missing` cannot be
-/// resolved, so that member's runtime type degrades to `null` and the
-/// carrier records a WARNING. This is the control that keeps a diagnostic
-/// from being read as a refusal.
+/// Compiles successfully with a warning (unresolved macro type) — a
+/// diagnostic must not be read as a refusal.
 const WARNS_WITHOUT_FAILING: &str = "<script setup lang=\"ts\">\nimport type { Missing } from './nope'\ndefineProps<{ foo: Missing }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
 
 /// Which public `compile_many` lane a row runs on.
@@ -735,15 +636,10 @@ impl Lane {
     }
 }
 
-/// A failing-entry class, named by the construction that produces it.
-///
-/// These are the classes a batch entry can genuinely enter through the
-/// PUBLIC `compile_many` API. Two more exist in the source and are NOT
-/// reachable from it at all, and one of the classes below —
-/// [`FailingClass::OtherHostError`] — is reachable on only ONE of the two
-/// lanes. All three unreachable facts are recorded on
-/// [`a_genuinely_failing_batch_entry_publishes_no_partial_product`] rather
-/// than represented here by a target that would fail for some other reason.
+/// Failing-entry class reachable through public `compile_many`.
+/// Unreachable classes (and the host-backed `OtherHostError` lane) are
+/// recorded on [`a_genuinely_failing_batch_entry_publishes_no_partial_product`],
+/// not represented by a target that would fail for another reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailingClass {
     /// Two inputs naming the same canonical with different sources. The
@@ -769,12 +665,9 @@ enum FailingClass {
 struct DrivenRow {
     /// Every entry that must have entered the row's failing class.
     failing: Vec<CompileBatchEntry>,
-    /// Entries that must publish cleanly. For a PER-ENTRY class these are
-    /// the failing entry's own neighbours in the SAME batch. For a
-    /// BATCH-LEVEL class (see [`FailingClass::OtherHostError`]) no
-    /// neighbour can survive, so these are the identical inputs run under
-    /// the lane's ordinary profile — which proves the failure is the axis
-    /// under test and not a property of the inputs.
+    /// Entries that must publish cleanly. Per-entry: neighbours in the
+    /// same batch. Batch-level ([`FailingClass::OtherHostError`]): the
+    /// same inputs under the ordinary profile.
     unaffected: Vec<CompileBatchEntry>,
 }
 
@@ -826,12 +719,8 @@ fn drive_failing_class(class: FailingClass, lane: Lane) -> DrivenRow {
             )
         }
         FailingClass::OtherHostError => {
-            // The grammar axis rides on the BATCH profile, so it is not a
-            // per-entry property: every entry in the batch enters the class
-            // and no neighbour can survive it. The `unaffected` half is
-            // therefore the SAME inputs under the lane's ordinary profile,
-            // which is what makes this a measurement of the axis rather than
-            // of the inputs.
+            // Grammar axis is batch-level: every entry fails. `unaffected`
+            // is the same inputs under the ordinary profile.
             assert_eq!(
                 lane,
                 Lane::RuntimeRender,
@@ -859,10 +748,8 @@ fn drive_failing_class(class: FailingClass, lane: Lane) -> DrivenRow {
             }
         }
         FailingClass::Panic => {
-            // The sentinel is a `#[cfg(test)]` branch that ALREADY exists in
-            // the batch worker, so the panic unwinds through the production
-            // catch boundary exactly like a codegen panic. Nothing is added
-            // to the production module to drive this row.
+            // Existing `#[cfg(test)]` sentinel: panic unwinds through the
+            // production catch boundary. Nothing is added to production.
             let sentinel = crate::host_compile::PANIC_INJECT_SENTINEL;
             partition_row(
                 host().compile_many(
@@ -880,11 +767,7 @@ fn drive_failing_class(class: FailingClass, lane: Lane) -> DrivenRow {
     }
 }
 
-/// Prove this entry genuinely entered the class the row claims.
-///
-/// Each arm asserts something only THAT construction produces, never merely
-/// that `errors` is non-empty — otherwise a row would pass on any failure
-/// whatsoever, including one from a class it is not measuring.
+/// Prove the entry entered THIS class, not merely that `errors` is non-empty.
 #[track_caller]
 fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBatchEntry) {
     let id = &entry.canonical_id;
@@ -903,13 +786,8 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
             );
         }
         FailingClass::CompileFailure => {
-            // The DISCRIMINATOR between the two arms that can carry error
-            // text: the failing-compile arm prefixes every message with the
-            // canonical id, while the SUCCESSFUL-response arm surfaces the
-            // response's own error-severity diagnostics verbatim — and that
-            // arm publishes its product alongside them. An unprefixed
-            // message here would mean this row is measuring the successful
-            // arm, where "no product" is not the property under test.
+            // Failing-compile prefixes every message with the canonical id;
+            // the successful-response arm does not (and publishes a product).
             let prefix = format!("[{id}] ");
             for message in entry.errors() {
                 assert!(
@@ -961,7 +839,7 @@ fn assert_entry_entered_class(class: FailingClass, lane: Lane, entry: &CompileBa
     }
 }
 
-/// THE QUESTION: does a failing entry publish a product beside its failure?
+/// A failing entry must publish no code, map, or output language.
 #[track_caller]
 fn assert_publishes_no_product(row: &str, entry: &CompileBatchEntry) {
     let id = &entry.canonical_id;
@@ -985,9 +863,7 @@ fn assert_publishes_no_product(row: &str, entry: &CompileBatchEntry) {
     );
 }
 
-/// The other half, and the control that keeps "no product beside a failure"
-/// from being satisfied by a route that withholds every product: this entry
-/// must report nothing and publish its module.
+/// Control: this entry reports no errors and publishes its module.
 #[track_caller]
 fn assert_publishes_cleanly(row: &str, entry: &CompileBatchEntry) {
     let id = &entry.canonical_id;
@@ -1006,11 +882,8 @@ fn assert_publishes_cleanly(row: &str, entry: &CompileBatchEntry) {
     );
 }
 
-/// Every `(class, lane)` this suite drives, with the number of ENTRIES that
-/// must enter the class. The count is part of the measurement: the conflict
-/// class fans its error out to every original input position for that
-/// canonical, and the grammar axis is batch-level, so both report more than
-/// one failing entry.
+/// Driven `(class, lane)` rows and the number of entries that must enter
+/// the class (conflict fans out; grammar is batch-level).
 const ATOMICITY_ROWS: &[(FailingClass, Lane, usize)] = &[
     (
         FailingClass::DuplicateCanonicalConflict,
@@ -1029,51 +902,22 @@ const ATOMICITY_ROWS: &[(FailingClass, Lane, usize)] = &[
     (FailingClass::Panic, Lane::HostBacked, 1),
 ];
 
-/// Does a batch entry ever publish a product alongside a genuine failure?
+/// A failing batch entry publishes no product. Each row is proven to have
+/// entered its class first, then asked whether it published code, map, or
+/// language.
 ///
-/// Driven over EVERY failing-entry class the public `compile_many` API can
-/// reach, on both lanes where the class exists on that lane. For each row
-/// the entry is first proven to have entered its intended class — the
-/// conflict message, the canonical-prefixed compile diagnostic, the typed
-/// grammar host error, the panic marker — and only then asked whether it
-/// published code, a source map, or an output language.
+/// Not reachable through this API (not represented by `#[ignore]` — that
+/// would fail for a different reason):
 ///
-/// Getting genuine failures needed care. The batch selects the VUE carrier
-/// for every input, so a Svelte-shaped refusal never fires, and an "error
-/// plus product" reading taken from a Vue-shaped SUCCESS would be an
-/// artifact of the carrier defect rather than an atomicity answer. Malformed
-/// Vue script is not a failure either — the carrier's error recovery still
-/// emits a module for it.
-///
-/// **Recorded as NOT REACHABLE through this API, with their source reason**
-/// — two whole classes, plus one lane of a class the table above does drive.
-/// None is represented by an `#[ignore]`d target, because such a target
-/// would fail for a reason other than the property it names:
-///
-/// - **Upsert failure.** It folds into the same per-canonical error map as
-///   the conflict above and short-circuits the per-input worker, but the
-///   upsert engine only yields an error from a scheduler `Failed` /
-///   `Superseded` / `Shutdown` completion state or a post-commit
-///   generation-fence mismatch (`crates/verter_session/src/host_upsert.rs`
-///   `map_states` / `finish_upsert_post_commit`). `compile_many` exposes no
-///   input that produces any of them: it deduplicates by canonical before
-///   submitting, and the only in-tree driver of those states is a test-only
-///   completion-state seam that bypasses the batch entirely. Both
-///   constructions the class would reach hardcode an empty code, map and
-///   language, exactly like the conflict row above.
-/// - **A typed Svelte runtime refusal.** No longer unreachable, and no longer
-///   listed here: the batch derives each input language from its canonical id,
-///   so a `.svelte` input reaches the Svelte carrier and its refusals surface
-///   as ordinary failing entries. They are driven directly by
-///   [`the_svelte_runtime_refusals_fire_on_the_batch_route`], which holds them
-///   to the same no-partial-product rule as every row in this table.
-/// - **`OtherHostError` on the HOST-BACKED lane.** The class itself IS
-///   driven, on the render lane. The grammar axis — the one caller-settable
-///   route into `Err(other)` — rides on the compile profile, and the
-///   host-backed lane's profile is the fixed bundler preset that
-///   `compile_many` never lets a caller vary, so that lane has no input
-///   that reaches the class. `drive_failing_class` asserts the restriction
-///   rather than leaving it to this prose.
+/// - **Upsert failure.** Same per-canonical error map as a conflict, but
+///   `compile_many` exposes no input that yields scheduler `Failed` /
+///   `Superseded` / `Shutdown` or a post-commit generation-fence mismatch.
+/// - **Svelte runtime refusal.** Reachable now (language is derived from
+///   the canonical id); driven by
+///   [`the_svelte_runtime_refusals_fire_on_the_batch_route`].
+/// - **`OtherHostError` on the host-backed lane.** Driven on the render
+///   lane. The grammar axis rides the compile profile, and the host-backed
+///   lane uses a fixed bundler preset the caller cannot vary.
 #[test]
 fn a_genuinely_failing_batch_entry_publishes_no_partial_product() {
     for (class, lane, expected_failing) in ATOMICITY_ROWS {
@@ -1100,22 +944,9 @@ fn a_genuinely_failing_batch_entry_publishes_no_partial_product() {
     }
 }
 
-/// CONTROLS — a diagnostic is not a refusal.
-///
-/// Without these the atomicity table above would be satisfied by a route
-/// that withheld every product, or that folded a warning into `errors`. Two
-/// rows on each lane: an ordinary SUCCESS, and a compile that succeeds while
-/// carrying a non-error diagnostic. Both must publish their product and
-/// report NO errors.
-///
-/// The warning is measured differently per lane, because the two lanes
-/// surface it differently by construction: the render lane carries a
-/// successful compile's non-error diagnostics on the entry itself, while the
-/// host-backed lane leaves that list empty and rides its warnings on the
-/// response. So the host-backed half reads the warning off the response for
-/// the SAME canonical the batch just compiled — proving the source really is
-/// warning-carrying on that lane, and that the batch entry nonetheless
-/// reported no error and published its module.
+/// A diagnostic is not a refusal. Ordinary success and warning-only compile
+/// both publish and report no errors. Render-lane warnings live on the
+/// entry; host-backed warnings live on the response for the same canonical.
 #[test]
 fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
     for lane in [Lane::RuntimeRender, Lane::HostBacked] {
@@ -1133,7 +964,7 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
         );
         assert_eq!(entries.len(), 2, "{row}: one entry per input");
 
-        // (a) ordinary success — product published, nothing reported.
+        // Ordinary success.
         assert_publishes_cleanly(&row, &entries[0]);
         assert!(
             entries[0].diagnostics().is_empty(),
@@ -1141,8 +972,7 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
             entries[0].diagnostics()
         );
 
-        // (b) warning-only — the compile SUCCEEDS while carrying a
-        //     non-error diagnostic, and still publishes.
+        // Warning-only compile still publishes.
         assert_publishes_cleanly(&row, &entries[1]);
         match lane {
             Lane::RuntimeRender => {
@@ -1178,8 +1008,7 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
                      construction, so a non-empty one means the lane changed: {:?}",
                     entries[1].diagnostics()
                 );
-                // The source really IS warning-carrying on this lane: read
-                // the same canonical back off the response the batch used.
+                // Confirm the source is warning-carrying on this lane.
                 let response = batch_host
                     .get_virtual_file(VirtualQuery {
                         raw_id: None,
@@ -1226,40 +1055,11 @@ fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
     }
 }
 
-/// The re-examination artifact for the host-backed construction, now that the
-/// construction it named has been corrected.
-///
-/// **What it named.** Of the nine batch-entry constructions, the host-backed
-/// SUCCESSFUL-RESPONSE one used to read the product and the error list from the
-/// same response — it derived `errors` by severity-filtering the response's
-/// diagnostics while independently retaining that response's product. That
-/// shape COULD have expressed a product beside a fatal-looking error list, but
-/// only if it were ever handed a successful response carrying an error-severity
-/// diagnostic. No reachable input demonstrated that; it was a latent
-/// construction hazard, never a demonstrated defect.
-///
-/// **What is true now.** The mixed shape is gone from the type: an entry
-/// carries a [`CompileBatchOutcome`] whose failure arm has no product field, and
-/// the host-backed construction picks its arm from the TYPED terminal result —
-/// `Ok(response)` produces, `Err(HostError)` fails — rather than from the
-/// severity of a successful response's diagnostics. So the precondition below
-/// no longer gates anything: even if a successful response DID carry an
-/// error-severity diagnostic, the entry built from it would still be a
-/// well-formed produced entry rather than a product paired with errors.
-///
-/// This test therefore measures the precondition that used to matter, and
-/// asserts the property that now holds regardless of it: on the host-backed
-/// lane, a diagnostic-carrying compile that SUCCEEDS publishes its product and
-/// reports nothing, and a compile that genuinely FAILS answers `Err`, publishes
-/// nothing, and reports its errors.
-///
-/// It stays `#[ignore]`d and it stays PASSING, exactly as before — it is the
-/// named artifact its finding points at, not a RED gate. The live, non-ignored
-/// coverage of the same lane is
+/// Host-backed construction: mixed product+errors is unrepresentable.
+/// `Ok(response)` produces, `Err(HostError)` fails. Stays `#[ignore]` and
+/// passing — named artifact, not a red gate. Live coverage:
 /// [`an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures`]
-/// (behaviour) and
-/// [`a_batch_outcome_cannot_express_a_product_beside_an_error`] (the structure
-/// that now makes the hazard unrepresentable).
+/// and [`a_batch_outcome_cannot_express_a_product_beside_an_error`].
 #[ignore]
 #[test]
 fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_error() {
@@ -1277,8 +1077,7 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
     );
     assert_eq!(entries.len(), 2, "{row}: one entry per input");
 
-    // 1. The SUCCESS half — served by the response-reading construction. The
-    //    old precondition is read first, so a change there is named directly.
+    // Success half.
     let response = batch_host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
@@ -1327,9 +1126,7 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
             ))
             .collect::<Vec<_>>()
     );
-    // The entry that construction built is a produced one: a product, and no
-    // errors beside it — now by the shape of the outcome, not by the
-    // precondition above holding.
+    // Produced arm: product, no errors.
     assert_publishes_cleanly(row, &entries[0]);
     assert!(
         matches!(
@@ -1339,8 +1136,7 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
         "{row}: a successful host-backed compile must take the PRODUCED arm"
     );
 
-    // 2. The FAILURE half — answers `Err`, so it never reaches that
-    //    construction and publishes nothing.
+    // Failure half: `Err`, no product.
     assert_publishes_no_product(row, &entries[1]);
     assert!(
         matches!(
@@ -1362,24 +1158,16 @@ fn the_host_backed_success_construction_is_never_fed_a_response_that_carries_an_
     );
 }
 
-/// The STRUCTURE, asserted directly: a batch outcome cannot express a product
-/// beside an error, and cannot express a failure that reports nothing.
-///
-/// The `match` is EXHAUSTIVE with no wildcard arm, so adding a variant to
-/// [`CompileBatchOutcome`] is a COMPILE error here rather than an unexamined
-/// third shape. Within each arm, only that arm's fields are in scope — which is
-/// the point: the produced arm has no `errors` to read and the failed arm has no
-/// `code` / `lang` / `source_map` to read, so the mixed state is not something
-/// this test has to look for. It also drives the two real conversion directions
-/// through the public batch API so the arms are not merely declarable but
-/// actually reached.
+/// A batch outcome cannot express a product beside an error, or a failure
+/// that reports nothing. Exhaustive `match` (no wildcard): a new
+/// [`CompileBatchOutcome`] variant is a compile error. Both arms are
+/// reached through the public batch API.
 #[test]
 fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
     use crate::host_compile::CompileBatchOutcome;
 
     let row = "structure/CompileBatchOutcome";
-    // A component that compiles, and one whose template cannot parse. Driving
-    // BOTH in one batch is what makes each arm reached rather than asserted.
+    // Both arms in one batch.
     let ok_id = "/atomic/OutcomeShapeOk.vue".to_string();
     let bad_id = "/atomic/OutcomeShapeBad.vue".to_string();
     let entries = host().compile_many(
@@ -1403,8 +1191,7 @@ fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
                 diagnostics,
             } => {
                 produced_seen += 1;
-                // The produced arm exposes a product. There is no `errors`
-                // binding to check — the arm has no such field.
+                // Produced arm has no `errors` field.
                 assert!(
                     !code.is_empty(),
                     "{row}: `{}` took the produced arm with an EMPTY product",
@@ -1423,7 +1210,7 @@ fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
                     "{row}: `{}` carries an ERROR in its success diagnostics",
                     entry.canonical_id
                 );
-                // The read projection agrees with the arm.
+                // Read projection matches the arm.
                 assert!(
                     entry.errors().is_empty(),
                     "{row}: a produced entry reported errors"
@@ -1431,14 +1218,13 @@ fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
             }
             CompileBatchOutcome::Failed { errors } => {
                 failed_seen += 1;
-                // The failed arm exposes errors, non-empty by construction.
-                // There is no `code` / `lang` / `source_map` binding to check.
+                // Failed arm has no product fields.
                 assert!(
                     !errors.as_slice().is_empty(),
                     "{row}: `{}` took the failed arm with NO error —                      NonEmptyErrors is supposed to make that unconstructible",
                     entry.canonical_id
                 );
-                // The read projections agree with the arm.
+                // Read projection matches the arm.
                 assert!(
                     entry.code().is_empty()
                         && entry.lang().is_none()
@@ -1455,8 +1241,7 @@ fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
         "{row}: the batch must reach BOTH arms, or this test proves only one of them"
     );
 
-    // The non-empty invariant, at the constructor: an empty list is replaced by
-    // the caller's stated fallback rather than published as an empty failure.
+    // Empty error list becomes the stated fallback, never an empty failure.
     let recovered = crate::host_compile::NonEmptyErrors::new(Vec::new(), || "fallback".to_string());
     assert_eq!(
         recovered.as_slice(),
@@ -1473,32 +1258,12 @@ fn a_batch_outcome_cannot_express_a_product_beside_an_error() {
     );
 }
 
-/// A SEARCH for one specific shape, not a proof that it cannot exist.
-///
-/// The host-backed lane's successful-response construction USED to be the only
-/// one that read a product and an error list independently — it is now a typed
-/// sum arm that cannot express both, and this search is what would turn RED if
-/// some change made the mixed shape reachable again. The known upstream way to
-/// produce a successful response carrying error diagnostics is the dev
-/// last-known-good serve, which pairs a PREVIOUS compile's outputs with a NEW
-/// compile's error diagnostics. Reaching it needs a compile of UNCHANGED
-/// bytes to newly fail while the last-good slot still holds that file's
-/// previous product.
-///
-/// This drives, through the PUBLIC API only, the sequences most likely to
-/// reach it: a zero-fact self-contained component compiled to populate the
-/// last-good slot, then store-view-advancing operations that do NOT edit that
-/// file's bytes, then a re-request; and the same file recompiled into a
-/// genuine failure, with and without unrelated generations in between. In
-/// every case the resulting entry must be atomic — never an error list
-/// together with a product.
-///
-/// **What this does NOT do:** it does not prove the shape is unreachable. It
-/// searches the sequences a public consumer can express and reports that none
-/// of them produced it. A residual remains open in the source — the last-good
-/// peek skips its validator when the fact rail is empty, and a self-contained
-/// component records no facts — and this test is what would turn RED if some
-/// change made that crack reachable from the public API.
+/// Search (not a proof of unreachability) for a mixed product+errors
+/// entry. Last-good serve can pair a previous product with new error
+/// diagnostics if unchanged bytes newly fail. Residual: last-good peek
+/// skips its validator when the fact rail is empty (a self-contained
+/// component records no facts). Public-API sequences only; would turn
+/// red if that crack became reachable.
 #[test]
 fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_finds_none() {
     /// The shared invariant: an entry that reports a failure publishes
@@ -1540,9 +1305,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
     }
 
     for lane in [Lane::RuntimeRender, Lane::HostBacked] {
-        // ── (1) populate the last-good slot, then make the SAME canonical
-        //        fail. The failing entry must not inherit the product the
-        //        successful compile just published.
+        // Populate last-good, then fail the same canonical.
         let canonical = format!("/probe/Stale{lane:?}.vue");
         let single = host();
         let good = single.compile_many(
@@ -1555,8 +1318,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
         let failed = single.compile_many(
             vec![
                 batch_input(&canonical, TEMPLATE_THAT_FAILS_TO_PARSE),
-                // A sibling that is untouched, so a stale product could also
-                // arrive by contamination rather than by the last-good read.
+                // Untouched sibling: contamination vs last-good read.
                 batch_input(&format!("/probe/Sibling{lane:?}.vue"), ZERO_FACT),
             ],
             CompileBatchOptions::default(),
@@ -1574,8 +1336,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
             &failed[1],
         );
 
-        // ── (2) the same, with unrelated generations landing in between, so
-        //        the failing request runs against an ADVANCED store view.
+        // Same, against an advanced store view.
         let advanced = host();
         let advanced_id = format!("/probe/Advanced{lane:?}.vue");
         let good = advanced.compile_many(
@@ -1599,9 +1360,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
         );
         assert_atomic(&format!("{lane:?}/fail-after-advanced-view"), &failed[0]);
 
-        // ── (3) a re-request of UNCHANGED bytes after the store view moved:
-        //        the read that consults the cached slot. It must serve its
-        //        product with no error at all.
+        // Unchanged bytes after the store view moved: cached slot, no error.
         let warm = host();
         let warm_id = format!("/probe/Warm{lane:?}.vue");
         let cold = warm.compile_many(
@@ -1625,8 +1384,7 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
              populated the slot"
         );
 
-        // ── (4) fail, then recover: the recovered request must publish a
-        //        FRESH product with no residue of the failure.
+        // Fail then recover: fresh product, no failure residue.
         let cycle = host();
         let cycle_id = format!("/probe/Cycle{lane:?}.vue");
         let first = cycle.compile_many(
@@ -1660,22 +1418,14 @@ fn searching_for_a_batch_entry_that_serves_a_stale_product_beside_fresh_errors_f
     }
 }
 
-/// A canonical already registered under ANOTHER carrier does not keep that
-/// carrier through a batch.
-///
-/// The batch skips its upsert when the registration it would make is the one
-/// the scheduler already holds. While that comparison read the source bytes
-/// ALONE, a host that had registered these exact bytes as Vue never re-ran the
-/// derivation and compiled the whole batch with the stale carrier. Deriving the
-/// language is not enough on its own: the skip decision has to see it too.
-///
-/// The reference is a FRESH host given the same batch, so this asserts the two
-/// agree rather than pinning bytes this test computed itself.
+/// A canonical already registered under another carrier does not keep that
+/// carrier through a batch. The skip decision must see language, not source
+/// bytes alone. Compared to a fresh host given the same batch.
 #[test]
 fn a_batch_re_registers_a_canonical_that_was_left_under_another_carrier() {
     let canonical = "/batch/Poisoned.svelte";
 
-    // Pre-register the exact batch bytes under the WRONG carrier.
+    // Pre-register the same bytes under the wrong carrier.
     let poisoned = host();
     let _ = poisoned
         .upsert(UpsertRequest {
@@ -1707,15 +1457,14 @@ fn a_batch_re_registers_a_canonical_that_was_left_under_another_carrier() {
         },
     );
 
-    // The batch re-registered it under the carrier its path implies.
+    // Re-registered under the path-implied carrier.
     assert_eq!(
         registered_adapter_id(&poisoned, canonical).as_deref(),
         Some("svelte"),
         "the batch kept the carrier a previous registration left behind"
     );
 
-    // And it published what a host that never saw the stale registration
-    // publishes for the same batch.
+    // Same bytes as a fresh host that never saw the stale registration.
     let fresh_entries = run_batch(&inputs, target);
     assert_eq!(
         poisoned_entries[0].code(),
@@ -1729,8 +1478,7 @@ fn a_batch_re_registers_a_canonical_that_was_left_under_another_carrier() {
         "a canonical pre-registered under another carrier produced different errors from a fresh \
          host given the same batch"
     );
-    // Non-vacuity: the comparison above is only meaningful because the fresh
-    // host publishes something.
+    // Non-vacuity: the fresh host must publish something.
     assert!(
         !fresh_entries[0].code().is_empty() && fresh_entries[0].errors().is_empty(),
         "the fresh host published nothing for this input, so the comparison decides nothing: {:?}",
@@ -1738,17 +1486,9 @@ fn a_batch_re_registers_a_canonical_that_was_left_under_another_carrier() {
     );
 }
 
-/// The batch classifies each input by its canonical id, so an id that names no
-/// carrier does not produce a component module.
-///
-/// This is the deliberate edge of deriving the carrier from the path: the batch
-/// used to register everything as Vue, so it would assemble a Vue module for
-/// ANY id — including a `.ts` path or one with no extension at all. It no
-/// longer does. A caller that wants a carrier compiled must name the file as
-/// that carrier.
-///
-/// The `.vue` row is the control: without it, a batch that had stopped
-/// compiling everything would satisfy the negative rows.
+/// An id that names no carrier yields no component module. The `.vue` row
+/// is the control so a batch that stopped compiling everything cannot
+/// satisfy the negative rows.
 #[test]
 fn the_batch_classifies_by_canonical_id_so_a_non_carrier_id_yields_no_module() {
     let vue_source =
@@ -1785,19 +1525,10 @@ fn the_batch_classifies_by_canonical_id_so_a_non_carrier_id_yields_no_module() {
     }
 }
 
-/// CHARACTERIZED, NOT FIXED — an id whose source IS registered but names no
-/// carrier is reported as a MISSING SOURCE.
-///
-/// The batch registers the bytes successfully (the id classifies as a plain
-/// script module), and the compile then asks for a `Main` node that a
-/// non-carrier file has none of. The route answers `HostError::MissingSource`,
-/// which tells the caller its source is absent when the real answer is that the
-/// file is not a component. The batch could only reach this state once inputs
-/// were classified by path, but the taxonomy is the virtual-file route's:
-/// `effective_file_state_from_snapshot` returning `None` is mapped to
-/// `MissingSource` in `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`,
-/// and correcting it means changing that route's error taxonomy for every
-/// consumer, not the batch's use of it.
+/// Characterized, not fixed: a registered non-carrier id is reported as
+/// `HostError::MissingSource` (no `Main` node). Taxonomy lives on the
+/// virtual-file route (`effective_file_state_from_snapshot` → `None`), not
+/// the batch.
 #[test]
 #[ignore = "the virtual-file route reports a registered non-carrier file as a missing source"]
 fn a_non_carrier_batch_id_is_not_reported_as_a_missing_source() {

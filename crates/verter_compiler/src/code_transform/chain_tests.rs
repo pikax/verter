@@ -84,7 +84,7 @@ fn rewrite_and_chain(
     (transform.build_string(), segments(&chained))
 }
 
-// ── The two authorized rewrites, end to end ────────────────────────────────
+// The two authorized rewrites, end to end
 
 /// A terminal removal has no chunk after it, so it produces no resume segment
 /// at all — only the rename's own geometry survives.
@@ -179,7 +179,7 @@ fn non_terminal_removal_resumes_sourcelessly_when_its_line_has_nothing_left_of_i
     );
 }
 
-// ── Equal coordinates, ordering, and collision policy ──────────────────────
+// Equal coordinates, ordering, and collision policy
 
 /// Two segments at one coordinate keep their declared order through a chain
 /// that touches neither. A multiset or column-sorted comparison cannot tell
@@ -297,7 +297,7 @@ fn segments_strictly_inside_a_replaced_range_are_dropped_but_still_resolve() {
     );
 }
 
-// ── The sourceless barrier ─────────────────────────────────────────────────
+// The sourceless barrier
 
 /// A sourceless segment is a legitimate lookup RESULT, not a hole to see
 /// through. Both lookups here land after it and both stay sourceless; an
@@ -358,7 +358,7 @@ fn a_resume_with_no_applicable_segment_emits_sourceless_rather_than_nothing() {
     );
 }
 
-// ── UTF-16 columns ─────────────────────────────────────────────────────────
+// UTF-16 columns
 
 /// Columns are UTF-16 code units — not code points, and not UTF-8 bytes. The
 /// occurrence below sits at unit 11, code point 10, and byte 13.
@@ -434,7 +434,7 @@ fn a_column_splitting_a_surrogate_pair_is_refused() {
     );
 }
 
-// ── End-of-text segments ───────────────────────────────────────────────────
+// End-of-text segments
 
 /// A segment one past the last byte is covered by no chunk. It is carried at
 /// the output's end position rather than silently dropped.
@@ -507,7 +507,7 @@ fn a_whole_text_removal_leaves_only_the_end_position_segment() {
     );
 }
 
-// ── Pass-through and refusals ──────────────────────────────────────────────
+// Pass-through and refusals
 
 /// Chaining moves coordinates, never identities: every table passes through
 /// untouched, including rows no segment references.
@@ -577,7 +577,7 @@ fn an_inserted_chunk_is_refused() {
     );
 }
 
-// ── The shared advance primitive ───────────────────────────────────────────
+// The shared advance primitive
 
 /// The write cursor an out-of-crate assembler keeps must be the SAME advance
 /// the map walk uses, so incremental advancing has to compose.

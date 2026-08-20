@@ -1,7 +1,7 @@
-// Independent oracles the normalizer sits ALONGSIDE, not inside
-// (conformance-normalizer.md: "Raw parse, import/export/link, execution,
+// Independent oracles the normalizer sits alongside, not inside
+// (conformance-normalizer.md: raw parse, import/export/link, execution,
 // diagnostic, and mapping checks run outside the normalizer. A normalizer
-// pass cannot override failure of any independent oracle.").
+// pass cannot override failure of any independent oracle).
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -24,9 +24,9 @@ export function checkParseValidity(code, label) {
 }
 
 /**
- * The exact package/version identities generated conformance artifacts may
- * link against: the pinned official closures from domain-pin.mjs. Any bare
- * import outside this set is a link violation for a conformance artifact.
+ * Exact package/version identities generated conformance artifacts may
+ * link against (pinned official closures from domain-pin.mjs). Any bare
+ * import outside this set is a link violation.
  */
 const PINNED_PACKAGE_VERSIONS = new Map([
   ...Object.keys(VUE_DOMAIN.directPackages).map((name) => [name, VUE_DOMAIN.packageVersion]),
@@ -44,11 +44,9 @@ function barePackageName(specifier) {
 const namespaceCache = new Map();
 
 /**
- * Imports `specifier` exactly as an ES module located in `baseDir` would —
- * a scratch importer module is written under `baseDir` and dynamically
- * imported, so Node's real ESM resolution (export maps, conditions) applies
- * from that directory. Returns the live namespace (named exports + default
- * presence), never a mock or a static approximation.
+ * Import `specifier` as an ES module located in `baseDir` would: a scratch
+ * importer under `baseDir` so Node's real ESM resolution applies. Returns
+ * the live namespace, never a mock.
  *
  * @returns {Promise<{ ns: object } | { error: string, kind: "unresolved"|"load-failed" }>}
  */
@@ -114,38 +112,27 @@ function resolvedPackageIdentity(baseDir, packageName) {
 }
 
 /**
- * Full linking-surface validation against the REAL installed pinned
- * packages — never a mock. Covers, each independently reported:
+ * Linking-surface validation against the real installed pinned packages —
+ * never a mock. Independently reported:
  *
- *  - static import resolution (bare specifiers; relative specifiers are
- *    declared unsupported here and reported unresolved — generated
- *    conformance fragments only ever import bare package specifiers);
- *  - module-load failure (module resolves but throws while evaluating);
- *  - named imports (`import { a }`) — the name must exist on the module's
- *    real, live ESM export surface;
- *  - default imports (`import X`) — the module must expose a default
- *    binding on that surface;
- *  - namespace imports (`import * as ns`) — the module must load;
- *  - side-effect imports (`import "x"`) — the module must load;
- *  - re-export sources (`export { a } from "x"`, `export * from "x"`) —
- *    the source must resolve and load, and each named re-export must exist
- *    on its surface;
- *  - local named exports (`export { x }`) — an undeclared `x` is a module
- *    early error the PARSE oracle itself raises (acorn checks export
- *    references), so that category is caught upstream of this function;
- *  - exact-package identity — every bare import must resolve to the exact
- *    pinned package version from domain-pin.mjs; a resolvable-but-wrong
- *    version and a package outside the pinned closures are both failures.
+ *  - static import resolution (bare specifiers; relatives are unsupported
+ *    here and reported unresolved)
+ *  - module-load failure (resolves but throws while evaluating)
+ *  - named imports — name must exist on the live ESM export surface
+ *  - default imports — module must expose a default binding
+ *  - namespace / side-effect imports — module must load
+ *  - re-export sources — source must resolve/load; named re-exports must
+ *    exist on its surface
+ *  - local named exports (`export { x }`) — undeclared `x` is a parse-oracle
+ *    early error (acorn checks export references), caught upstream
+ *  - exact-package identity — every bare import must resolve to the pinned
+ *    version from domain-pin.mjs
  *
- * `specifierOverrides` (specifier → module URL/specifier) redirects the
- * EXPORT-SURFACE load of a bare specifier to a different entry of the SAME
- * pinned install, for artifacts whose deployment target resolves that
- * specifier differently than Node does. The one live case: a vapor-backend
- * artifact's `vue` imports resolve to the with-vapor runtime build (Vue
- * publishes vapor exports only in its ESM browser/bundler builds; the CJS
- * entry Node's `vue` resolution lands on carries none of them). The
- * exact-package-identity check still runs against the ORIGINAL bare
- * specifier, so the pin discipline is unchanged.
+ * `specifierOverrides` redirects the export-surface load of a bare
+ * specifier to a different entry of the same pinned install (vapor-backend
+ * `vue` → with-vapor runtime build; Vue publishes vapor exports only in
+ * ESM browser/bundler builds). Exact-package-identity still runs against
+ * the original bare specifier.
  *
  * @returns {Promise<{
  *   ok: boolean, resolved: string[], unresolved: string[],

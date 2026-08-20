@@ -1,42 +1,26 @@
-//! Mapping product identity types, per mapping-products.md §1: "The
-//! architecture distinguishes [four] different identities and products. A
-//! single 'maps enabled' boolean is insufficient at architecture/API/
-//! benchmark level."
-//!
-//! Scope, stated precisely: this module lands the four DISTINCT identity
-//! types so nothing downstream collapses them back into one boolean or one
-//! generic "map" type. It does NOT implement map construction, encoding, or
-//! round-trip behavior — that is source-unit/`CodeTransform` behavior owned
-//! by whichever component compacts the source-unit representation, and
-//! building it here would be exactly the semantic-behavior migration
-//! landing dependency-neutral types is scoped apart from.
+//! Four mapping-product identities. A single "maps enabled" boolean is
+//! not enough (`mapping-products.md` §1). This module does not construct,
+//! encode, or round-trip maps — that stays with the source-unit /
+//! `CodeTransform` owner.
 
 digest_identity!(
-    /// Internal source-unit placement/composition identity
-    /// (mapping-products.md §1.1).
+    /// Internal source-unit placement/composition identity.
     PlacementMapId
 );
 digest_identity!(
-    /// Identity of the map required to interpret an IDE/provider companion
-    /// (mapping-products.md §1.2). An IDE companion requiring this cannot be
-    /// Ready/published without it (mapping-products.md §3).
+    /// Map required to interpret an IDE/provider companion. A companion
+    /// that needs this cannot be Ready without it.
     SourceProjectionMapId
 );
 digest_identity!(
-    /// Identity of an optional runtime/build map segment set
-    /// (mapping-products.md §1.3). Runtime code without a requested runtime
-    /// source map constructs no [`RuntimeSourceMapDataId`] at all
-    /// (mapping-products.md §3) — this type's absence (`Option::None` at the
-    /// call site, not a zero-value instance) is the correct representation
-    /// of "not requested".
+    /// Optional runtime/build map segments. Absence is `Option::None`,
+    /// not a zero-value instance.
     RuntimeSourceMapDataId
 );
 digest_identity!(
-    /// Terminal external serialized map identity (mapping-products.md
-    /// §1.4). Encoding/serialization identity is separate from semantic/
-    /// generated-code identity (mapping-products.md §4) — changing this
-    /// type's construction never invalidates a [`PlacementMapId`] or
-    /// [`SourceProjectionMapId`] for the same underlying map data.
+    /// Terminal serialized-map identity. Changing this construction does
+    /// not invalidate [`PlacementMapId`] or [`SourceProjectionMapId`] for
+    /// the same underlying map data.
     EncodedSourceMapId
 );
 
@@ -53,10 +37,6 @@ mod tests {
         }
     }
 
-    /// The four mapping-product identities are four distinct Rust types --
-    /// exactly the "single boolean is insufficient" requirement
-    /// (mapping-products.md 1) made structural: a caller cannot pass a
-    /// `PlacementMapId` where a `SourceProjectionMapId` is expected.
     #[test]
     fn four_distinct_mapping_identities_construct_independently() {
         let placement = PlacementMapId::from_canonical(&MapDescriptor(1));

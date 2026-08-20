@@ -53,13 +53,9 @@ pub(crate) enum ScriptOwnerIndexError {
     },
 }
 
-/// The real mapped span for a script-owner-index failure, when the error
-/// variant carries one. `InvalidTable`/`InvalidRegions`/`ParserTable` are
-/// internal derivation mismatches with no natural anchor in the source
-/// (they compare two internally-derived counts/ordinals, never a specific
-/// authored byte range) — the caller supplies the whole-document span for
-/// those, which is an honest "somewhere in this file" anchor rather than a
-/// fabricated zero-width point.
+/// Mapped span for a script-owner-index failure, when the variant
+/// carries one. `InvalidTable`/`InvalidRegions`/`ParserTable` have no
+/// authored anchor; the caller supplies the whole-document span.
 fn script_owner_index_span(error: &ScriptOwnerIndexError) -> Option<verter_span::Span> {
     match *error {
         ScriptOwnerIndexError::OverlappingRegions {
@@ -928,12 +924,8 @@ fn build_svelte_snapshot_from_eval_source(
                 arguments: diagnostic.arguments.clone(),
                 span: diagnostic.span,
             };
-        // Partition on `blocks_compile` — a Svelte strict-parse fact
-        // (`blocks_compile: false`) is IDE-visible at full severity but
-        // must not flip `has_errors` for the whole file (see
-        // `svelte_parse_diagnostics`'s doc in the carrier). Every other
-        // diagnostic on this channel keeps blocking `compile_entry` exactly
-        // as before.
+        // `blocks_compile: false` (Svelte strict-parse) stays IDE-visible
+        // but must not flip `has_errors`. Everything else still blocks.
         let (blocking, advisory): (Vec<_>, Vec<_>) = artifact
             .diagnostics()
             .iter()
@@ -1896,10 +1888,8 @@ fn build_style_analyses_from_inventory(
         .collect()
 }
 
-/// Run a closure with panic safety, returning a warning diagnostic if it
-/// panics. `source_len` anchors the diagnostic to the whole document being
-/// analyzed when it panics — an honest "somewhere in this file" span, since
-/// a caught panic has no narrower real location to report.
+/// Run a closure with panic safety. On panic, `source_len` anchors a
+/// whole-document warning — a caught panic has no narrower location.
 fn catch_analysis_panic<T: Default>(
     label: &str,
     source_len: u32,

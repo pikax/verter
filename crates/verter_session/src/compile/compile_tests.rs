@@ -7,9 +7,7 @@
 
 use super::*;
 
-// ═══════════════════════════════════════════════════════════
 // assemble_main_module tests
-// ═══════════════════════════════════════════════════════════
 
 use verter_compiler::framework_common::{
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
@@ -110,13 +108,9 @@ fn assemble_main_module_ssr_registers_ssr_context_module() {
     assert!(!result.contains("module.hot"));
 }
 
-/// `emit_ssr_module_registration: false` suppresses the whole
-/// `useSSRContext`/`ssrContext.modules` wrapper — the conformance
-/// harness's own candidate-generation shape (a bare `@vue/compiler-sfc`-
-/// equivalent assembly, matching goldens generated the same way, with no
-/// `@vitejs/plugin-vue` bundler-plugin glue at all). Every OTHER field
-/// stays at its default, proving this is a narrow, single-purpose knob —
-/// not a side effect of some other axis.
+/// `emit_ssr_module_registration: false` suppresses the
+/// `useSSRContext`/`ssrContext.modules` wrapper (harness candidate shape).
+/// Other fields stay at default — a single-purpose knob.
 #[test]
 fn assemble_main_module_ssr_registration_suppressed_when_requested() {
     let compiled = basic_compiled_result();
@@ -152,13 +146,8 @@ fn assemble_main_module_ssr_registration_suppressed_when_requested() {
     );
 }
 
-/// `emit_ssr_module_registration` defaults to `true` — every EXISTING
-/// caller (constructed via `..CompileProfile::default()`, which is every
-/// production call site in the codebase) keeps today's byte-identical
-/// wrapper behavior with zero changes required at the call site. This is
-/// the SAME assertion `assemble_main_module_ssr_registers_ssr_context_module`
-/// already makes; this test exists to name the discriminating contract
-/// explicitly (default-true vs explicit-false) in one place.
+/// `emit_ssr_module_registration` defaults to `true` so existing
+/// `CompileProfile::default()` callers keep today's wrapper.
 #[test]
 fn assemble_main_module_ssr_registration_default_is_true() {
     assert!(
@@ -169,12 +158,8 @@ fn assemble_main_module_ssr_registration_default_is_true() {
     );
 }
 
-/// The registered id must match the ssr-manifest KEY FORM. When the
-/// bundler supplies a root-relative `ssr_module_id`, an ABSOLUTE
-/// canonical id (the real transform-time shape) must NOT be the
-/// registered id — Vite's manifest keys are root-relative, so
-/// registering the absolute path makes every `renderPreloadLinks`
-/// lookup miss.
+/// Registered id must match the ssr-manifest key form: a bundler-supplied
+/// root-relative `ssr_module_id` wins over an absolute canonical id.
 #[test]
 fn assemble_main_module_ssr_registers_bundler_supplied_module_id() {
     let compiled = basic_compiled_result();
@@ -328,16 +313,9 @@ fn assemble_main_module_production_skips_file() {
     assert!(!result.contains("__file"));
 }
 
-/// Official `@vitejs/plugin-vue@6.0.7`'s real `transformMain` gates `__file`
-/// on `devToolsEnabled || (devServer && !isProduction)` — it is a live
-/// dev-server / devtools marker, not a bare dev-vs-prod split. Verter has no
-/// separate `devToolsEnabled` concept, but `hmr_strategy: None` already
-/// means "no dev-server tooling requested" (its own doc comment: "No HMR
-/// code is emitted") — a dev-mode assembly that explicitly opts out of HMR
-/// must ALSO skip `__file`, not just the HMR block itself. Confirmed
-/// against the pinned rc.3 golden for `basic-interpolation.vue`'s dev
-/// cell, which has neither `__file` nor HMR (the harness's golden-
-/// generation never runs inside a live dev server).
+/// Official plugin-vue gates `__file` on `devToolsEnabled || (devServer &&
+/// !isProduction)`. `hmr_strategy: None` means no dev-server tooling, so
+/// skip `__file` too — not just the HMR block.
 #[test]
 fn assemble_main_module_no_hmr_strategy_skips_file_even_in_dev() {
     let compiled = basic_compiled_result();
@@ -626,14 +604,9 @@ fn assemble_main_module_inline_topology() {
     );
 }
 
-/// The runtime Main passes the compiler-emitted `__returned__` bindings
-/// object through UNCHANGED: setup-binding elision (type-only imports,
-/// unused setup imports) is owned by the compiler's `build_returned_object`
-/// (template_used_vars-driven), not by a text-level post-pass on the
-/// assembled module. (The old `filter_setup_return` was removed — it
-/// keyed on a `return { ... };` shape the compiler has not emitted since
-/// `__returned__` was introduced, so it was dead code on the real
-/// production shape, proven by canary.)
+/// Runtime Main passes `__returned__` through unchanged. Setup-binding
+/// elision is the compiler's `build_returned_object`, not an assembly
+/// text post-pass.
 #[test]
 fn assemble_passes_compiler_returned_bindings_verbatim() {
     use oxc_allocator::Allocator;
@@ -687,11 +660,8 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
     );
 }
 
-/// The genuine production assembler must return the assembled module code
-/// AND the source map it was generated from, together. Before the
-/// assembled-map composition landed it terminated at a bare `String`, so a
-/// map-enabled compile observed code with no map at all — an absent map is
-/// a hard failure, never a skip.
+/// Assembler returns code and map together. An absent map is a hard
+/// failure, never a skip.
 #[test]
 fn assemble_returns_code_and_map_together_when_maps_are_requested() {
     let script_code = "const __sfc__ = {}\n";

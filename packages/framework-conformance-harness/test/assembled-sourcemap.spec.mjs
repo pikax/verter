@@ -107,7 +107,6 @@ describe("assembled-module map — every backend, whole-artifact soundness", () 
   });
 });
 
-// ---------------------------------------------------------------------------
 // Column-precise re-anchoring ground truth — the control that makes the
 // keyword-splice arithmetic in composeAssembledModuleMap FALSIFIABLE.
 //
@@ -127,7 +126,6 @@ describe("assembled-module map — every backend, whole-artifact soundness", () 
 //     ("const _sfc_main = ".length 18 − "export default ".length 15 = +3).
 // A one-column offset in the re-anchoring, or the re-anchoring not running
 // at all, changes this exact set and fails these assertions.
-// ---------------------------------------------------------------------------
 
 const PLAIN_SCRIPT_FIXTURE = `<script>
 export default { name: "plain-script", data() { return { n: 1 } } }

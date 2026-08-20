@@ -278,14 +278,11 @@ fn compute_svelte_surface(
 
 struct SvelteFactObservations<'a> {
     props_type: Option<&'a AuthoredTypePayloadRef>,
-    /// The EXACT `$props()` call inventory — the authored public-key geometry.
+    /// Exact `$props()` inventory — authored public-key geometry.
     ///
-    /// Threaded on the `exact` arm ONLY. `ExactSveltePropsCalls` is the sealed
-    /// negative-evidence inventory whose ABSENCE is authoritative, so an empty
-    /// one proves the component declares no `$props()` call rather than meaning
-    /// "not computed". Leaving it `None` on the conservative arm is the whole
-    /// exactness guard: a partial or unavailable evidence arm can never
-    /// synthesise a props surface from geometry it did not prove complete.
+    /// On the `exact` arm only. Absence is authoritative: empty means no
+    /// `$props()` call, not "not computed". `None` on the conservative
+    /// arm so partial/unavailable evidence cannot synthesise a surface.
     props_calls: Option<&'a ExactSveltePropsCalls>,
     prop_defaults: Vec<&'a verter_semantic::analysis::types::AnalyzedDefaultValue>,
     bindable_members: Vec<&'a String>,
@@ -456,37 +453,22 @@ fn macro_surface_shell(
     }
 }
 
-/// PROPS for an UNTYPED `$props()` destructure, from the authored public-key
-/// geometry alone.
+/// Props for an untyped `$props()` destructure, from authored public-key
+/// geometry. Reached only with no authored props type. One row per
+/// enumerated key, no type annotation (`unknown`). Optionality comes
+/// from the shared `prop_defaults` pass.
 ///
-/// Reached only when there is no authored props type. Publishes one prop row
-/// per statically enumerated public key, with NO type annotation — downstream
-/// renders `unknown`, which is honest: the author wrote no type. Optionality is
-/// applied by the caller's shared `prop_defaults` pass, so a destructuring
-/// default or a `$bindable(<arg>)` fallback makes its key optional exactly as it
-/// does on the typed path.
+/// Stays `Missing` when:
 ///
-/// Stays `Missing` — the propless answer — in three cases, each for its own
-/// reason:
+/// - there is no exact inventory (partial/unavailable must never
+///   synthesise a surface);
+/// - there is no `$props()` call (sealed negative evidence). `Missing`
+///   tells the public API projector to ask the legacy `export let`
+///   surface; present-but-empty would hide every legacy prop;
+/// - the key domain is open (rest or `let props = $props()`). Publishing
+///   only enumerated keys would close a surface the author left open.
 ///
-/// - **No exact inventory.** Only the `exact` observation arm carries one. A
-///   partial or unavailable evidence arm must never synthesise a surface.
-/// - **No `$props()` call.** The absence is authoritative (the inventory is
-///   sealed negative evidence), so the component genuinely declares no runes
-///   props. Returning `Missing` here is load-bearing beyond honesty: the public
-///   API projector reads a `Missing` runes surface as "ask the LEGACY
-///   `export let` surface instead", so resolving present-but-empty would hide
-///   every legacy prop.
-/// - **An OPEN key domain.** A top-level rest element or a whole-object binding
-///   (`let props = $props()`) leaves the enumerated set incomplete. Publishing
-///   only the enumerated keys would produce a CLOSED TypeScript surface that
-///   rejects the extra props the author deliberately allowed — trading one
-///   wrong answer for another. There is no open-key props rendering on this
-///   surface yet, so the honest answer is to claim nothing.
-///
-/// `prop_origins` stays empty: an origin entry is a resolver-known
-/// `ResolvedTypeDeclaration`, and an untyped destructure key has no type
-/// declaration to point at. A synthesised one would be a fabricated route.
+/// `prop_origins` stays empty: an untyped key has no type declaration.
 fn runes_props_from_destructure_geometry(
     facts: &SvelteFactObservations<'_>,
 ) -> ResolvedMacroPayload {

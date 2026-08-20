@@ -1,50 +1,20 @@
 //! Measurement-only work attribution.
 //!
-//! A typed, closed schema of work sites ([`WorkSite`]) plus a counter
-//! table, so that the cost of a strategic operation can be explained by
-//! WHAT ran and HOW OFTEN rather than by a profiler's symbol names.
+//! Closed [`WorkSite`] schema plus a counter table. Not a semantic
+//! authority and structurally unable to become one: schema types compile
+//! unconditionally (macros name a site even when disabled) but carry no
+//! storage. Everything that can produce a number — [`snapshot`],
+//! [`read`], `record_*`, the report renderers — is behind the
+//! non-default `attribution` feature. A default build cannot write
+//! `if attribution::read(site).calls > n`: the path does not resolve.
+//! There is no disabled stub returning zero.
 //!
-//! ## What this is not
-//!
-//! It is not a semantic authority, and it is structurally incapable of
-//! becoming one. The schema types ([`WorkSite`], [`WorkDomain`],
-//! [`WorkUnit`]) compile unconditionally, because the recording macros
-//! name a site even when disabled — but they carry no storage and
-//! expose no value. EVERYTHING that can produce a number —
-//! [`snapshot`], [`snapshot_all`], [`read`], [`reset`], [`SiteSample`],
-//! `record_*`, the report renderers — is behind the non-default
-//! `attribution` feature.
-//!
-//! So a default build cannot write `if attribution::read(site).calls > n`:
-//! the path does not resolve. There is no runtime flag to audit, no
-//! "disabled" stub returning zero that a caller could branch on by
-//! accident, and no way for a counter to reach a decision without a
-//! Cargo feature change that shows up in review. `verter_audit` is a
-//! leaf crate (`verter_span` only) and this module adds no dependency,
-//! so the confinement holds for every consumer.
-//!
-//! ## Cost when disabled
-//!
-//! With the feature off, [`attribute!`], [`attribute_n!`],
-//! [`attribute_scope!`], [`attribute_max!`] and [`attribute_digest!`]
-//! expand to a single `const` item that names the site and nothing else.
-//! A `const` with no reads produces no code, so a disabled build carries
-//! no atomics, no clock reads, and no branch — and the amount/digest
-//! ARGUMENT IS NEVER EVALUATED, so instrumenting a site with an
-//! expensive quantity (`v.iter().map(len).sum()`) costs nothing when the
-//! feature is off.
-//!
-//! Naming the site in the disabled arm is deliberate: a typo'd or
-//! deleted variant fails a DEFAULT build, so instrumentation cannot rot
-//! silently behind a feature nobody enables. The amount expression is
-//! NOT type-checked in the disabled arm — that would require mentioning
-//! it, and mentioning it in any form (`if false`, an uncalled closure)
-//! either emits code or takes a borrow that can conflict with the
-//! surrounding function. `cargo check -p <crate> --features
-//! verter_audit/attribution` is what type-checks the amounts; the
-//! disabled arm's job is only to pin the site names.
-//!
-//! ## Usage
+//! With the feature off, [`attribute!`] / [`attribute_n!`] /
+//! [`attribute_scope!`] / [`attribute_max!`] / [`attribute_digest!`]
+//! expand to a `const` that names the site. The amount/digest argument
+//! is **not evaluated**. Naming the site in the disabled arm is
+//! deliberate: a typo fails a default build. Amounts are type-checked
+//! only under `--features verter_audit/attribution`.
 //!
 //! ```ignore
 //! use verter_audit::{attribute_n, attribute_scope};
@@ -57,7 +27,6 @@
 //!
 //! fn build_index(source: &str) -> Index {
 //!     attribute_scope!(IndexedReadyBuild);
-//!     // times this region AND attributes its heap traffic
 //! }
 //! ```
 

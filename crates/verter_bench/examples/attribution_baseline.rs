@@ -1,31 +1,19 @@
 //! Work-attribution baseline harness.
 //!
-//! Runs a fixed, self-contained workload through the host and reports what
-//! ran, by logical identity, from `verter_audit::attribution`.
+//! Fixed in-process corpus (no fixture checkout) through the host;
+//! reports `verter_audit::attribution` by logical identity.
 //!
-//! The corpus is SYNTHESISED in-process (no fixture directory, no external
-//! checkout), so the same command produces the same work on any machine.
+//! ```text
+//! cargo run -p verter_bench --release --example attribution_baseline
+//! cargo run -p verter_bench --release --features attribution \
+//!     --example attribution_baseline -- --format tsv
+//! ```
 //!
-//! Usage:
-//!   # disabled arm — wall-clock only, proves the instrumentation is free
-//!   cargo run -p verter_bench --release --example attribution_baseline
+//! `--format tsv|json|summary`, `--files N`, `--runs N`.
 //!
-//!   # enabled arm — same workload plus the counter dataset
-//!   cargo run -p verter_bench --release --features attribution \
-//!       --example attribution_baseline -- --format tsv
-//!
-//! Flags:
-//!   --format tsv|json|summary   dataset rendering (default: summary)
-//!   --files N                   components in the corpus (default: 40)
-//!   --runs N                    measured repetitions (default: 3)
-//!
-//! With the feature OFF the counter table does not exist, so the harness
-//! reports timings only. The workload itself is identical across arms, but
-//! the arms are NOT otherwise equivalent: the enabled arm also installs
-//! `AttributingAllocator` as the global allocator, which dominates its
-//! overhead. The disabled-overhead question is therefore answered by
-//! comparing this arm against the PRE-INSTRUMENTATION tree, not against the
-//! enabled arm — see the disabled-overhead evidence note.
+//! Feature off: timings only (no counter table). Feature on also
+//! installs `AttributingAllocator`, so disabled-overhead is measured
+//! against the pre-instrumentation tree, not against the enabled arm.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,7 +31,7 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace};
 static ALLOC: verter_audit::attribution::AttributingAllocator<std::alloc::System> =
     verter_audit::attribution::AttributingAllocator::new(std::alloc::System);
 
-// ─────────────────────────── corpus ───────────────────────────
+// corpus
 
 struct SourceFile {
     id: String,
@@ -152,7 +140,7 @@ fn build_corpus(files: usize) -> Vec<SourceFile> {
     corpus
 }
 
-// ─────────────────────────── workload ───────────────────────────
+// workload
 
 /// One full pass: fresh host, upsert the corpus, then request component
 /// metadata for every component. Returns the wall-clock in milliseconds and
@@ -209,7 +197,7 @@ fn run_once(corpus: &[SourceFile]) -> (f64, usize) {
     (started.elapsed().as_secs_f64() * 1000.0, resolved)
 }
 
-// ─────────────────────────── reporting ───────────────────────────
+// reporting
 
 fn median(values: &mut [f64]) -> f64 {
     if values.is_empty() {
@@ -334,7 +322,7 @@ fn determinism_check(corpus: &[SourceFile]) {
 #[cfg(not(feature = "attribution"))]
 fn determinism_check(_corpus: &[SourceFile]) {}
 
-// ─────────────────────────── entry ───────────────────────────
+// entry
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

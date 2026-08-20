@@ -1,20 +1,13 @@
-// TypeScript-observation validator (BF2 owned scope: "diagnostics,
-// source-map, and TypeScript-observable product validation" — BF2.md).
+// TypeScript-observation validator: what the real TypeScript compiler
+// observes about a set of produced artifacts — exports, assigned types,
+// and every diagnostic with full spans — serialized as a deterministic
+// record two artifact sets can be compared on. A type that silently
+// changes (`string` → `number` with no diagnostic) changes the record.
 //
-// This module is the reusable VALIDATOR MECHANISM: it programmatically
-// determines what the real TypeScript compiler observes about a set of
-// produced artifacts — the exports it sees, the exact types it assigns
-// them, and every diagnostic it raises, with full spans — and serializes
-// that as a deterministic observation record two artifact sets can be
-// compared on. A type that silently changes (a prop type drifting from
-// `string` to `number` with no diagnostic anywhere) changes the record and
-// is caught.
-//
-// It drives the REAL pinned `typescript` compiler API over an in-memory
-// program — never a mock, never a re-implementation, and never production
-// compiler behavior: this package supplies the mechanism only; the blocks
-// that produce real candidate TypeScript-visible products own using it for
-// actual product conformance results.
+// Drives the pinned `typescript` compiler API over an in-memory program —
+// never a mock or re-implementation. This package supplies the mechanism;
+// callers that produce TypeScript-visible products own using it for
+// product conformance.
 
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -33,11 +26,10 @@ const COMPILER_OPTIONS = {
 };
 
 /**
- * The NORMALIZED compiler-option record entering the observation: enum
- * values spelled as their stable names (never ordinal numbers, which can
- * renumber across TypeScript releases), every option explicit. A candidate
- * observed under different options is a DIFFERENT observation, not a
- * comparable one.
+ * Normalized compiler-option record: enum values as stable names (never
+ * ordinals, which can renumber across TypeScript releases), every option
+ * explicit. Different options are a different observation, not a comparable
+ * one.
  */
 const NORMALIZED_COMPILER_OPTIONS = Object.freeze({
   strict: true,
@@ -62,11 +54,10 @@ function stableStringify(value) {
 /**
  * Thrown when an observed artifact names a module the host cannot resolve.
  *
- * This is a HARD failure, never a degradation. An unresolvable `import("vue")`
- * or `import("svelte")` does not error inside a `.d.ts` under `skipLibCheck` —
- * TypeScript silently types the reference `any`, and two artifacts that differ
- * only in their framework types then observe IDENTICALLY. An observation taken
- * in that state decides nothing, so it is refused instead of returned.
+ * Hard failure, never a degradation. An unresolvable `import("vue")` /
+ * `import("svelte")` does not error inside a `.d.ts` under `skipLibCheck` —
+ * TypeScript types the reference `any`, and two artifacts that differ only
+ * in framework types then observe identically. Refused, not returned.
  */
 export class ModuleResolutionError extends Error {
   constructor(unresolved) {
@@ -83,29 +74,22 @@ export class ModuleResolutionError extends Error {
 }
 
 /**
- * The OBSERVATION DOMAIN: the realized, pinned framework closure an artifact's
- * module references are given meaning by.
+ * Workspace observation domain: this repo's `@verter/*` declaration packages.
  *
- * `null` is the domain-less domain — for artifacts that reference no external
- * module. Naming a framework roots every virtual artifact INSIDE that
- * framework's isolated oracle install, so TypeScript's OWN node module
- * resolution walks up to that install's `node_modules` and finds the pinned
- * package's real declarations. TypeScript stays the observer; the install
- * supplies the meaning of the imports.
- */
-/**
- * The WORKSPACE domain: this repository's own `@verter/*` declaration packages.
+ * Observation domain is the realized, pinned closure that gives module
+ * references meaning. `null` is domain-less (no external modules). Naming
+ * a framework roots every virtual artifact inside that framework's isolated
+ * oracle install so TypeScript's own node resolution finds the pinned
+ * declarations. TypeScript stays the observer; the install supplies import
+ * meaning.
  *
- * The IDE/TSX products a carrier publishes are JSX modules whose meaning lives
- * behind `@jsxImportSource @verter/svelte-jsx` and `@verter/types`. Those are
+ * IDE/TSX products are JSX modules whose meaning lives behind
+ * `@jsxImportSource @verter/svelte-jsx` and `@verter/types`. Those are
  * workspace packages, not oracle-install packages, and pnpm links them
- * per-consumer — no single directory has both — so the domain is provisioned by
- * mapping each package name to its own on-disk directory through TypeScript's
- * own `paths`. The declarations resolved are the packages' REAL emitted
- * `.d.ts`; nothing is hand-written.
- *
- * Every mapped target is asserted present, so a missing build REFUSES the
- * observation rather than silently degrading a reference to `any`.
+ * per-consumer — no single directory has both — so the domain maps each
+ * package name to its on-disk directory through TypeScript `paths`. Resolved
+ * declarations are the packages' real emitted `.d.ts`. A missing build
+ * refuses the observation rather than degrading a reference to `any`.
  */
 function workspacePackagePaths() {
   const packages = {
@@ -120,8 +104,8 @@ function workspacePackagePaths() {
       missing.push({ name, expected: manifest });
       continue;
     }
-    // Bare specifier and subpaths both map to the package's own directory, so
-    // TypeScript reads the package's `types` / `exports` entries itself.
+    // Bare specifier and subpaths both map to the package directory so
+    // TypeScript reads `types` / `exports` itself.
     paths[name] = [directory];
     paths[`${name}/*`] = [path.join(directory, "*")];
   }
@@ -132,10 +116,9 @@ function workspacePackagePaths() {
 }
 
 /**
- * Thrown when a workspace declaration package the observation domain needs is
- * not present on disk. A hard failure for the same reason
- * [`ModuleResolutionError`] is: an absent package types every reference to it
- * `any`, and the observation would decide nothing.
+ * Thrown when a workspace declaration package is missing on disk. Same
+ * reason as `ModuleResolutionError`: an absent package types every
+ * reference `any`, so the observation would decide nothing.
  */
 export class WorkspaceDomainError extends Error {
   constructor(missing) {
@@ -160,30 +143,29 @@ function resolveDomain(framework) {
     };
   }
   if (framework === "workspace") {
-    // Rooted inside the repository so a relative import between artifacts and
-    // any real workspace file resolves the way a consumer's would.
+    // Rooted inside the repo so relative imports between artifacts and
+    // workspace files resolve as a consumer's would.
     return {
       framework: "workspace",
       installDir: REPO_ROOT,
       root: path.join(REPO_ROOT, "__verter_observed__"),
       packageVersion: null,
       paths: workspacePackagePaths(),
-      // The IDE products ARE JSX modules: without this the `@jsxImportSource`
-      // pragma is inert and the projection's element types are never checked.
+      // IDE products are JSX: without this `@jsxImportSource` is inert and
+      // element types are never checked.
       jsx: true,
     };
   }
   const { installDir } = ensureOracleDomain(framework);
-  // The pinned package's own manifest version — recorded in the observation's
-  // identity so two observations taken against different closures are never
-  // reported as comparable results of the same query.
+  // Pinned package manifest version — part of observation identity so
+  // different closures are never compared as the same query.
   const manifestPath = path.join(installDir, "node_modules", framework, "package.json");
   const manifest = JSON.parse(ts.sys.readFile(manifestPath) ?? "{}");
   return {
     framework,
     installDir,
-    // A directory INSIDE the install, so node resolution from an artifact
-    // reaches `<installDir>/node_modules`.
+    // Inside the install so node resolution from an artifact reaches
+    // `<installDir>/node_modules`.
     root: path.join(installDir, "__verter_observed__"),
     packageVersion: manifest.version ?? null,
     paths: undefined,
@@ -192,20 +174,17 @@ function resolveDomain(framework) {
 }
 
 /**
- * The compiler options ONE observation runs under.
+ * Compiler options one observation runs under.
  *
- * `checkDeclarationFiles` turns `skipLibCheck` OFF. That matters for the
- * declaration-only claim: a runtime value statement inside a `.d.ts` is
- * `TS1036`, but `skipLibCheck` suppresses every error raised inside a
- * declaration file — so under the default options a surface carrying real
- * runtime code observes exactly like an ambient-clean one. Diagnostics stay
- * filtered to the observed artifacts, so the pinned framework closure's own
- * declarations never contribute noise.
+ * `checkDeclarationFiles` turns `skipLibCheck` off. A runtime value
+ * statement inside a `.d.ts` is `TS1036`, but `skipLibCheck` suppresses
+ * every error in a declaration file — so a surface carrying real runtime
+ * code would observe like an ambient-clean one. Diagnostics stay filtered
+ * to the observed artifacts; pinned framework declarations add no noise.
  */
 function compilerOptionsFor(checkDeclarationFiles, domain) {
   const options = { ...COMPILER_OPTIONS, skipLibCheck: !checkDeclarationFiles };
-  // `paths` values are ABSOLUTE, so no `baseUrl` is needed (and `baseUrl` is
-  // deprecated in this TypeScript).
+  // `paths` values are absolute — no `baseUrl` (deprecated in this TypeScript).
   if (domain.paths !== undefined) options.paths = domain.paths;
   if (domain.jsx) options.jsx = ts.JsxEmit.ReactJSX;
   return options;
@@ -227,8 +206,8 @@ function inMemoryHost(fileMap, compilerOptions) {
       return fileMap.has(fileName) || base.fileExists(fileName);
     },
     directoryExists(directoryName) {
-      // A virtual artifact's own directory need not exist on disk; every other
-      // directory question is the real filesystem's.
+      // A virtual artifact's directory need not exist on disk; other
+      // directory questions are the real filesystem's.
       for (const fileName of fileMap.keys()) {
         if (path.dirname(fileName) === directoryName) return true;
       }
@@ -241,19 +220,14 @@ function inMemoryHost(fileMap, compilerOptions) {
 }
 
 /**
- * Normalize a relocated relative path into the portable form the observation
- * identity carries.
+ * Normalize a relocated relative path into the portable observation-identity
+ * form.
  *
- * `path.relative` yields BACKSLASHES on Windows, and an identity carrying
- * platform-specific separators gives the SAME observation a different
- * `queryIdentity` per platform — two machines observing one tree would compare
- * as divergent for no semantic reason.
- *
- * Splitting on `path.sep` cannot be exercised on a POSIX machine, where `sep`
- * is already `/` and the normalization is a no-op. Splitting on BOTH separators
- * makes the rule platform-independent AND drivable everywhere: a
- * Windows-shaped path normalizes identically on Linux and macOS, so the
- * behaviour is testable rather than merely asserted.
+ * `path.relative` yields backslashes on Windows; platform-specific
+ * separators would give the same observation a different `queryIdentity`
+ * per platform. Splitting on `path.sep` is a no-op on POSIX. Splitting on
+ * both separators makes the rule platform-independent and testable: a
+ * Windows-shaped path normalizes identically on Linux and macOS.
  *
  * @param {string} relativePath a path relative to the domain root
  * @returns {string} a leading-slash, forward-slash-only identity path
@@ -266,25 +240,16 @@ export function toIdentityPath(relativePath) {
 }
 
 /**
- * Every module reference an artifact makes, enumerated by TYPESCRIPT ITSELF.
+ * Every module reference an artifact makes, enumerated by TypeScript itself.
  *
- * `ts.preProcessFile(text, readImportFiles, detectJavaScriptImports)` is the
- * compiler's own scanner for "what does this file reference". Using it — rather
- * than a hand-written AST walk — is what makes the enumeration COMPLETE by
- * construction instead of by assertion: a reference form a walk forgot is a
- * bypass, and a hand-written walk cannot prove it forgot nothing.
- * `preProcessFile` reports, in `importedFiles`, every one of: import
- * declarations, `export … from`, `export *`, `import("x")` type nodes,
- * `typeof import("x")`, `declare module "x"` augmentations,
- * `import x = require("x")`, dynamic `import("x")` expressions, and
- * `require("x")` calls; and, in three SEPARATE channels,
- * `/// <reference types="x" />` (`typeReferenceDirectives`),
- * `/// <reference path="x" />` (`referencedFiles`) and
- * `/// <reference lib="x" />` (`libReferenceDirectives`). ALL FOUR channels are
- * gated below: a channel left ungated is a hole of exactly the kind this
- * function exists to close — an unresolvable `path` reference surfaces only as
- * a `TS6053` diagnostic and the observation proceeds against a file that was
- * never read.
+ * `ts.preProcessFile` is the compiler's own scanner. A hand-written AST walk
+ * cannot prove it forgot nothing. `importedFiles` covers import declarations,
+ * `export … from`, `export *`, `import("x")` type nodes, `typeof import("x")`,
+ * `declare module "x"`, `import x = require("x")`, dynamic `import("x")`,
+ * and `require("x")`. Three more channels: `typeReferenceDirectives`,
+ * `referencedFiles`, `libReferenceDirectives`. All four are gated: an
+ * unresolvable `path` reference otherwise surfaces only as `TS6053` and the
+ * observation proceeds against a file that was never read.
  */
 function moduleReferencesOf(code) {
   const preprocessed = ts.preProcessFile(code, true, true);
@@ -301,15 +266,14 @@ function moduleReferencesOf(code) {
 }
 
 /**
- * The lib names TypeScript itself accepts, taken from the compiler's own
- * `libMap` when it is exposed and derived from `libs` otherwise — never a
- * hand-written list.
+ * Lib names TypeScript itself accepts (`libMap` when exposed, else `libs`)
+ * — never a hand-written list.
  */
 const KNOWN_LIB_NAMES = new Set((ts.libs ?? []).map((name) => String(name).toLowerCase()));
 
 /**
- * FAIL-CLOSED module-resolution gate. Runs before any type is read, so an
- * observation is either taken in a fully-resolved domain or refused outright.
+ * Fail-closed module-resolution gate. Runs before any type is read: fully
+ * resolved or refused.
  */
 function assertModulesResolve(fileMap, host, compilerOptions) {
   const unresolved = [];
@@ -326,15 +290,15 @@ function assertModulesResolve(fileMap, host, compilerOptions) {
         unresolved.push({ fileName, specifier: directive });
       }
     }
-    // A `path` reference is a plain relative file reference. Its declaration
-    // content affects checker output, so accepting a disk-only target would let
-    // an input absent from the observation identity change the result.
+    // `path` references are relative files whose content affects checker
+    // output; a disk-only target would let an input absent from observation
+    // identity change the result.
     for (const reference of pathReferences) {
       const targetIdentity = toIdentityPath(path.resolve(path.dirname(fileName), reference));
       if (!fileIdentities.has(targetIdentity)) unresolved.push({ fileName, specifier: reference });
     }
-    // A `lib` reference names a built-in lib file; TypeScript maps the name to
-    // `lib.<name>.d.ts` and its miss is likewise diagnostic-only.
+    // `lib` references name built-in `lib.<name>.d.ts`; a miss is
+    // diagnostic-only unless gated here.
     for (const reference of libReferences) {
       if (!KNOWN_LIB_NAMES.has(reference.toLowerCase())) {
         unresolved.push({ fileName, specifier: reference });
@@ -389,21 +353,20 @@ function canonicalTsDiagnostic(diagnostic) {
 
 const TYPE_FORMAT = ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias;
 
-/** Structural expansion depth for observed export types. A NAMED type's
- * display string alone would hide a member whose type silently changed
- * (`ButtonProps` prints as `ButtonProps` either way), so object-like types
- * are expanded member-by-member to this bounded depth. A NAMED type sitting
- * exactly at the boundary gets one additional expansion hop before the
- * display-string fallback (see `expandType`) — a stated bound, not a hidden
- * sample: an all-named chain is structurally observed to depth
- * EXPANSION_DEPTH + 1. */
+/**
+ * Structural expansion depth for observed export types. A named type's
+ * display string hides member drift (`ButtonProps` prints as `ButtonProps`
+ * either way), so object-like types expand member-by-member to this bound.
+ * A named type at the boundary gets one extra hop before the display-string
+ * fallback (see `expandType`): an all-named chain is observed to
+ * EXPANSION_DEPTH + 1.
+ */
 const EXPANSION_DEPTH = 3;
 
 /**
- * A type whose display string is just its NAME (a symbol-named
- * interface/class/enum or an alias reference), hiding its structure —
- * as opposed to an anonymous object/union/intersection whose NoTruncation
- * display string already spells the full structure out.
+ * Display string is just the type name (symbol-named interface/class/enum
+ * or alias), hiding structure — unlike an anonymous object/union/intersection
+ * whose NoTruncation display already spells the structure.
  */
 function isNamedType(type) {
   if (type.aliasSymbol !== undefined) return true;
@@ -414,10 +377,9 @@ function isNamedType(type) {
 }
 
 /**
- * Modifier observation for a member symbol. `readonly` is read from the
- * member's declarations' combined modifier flags — the `typeToString` /
- * symbol-flag surface does NOT carry readonly-ness, so without this a
- * readonly-modifier-only change was invisible to the comparison.
+ * Member modifiers. `readonly` comes from combined declaration modifier
+ * flags — `typeToString` / symbol flags do not carry it, so a
+ * readonly-only change would otherwise be invisible.
  */
 function memberModifiers(property) {
   return {
@@ -429,12 +391,10 @@ function memberModifiers(property) {
 }
 
 /**
- * Structural observation of one call or construct signature: every
- * parameter's name/expanded type/optionality plus the expanded return type
- * — recorded through the same `expandType` machinery and depth budget as an
- * ordinary property member, so a signature-only drift (a callable member's
- * parameter or return type changing) alters the observation record exactly
- * like a property drift does.
+ * Structural observation of one call or construct signature: each
+ * parameter's name/expanded type/optionality plus expanded return type,
+ * through the same `expandType` depth budget as a property, so
+ * signature-only drift alters the record like property drift.
  */
 function expandSignature(program, checker, signature, depth, seen) {
   return {
@@ -460,9 +420,11 @@ function expandSignature(program, checker, signature, depth, seen) {
   };
 }
 
-/** True when a signature/index declaration belongs to the default lib (that
- * surface is TypeScript's own, not the artifact's — same exclusion as
- * default-lib property members). */
+/**
+ * True when a signature/index declaration belongs to the default lib
+ * (TypeScript's surface, not the artifact's — same exclusion as default-lib
+ * property members).
+ */
 function isDefaultLibDeclaration(program, declaration) {
   return (
     declaration !== undefined && program.isSourceFileDefaultLibrary(declaration.getSourceFile())
@@ -470,15 +432,10 @@ function isDefaultLibDeclaration(program, declaration) {
 }
 
 /**
- * TypeScript spells a unique-symbol-keyed member `__@<symbol>@<id>`, where
- * `<id>` is a PER-CHECKER symbol id — `__@brand@63` in one program and
- * `__@brand@144` in the next, for the same member of the same pinned type.
- * Two observations of identical artifacts would then never compare equal.
- *
- * The symbol NAME is the semantic part and is kept; only the per-process id is
- * dropped. This is the same class the default-lib member exclusion above
- * already guards against, surfacing again now that framework declarations
- * participate in the observation.
+ * Unique-symbol-keyed members are spelled `__@<symbol>@<id>`, where `<id>`
+ * is a per-checker symbol id (`__@brand@63` vs `__@brand@144` for the same
+ * member). Keep the symbol name; drop the per-process id so identical
+ * artifacts compare equal.
  */
 function stableMemberName(name) {
   const branded = /^__@(.+)@\d+$/.exec(name);
@@ -488,12 +445,9 @@ function stableMemberName(name) {
 function expandType(program, checker, type, depth, seen) {
   const display = checker.typeToString(type, undefined, TYPE_FORMAT);
   if (type === undefined || seen.has(type)) return { display };
-  // Depth budget. An ANONYMOUS type at the boundary loses nothing to the
-  // fallback — its NoTruncation display string spells the whole structure —
-  // but a NAMED type's display is only its name, so the named fallback
-  // would hide every member beneath it. A named type at depth 0 therefore
-  // expands ONE additional hop (its children observe at depth -1, where
-  // everything falls back); see EXPANSION_DEPTH's doc for the stated bound.
+  // Depth budget. An anonymous type at the boundary loses nothing (NoTruncation
+  // already spells the structure); a named type's display is only its name.
+  // A named type at depth 0 expands one extra hop (children at depth -1).
   if (depth < 0) return { display };
   if (depth === 0 && !isNamedType(type)) return { display };
   const objectLike =
@@ -506,10 +460,8 @@ function expandType(program, checker, type, depth, seen) {
   )) {
     const declaration = property.valueDeclaration ?? property.declarations?.[0];
     if (declaration === undefined) continue;
-    // Members declared by the default lib (Array.prototype and friends on
-    // tuple/array types) are TypeScript's own surface, not the artifact's —
-    // and their internal symbol-name spellings carry per-process ids, so
-    // they are excluded from the deterministic observation record.
+    // Default-lib members (Array.prototype on tuple/array types) are
+    // TypeScript's surface and carry per-process symbol ids.
     if (program.isSourceFileDefaultLibrary(declaration.getSourceFile())) continue;
     const propertyType = checker.getTypeOfSymbolAtLocation(property, declaration);
     members[stableMemberName(property.getName())] = {
@@ -517,12 +469,8 @@ function expandType(program, checker, type, depth, seen) {
       ...memberModifiers(property),
     };
   }
-  // Callable/construct/index surfaces are members too: a callable
-  // interface's return type, a construct signature's produced instance, or
-  // an index signature's value type drifting is exactly as observable to
-  // TypeScript consumers as a property drift, so each is recorded
-  // structurally (declaration order preserved — overload order is
-  // semantic).
+  // Callable/construct/index surfaces are members too; record them
+  // structurally (declaration order preserved — overload order is semantic).
   const callSignatures = type
     .getCallSignatures()
     .filter((signature) => !isDefaultLibDeclaration(program, signature.getDeclaration()))
@@ -549,17 +497,14 @@ function expandType(program, checker, type, depth, seen) {
 }
 
 /**
- * Observes a set of artifacts exactly as TypeScript would. Use ROOTED
- * virtual file names ("/component.ts") so relative imports between
- * artifacts resolve unambiguously.
+ * Observe a set of artifacts exactly as TypeScript would. Use rooted virtual
+ * file names (`/component.ts`) so relative imports resolve unambiguously.
  *
- * The record captures the FULL observation identity, not only its results:
- * the exact compiler/API version, the normalized compiler options, the
- * referenced default-lib files, the virtual-file inputs (name + content
- * digest), and a queryIdentity digest over all of those — two observation
- * records are comparable results of the SAME query only when those match,
- * and the deep comparison reports any of them drifting exactly like a
- * result drift.
+ * The record captures full observation identity, not only results:
+ * compiler/API version, normalized options, default-lib files, virtual-file
+ * inputs (name + content digest), and a `queryIdentity` digest over those.
+ * Two records are the same query only when those match; identity drift is
+ * reported like a result drift.
  *
  * @param {Array<{ fileName: string, code: string }>} artifacts the produced
  *   files (.ts / .d.ts / .js as named); every artifact is a root file
@@ -575,18 +520,17 @@ function expandType(program, checker, type, depth, seen) {
  */
 export function observeTypeScript(artifacts, options = {}) {
   const domain = resolveDomain(options.frameworkDomain ?? null);
-  // Rooting: a domain-less observation keeps the caller's own rooted names; a
-  // framework observation relocates every artifact INSIDE the pinned install so
-  // TypeScript's own node resolution reaches its `node_modules`. The relocation
-  // is a pure prefix, so relative imports between artifacts are unaffected.
+  // Domain-less keeps the caller's rooted names; a framework observation
+  // relocates artifacts inside the pinned install so TypeScript node
+  // resolution reaches its `node_modules`. Pure prefix — relative imports
+  // between artifacts are unaffected.
   const relocate = (fileName) =>
     domain.root === "/" ? fileName : path.join(domain.root, fileName.replace(/^\/+/, ""));
   const fileMap = new Map(artifacts.map(({ fileName, code }) => [relocate(fileName), code]));
   const compilerOptions = compilerOptionsFor(options.checkDeclarationFiles === true, domain);
   const host = inMemoryHost(fileMap, compilerOptions);
   const program = ts.createProgram([...fileMap.keys()], compilerOptions, host);
-  // FAIL-CLOSED, before a single type is read: an artifact naming a module the
-  // domain cannot resolve refuses the observation.
+  // Fail-closed before any type is read: an unresolvable module refuses.
   assertModulesResolve(fileMap, host, compilerOptions);
   const checker = program.getTypeChecker();
 
@@ -595,17 +539,15 @@ export function observeTypeScript(artifacts, options = {}) {
     .filter((sourceFile) => program.isSourceFileDefaultLibrary(sourceFile))
     .map((sourceFile) => path.basename(sourceFile.fileName))
     .sort();
-  // Reported under the CALLER's spelling: the relocation is an environment
-  // detail, and an install path baked into the record would make two runs on
-  // different machines incomparable for no semantic reason.
+  // Report under the caller's spelling: an install path in the record would
+  // make two machines incomparable.
   const unrelocate = (fileName) =>
     domain.root === "/" ? fileName : toIdentityPath(path.relative(domain.root, fileName));
   const inputs = [...fileMap.entries()]
     .map(([fileName, code]) => ({ fileName: unrelocate(fileName), sha256: sha256(code) }))
     .sort((a, b) => a.fileName.localeCompare(b.fileName));
-  // The domain is part of the observation IDENTITY: two observations taken
-  // against different framework closures are not comparable results of the
-  // same query, and `compareObservations` reports the drift like any other.
+  // Domain is part of observation identity: different closures are not the
+  // same query.
   const observationDomain = {
     framework: domain.framework,
     packageVersion: domain.packageVersion,
@@ -614,8 +556,7 @@ export function observeTypeScript(artifacts, options = {}) {
     ...NORMALIZED_COMPILER_OPTIONS,
     skipLibCheck: compilerOptions.skipLibCheck,
     jsx: compilerOptions.jsx === undefined ? null : ts.JsxEmit[compilerOptions.jsx],
-    // The mapped package NAMES enter the identity; their absolute directories
-    // deliberately do not, so two machines observing the same tree compare.
+    // Mapped package names enter the identity; absolute directories do not.
     pathMappings:
       compilerOptions.paths === undefined ? null : Object.keys(compilerOptions.paths).sort(),
   };
@@ -709,8 +650,8 @@ function symbolFlagNames(flags) {
 
 /**
  * Deterministic deep comparison of two observation records. Every
- * difference is reported with a path — an export whose observed TYPE
- * changed with zero diagnostics anywhere still fails.
+ * difference is reported with a path — a type-only export change with
+ * zero diagnostics still fails.
  *
  * @returns {{ equal: boolean, differences: string[] }}
  */

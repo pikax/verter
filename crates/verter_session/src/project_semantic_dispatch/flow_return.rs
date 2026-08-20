@@ -366,12 +366,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// The demand-parameterised half of [`Self::flow_return_key_for`] —
-    /// still the ONE construction point (the whole-return wrapper
-    /// delegates here; the audited host seam passes the caller's
-    /// demand). The input axis stays the canonical EMPTY point: no
-    /// production contextual-input producer exists, and a non-empty
-    /// point is a distinct cache/re-entry identity a later block mints.
+    /// Demand-parameterised half of [`Self::flow_return_key_for`].
+    /// Input axis stays the canonical empty point: no production
+    /// contextual-input producer exists. A non-empty point is a
+    /// distinct cache/re-entry identity.
     pub(crate) fn flow_return_key_with_demand(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,

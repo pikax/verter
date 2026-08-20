@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-// gate.mjs — canonical agent Rust gate runner (production CLI).
+// Canonical Rust gate CLI.
 //
-// PRINCIPLE (gate-correctness/security): the production gate binary runs ONLY the real gate — oracle
-// verification → archive → nextest run → direct libtest → verdict (plus the gate-adjacent `--prepare`
-// warm utility, which is a
-// PREPARE, never a gate PASS). It exposes NO test-seam, NO classifier hook, NO custom-command mode, and NO
-// environment variable that can make `node scripts/gate.mjs <anything>` return the gate success contract
-// without actually building and running the test suite. The reusable internals (the classifiers, the
-// mutex, the contained-step runner, the multi-step seam) live in `gate-internals.mjs` and are imported
-// here AND imported DIRECTLY by `gate-selftest.mjs`; the self-test drives the cargo-free seam/classifier
-// scenarios in-process, never via a magic flag on this CLI.
+// SECURITY: this binary runs only the real gate (oracle → archive →
+// nextest → direct libtest → verdict). `--prepare` is a warm utility,
+// never a gate PASS. No test-seam, classifier hook, custom-command
+// mode, or env var can make this CLI return the success contract without
+// building and running the suite. Internals live in `gate-internals.mjs`;
+// the self-test imports them in-process, never via a flag here.
 //
 // OPERATION-SCOPED EXIT SEMANTICS (read this before trusting an exit 0)
 //   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket

@@ -1,13 +1,9 @@
 //! Shared declarative macros used by [`crate::identity`] and
 //! [`crate::profile`].
 
-/// Declares a digest-backed identity newtype: a thin, non-interchangeable
-/// wrapper over [`crate::canonical::Canonical`], constructed from any
-/// owner-supplied [`crate::encoding::CanonicalEncode`] descriptor. Each
-/// invocation produces a genuinely distinct Rust type — the macro exists to
-/// keep the many structurally-identical declarations mechanically
-/// consistent, not to erase their distinctness (there is no shared
-/// non-marker base type any two of them coerce through).
+/// Digest-backed identity newtype over [`crate::canonical::Canonical`].
+/// Each invocation is a distinct Rust type — the macro does not introduce
+/// a shared base they can coerce through.
 #[macro_export]
 macro_rules! digest_identity {
     ($(#[$meta:meta])* $name:ident) => {
@@ -16,10 +12,8 @@ macro_rules! digest_identity {
         pub struct $name($crate::canonical::Canonical);
 
         impl $name {
-            /// Builds this identity from a canonical descriptor. The
-            /// descriptor's [`crate::encoding::CanonicalEncode::DOMAIN_TAG`]
-            /// is this identity's compatibility domain
-            /// (identity-encoding.md §1).
+            /// Build from a canonical descriptor (`DOMAIN_TAG` is the
+            /// compatibility domain).
             pub fn from_canonical<T: $crate::encoding::CanonicalEncode>(value: &T) -> Self {
                 Self($crate::canonical::Canonical::from_encodable(value))
             }

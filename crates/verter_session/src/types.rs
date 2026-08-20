@@ -27,31 +27,23 @@ pub(crate) fn format_hash16_hex(hash: &Hash16) -> String {
     out
 }
 
-/// Content identity of the EXACT source bytes an analysis observed.
+/// Content identity of the exact source bytes an analysis observed.
 ///
-/// Pairs a [`FileAnalysisSnapshot`] with the buffer its spans and edit anchors
-/// address. A consumer that is about to apply an analyzer-minted edit position
-/// to a live buffer compares this against [`Self::of_source`] of that buffer:
-/// on mismatch it must produce no edit at all, because an in-bounds offset from
-/// a different revision silently lands in the wrong place.
+/// A consumer applying an analyzer-minted edit compares this to
+/// [`Self::of_source`] of the live buffer; mismatch must produce no edit
+/// (an in-bounds offset from another revision lands in the wrong place).
+/// Not `RevisionMarker` (query revision, not content) and not LSP
+/// `version` alone (a host-served analysis has none).
 ///
-/// Deliberately NOT `verter_semantic::RevisionMarker` (a session query-revision
-/// tuple, not a content identity, and not comparable against an editor buffer)
-/// and NOT the LSP `version: i32` alone (a host-served analysis carries no LSP
-/// version — precisely the ungated case).
-///
-/// `Default` is the UNSTAMPED sentinel. It equals no realistic source
-/// identity, so an unstamped analysis fails the comparison and the consumer
-/// fails closed.
+/// `Default` is the unstamped sentinel — equals no realistic identity,
+/// so an unstamped analysis fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
 #[serde(transparent)]
 pub struct AnalysisSourceRevision(Hash16);
 
 impl AnalysisSourceRevision {
-    /// Mint the revision of these exact source bytes.
-    ///
-    /// Producer and consumer share this one function, so the two sides cannot
-    /// drift apart on the hash algorithm.
+    /// Mint from these exact source bytes. Producer and consumer share
+    /// this so the hash algorithm cannot drift.
     pub fn of_source(source: &str) -> Self {
         Self(crate::hash::hash_16(source.as_bytes()))
     }
@@ -1440,19 +1432,12 @@ pub struct CompileProfile {
     /// `@vitejs/plugin-vue` registers). `None` falls back to the canonical
     /// id — correct only when the caller's manifest keys are canonical.
     pub ssr_module_id: Option<String>,
-    /// Whether SSR assembly wraps `setup()` with the `useSSRContext`/
-    /// `ssrContext.modules` registration (real `@vitejs/plugin-vue`
-    /// `transformMain` behavior — confirmed directly against its source:
-    /// unconditional on `ssr`, NOT gated on a live dev server, so it is
-    /// correct for BOTH dev and production bundled SSR builds). Defaults
-    /// to `true` — every existing production caller keeps today's byte-
-    /// identical output. Set `false` only by a caller assembling a BARE
-    /// `@vue/compiler-sfc`-equivalent module with no bundler-plugin glue
-    /// at all (the conformance harness's own candidate generation,
-    /// matching goldens generated the same way — see `bf2_seed_matrix`'s
-    /// `compile_cell`, which already overrides `hmr_strategy` for the
-    /// identical reason). This is NOT a general "disable SSR asset
-    /// tracking" production knob.
+    /// Whether SSR assembly wraps `setup()` with `useSSRContext` /
+    /// `ssrContext.modules` (`@vitejs/plugin-vue` `transformMain`:
+    /// unconditional on `ssr`, not gated on a live dev server). Defaults
+    /// `true`. Set `false` only for a bare `@vue/compiler-sfc` module
+    /// with no bundler-plugin glue (conformance candidate generation).
+    /// Not a general "disable SSR asset tracking" knob.
     pub emit_ssr_module_registration: bool,
     /// HMR code injection strategy.
     pub hmr_strategy: HmrStrategy,
@@ -2510,16 +2495,10 @@ pub struct HostDiagnostic {
 
 /// Collection of diagnostics with a precomputed `has_errors` flag.
 ///
-/// `has_errors` does NOT mean "at least one diagnostic in `diagnostics` has
-/// `Error` severity" — a diagnostic can be `Error`-severity (fully
-/// IDE-visible, shown to the user as an error) without contributing to
-/// `has_errors`. `from_vec` computes `has_errors` from severity, matching
-/// that description; `append_advisory` adds diagnostics to the list WITHOUT
-/// updating `has_errors`, for a diagnostic that must display at its own
-/// severity but must not gate `compile_entry`'s "does this file have an
-/// error" check (see `append_advisory`'s doc and
-/// `verter_language::LanguageDiagnostic::blocks_compile`, the field
-/// upstream producers use to route a diagnostic to one path or the other).
+/// `has_errors` is not "any `Error`-severity diagnostic":
+/// `append_advisory` can add an IDE-visible `Error` without flipping
+/// the compile-entry gate. `from_vec`/`merge` compute it from
+/// severity; see [`LanguageDiagnostic::blocks_compile`](verter_language::LanguageDiagnostic::blocks_compile).
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsSnapshot {
     /// All diagnostics (errors + warnings + info).
@@ -2549,22 +2528,10 @@ impl DiagnosticsSnapshot {
         self
     }
 
-    /// Merge in diagnostics FROM A DIFFERENT REPORTING CHANNEL that can
-    /// legitimately carry the exact same underlying defect this snapshot
-    /// already has: `compile_entry` merges the framework-neutral compile
-    /// RESULT's diagnostics (`compiled.diagnostics`, one call site per
-    /// framework) into the snapshot already built from the carrier's own
-    /// parse-time diagnostics (`snapshot.parse_diagnostics`). For Vue those
-    /// two channels are NOT independent — `compile_bundle` reuses the
-    /// already-parsed `ParsedSfc` and its compile result clones that same
-    /// `ParsedSfc`'s diagnostics wholesale (`clone_diagnostics`) into what it
-    /// returns, so a parse-time diagnostic (`MissingSfcEntryBlock`) that is
-    /// ALREADY in this snapshot would otherwise be counted, sorted, and
-    /// reported a second time. An entry from `incoming` byte-identical to one
-    /// already present (same severity, code, message, span, arguments) is
-    /// dropped rather than duplicated; a genuinely distinct diagnostic from
-    /// EITHER side (a real Svelte IDE-projector diagnostic, a real compile
-    /// error co-located with a parse error) still merges normally.
+    /// Merge diagnostics from a different reporting channel that can
+    /// carry the same defect. Vue's `compile_bundle` clones parse-time
+    /// diagnostics into the compile result, so byte-identical entries
+    /// (severity, code, message, span, arguments) are dropped.
     pub(crate) fn merge_deduplicated(mut self, mut incoming: DiagnosticsSnapshot) -> Self {
         incoming
             .diagnostics
@@ -2575,14 +2542,10 @@ impl DiagnosticsSnapshot {
         self
     }
 
-    /// Append diagnostics that are IDE-visible at their own (possibly
-    /// `Error`) severity but must NOT flip `has_errors` — a recoverable
-    /// parser-recovery defect the carrier already produced usable output
-    /// around (Svelte's `strict_parse_errors`, threaded here from
-    /// [`verter_language::LanguageDiagnostic::blocks_compile`]). `has_errors`
-    /// stays whatever this snapshot already carried: an advisory entry is
-    /// never the reason `compile_entry`'s gate refuses the file, but it
-    /// never CLEARS a real error already present either.
+    /// Append IDE-visible diagnostics without flipping `has_errors`
+    /// (Svelte `strict_parse_errors` via
+    /// [`LanguageDiagnostic::blocks_compile`](verter_language::LanguageDiagnostic::blocks_compile)).
+    /// Never clears an error already present.
     pub(crate) fn append_advisory(mut self, mut advisory: Vec<HostDiagnostic>) -> Self {
         self.diagnostics.append(&mut advisory);
         sort_host_diagnostics(&mut self.diagnostics);
@@ -3063,20 +3026,14 @@ pub enum PublicApiMode {
     Declaration,
 }
 
-/// What a compile transaction COMMITTED for one `(canonical, profile)`.
+/// What a compile transaction committed for one `(canonical, profile)`.
 ///
-/// A sum, not a product set beside a refusal flag. The refusal arm carries no
-/// product field of any kind — no virtual-node outputs, no last-good outputs, no
-/// IDE `tsx`, no template analysis — so a committed refusal cannot hold a
-/// sibling product for the same request identity. The refusal is nonetheless
-/// CACHEABLE: it is the final, payload-free answer for that identity, so a
-/// refused component is not recompiled on every request.
+/// A sum: the refusal arm has no product field, so it cannot hold a
+/// sibling product. The refusal is still cacheable — the final
+/// payload-free answer for that identity.
 ///
-/// `clippy::large_enum_variant` is allowed rather than boxing the produced arm:
-/// the produced arm is the overwhelmingly common case and this value lives
-/// inside the compile slot / cached value it describes, so boxing would add an
-/// allocation and a pointer hop to every warm read purely to shrink the rare
-/// refusal arm's footprint.
+/// `large_enum_variant` is allowed: boxing the common produced arm
+/// would add a hop on every warm read.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CompileProducts {
@@ -3345,9 +3302,7 @@ impl DependencyResolution {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // CompileCacheEntry — scheduler-backed compile state (native only)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Profile-domain state for the scheduler-backed compile cache (D48).
 ///
@@ -3695,9 +3650,7 @@ pub(crate) struct EffectiveFileState {
     pub(crate) whole_hash: Hash16,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // External type resolution limits
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Maximum recursion depth for external type resolution.
 ///
@@ -3756,9 +3709,7 @@ pub(crate) struct CachedMetaPayload {
     pub validated_at_generation: u64,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // MetaProvenance — per-host counters for component-meta observability
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of [`crate::semantic_query::SemanticNodeData`] discriminants used
 /// to size the per-discriminant push-count array in [`MetaProvenance`].
@@ -4545,9 +4496,7 @@ impl MetaProvenance {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Fallthrough Resolution
-// ═══════════════════════════════════════════════════════════════════════════
+// Fallthrough resolution
 
 /// The computed fallthrough inheritance resolution for a component.
 ///

@@ -1556,11 +1556,9 @@ pub enum FlowGap {
     UnmodeledExpression,
 }
 
-/// A typed degradation reason riding a usable but incomplete
-/// [`FlowReturnResult`]. It is never a failure substitute: a no-value outcome
-/// is a [`FlowReturnFailure`], while a degraded success still has a value.
-/// First-observed reason wins deterministically in source order. Every
-/// degraded result is return-only and warm-inadmissible.
+/// Typed degradation on a usable but incomplete [`FlowReturnResult`].
+/// Not a failure substitute (`FlowReturnFailure` is no-value). First
+/// observed reason wins in source order. Return-only and warm-inadmissible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowReturnDegradation {
     FlowGap(FlowGap),

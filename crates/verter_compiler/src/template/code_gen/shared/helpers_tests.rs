@@ -31,7 +31,7 @@ fn shared_parse_v_for_complex_iterable() {
     assert_eq!(iterable, "items.filter(x => x.active)");
 }
 
-// ==================== split_v_for_params ====================
+// split_v_for_params
 
 #[test]
 fn shared_split_v_for_params_value_only() {

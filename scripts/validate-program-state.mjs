@@ -1,35 +1,20 @@
 #!/usr/bin/env node
-// validate-program-state.mjs — program-state validator (Node/ESM).
+// Program-state validator. Each check cites its source in the program tree.
+// Must pass after every transition and before a block starts, enters review,
+// is recommended for acceptance, or is accepted.
 //
-// This is a NEW ratified implementation, not a port: the plan's original
-// `tools/validate_program_state.py` was never available on this machine
-// (docs/arch/refactor/rev11/PROVENANCE.md "Not recoverable / absent"), and the
-// maintainer ruled the validators are reimplemented in Node
-// (docs/arch/refactor/rev11/evidence/maintainer-rulings.md R-4). Every check below is
-// derived from the program tree's own text; each rule cites its source.
-//
-// Mandate: docs/arch/refactor/rev11/governance.md:181 — the program-state validator
-// "must pass after every transition and before a block starts, enters review, is
-// recommended for acceptance, or is accepted".
-//
-// CLI (matches the invocation shape in docs/arch/refactor/rev11/ORCHESTRATOR.md:54,86):
 //   node scripts/validate-program-state.mjs \
 //     --dag <program-dag.toml> --state <program-state.toml> --mode template|live
 //
-// Exit codes: 0 = pass (one-line summary naming the state file and block count);
-//             1 = validation failure (every violation listed, one per line);
-//             2 = usage / unreadable input.
-//
-// No dependencies beyond node:fs / node:path / node:process. TOML is read by a
-// small purpose-written reader restricted to the shapes the program files
-// actually use; anything it cannot parse is a LOUD failure, never a silent skip.
+// Exit: 0 pass, 1 validation failure (one violation per line), 2 usage /
+// unreadable input. No deps beyond node:fs / path / process. Unknown TOML
+// is a loud failure, never a silent skip.
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
 
-// ---------------------------------------------------------------------------
 // Minimal strict TOML reader.
 //
 // Supported shapes (the full set used by program-dag.toml and
@@ -38,7 +23,6 @@ import process from "node:process";
 // double-quoted string (no escapes), a single-line array of basic strings,
 // an integer, or a boolean. A trailing `# comment` after a value is allowed.
 // Everything else fails loudly with the file/line.
-// ---------------------------------------------------------------------------
 
 class TomlError extends Error {}
 
@@ -193,9 +177,7 @@ function resolveEvidenceArtifact(root, id) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
 // Rule constants, each derived from the program tree.
-// ---------------------------------------------------------------------------
 
 // templates/program-state.template.toml:44-45 — the declared block-status enum.
 const BLOCK_STATUS_ENUM = new Set([
@@ -223,36 +205,23 @@ const REVIEW_ENUM = new Set([
 ]);
 const REVIEW_FIELDS = ["conformance_review", "architecture_review", "adversarial_review"];
 
-// governance.md:6 (sequencing authority): a block has BEGUN — and therefore
-// requires every direct predecessor ACCEPTED — in these statuses. READY is a
-// begun status: governance.md:6 names "contingent READY/IN_PROGRESS/REVIEW work"
-// as the ONLY statuses the stacked exception covers, which entails a stackless
-// READY block with an unaccepted predecessor has begun illegally. The contingent
-// stacked exception is honored for READY/IN_PROGRESS/REVIEW only when the stack
-// can be ESTABLISHED from the ledger (bound snapshot digest shared by every
-// unaccepted predecessor, same non-empty stack_id, predecessor in a begun
-// status, predecessor layer strictly below the block's layer — see the
-// sequencing section); governance.md:6 forbids the exception for
-// acceptance-recommendation/acceptance ("Such work cannot be
-// acceptance-recommended or accepted until the predecessor lands").
-// PRIVATE_CHECKPOINT is a begun status too: it is reviewed, review-approved work
-// (program.md §7 — a checkpoint block "may receive checkpoint review approval"),
-// so a checkpoint whose declared predecessors are unaccepted has begun illegally.
-// It is deliberately NOT in the stacked-exception set: under this validator a
-// checkpoint is legal only over ACCEPTED predecessors — the stack-window model
-// that could relax that for in-window layers is A6-owned and not modelled here
-// (amendments/AMD-001), so this fails closed rather than trusting a stack claim.
-// Deliberately NOT begun statuses (recorded intent, not an oversight):
-//   - ABORTED / SUPERSEDED are terminal — the block's work is void, so there is
-//     no begun state left for sequencing to police;
-//   - BLOCKED / RESCOPE_REQUIRED are paused states reached FROM begun work.
-//     Treating them as begun would reject a legal pause (e.g. stacked work
-//     blocked precisely ON its predecessor landing, whose exception fields may
-//     no longer be re-establishable mid-pause) — a fail-closed false positive.
-//     The exit from either state back into any begun status re-enters the full
-//     sequencing gate, so nothing can RESUME illegally through them. What this
-//     does NOT catch is a block minted directly into BLOCKED/RESCOPE_REQUIRED
-//     without ever legally beginning — accepted as a recorded limit.
+// Begun statuses require every direct predecessor ACCEPTED. READY is begun:
+// a stackless READY with an unaccepted predecessor has begun illegally.
+// The stacked exception covers READY/IN_PROGRESS/REVIEW only when the
+// ledger can establish the stack (shared snapshot digest, same stack_id,
+// predecessor begun, predecessor layer strictly below). It does not cover
+// acceptance-recommendation or acceptance.
+//
+// PRIVATE_CHECKPOINT is begun (reviewed work) but not in the stacked
+// exception: a checkpoint is legal only over ACCEPTED predecessors. This
+// validator does not model a stack-window relaxation, so it fails closed.
+//
+// Not begun (intentional):
+//   - ABORTED / SUPERSEDED — terminal; nothing left to sequence
+//   - BLOCKED / RESCOPE_REQUIRED — paused from begun work. Treating them
+//     as begun would reject a legal pause. Re-entering a begun status
+//     re-runs the full sequencing gate. A block minted directly into
+//     these states is a recorded limit this check does not catch.
 const BEGUN_STATUSES = new Set([
   "READY",
   "IN_PROGRESS",
@@ -266,9 +235,7 @@ const STACK_EXCEPTION_STATUSES = new Set(["READY", "IN_PROGRESS", "REVIEW"]);
 const SHA_RE = /^[0-9a-f]{40}$/; // full lowercase git object id
 const DIGEST_RE = /^[0-9a-f]{64}$/; // lowercase SHA-256
 
-// ---------------------------------------------------------------------------
 // Validation
-// ---------------------------------------------------------------------------
 
 function usageFail(msg) {
   process.stderr.write(
@@ -321,7 +288,7 @@ function main() {
     throw err;
   }
 
-  // -- State header ---------------------------------------------------------
+  // -- State header
   // templates/program-state.template.toml:5-7 — the state file carries
   // top-level `schema`, `revision`, `status`.
   for (const key of ["schema", "revision", "status"]) {
@@ -366,7 +333,7 @@ function main() {
     }
   }
 
-  // -- DAG structure --------------------------------------------------------
+  // -- DAG structure
   const dagBlocks = Array.isArray(dag.block) ? dag.block : [];
   const dagIds = [];
   const dagById = new Map();
@@ -452,7 +419,7 @@ function main() {
     }
   }
 
-  // -- State blocks vs DAG --------------------------------------------------
+  // -- State blocks vs DAG
   const stateBlocks = Array.isArray(state.block) ? state.block : [];
   const stateById = new Map();
   for (const b of stateBlocks) {
@@ -477,7 +444,7 @@ function main() {
     }
   }
 
-  // -- Per-block status -----------------------------------------------------
+  // -- Per-block status
   for (const [id, b] of stateById) {
     if (typeof b.status !== "string") {
       v(`state block ${id} has no status`);
@@ -497,7 +464,7 @@ function main() {
     }
   }
 
-  // -- Sequencing invariant (governance.md:6, the core rule) ----------------
+  // -- Sequencing invariant (governance.md:6, the core rule)
   // "no block may begin before every direct predecessor in program-dag.toml is
   // accepted, except contingent ... work ... in the same validated immutable
   // stack snapshot. Such work cannot be acceptance-recommended or accepted
@@ -626,7 +593,7 @@ function main() {
     );
   }
 
-  // -- Status-dependent identity/review invariants --------------------------
+  // -- Status-dependent identity/review invariants
   // governance.md:181 mandates this validator pass "before a block ... enters
   // review, is recommended for acceptance, or is accepted"; governance.md §9
   // attaches approval to one exact candidate SHA and tree plus the evidence
@@ -789,19 +756,14 @@ function main() {
     }
   }
 
-  // -- Single IN_PROGRESS block, bound to current_block ---------------------
+  // -- Single IN_PROGRESS block, bound to current_block
   // templates/program-state.template.toml:18 declares `current_block`; the
   // orchestrator executes "only the next legal bounded block"
   // (ORCHESTRATOR.md:15), so at most one block is IN_PROGRESS and it must be
   // the declared current block.
-  // RECORDED TENSION (fail-closed by choice): the ledger's [orchestration]
-  // table declares max_active_workers = 3, and contracts/stacked-prs.md:39
-  // says an upper stack layer "may be ... IN_PROGRESS" over an unaccepted
-  // lower one — both readings would allow >1 IN_PROGRESS block. This validator
-  // enforces the STRICT ORCHESTRATOR.md:15 reading (one bounded block at a
-  // time); a future stacked/parallel regime must relax this check under
-  // review, alongside the A6-owned stack-window model (amendments/AMD-001),
-  // not by editing it ad hoc. Debt row: evidence/A0-summary.md.
+  // Fail-closed: one IN_PROGRESS block at a time (ORCHESTRATOR.md:15), even
+  // though stacked-prs.md:39 and max_active_workers = 3 would allow more.
+  // A stacked/parallel regime must relax this check under review, not ad hoc.
   {
     const inProgress = [...stateById.values()].filter((b) => b.status === "IN_PROGRESS");
     if (inProgress.length > 1) {
@@ -823,7 +785,7 @@ function main() {
     }
   }
 
-  // -- Live-mode field resolution -------------------------------------------
+  // -- Live-mode field resolution
   if (opts.mode === "live") {
     // ORCHESTRATOR.md:83 — the live ledger must "resolve every A0-required
     // field": no REQUIRED_* template placeholder may remain. (The template
@@ -920,7 +882,7 @@ function main() {
     }
   }
 
-  // -- Non-vacuous work -----------------------------------------------------
+  // -- Non-vacuous work
   // contracts/agent-orchestration.md:137 — a required command that "executes
   // zero intended work or cannot be proven non-vacuous" is a mandatory stop.
   // A run that validated zero blocks proved nothing and is a FAILURE.

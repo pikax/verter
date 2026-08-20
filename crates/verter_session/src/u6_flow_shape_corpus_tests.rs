@@ -1,147 +1,55 @@
-//! THE flow-return shape corpus — one table every round and every reviewer
-//! runs instead of rebuilding its own fixture set.
+//! Flow-return shape corpus: one append-only table every lane is driven
+//! from. Adding a shape is one [`Row`] literal; if that requires editing
+//! a driver, the driver is wrong.
 //!
-//! # Why this file exists
+//! Primary columns:
 //!
-//! Eleven review rounds each authored their own fixtures for the same
-//! surface, and each reviewer rebuilt the shape space by hand. That work was
-//! discarded every round, so the tested surface never GREW — it was rebuilt.
-//! Four consecutive rounds then oscillated on one guard, each shipping a fix
-//! whose fixture set structurally could not reach the neighbouring failure.
-//!
-//! This table is the fence that ends that. It is APPEND-ONLY by design:
-//! adding a shape is one [`Row`] literal, and every lane (`checker`, the flow
-//! graph node and its members, runtime bytes, TSX bytes, the Svelte twin) is
-//! driven from that one literal by the shared drivers below. If adding a shape
-//! requires editing a driver, the driver is wrong.
-//!
-//! # What a row carries
-//!
-//! PRIMARY — the semantic answer, and who owns it:
-//!
-//! * `script` — the authored program, spliced verbatim into every lane.
-//! * `checker` — what tsgo `7.0.0-dev.20260526.1`
-//!   (`--noEmit --strict --ignoreConfig`, CHECKER only, never `.d.ts`) prints
-//!   for the row's `probe`. This is a RECORDED measurement, refreshed by the
-//!   generation-only procedure in [`oracle`] — the suite itself never invokes
-//!   tsgo (the checker is generation-only in this codebase). What the suite
-//!   enforces instead: the column is never empty, the probe program is
-//!   derivable from the row ([`oracle::every_row_records_the_checkers_answer`]),
-//!   and for every deep-pinned row the recorded text is parsed and compared
-//!   SEMANTICALLY against the live graph
+//! * `script` — authored program, spliced verbatim into every lane.
+//! * `checker` — recorded tsgo `7.0.0-dev.20260526.1` (`--noEmit
+//!   --strict --ignoreConfig`, checker only, never `.d.ts`) print for
+//!   `probe`. The suite never invokes tsgo. The column must be
+//!   non-empty, the probe derivable
+//!   ([`oracle::every_row_records_the_checkers_answer`]), and every
+//!   deep-pinned row compared semantically against the live graph
 //!   ([`corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict`]).
-//! * `flow` — the row's function return as PRODUCTION composes it: the
-//!   graph node and its per-MEMBER node shapes, plus (on the body-derived
-//!   rail) the typed `degradation` and the `slot_candidate_count`. A
-//!   function with an AUTHORED return annotation is served from the
-//!   declared locator rail — pin [`Flow::Declared`]; the body-derived
-//!   producer's answer for it is a measurement no consumer ever makes.
-//! * `owner` — the block the row is attributed to ([`Owner`]). Drives the
-//!   per-owner conformance number, which is the merge go/no-go.
-//! * `subject` — [`Subject::TypeScript`] or [`Subject::FrameworkOnly`].
-//! * `demand` — [`Demand::MacroSurface`] or [`Demand::Narrowing`].
-//! * `verdict` — [`Verdict`], the row's relationship to the checker.
+//! * `flow` — production composition: graph node, per-member shapes,
+//!   typed `degradation`, `slot_candidate_count`. An authored return
+//!   annotation is [`Flow::Declared`]; the body-derived answer is not
+//!   what consumers see.
+//! * `owner` — [`Owner`]; drives per-owner conformance.
+//! * `subject`, `demand`, `verdict`.
 //!
-//! SECONDARY — did the answer reach a consumer intact? Optional; `Skip` by
-//! default:
+//! Secondary (optional, `Skip` by default):
 //!
-//! * `runtime` — the EMITTED option value (`props: {…}` / `emits: […]`),
-//!   BRACKET-MATCHED out of the rendered `CompileTarget::BUNDLER` module.
-//! * `tsx` — the `CompileTarget::IDE | TEMPLATE_DATA` lane outcome, reached
-//!   through `ensure_ide_compiled` + `get_ide`.
-//! * `svelte` — the `.svelte` twin's `FrameworkSurfaceKind::Props` member set.
-//!   NOTE: Svelte props are served by `resolve_framework_surface_with_audit`,
-//!   NOT by `ComponentMetaAnalysis.props`; a harness driving the latter reports
-//!   every Svelte row empty and proves nothing.
+//! * `runtime` — bracket-matched emitted option value.
+//! * `tsx` — `ensure_ide_compiled` + `get_ide`.
+//! * `svelte` — `FrameworkSurfaceKind::Props` via
+//!   `resolve_framework_surface_with_audit`, not
+//!   `ComponentMetaAnalysis.props` (that path reports every Svelte row
+//!   empty).
 //!
-//! # Two assertion rules this file exists to enforce
+//! Two assertion rules:
 //!
-//! 1. **A `contains("propname")` assertion is FORBIDDEN.** A rendered
-//!    `<script setup>` module splices the AUTHORED script verbatim into
-//!    `setup(__props)`, so `code.contains("label")` is satisfied by the helper
-//!    source whatever the props block says — such a check passes against
-//!    `props: {}`. Every runtime assertion here runs against the
-//!    BRACKET-MATCHED option value ([`emitted_option`]).
-//! 2. **Assert on the GRAPH NODE, never the projected `TypeExpr`.**
-//!    `TypeParam` / `DeclRef` / `BareRef` all project to `Ref { name }`, so a
-//!    `TypeExpr`-level assertion cannot tell them apart. [`NodeShape`] reads
-//!    `SemanticNodeData` directly, at the row's node AND at each of its
-//!    members.
+//! 1. Never `contains("propname")`. A rendered `<script setup>` splices
+//!    the authored script into `setup(__props)`, so `code.contains("label")`
+//!    passes against `props: {}`. Runtime asserts against
+//!    [`emitted_option`].
+//! 2. Assert on the graph node, never the projected `TypeExpr`.
+//!    `TypeParam` / `DeclRef` / `BareRef` all project to `Ref { name }`.
+//!    [`NodeShape`] reads `SemanticNodeData` at the node and each member.
 //!
-//! # CONTRIBUTOR NOTE — read this before you build your own fixtures
+//! This is a TypeScript semantics corpus. Framework columns mean "the
+//! answer reached a consumer"; most rows carry none.
 //!
-//! **This is a TypeScript semantics corpus.** A row's identity is the semantic
-//! answer the substrate computes for a plain `.ts` program, measured against
-//! the checker: the flow-return GRAPH NODE, its MEMBER shapes, the typed
-//! `degradation`, the `slot_candidate_count`. Vue and Svelte emission are an
-//! OPTIONAL SECONDARY column meaning "the semantic answer reached a consumer
-//! intact" — real evidence (several defects here were caught only there), but
-//! never the subject. Most rows you add will carry no framework column at all.
-//!
-//! **If you measured a shape, add it here and COMMIT it on your branch.**
-//! Passing or failing. A reviewer who measured a shape in a scratch worktree,
-//! found a defect, reported it in prose, and did not land the row has thrown
-//! the measurement away — the next agent rebuilds it, slightly differently,
-//! and the surface never grows. A failing row is worth more than a paragraph:
-//! the fix agent's target is then exact and its red-first evidence already
-//! exists. Landed coverage grows monotonically; measurement corpora do not,
-//! unless you append.
-//!
-//! # Adding a row — the whole procedure
-//!
-//! 1. **Write the row.** One [`Row`] literal appended to [`CORPUS`], with
-//!    `..Row::BLANK` filling everything else. `BLANK` defaults every FRAMEWORK
-//!    lane to `Skip`, so a plain `.ts` semantic row is the SHORT literal:
-//!    ```text
-//!    Row { id: "N13_…", script: "…", checker: "{ label: string; }",
-//!          flow: Flow::Result { function: "makeProps", node: NodeShape::Object,
-//!                               members: &[("label", NodeShape::Union)],
-//!                               degradation: Degr::None, candidates: 1 },
-//!          verdict: Verdict::KnownOwed { … }, ..Row::BLANK },
-//!    ```
-//!    Add a framework column only when you want to assert that the answer
-//!    survived the trip to a consumer.
-//! 2. **Measure it, do not guess it.**
-//!    ```text
-//!    U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus \\
-//!        -- --nocapture --test-threads=1 2>&1 | grep <your_row_id>
-//!    ```
-//!    Every lane prints its MEASURED value. Transcribe them into the row.
-//! 3. **Record the checker's answer.** `checker` is what tsgo prints for
-//!    `probe`; leave it empty and the row is rejected. Do not hand-write it —
-//!    dump the probe program (`U6_CORPUS_DUMP=1`, see
-//!    [`corpus_suite::corpus_probe_programs`]) and run it through the PINNED
-//!    tsgo binary yourself; the printed diagnostic IS the column. The suite
-//!    never invokes tsgo (generation-only), so the column is a recorded
-//!    measurement — [`oracle`] documents the exact refresh procedure and
-//!    enforces that the probe is reproducible from the row. If the row is
-//!    `any`, set `checker_is_any`: `any` is assignable to `null`, so the
-//!    shape probe alone cannot see it.
-//! 4. **Pin the MEMBER shapes, not just the enclosing node.** For anything
-//!    that depends on a computed member type — every narrowing row — the
-//!    enclosing node is `Object` whether or not the guard applied. `members`
-//!    is where the answer actually lives.
-//! 5. **Pick the verdict.** [`Verdict`] is the row's relationship to the
-//!    CHECKER, and [`verdict_consistency`] enforces each claim:
-//!    * [`Verdict::MatchesChecker`] — the computed answer equals the
-//!      checker's. No erased member, no refusal.
-//!    * [`Verdict::Degraded`] — the member SET is right and some member TYPE
-//!      is erased. An honest weaker answer.
-//!    * [`Verdict::FailsClosed`] — production REFUSES, and refusing is the
-//!      DESIGNED answer because the root's key set is genuinely unknowable.
-//!    * [`Verdict::KnownOwed`] — production DISAGREES with the checker and the
-//!      divergence is a debt. Name the `owner`; for a framework row put in
-//!      `owed_absent` the needles that would APPEAR if the debt were repaired;
-//!      for a semantic row the pinned `members` are the tripwire. Append the
-//!      row's id to [`OPEN_DEBTS`]. This makes the row fail in BOTH directions
-//!      — if the shape degrades further, AND the moment an owner fixes it —
-//!      so a repair is visible instead of silent.
-//! 6. **Set `demand` / `subject` when they apply.** A narrowing row sets
-//!    [`Demand::Narrowing`] with its owning `U6.NARROW_*` block. A shape that
-//!    exists only as a framework shape sets [`Subject::FrameworkOnly`] and
-//!    joins `FRAMEWORK_ONLY_WORKLIST`.
-//! 7. **Run the suite and commit the row.** Thirteen tests, about five seconds
-//!    once the crate is built. No other crate and no other suite is involved.
+//! Adding a row: append a [`Row`] with `..Row::BLANK`, measure with
+//! `U6_CORPUS_DUMP=1`, transcribe, record the checker's print (dump the
+//! probe and run the pinned tsgo; do not hand-write). Pin member shapes,
+//! not just the enclosing `Object`. Set `checker_is_any` when the row is
+//! `any` (`any` is assignable to `null`). [`Verdict::KnownOwed`] names
+//! the `owner` and appends the id to [`OPEN_DEBTS`] so the row fails if
+//! the shape degrades or the owner fixes it. Narrowing rows set
+//! [`Demand::Narrowing`]. Framework-only shapes set
+//! [`Subject::FrameworkOnly`].
 
 use std::sync::Arc;
 
@@ -166,9 +74,7 @@ pub(crate) mod u6_flow_expect_tests;
 mod flow_gap_retraction_tests;
 use self::u6_flow_expect_tests::{Boundary, Expect, ExpectedNode, Lit};
 
-// ─────────────────────────────────────────────────────────────────────────
 // Row vocabulary
-// ─────────────────────────────────────────────────────────────────────────
 
 /// What the RUNTIME (bundler) lane must do with a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,49 +340,25 @@ pub(crate) enum Subject {
     FrameworkOnly,
 }
 
-/// WHAT a row demands — the row's SUBJECT, named rather than implied.
+/// What a row demands — named rather than implied.
 ///
-/// The corpus is the fence for the whole `U6` programme, not only for
-/// `U6.FLOW_RETURN_SUBSTRATE`. Narrowing (`U6.NARROW_TYPEOF`,
-/// `U6.NARROW_LATTICE`, `U6.NARROW_SUBSTITUTION`, `U6.NARROW_INVALIDATION`) is
-/// the class where a weakening passes every test that was not written for it:
-/// a branch join that silently widens, a `typeof` guard that stops applying
-/// across a call boundary, a narrowed type that stays warm after its
-/// predicate's dependency changes. None of those announce themselves, so the
-/// fence has to exist BEFORE the work starts.
+/// Narrowing is the class where a weakening passes every test not
+/// written for it (silent widen, `typeof` that stops applying, a
+/// narrowed type that stays warm after the predicate's dependency
+/// changes). [`Demand::Narrowing`] labels a returned-member type that
+/// already rides the existing drivers.
 ///
-/// # Where a genuinely new subject attaches
-///
-/// A narrowing row whose evidence is a RETURNED MEMBER's type needs no new
-/// machinery: the narrowed type is observable in the emitted option value
-/// (`label: { type: String` vs an erased `type: null`), so it rides the
-/// existing drivers and is only LABELLED here. That is
-/// [`Demand::Narrowing`] — a new variant, not a new harness.
-///
-/// A subject the current drivers genuinely cannot express is
-/// **type-at-an-arbitrary-position under a predicate** (the hover-shaped
-/// demand: "what is `v` on line N, inside this guard"). Building it
-/// speculatively would be an abstraction with no consumer, so it is NOT built.
-/// The seam is exact and small, and is recorded here so the narrowing blocks
-/// do not have to rediscover it:
-///
-/// 1. one new `Demand` variant carrying the position and the expected type;
-/// 2. one new `drive_*` function beside [`drive_runtime`] / [`drive_flow`] /
-///    [`drive_svelte`], demanding that position through the shared
-///    `ProjectSemanticDispatch` (never a second resolver);
-/// 3. one new lane test in `corpus_suite` that dispatches on the variant.
-///
-/// Nothing in [`Row`], [`Verdict`], [`report`], the oracle, or the debt ledger
-/// changes for that, which is the property this enum exists to preserve.
+/// Type-at-an-arbitrary-position under a predicate is not built: add a
+/// `Demand` variant, a `drive_*` through `ProjectSemanticDispatch`
+/// (never a second resolver), and a lane test. [`Row`] / [`Verdict`] /
+/// the oracle do not change for that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Demand {
     /// The published macro surface: the emitted runtime option value, the TSX
     /// projection, the flow-return graph node, and the `.svelte` twin.
     MacroSurface,
-    /// A NARROWING shape, owned by one of the `U6.NARROW_*` blocks. Driven
-    /// through exactly the same lanes — the narrowed type is evidence that
-    /// surfaces in the published member's type — and labelled so the
-    /// population is countable, filterable, and attributable.
+    /// Narrowing shape, labelled so the population is countable.
+    /// Driven through the same lanes as [`Self::MacroSurface`].
     Narrowing(NarrowBlock),
 }
 
@@ -584,16 +466,13 @@ pub(crate) struct Row {
     pub(crate) flow: Flow,
     pub(crate) svelte: Svelte,
     pub(crate) verdict: Verdict,
-    /// RECURSIVE graph-node expectation, matched through the public
-    /// audited boundary — the strengthening layer that makes
-    /// `() => "a"` distinguishable from `() => "b"` where the root
-    /// [`NodeShape`] cannot. See
-    /// [`u6_flow_expect_tests::ExpectedNode`].
+    /// Recursive graph-node expectation through the public audited
+    /// boundary. Distinguishes `() => "a"` from `() => "b"` where
+    /// [`NodeShape`] cannot. See [`u6_flow_expect_tests::ExpectedNode`].
     pub(crate) expect: Expect,
-    /// Public cold/warm boundary companion:
-    /// `get_flow_return_type_with_audit` invoked TWICE, pinning the exact
-    /// projected JSON, the typed degradation, and the second call's
-    /// cache-replay state. See [`u6_flow_expect_tests::Boundary`].
+    /// Public cold/warm companion: `get_flow_return_type_with_audit`
+    /// twice, pinning JSON, degradation, and replay. See
+    /// [`u6_flow_expect_tests::Boundary`].
     pub(crate) boundary: Boundary,
 }
 
@@ -622,9 +501,7 @@ impl Row {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Drivers — every lane, shared by every row
-// ─────────────────────────────────────────────────────────────────────────
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone_with_scheduler_config(
@@ -1109,9 +986,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// THE TABLE
-// ─────────────────────────────────────────────────────────────────────────
+// The table
 
 include!("u6_flow_shape_corpus_rows_tests.rs");
 
@@ -1742,9 +1617,7 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     ),
 ];
 
-// ─────────────────────────────────────────────────────────────────────────
 // The suite
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod corpus_suite {
@@ -3056,9 +2929,7 @@ mod corpus_suite {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// The ORACLE — how the `checker` column is obtained
-// ─────────────────────────────────────────────────────────────────────────
+// Oracle — how the `checker` column is obtained
 
 /// The pinned checker. CHECKER only, never `.d.ts`.
 #[cfg(test)]
@@ -3362,8 +3233,7 @@ mod verdict_consistency {
         /// cross-validation (byte and semantic) runs over DEEP-PINNED
         /// rows only, so on a shallow row the checker column is
         /// recorded documentation compared by nothing. Widening the
-        /// floor bucket-by-bucket belongs to the D8 ledger-governance
-        /// block.
+        /// floor is a separate ledger-governance change.
         /// `Object` roots stay out — their per-member shapes are
         /// asserted member-by-member, and a member in one of the three
         /// floored buckets is caught by the member scan.
@@ -3471,14 +3341,9 @@ mod verdict_consistency {
 mod programme_ledgers {
     use super::*;
 
-    /// Every narrowing row is OWNED by a `U6.NARROW_*` block, and every one of
-    /// them is pinned against today's substrate until that block lands.
-    ///
-    /// The narrowing blocks are the class where a weakening passes every test
-    /// that was not written for it. Seeding the rows BEFORE the work starts is
-    /// what gives those blocks a fence on day one: each row fails the moment
-    /// its shape starts behaving correctly, which forces a deliberate
-    /// reclassification instead of a silent pass.
+    /// Every narrowing row has an owner and is pinned against today's
+    /// substrate. A weakening that starts matching the checker fails
+    /// until the row is reclassified.
     #[test]
     fn narrowing_rows_are_owned_by_a_narrow_block() {
         let mut seen_blocks = std::collections::BTreeSet::new();
@@ -3595,34 +3460,22 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
     "F05_defineoptions_runtime_spread",
 ];
 
-/// The rows in the VALUE-INDISTINCT class (the §7 defect class: the row's
-/// `checker` names a value the root [`NodeShape`] vocabulary buckets away —
-/// a function value under `Other`, union constituents under `Union`, a
-/// literal's value under `Literal`, at the root or at a member) that do NOT
-/// carry a recursive [`Expect::Node`] pin.
+/// Value-indistinct rows (the `checker` names a value [`NodeShape`]
+/// buckets away: function/`Other`, union constituents/`Union`,
+/// literal value/`Literal`) that do not carry [`Expect::Node`].
 ///
-/// Each entry is `(row id, owning block, reason)`: the owning block MUST
-/// equal the row's own `owner` column (guard-asserted), and the reason
-/// names the value-indistinct site and what a deepening would pin.
+/// Each entry is `(row id, owner, reason)`. Owner must equal the row's
+/// `owner` column (guard-asserted).
 ///
-/// This ledger is the ANTI-RECURRENCE FLOOR for the repaired five-row
-/// non-discriminating-pin defect: deleting a row's deep pin makes the row appear here unnamed
-/// and fails `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`
-/// (in [`verdict_consistency`]); landing a NEW value-indistinct row without
-/// a deep pin requires naming it here, deliberately, in review. Named rows
-/// are the recorded shallow residue — visible and one edit away from a pin
-/// — not silent green.
+/// Anti-recurrence floor: deleting a deep pin makes the row appear
+/// unnamed and fails
+/// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`. A new
+/// value-indistinct row without a deep pin must be named here.
 ///
-/// **BURN-DOWN-ONLY — ENFORCED.** This ledger only shrinks: an entry is
-/// REMOVED in the same change that deepens its row (adding the
-/// `Expect::Node` + `Boundary::Audit` pair), and entries are never added
-/// casually — a new value-indistinct row lands DEEP by default, and
-/// naming it here instead is a deliberate, reviewed exception recorded
-/// with its owner and reason. The governance is asserted, not prose:
-/// [`SHALLOW_PINNED_ROWS_CEILING`] caps the ledger at its current size
-/// and `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`
-/// fails any growth past it. (The full frozen-ledger governance is the
-/// D8 block's; the per-row rationale lives here.)
+/// Burn-down only: remove an entry in the same change that deepens
+/// the row. [`SHALLOW_PINNED_ROWS_CEILING`] caps the size, and
+/// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`
+/// fails any growth past it.
 #[cfg(test)]
 const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     (
@@ -3987,10 +3840,8 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     ),
 ];
 
-/// The ENFORCED burn-down ceiling of [`SHALLOW_PINNED_ROWS`]: the ledger
-/// may never exceed this size. LOWER it freely as rows are deepened;
-/// raising it is the deliberate, reviewed act of admitting a new shallow
-/// exception (see the ledger's governance doc). Asserted by
+/// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
+/// deepen; raising it admits a new shallow exception. Asserted by
 /// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
 #[cfg(test)]
 const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
@@ -4073,9 +3924,7 @@ const OPEN_DEBTS: &[&str] = &[
     "X21_satisfies_plain_return",
 ];
 
-// ─────────────────────────────────────────────────────────────────────────
-// PER-OWNER CONFORMANCE — the merge go/no-go
-// ─────────────────────────────────────────────────────────────────────────
+// Per-owner conformance — the merge go/no-go
 
 /// Per-owner conformance, pinned.
 ///

@@ -69,26 +69,18 @@ oracle-lift = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:blake3"]
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
-# Opt-in: the BF2-backed Vue seed-matrix driver
-# (`src/compile/map_equality_tests/bf2_seed_matrix.rs`). It drives the genuine
-# production `assemble_vue_main_module` over the 36 committed seed cells and
-# hands each result to the conformance harness's authored-source oracle
-# (`packages/framework-conformance-harness/bin/check-candidate.mjs`), which
-# needs Node PLUS the harness's provisioned, gitignored oracle install
-# (`.oracle-checkouts` / `.oracle-npm-cache` / `.oracle-installs` — an isolated
-# npm realization of the pinned official framework packages). That install is
-# not part of a fresh checkout, so the default hermetic gate MUST NOT enable
-# this feature. Run it with
+# Opt-in: Vue seed-matrix driver
+# (`src/compile/map_equality_tests/bf2_seed_matrix.rs`) plus the harness
+# authored-source oracle. Needs Node and a gitignored oracle install;
+# the default hermetic gate must not enable this. Run:
 # `cargo test -p verter_session --lib --features bf2-authoritative bf2_seed_matrix`.
 bf2-authoritative = []
-# Opt-in: the transport route-equivalence suite
-# (`src/transport_route_equivalence_tests.rs`). It BUILDS nothing itself — it
-# drives the already-built `@verter/native` binding and the wasm-bindgen output
-# through Node probe scripts and compares each answer against the in-process
-# host route. Both artifacts are produced by commands outside cargo, so the
-# default hermetic gate MUST NOT enable this feature; with it on, a missing
-# artifact FAILS loudly naming its producing command rather than skipping. Run
-# it with `cargo test -p verter_session --lib --features transport-authoritative
+# Opt-in: transport route-equivalence suite
+# (`src/transport_route_equivalence_tests.rs`). Drives built `@verter/native`
+# and wasm-bindgen through Node probes vs the in-process host. Artifacts
+# come from commands outside cargo; the default hermetic gate must not
+# enable this. A missing artifact fails loudly. Run:
+# `cargo test -p verter_session --lib --features transport-authoritative
 # transport_route_equivalence`.
 transport-authoritative = []
 # Opt-in: enables the full trybuild compile-fail SEAL fixture suite
@@ -102,7 +94,7 @@ transport-authoritative = []
 # `cargo nextest run -p verter_session --features compile-fail` (or
 # `cargo test`).
 compile-fail = []
-# Phase 11b diagnosis benchmark: enables the corpus-driven
+# Diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest
 # at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via
 # `cargo test --features diagnosis-bench --test repo_first_pass_diagnosis_corpus`.

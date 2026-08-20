@@ -1,15 +1,12 @@
-// Hermetic invocation of the pinned official Vue 3.6.0-rc.3 compiler
-// (`@vue/compiler-sfc`, backed by `@vue/compiler-dom` / `@vue/compiler-vapor`
-// / `@vue/compiler-ssr` for the VDOM/vapor/ssr backends respectively). This
-// module never writes an expectation; it only produces a raw compilation
-// artifact for the caller (golden generator or comparator) to consume.
+// Hermetic invocation of the pinned official Vue compiler
+// (`@vue/compiler-sfc`, backed by `@vue/compiler-dom` /
+// `@vue/compiler-vapor` / `@vue/compiler-ssr`). Never writes an
+// expectation; produces a raw compilation artifact for the caller.
 //
-// The compiler is loaded DYNAMICALLY from the isolated per-domain
-// installation realized from the committed oracle lock (oracle-install.mjs)
-// — never from workspace dependency resolution, and never via a static
-// top-level import. The full validation gate (committed-evidence layers +
-// realized-closure enumeration of the isolated install) runs before a
-// single line of the oracle compiler is evaluated.
+// Compiler is loaded dynamically from the isolated per-domain install
+// (oracle-install.mjs) — never workspace resolution, never a static
+// top-level import. The validation gate runs before any oracle compiler
+// line is evaluated.
 
 import { parseModule } from "./normalize.mjs";
 import { validateVueFragments } from "./fragments.mjs";
@@ -19,8 +16,8 @@ import { ensureOracleDomain, oracleRequire } from "./oracle-install.mjs";
 import { composeAssembledModuleMap } from "./sourcemap.mjs";
 
 /**
- * Captures every contract-observable field the official compiler exposes on
- * a diagnostic: kind, code, message, source identity, start AND end spans.
+ * Contract-observable diagnostic fields: kind, code, message, source
+ * identity, start and end spans.
  */
 function toDiagnostic(kind, error, filename) {
   return {
@@ -45,21 +42,17 @@ export function assertVuePinned() {
 let compilerSfc = null;
 
 /**
- * Loads `@vue/compiler-sfc` from the validated isolated installation. The
- * gate (ensureOracleDomain inside oracleRequire) has passed before the
- * compiler module is evaluated. Vue routes Node `import` and `require` to
- * the same CJS dist artifact (its `node` export condition), so this is the
- * identical module shape either entry would load — with every transitive
- * dependency (postcss, @babel/parser, …) resolving from the realized
- * committed closure instead of the workspace store.
+ * Load `@vue/compiler-sfc` from the validated isolated install. The gate
+ * (`ensureOracleDomain` inside `oracleRequire`) has passed before the
+ * compiler is evaluated. Vue routes Node `import` and `require` to the
+ * same CJS dist (`node` export condition); transitive deps resolve from
+ * the realized committed closure, not the workspace store.
  */
 function vueCompilerSfc() {
   if (compilerSfc === null) {
     const loaded = oracleRequire("vue", "@vue/compiler-sfc");
-    // Loaded-module identity gate: the compiler ACTUALLY IN USE attests its
-    // own version against the domain pin — a load that slipped through any
-    // other resolution path (e.g. a workspace-hoisted @vue/compiler-sfc at
-    // a different version) refuses here.
+    // Loaded-module identity: the compiler in use attests its version
+    // against the domain pin — a workspace-hoisted load refuses here.
     if (loaded.version !== VUE_DOMAIN.packageVersion) {
       throw new PackageDriftError(
         `loaded @vue/compiler-sfc reports version ${loaded.version}, pinned ${VUE_DOMAIN.packageVersion}`,
@@ -75,7 +68,7 @@ function vueCompilerSfc() {
   return compilerSfc;
 }
 
-/** Version the LOADED oracle compiler attests — for identity self-tests. */
+/** Version the loaded oracle compiler attests — for identity self-tests. */
 export function vueOracleCompilerVersion() {
   return vueCompilerSfc().version;
 }
@@ -85,39 +78,34 @@ export function vueOracleCompilerVersion() {
  */
 
 /**
- * The asset-URL resolution official bundler tooling passes in BUILD mode —
- * this harness's own posture: an offline invocation with no user-supplied
- * `template.transformAssetUrls` and no dev server. Authority (verified
- * verbatim, and — like the assembly constants below — NOT covered by the
- * pinned oracle domain): @vitejs/plugin-vue@6.0.7, dist/index.mjs:193,
+ * Asset-URL resolution official bundler tooling passes in build mode —
+ * this harness's posture: offline, no user `template.transformAssetUrls`,
+ * no dev server. Authority (verified verbatim; not covered by the pinned
+ * oracle domain): @vitejs/plugin-vue@6.0.7, dist/index.mjs:193,
  * `else assetUrlOptions = { includeAbsolute: true }`, assigned onto
  * `transformAssetUrls` at :202 and passed to compileTemplate at :223.
  *
- * Passing it EXPLICITLY rather than letting compileTemplate fall through to
- * the compiler's own bare default (pinned dist,
- * compiler-sfc.cjs.js:1737-1739 `defaultAssetUrlOptions.includeAbsolute:
- * false`, selected at :3305) is what keeps an ABSOLUTE asset URL a module
- * import instead of an inert string attribute — a whole import graph the
- * default resolution never emits.
+ * Passed explicitly rather than letting compileTemplate fall through to
+ * the compiler default (`includeAbsolute: false` at compiler-sfc.cjs.js
+ * :1737–1739 / :3305). Otherwise an absolute asset URL stays an inert
+ * string attribute instead of a module import.
  */
 export const VUE_BUILD_TRANSFORM_ASSET_URLS = Object.freeze({ includeAbsolute: true });
 
 /**
- * THE `compileTemplate` invocation contract, in one place. Every caller that
- * drives the pinned compiler's template half — the production path below and
- * the composition self-test's fragment rebuild — builds its options here, so
- * the two cannot drift into "the same call, one copy silently narrower".
- * That drift is precisely how `transformAssetUrls` came to be missing from
- * the production call in the first place, and a second uncontrolled copy
- * re-opens it.
+ * `compileTemplate` invocation contract. Every caller that drives the
+ * pinned compiler's template half (production path and composition
+ * self-test fragment rebuild) builds options here so the two cannot drift
+ * into "the same call, one copy silently narrower" — how
+ * `transformAssetUrls` went missing from the production call.
  *
- * Deliberately NOT passed, because no committed fixture exercises them and a
- * guess would be worse than an omission — each fails LOUD (a diagnostic), not
- * open, if a future fixture reaches it: `compilerOptions.expressionPlugins`
- * (official pushes `"typescript"` for a `lang="ts"`/`"tsx"` script — no
- * fixture has a TS script), and `preprocessLang` / `preprocessOptions` (no
- * fixture has a `<template lang="…">`). Adding a fixture in either class
- * means extending this builder, not patching a call site.
+ * Deliberately not passed (no committed fixture exercises them; a guess
+ * is worse than an omission; each fails loud if a future fixture reaches
+ * it): `compilerOptions.expressionPlugins` (official pushes `"typescript"`
+ * for `lang="ts"`/`"tsx"` — no fixture has a TS script) and
+ * `preprocessLang` / `preprocessOptions` (no `<template lang="…">`). Adding
+ * a fixture in either class means extending this builder, not patching a
+ * call site.
  *
  * @param {{ descriptor: object, filename: string, ssr: boolean, vapor: boolean,
  *   isProd: boolean, sourceMap: boolean, scriptBindings: object|undefined }} input
@@ -140,22 +128,18 @@ export function vueTemplateCompileOptions({
     isProd,
     ssr,
     vapor,
-    // Official bundler tooling passes the parsed descriptor's own v-bind()
-    // css-vars inventory (@vitejs/plugin-vue@6.0.7, dist/index.mjs:222,
-    // `ssrCssVars: cssVars` from `const { id, cssVars } = descriptor`) —
-    // the SSR backend relocates css-vars out of the script half and into
-    // the render half's `_cssVars`/`_mergeProps` attrs merge, which only
-    // happens when compileTemplate can see the inventory here.
+    // Official bundler tooling passes the descriptor's v-bind() css-vars
+    // (@vitejs/plugin-vue@6.0.7, dist/index.mjs:222). SSR relocates css-vars
+    // into the render half's `_cssVars`/`_mergeProps` merge only when
+    // compileTemplate sees the inventory here.
     ssrCssVars: descriptor.cssVars,
-    // Official build-mode asset resolution, passed EXPLICITLY exactly as
-    // bundler tooling resolves it — never inherited from the compiler's own
-    // narrower default. See VUE_BUILD_TRANSFORM_ASSET_URLS.
+    // Official build-mode asset resolution, passed explicitly — never the
+    // compiler's narrower default. See VUE_BUILD_TRANSFORM_ASSET_URLS.
     transformAssetUrls: VUE_BUILD_TRANSFORM_ASSET_URLS,
-    // The descriptor block map chains the render fragment's original
-    // coordinates back to WHOLE-FIXTURE-FILE positions (official's own
-    // composition, exactly what bundler tooling passes) — without it the
-    // fragment map's original lines are template-block-relative and the
-    // published map mis-anchors against the fixture source.
+    // Descriptor block map chains the render fragment's original
+    // coordinates to whole-fixture-file positions. Without it, fragment
+    // map originals are template-block-relative and the published map
+    // mis-anchors.
     inMap: sourceMap ? (descriptor.template.map ?? undefined) : undefined,
     compilerOptions: {
       mode: "module",
@@ -165,7 +149,7 @@ export function vueTemplateCompileOptions({
 }
 
 /**
- * Compiles one independently-authored Vue SFC fixture with the official
+ * Compile one independently-authored Vue SFC fixture with the official
  * pinned compiler.
  *
  * @param {string} source raw `.vue` SFC text
@@ -196,27 +180,24 @@ export function compileVueFixture(source, filename, options) {
   let bindingMetadata = null;
   let scriptCode = null;
   let scriptMap = null;
-  // ABSENT, not empty: official bundler tooling passes
+  // Absent, not empty: official tooling passes
   // `bindingMetadata: resolvedScript ? resolvedScript.bindings : void 0`
-  // (@vitejs/plugin-vue@6.0.7, dist/index.mjs:229), and compiler-core's
+  // (@vitejs/plugin-vue@6.0.7, dist/index.mjs:229). compiler-core's
   // render-arity branch is truthy-gated (`options.bindingMetadata &&
-  // !options.inline`), so an empty `{}` for a script-less SFC would emit a
-  // 6-parameter render function official never emits.
+  // !options.inline`); `{}` for a script-less SFC would emit a 6-parameter
+  // render official never emits.
   let scriptBindings;
   const hasScriptSetup = Boolean(descriptor.scriptSetup);
 
   if (hasScriptSetup || descriptor.script) {
     try {
-      // The requested compilation profile must reach EVERY official phase,
-      // not only compileTemplate: the official compiler derives the script
-      // half's backend semantics at compileScript itself (pinned dist,
-      // compiler-sfc.cjs.js: `vapor = sfc.vapor || options.vapor`,
-      // `ssr = options.templateOptions?.ssr`) — the vapor arm gates the
-      // `__vapor: true` runtime-interop marker (JS branch) and the
-      // `defineVaporComponent` wrapper (TS branch), and the ssr arm gates
-      // client-only script injection such as `useCssVars` — and it reads
-      // `options.isProd` directly (scoped css-vars hashing, TS type-declared
-      // prop erasure), so the prod axis must be visible here too.
+      // Profile must reach every official compile step, not only
+      // compileTemplate. compileScript derives script-half backend
+      // semantics (`vapor = sfc.vapor || options.vapor`,
+      // `ssr = options.templateOptions?.ssr`): vapor gates `__vapor: true`
+      // / `defineVaporComponent`; ssr gates client-only injection such as
+      // `useCssVars`. It also reads `options.isProd` (scoped css-vars
+      // hashing, TS type-declared prop erasure).
       const compiled = compileScript(descriptor, {
         id: filename,
         inlineTemplate: false,
@@ -228,15 +209,11 @@ export function compileVueFixture(source, filename, options) {
       scriptCode = compiled.content;
       scriptMap = compiled.map ?? null;
       bindingMetadata = compiled.bindings ?? {};
-      // Threaded VERBATIM, exactly as official tooling threads
-      // `resolvedScript.bindings` — never widened to `{}` by the reported
-      // field's fallback above, for the truthiness reason recorded there.
-      // FORWARD-LOOKING, and untested by construction: on every reachable
-      // path the pinned compiler returns a truthy bindings object here, so
-      // this line changes nothing observable today. It is kept because it
-      // is the faithful threading, not because a current behavior depends
-      // on it — the tested case is the script-LESS one above, where the
-      // binding is absent entirely.
+      // Threaded verbatim as official tooling threads
+      // `resolvedScript.bindings` — never widened to `{}` (truthiness
+      // reason above). On every reachable path the pinned compiler returns
+      // a truthy bindings object here; the tested case is the script-less
+      // one above, where the binding is absent.
       scriptBindings = compiled.bindings;
     } catch (error) {
       diagnostics.push(toDiagnostic("script-error", error, filename));
@@ -275,10 +252,8 @@ export function compileVueFixture(source, filename, options) {
     return { code: null, map: null, diagnostics, backend, bindingMetadata };
   }
 
-  // The published map describes the PUBLISHED assembled module: each
-  // official fragment map (script half; render half, already chained to
-  // whole-file original coordinates via inMap above) is re-anchored by the
-  // assembly's exact geometry. See sourcemap.mjs.
+  // Published map describes the published assembled module: each official
+  // fragment map is re-anchored by assembly geometry. See sourcemap.mjs.
   let map = null;
   if (sourceMap) {
     map = composeAssembledModuleMap(
@@ -304,18 +279,14 @@ export function compileVueFixture(source, filename, options) {
 }
 
 /**
- * Validates every fragment's OWN syntactic contract (fragments.mjs) before
- * assembling, and returns both signals — fragment diagnostics and the
- * assembled text — separately. Fragment validity and assembled-module
- * parseability are independent facts: a caller must never read "the
- * assembly parses" as "every fragment was well-formed", and a valid
- * fragment set can still produce an unparseable assembly (see fragments.mjs
- * for the concrete counterexample).
+ * Validate every fragment's own syntactic contract (fragments.mjs) before
+ * assembling. Returns fragment diagnostics and assembled text separately:
+ * assembly parseability is not fragment well-formedness, and a valid
+ * fragment set can still produce an unparseable assembly.
  *
- * When any fragment is invalid, NO assembly is attempted (`code` is null):
- * the syntax-located assembler's input contract is exactly the fragment
- * shape contract, and assembling around a known-invalid fragment is the
- * fail-open the textual assembler used to permit.
+ * When any fragment is invalid, no assembly is attempted (`code` is null).
+ * Assembling around a known-invalid fragment is the fail-open the textual
+ * assembler used to permit.
  *
  * @returns {{ code: string|null, fragmentDiagnostics: Array<object>,
  *   parts: Array<object>|null }} `parts` is the assembly geometry
@@ -344,23 +315,19 @@ export function assembleAndValidate({ scriptCode, renderCode, ssr, vapor }) {
 }
 
 /**
- * Rewrites a fragment by SYNTAX LOCATION, never text search: the fragment
- * is parsed, the target statement node is located in the AST, and only the
- * exact source span [from, to) that node identifies is replaced. A string
- * literal that happens to CONTAIN the target's source text is an ordinary
- * expression node, never the located statement, so it is untouchable by
- * construction.
+ * Rewrite a fragment by syntax location, never text search: parse, locate
+ * the statement node, replace only its exact `[from, to)` span. A string
+ * literal that contains the target's source text is not the located
+ * statement.
  */
 function spliceAt(code, from, to, replacement) {
   return code.slice(0, from) + replacement + code.slice(to);
 }
 
 /**
- * Locates the module's actual `ExportDefaultDeclaration` and rewrites ONLY
- * that node's export keywords to a `const` binding. Throws when the
- * fragment has no default export or more than one — the assembler's input
- * contract (fragments.mjs "script" shape) requires exactly one, and a
- * silent fallback here would re-open the unanchored-rewrite defect class.
+ * Locate the module's `ExportDefaultDeclaration` and rewrite only that
+ * node's export keywords to a `const` binding. Throws if not exactly one —
+ * silent fallback would re-open unanchored rewrite.
  */
 function rebindDefaultExport(scriptCode, bindingName) {
   const ast = parseModule(scriptCode, "script-fragment-rebind");
@@ -371,9 +338,8 @@ function rebindDefaultExport(scriptCode, bindingName) {
     );
   }
   const [node] = defaults;
-  // Replace the `export default` keyword span — everything from the
-  // statement's start up to its declaration expression — leaving the
-  // declaration itself byte-identical.
+  // Replace the `export default` keyword span; leave the declaration
+  // byte-identical.
   const replacement = `const ${bindingName} = `;
   return {
     code: spliceAt(scriptCode, node.start, node.declaration.start, replacement),
@@ -386,8 +352,8 @@ function rebindDefaultExport(scriptCode, bindingName) {
 }
 
 /**
- * Locates the exported render/ssrRender FUNCTION DECLARATION and strips
- * only its `export` keyword span. @returns {{ code, functionName }}
+ * Locate the exported render/ssrRender function declaration and strip only
+ * its `export` keyword span. @returns {{ code, functionName }}
  */
 function unexportRenderFunction(renderCode) {
   const ast = parseModule(renderCode, "render-fragment-rebind");
@@ -411,30 +377,20 @@ function unexportRenderFunction(renderCode) {
 }
 
 /**
- * Assembles the official non-inline module shape: a component object
- * (`_sfc_main`, from `compileScript` or an empty object for template-only
- * SFCs) plus a SEPARATE render function attached as `_sfc_main.render` (or
- * `_sfc_main.ssrRender` for the SSR backend), matching the bundler-standard
- * SFC assembly official tooling (`@vitejs/plugin-vue`) produces.
- *
- * Both rewrites are syntax-located (see rebindDefaultExport /
- * unexportRenderFunction): the actual AST node is found and its exact span
- * replaced. A source that merely CONTAINS the text "export default" inside
- * a string literal is never touched by the rebind.
+ * Assemble the official non-inline module shape: `_sfc_main` plus a
+ * separate render function as `_sfc_main.render` / `_sfc_main.ssrRender`,
+ * matching `@vitejs/plugin-vue` assembly. Both rewrites are syntax-located;
+ * a string literal containing `"export default"` is never touched.
  */
 function assembleNonInline({ scriptCode, renderCode, ssr, vapor }) {
   const renderProp = ssr ? "ssrRender" : "render";
-  // Scriptless SFCs get a synthesized component object; for a vapor build
-  // official bundler assembly attaches the runtime-interop marker there,
-  // since no compileScript output exists to carry it. Authority (verified
-  // verbatim, and NOT covered by the pinned oracle domain — plugin-vue sits
-  // outside domain-pin.mjs): @vitejs/plugin-vue@6.0.7, dist/index.mjs:1424,
-  // genScriptCode:
+  // Scriptless SFCs get a synthesized component object; vapor assembly
+  // attaches the runtime-interop marker there (no compileScript output).
+  // Authority (not covered by the pinned oracle domain):
+  // @vitejs/plugin-vue@6.0.7, dist/index.mjs:1424, genScriptCode:
   //   let scriptCode = `const ${scriptIdentifier} = { ${descriptor.vapor ? "__vapor: true" : ""} }`;
-  // The marker's NECESSITY is proven against the pinned runtime itself (the
-  // vapor-interop mount controls), and the exact emitted string is pinned by
-  // a literal regression test, so a change to this constant is caught
-  // structurally even without a dynamic plugin-vue pin.
+  // Marker necessity is proven against the pinned runtime (vapor-interop
+  // mount controls); the emitted string is pinned by a literal regression.
   const rebound = scriptCode
     ? rebindDefaultExport(scriptCode, "_sfc_main")
     : { code: vapor ? "const _sfc_main = { __vapor: true }" : "const _sfc_main = {}", edit: null };

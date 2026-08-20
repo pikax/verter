@@ -8,23 +8,14 @@ use super::*;
 use crate::cache_runtime::SignatureAdmission;
 use crate::resolver_core::{FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken};
 
-/// This module's tests belong to THIS module, and to no evidence suite's floor.
+/// This module's tests belong here, not to any evidence suite's floor.
 ///
-/// The suite census (`crate::framework::suite_census`) proves that each
-/// documented product/route invocation selects a suite that really exists, by
-/// counting the tests reported under that suite's module path. It counts by
-/// PREFIX, so a row aimed at this module — or at any ancestor of it — would
-/// clear that suite's floor on tests written here, which characterize the
-/// script-fact seam and say nothing about the surface the row speaks for. This
-/// module is a standing candidate for exactly that: it is a long-lived sibling
-/// with a substantial test count, which is what made it a decoy target when the
-/// census's binding was measured.
-///
-/// This also anchors the census from OUTSIDE the set of `mod` declarations it
-/// censuses. The census and its three suites protect each other pairwise, but
-/// removing all four declarations in one edit removes every party to that
-/// argument at once. This module is not one of them, so that edit stops
-/// compiling here.
+/// The census counts by PREFIX, so a row aimed at this module (or an
+/// ancestor) would clear another suite's floor on tests that say nothing
+/// about that surface. This module is also the outside anchor: the census
+/// and its three suites protect each other pairwise, but deleting all four
+/// `mod`s in one edit would drop every party; this module is not one of
+/// them, so that edit fails to compile here.
 #[test]
 fn no_suite_census_row_counts_this_module() {
     let mine = module_path!();

@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-// Executes the NAPI transport's representative cases and prints the result as
-// JSON on stdout, for a Rust-side comparison against the in-process host route.
+// Drive the NAPI transport's representative cases and print JSON for
+// Rust-side comparison against the in-process host.
 //
-// It also ENUMERATES the transport's exported surface from the BUILT ARTIFACT
-// itself — `Object.keys` over the loaded binding plus each exported class's own
-// prototype — never by reading source. Exhaustion is a claim about the pinned
-// tree, so the enumeration is what a caller can actually reach.
+// Enumerates the exported surface from the built artifact
+// (`Object.keys` + class prototypes), never from source.
 //
-// Usage: node scripts/probe-transport-surface.mjs
-// Exit codes: 0 = probed (the JSON says what happened); 2 = the binding could
-// not be loaded (an execution prerequisite, reported as such, never a pass).
+// Exit: 0 probed (JSON says what happened), 2 binding could not load
+// (prerequisite failure, never a pass).
 
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -80,7 +77,7 @@ function virtualFile(host, canonicalId, kind, compileProfile, index) {
 
 const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
 
-// ── SUCCESS: a supported Svelte client component publishes its module ───────
+// SUCCESS: a supported Svelte client component publishes its module
 {
   const host = new binding.VerterHost();
   host.upsert({
@@ -112,7 +109,7 @@ const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
   host.close();
 }
 
-// ── REFUSAL: the same component under a server profile ─────────────────────
+// REFUSAL: the same component under a server profile
 {
   const host = new binding.VerterHost();
   host.upsert({
@@ -138,7 +135,7 @@ const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
   host.close();
 }
 
-// ── STRUCTURAL ABSENCE: a node the carrier simply does not have ────────────
+// STRUCTURAL ABSENCE: a node the carrier simply does not have
 //
 // The refusal case above reaches a missing node THROUGH a refused compilation.
 // This one never involves a refusal at all: the carrier compiles normally and
@@ -171,7 +168,7 @@ const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
   host.close();
 }
 
-// ── IDE/TSX: ensure + read, on the profile the LSP uses ────────────────────
+// IDE/TSX: ensure + read, on the profile the LSP uses
 {
   const host = new binding.VerterHost();
   host.upsert({
@@ -214,7 +211,7 @@ const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
   host.close();
 }
 
-// ── PUBLIC API: option conversion of the `mode` argument ────────────────────
+// PUBLIC API: option conversion of the `mode` argument
 {
   const host = new binding.VerterHost();
   host.upsert({
@@ -260,7 +257,7 @@ function renderProfile({ ssr, sourceMap }) {
   };
 }
 
-// ── BATCH: the same shape the in-process batch suite drives ────────────────
+// BATCH: the same shape the in-process batch suite drives
 //
 // A supported Svelte component, both refusal-shaped inputs, and a second
 // distinct supported component — the refusals in the middle so a shifted or
@@ -314,7 +311,7 @@ function renderProfile({ ssr, sourceMap }) {
   host.close();
 }
 
-// ── AUDITED COMPILE: what the transport spelling actually returns ──────────
+// AUDITED COMPILE: what the transport spelling actually returns
 //
 // The in-process entry returns the compiled product; the NAPI spelling returns
 // the AUDIT RECORD only (`crates/verter_napi/src/lib.rs:2525-2540` encodes
@@ -356,7 +353,7 @@ function renderProfile({ ssr, sourceMap }) {
   host.close();
 }
 
-// ── STANDALONE CSS: option conversion + artifact shape ─────────────────────
+// STANDALONE CSS: option conversion + artifact shape
 {
   const processed = binding.processStyle(".x{color:red}", {
     scopeId: "probe1234",

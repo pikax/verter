@@ -1,59 +1,28 @@
-//! `FileArtifactStore`: the canonical per-file artifact cache.
-//!
-//! `FileArtifactStore` is the **authoritative** post-parse cache. It replaces
-//! the legacy `FileArtifactStore` type as the single per-file storage layer on
+//! Authoritative per-file post-parse cache on
 //! [`crate::project_type_store::ProjectTypeStore`].
 //!
-//! The store is **content-addressed**: keys carry the file's canonical path
-//! AND its `content_hash` AND the `parse_env_hash` (R5, R6). Concurrent
-//! overlay sessions reading different versions never poison each other.
+//! Content-addressed: keys carry canonical path, `content_hash`, and
+//! `parse_env_hash` (R5, R6). Concurrent overlay sessions on different
+//! versions never poison each other.
 //!
-//! ## What lives here
+//! - [`FileArtifactKey`] — source, parse, environment, and build identity
+//! - [`FileArtifacts`] — `IndexedReady`, `FileFacts`, `parse_stable_hash`,
+//!   augmentations
+//! - [`AugmentationTargetKey`] / [`AugmenterSet`] — module-augmentation
+//!   inverse index (R29)
 //!
-//! - [`FileArtifactKey`] — exact source, parse, environment, and build identity.
-//! - [`FileArtifacts`] — the per-file payload: `IndexedReady`, `FileFacts`,
-//!   `parse_stable_hash`, `augmentations`.
-//! - [`AugmentationTargetKey`] / [`AugmenterSet`] — the inverse-lookup index
-//!   for module augmentations (R29).
-//! - [`FileFacts`] — placeholder; per-file fact registry payload (populated
-//!   by the fact-emission walk).
-//! - [`ModuleAugmentationFact`] — per-file syntactic augmentation fact
-//!   (populated by the fact-emission walk; left empty until then).
+//! Two surfaces: canonical-keyed `get`/`insert` returning
+//! `Arc<IndexedReady>`, and [`FileArtifactKey`]-keyed
+//! `get_artifacts`/`insert_artifacts` returning `Arc<FileArtifacts>`.
 //!
-//! ## Two API surfaces
+//! Both surfaces share one `DashMap<FileArtifactKey, Arc<FileArtifacts>>`.
+//! The canonical-keyed surface synthesises a default [`FileArtifactKey`]
+//! from `(canonical, indexed.whole_hash)`.
 //!
-//! The store exposes both:
-//!
-//! 1. **Canonical-keyed legacy surface** — matches the retired
-//!    `FileArtifactStore` shape (`get(canonical, hash)`, `insert(canonical,
-//!    indexed)`, etc.) returning `Arc<IndexedReady>` directly. Existing
-//!    callers see no signature break across the rename.
-//! 2. **`FileArtifactKey`-keyed canonical surface** — `get_artifacts(&key)`,
-//!    `insert_artifacts(key, artifacts)`, etc. Returns `Arc<FileArtifacts>`,
-//!    the new payload type with `IndexedReady` + facts + parsed edges +
-//!    `parse_stable_hash` + augmentations. New code (later stages) uses
-//!    this surface.
-//!
-//! Both surfaces share the same backing `DashMap<FileArtifactKey,
-//! Arc<FileArtifacts>>`. The legacy surface synthesises a default
-//! [`FileArtifactKey`] from `(canonical, indexed.whole_hash)`; later stages
-//! plumb the full parse and environment identity through.
-//!
-//! ## Invariants
-//!
-//! - **Content-addressed (R5, R6):** the key carries every dimension that
-//!   meaningfully changes the cached value.
-//! - **Eviction is memory-bound (R22):** there is no `invalidate_canonical`
-//!   on `FileArtifactStore`. The existing `ProjectTypeStore::evict_canonical`
-//!   cascade calls `remove_canonical(canonical_id)` to drain all versions
-//!   under a canonical (this path is the canonical-keyed legacy retirement target).
-//! - **`parse_stable_hash`:** alpha-normalised structural hash over the
-//!   file's post-shallow-analysis decl skeleton. Invariant under cosmetic
-//!   edits.
-//! - **`augmentation_index` populated lazily on first augmentation-sensitive query:** This module owns
-//!   the skeleton + accessor API.
-//!
-//! See `/type-cache-architecture` skill for the full rule set.
+//! Invariants: content-addressed (R5, R6); eviction is memory-bound (R22)
+//! — no `invalidate_canonical`; `parse_stable_hash` is the
+//! alpha-normalised decl skeleton; `augmentation_index` is populated
+//! lazily. See `/type-cache-architecture`.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

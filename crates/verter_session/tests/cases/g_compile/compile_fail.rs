@@ -497,11 +497,8 @@ fn deferred_callable_is_sealed_to_its_two_consumers() {
 }
 
 /// `HostDiagnostic.span` is mandatory (`verter_span::Span`, not
-/// `Option<verter_span::Span>`) — a producer that cannot derive a real
-/// mapped location has no way to construct the value at all, and must fail
-/// closed at its own seam instead of fabricating a placeholder position.
-/// If the field regressed back to `Option`, the fixture (which omits it)
-/// would compile and trybuild would fail.
+/// `Option`). A producer that cannot map a location must fail closed.
+/// If the field became `Option`, this fixture would compile.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),

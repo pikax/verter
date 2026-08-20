@@ -1,23 +1,13 @@
-//! The disabled-arm proofs. Compiled ONLY when the `attribution`
-//! feature is OFF — that is, in the configuration every production
-//! build and the canonical gate use.
+//! Disabled-arm proofs (`attribution` feature off — production/gate
+//! config).
 //!
-//! Two things are proven here, and they are the two that a
-//! measurement-only substrate has to get right:
+//! 1. Macros do not evaluate their amount/digest argument.
+//! 2. Macros still accept every declared site name (schema cannot rot
+//!    behind a disabled feature).
 //!
-//! 1. the macros do not evaluate their amount/digest argument, so
-//!    instrumenting a site with an expensive quantity is free when the
-//!    feature is off; and
-//! 2. the recording macros still accept every declared site name, so
-//!    the schema and the call sites cannot drift apart behind a feature
-//!    nobody enables.
-//!
-//! The absence of a READER is not proven here — it cannot be, because a
-//! test that could observe the absence would be the reader. It is
-//! proven by the compile-fail fixture driven from
-//! `tests/cases/attribution_compile_fail.rs`, which asserts that
-//! naming `attribution::snapshot()` fails to compile in this
-//! configuration.
+//! Reader absence is proven by the compile-fail fixture
+//! (`tests/cases/attribution_compile_fail.rs`): naming
+//! `attribution::snapshot()` must not compile.
 
 use std::cell::Cell;
 

@@ -1,5 +1,5 @@
-//! Composing the assembled module's source map: the two authorized script
-//! rewrites, fragment placement, boundary segments, and the output artifact.
+//! Assembled-module source map: the two authorized script rewrites,
+//! fragment placement, boundary segments, and the output artifact.
 
 use std::borrow::Cow;
 
@@ -17,12 +17,8 @@ pub(crate) const RENAME_TO: &str = "_sfc_main";
 /// the pattern is spelled with pass one's output identifier.
 pub(crate) const EXPORT_REMOVAL: &str = "export default _sfc_main;\n";
 
-/// Where a segment entered the composition.
-///
-/// Composition-time bookkeeping only. The tag is attached at INGESTION, rides
-/// every later operation, is never inferred from a final coordinate or a
-/// spelling, and is never serialized: no member of the emitted artifact carries
-/// it.
+/// Where a segment entered composition. Attached at ingestion, never
+/// inferred from a final coordinate, never serialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SegmentOrigin {
     Script,
@@ -40,7 +36,7 @@ pub(crate) struct AssembledSegment {
     pub(crate) origin: SegmentOrigin,
 }
 
-// ── The two authorized rewrites ────────────────────────────────────────────
+// The two authorized rewrites
 
 /// Every literal, non-overlapping, left-to-right occurrence of `needle` — the
 /// same match set `str::replace` visits, so driving the rewrites through
@@ -58,16 +54,10 @@ fn literal_occurrences(haystack: &str, needle: &str) -> Vec<u32> {
     found
 }
 
-/// Apply the two authorized script rewrites and, when the fragment contributes
-/// a map, chain that map through both passes.
-///
-/// The passes are real `CodeTransform` transforms applied SEQUENTIALLY, pass
-/// two over pass one's output coordinate space, each driving both the output
-/// code and the output map from one chunk list. They run whether or not a map
-/// was requested, because they determine the module's BYTES and the code
-/// baseline is pinned regardless of any map — routing the bytes through a
-/// second, map-free rewrite path would be two implementations of one operation
-/// with nothing forcing them to agree.
+/// Two authorized script rewrites, sequential `CodeTransform`s (pass two
+/// over pass one's output). They run whether or not a map was requested —
+/// a second map-free rewrite path would be two implementations of one
+/// operation.
 pub(crate) fn rewrite_script(
     code: &str,
     map: Option<&DecodedFragmentMap>,
@@ -87,13 +77,8 @@ pub(crate) fn rewrite_script(
     let rewritten = pass_two.build_string();
 
     let chained = map.map(|map| {
-        // Both refusals are excluded by construction at this one call site:
-        // each transform is built from `overwrite` alone over its own input, so
-        // it holds only retained and replaced runs and carries no intro or
-        // outro; pass one's segment positions were validated in bounds against
-        // this exact code, and pass two's input positions are ones pass one's
-        // own walk emitted. A panic here would mean one of those stopped being
-        // true, which is a defect to fix rather than an input to report.
+        // Overwrite-only transforms over validated positions: a panic here
+        // is a defect, not an input to report.
         let after_one = pass_one
             .chain_source_map(&to_source_map(map))
             .expect("the rename pass is an overwrite-only transform over the validated script");
@@ -167,7 +152,7 @@ fn segments_of(map: &SourceMap<'_>) -> Vec<WireSegment> {
         .collect()
 }
 
-// ── Placement, boundaries, and the output artifact ─────────────────────────
+// Placement, boundaries, and the output artifact
 
 /// Accumulates the assembled artifact as the write grammar runs.
 #[derive(Debug, Default)]
@@ -180,17 +165,9 @@ pub(crate) struct MapComposer {
 }
 
 impl MapComposer {
-    /// Append one contributing map's table rows and ignore-list entries, and
-    /// return the `(source, name)` base offsets its segments must shift by.
-    ///
-    /// Tables are a STABLE APPEND in contribution order with NO deduplication:
-    /// two fragments declaring the same spelling contribute two rows, and a row
-    /// no segment references is still contributed. Merging identical rows would
-    /// be an assertion that two independently declared identities are one, and
-    /// declared identities are carried opaquely. Confronted with two rows that
-    /// differ only in ignore status, a merging rule would have to union the
-    /// flags, intersect them, or decline — and only declining publishes nothing
-    /// beyond what an input declared.
+    /// Append table rows and ignore-list entries; return `(source, name)`
+    /// bases. Stable append, no dedup: merging identical rows would claim
+    /// two independently declared identities are one.
     fn contribute_tables(&mut self, map: &DecodedFragmentMap) -> (u32, u32) {
         let source_base = self.sources.len() as u32;
         let name_base = self.names.len() as u32;
@@ -206,12 +183,9 @@ impl MapComposer {
             );
         }
         self.names.extend(map.names.iter().cloned());
-        // Each entry already passed step 1.23's bound check against this
-        // fragment's own (small) `sources` table, so narrowing to `u32` here
-        // is exact even before adding the running `source_base` offset — the
-        // binary64 storage on `DecodedFragmentMap` exists only so the earlier
-        // type/agreement checks and the bound itself run at full binary64
-        // identity; a validated entry is always a small integral value.
+        // Step 1.23 already bound-checked against this fragment's table;
+        // narrowing to `u32` is exact. Binary64 storage is for earlier
+        // type/agreement checks only.
         self.ignore_list.extend(
             map.ignore_list
                 .iter()
@@ -255,29 +229,13 @@ impl MapComposer {
         }
     }
 
-    /// Emit the fragment-end boundary segment at a fragment's transition out of
-    /// mapped content.
-    ///
-    /// The condition is that the fragment's FINAL code ends with a newline —
-    /// equivalently, that its newline patch does not fire. It is deliberately
-    /// NOT "the end cursor column is zero": those disagree on a real, legal
-    /// input. A present fragment whose code is empty leaves the cursor at
-    /// column 0 while its newline patch DOES fire, terminating a line that
-    /// contains no characters at all, so the next assembly-owned write begins
-    /// on the following line and there is nothing on the fragment's line to
-    /// protect. Firing there would be worse than redundant: the boundary would
-    /// land on the same coordinate as the fragment's own carried segment and,
-    /// being placed after it, would shadow a faithfully composed authored
+    /// Fragment-end boundary. Condition is "final code ends with a newline",
+    /// not "end cursor column is zero" — they disagree on an empty present
+    /// fragment (cursor at column 0, newline patch fires). Firing there
+    /// would shadow a carried authored segment. When the code does end with
+    /// a newline, the sourceless boundary (after every fragment segment)
+    /// stops assembly-owned bytes from inheriting that line's authored
     /// position.
-    ///
-    /// When the code DOES end with a newline, the fragment's trailing empty
-    /// line is where the next assembly-owned write begins — and a segment can
-    /// legitimately sit there, at column 0, the only in-bounds column an empty
-    /// line has. Without this boundary such a segment would answer for every
-    /// column of that line, including the ones assembly-owned bytes occupy,
-    /// giving synthetic scaffolding an authored position. The boundary is
-    /// sourceless and is placed AFTER every segment of the fragment it bounds,
-    /// so the last-applicable lookup resolves to it across that whole line.
     fn boundary(&mut self, at_line: u32) {
         self.segments.push(AssembledSegment {
             generated_line: at_line,
@@ -345,14 +303,9 @@ impl MapComposer {
     }
 }
 
-/// The module writer: the assembled bytes plus the write cursor they advanced.
-///
-/// The cursor is DERIVED as the assembler writes. It is never supplied as an
-/// input, never recovered by scanning the generated output, and never
-/// reconstructed by concatenating code and computing offsets afterward — so a
-/// fragment's placement cannot drift from the write grammar that produced it.
-/// The advance is the same primitive the map walk uses, so the two coordinate
-/// spaces cannot disagree.
+/// Assembled bytes plus the write cursor, derived as the assembler writes
+/// — never supplied, scanned, or reconstructed. Same primitive as the map
+/// walk, so the coordinate spaces cannot disagree.
 pub(crate) struct ModuleWriter {
     out: String,
     line: u32,
@@ -406,16 +359,9 @@ pub(crate) struct FragmentWrite<'a> {
 }
 
 impl MapComposer {
-    /// Write one mapped fragment's code and compose its contribution.
-    ///
-    /// A present fragment carrying no map still has its code written — the
-    /// passes determine the module's bytes — but contributes NOTHING to the
-    /// map: no carried segments, no replacement or resume segments, no table
-    /// rows, no ignore-list entries, and no boundary segment. Treating its map
-    /// as a validated-but-empty sequence would be a different rule with a
-    /// different result, sprouting a sourceless segment at every position where
-    /// a lookup came up empty — segments that could never change what any
-    /// position resolves to.
+    /// Write one fragment's code. A present fragment with no map still
+    /// writes bytes but contributes nothing to the map — a validated-empty
+    /// sequence would sprout sourceless segments that cannot change lookup.
     pub(crate) fn write_fragment(
         &mut self,
         writer: &mut ModuleWriter,
