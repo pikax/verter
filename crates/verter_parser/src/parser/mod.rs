@@ -1355,6 +1355,22 @@ impl Syntax {
                             .as_ref()
                             .expect("invariant: prop not yet taken in v-bind branch");
                         if let (Some(arg_s), Some(arg_e)) = (p.arg_start, p.arg_end) {
+                            // With an arg (`:id`, `v-bind:id`): no `=value` at
+                            // all is the Vue 3.4+ same-name shorthand, valid.
+                            // An EXPLICIT but blank value (`:id=""`,
+                            // `:id="  "`) is a DIFFERENT authored shape —
+                            // official rejects it outright rather than
+                            // treating it as shorthand.
+                            if let (Some(val_s), Some(val_e)) = (p.value_start, p.value_end) {
+                                let val = &ctx.input[val_s as usize..val_e as usize];
+                                if val.trim().is_empty() {
+                                    self.diagnostics.push(Diagnostic::error(
+                                        "syntax",
+                                        CompilerErrorCode::XVBindNoExpression,
+                                        Span::new(prop_start, prop_name_end),
+                                    ));
+                                }
+                            }
                             let arg = &ctx.bytes[arg_s as usize..arg_e as usize];
                             match arg {
                                 b"key" => builder.add_prop_flag(PropFlags::HasDynamicKey),
@@ -1363,7 +1379,17 @@ impl Syntax {
                                 _ => builder.add_prop_flag(PropFlags::HasDynamicBinding),
                             }
                         } else {
-                            // v-bind with no arg = spread
+                            // v-bind with no arg = spread. No value AT ALL
+                            // has nothing to spread (an error); an explicit
+                            // — even blank — value is a real, if vacuous,
+                            // expression and compiles fine.
+                            if p.value_start.is_none() {
+                                self.diagnostics.push(Diagnostic::error(
+                                    "syntax",
+                                    CompilerErrorCode::XVBindNoExpression,
+                                    Span::new(prop_start, prop_name_end),
+                                ));
+                            }
                             builder.add_prop_flag(PropFlags::HasBindSpread);
                         }
                     }

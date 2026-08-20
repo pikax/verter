@@ -107,6 +107,12 @@ pub struct CodeGenOutput<'alloc> {
     /// when no helper-import preamble was emitted.
     helper_preamble: Option<&'alloc str>,
 
+    /// Inline-mode hoisted-constant module preamble, recorded via
+    /// [`set_module_preamble`](Self::set_module_preamble). Transferred to
+    /// [`TemplateImports::module_preamble`] in [`apply_to`](Self::apply_to)
+    /// for the orchestrator to apply with `ct.prepend(...)`.
+    module_preamble: Option<&'alloc str>,
+
     /// Explicit source-map boundary offsets, transferred in
     /// [`apply_to`](Self::apply_to) via `try_add_sourcemap_location`.
     /// `Original`/`Moved` chunks otherwise token only start and newlines;
@@ -146,6 +152,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             moves: Vec::new(),
             wrapped_moves: Vec::new(),
             helper_preamble: None,
+            module_preamble: None,
             sourcemap_locations: Vec::new(),
             sfc_export_facts: Vec::new(),
             alloc,
@@ -331,6 +338,24 @@ impl<'alloc> CodeGenOutput<'alloc> {
         let allocated = self.alloc.alloc_str(content);
         self.prepends.push((pos, allocated));
         self.helper_preamble = Some(allocated);
+    }
+
+    /// Record module-scope preamble content (inline-mode hoisted constants)
+    /// for the caller to apply via `ct.prepend(...)` — NOT a position-
+    /// anchored `prepend_alloc`/`overwrite`. A position-anchored prepend at
+    /// the same source offset as another producer's own position-anchored
+    /// prepend (e.g. the script codegen's user-import hoist, both commonly
+    /// anchored at offset 0) loses the ordering race whenever that other
+    /// producer's `apply_to` batch already ran first: `batch_prepend_left_static`
+    /// only interleaves new items with *positioned* chunks it walks past —
+    /// once an earlier batch's same-position item is baked into an opaque
+    /// `Chunk::Inserted`, a later batch's item at that position is appended
+    /// after it, not before. `ct.prepend` sidesteps this entirely (it
+    /// manipulates `ct`'s `intro` directly, unconditionally ahead of every
+    /// chunk), the same escape hatch the helper-import line already uses.
+    #[inline]
+    pub fn set_module_preamble(&mut self, content: &str) {
+        self.module_preamble = Some(self.alloc.alloc_str(content));
     }
 
     /// Register an explicit source-map boundary at an original-source byte
@@ -763,6 +788,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             ssr,
             sfc_binding_markers,
             sfc_export_statement_marker,
+            module_preamble: self.module_preamble,
         }
     }
 }
@@ -799,6 +825,13 @@ pub struct TemplateImports<'alloc> {
     /// The declared terminal default-export statement's own range, as an
     /// unresolved marker. `None` when no script producer recorded one.
     pub(crate) sfc_export_statement_marker: Option<GeneratedContentMarker<'alloc>>,
+    /// Inline-mode hoisted-constant preamble (`const _hoisted_1 = [...]\n`),
+    /// when template codegen recorded one via
+    /// [`CodeGenOutput::set_module_preamble`]. The caller must apply it with
+    /// `ct.prepend(...)` — NOT a position-anchored `overwrite`/`prepend_alloc`
+    /// — see that method's doc comment for why. `None` when no hoisted
+    /// preamble was emitted (non-inline mode, or no hoisted constants).
+    pub module_preamble: Option<&'alloc str>,
 }
 
 impl TemplateImports<'_> {
@@ -1093,10 +1126,14 @@ impl VaporTextPart<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum VaporEffect<'a> {
-    /// `_setText(xN, parts...)`.
+    /// `_setText(xN, parts...)` when `generated` (extracted via `_txt()`),
+    /// or `_setText(nN, parts...)` when the ref is already a plain nav-chain
+    /// node reached through shared `_child`/`_next` (a mixed-children
+    /// container's text run — official `SetTextIRNode.generated`).
     SetText {
         text_ref: u32,
         parts: Vec<VaporTextPart<'a>>,
+        generated: bool,
     },
     /// `_setClass(nN, expr)`.
     SetClass { node_ref: u32, expr: &'a str },
@@ -1114,6 +1151,13 @@ pub enum VaporEffect<'a> {
         attr: &'a str,
         expr: &'a str,
     },
+    /// `_setDOMProp(nN, "attr", expr)` — an explicit `.prop`-modified binding
+    /// forced to the DOM-property setter regardless of hyphenation.
+    SetDomProp {
+        node_ref: u32,
+        attr: &'a str,
+        expr: &'a str,
+    },
     /// `_setHtml(nN, expr)`.
     SetHtml { node_ref: u32, expr: &'a str },
     /// `_setDynamicProps(nN, [expr])`.
@@ -1125,8 +1169,13 @@ impl VaporEffect<'_> {
     pub fn write_code_into(&self, buf: &mut String) {
         use super::shared::helpers::push_u32;
         match self {
-            VaporEffect::SetText { text_ref, parts } => {
-                buf.push_str("_setText(x");
+            VaporEffect::SetText {
+                text_ref,
+                parts,
+                generated,
+            } => {
+                buf.push_str("_setText(");
+                buf.push(if *generated { 'x' } else { 'n' });
                 push_u32(buf, *text_ref);
                 buf.push_str(", ");
                 for (i, part) in parts.iter().enumerate() {
@@ -1151,8 +1200,13 @@ impl VaporEffect<'_> {
     ) {
         use super::shared::helpers::push_u32;
         match self {
-            VaporEffect::SetText { text_ref, parts } => {
-                buf.push_str("_setText(x");
+            VaporEffect::SetText {
+                text_ref,
+                parts,
+                generated,
+            } => {
+                buf.push_str("_setText(");
+                buf.push(if *generated { 'x' } else { 'n' });
                 push_u32(buf, *text_ref);
                 buf.push_str(", ");
                 for (i, part) in parts.iter().enumerate() {
@@ -1222,6 +1276,19 @@ impl VaporEffect<'_> {
                 buf.push_str(expr);
                 buf.push(')');
             }
+            VaporEffect::SetDomProp {
+                node_ref,
+                attr,
+                expr,
+            } => {
+                buf.push_str("_setDOMProp(n");
+                push_u32(buf, *node_ref);
+                buf.push_str(", \"");
+                buf.push_str(attr);
+                buf.push_str("\", ");
+                buf.push_str(expr);
+                buf.push(')');
+            }
             VaporEffect::SetHtml { node_ref, expr } => {
                 buf.push_str("_setHtml(n");
                 push_u32(buf, *node_ref);
@@ -1257,6 +1324,19 @@ impl VaporEffect<'_> {
     }
 }
 
+/// What kind of construct a merge into a parent's `element_stack` entry
+/// brought in — official's `markSlotRootOperations` branches on this to
+/// decide slot-root forwarding. Only `SlotOutlet` and `DynamicComponent` are
+/// ever NON_STABLE-forwarding-eligible (a statically-resolved component or a
+/// v-if/v-for chain is `Other` — excluded, matching `hasStableSlotRoot`/
+/// `markSlotRootComponent`'s `!isStatic` gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergedConstructKind {
+    SlotOutlet,
+    DynamicComponent,
+    Other,
+}
+
 /// Per-element state for Vapor codegen.
 ///
 /// Pushed onto the stack when entering an element, popped on leave. Holds this
@@ -1278,6 +1358,26 @@ pub struct VaporElementState<'a> {
     pub node_ref: Option<u32>,
     /// Text node ref index if needed (Some(N) → `xN`).
     pub text_node_ref: Option<u32>,
+    /// Whether `text_node_ref` needs a `_txt()` extraction statement
+    /// (`xN`) or is already a plain nav-chain node reference reached
+    /// through shared `_child`/`_next` (`nN`) — set `false` only for a
+    /// text run that is a direct child of a mixed-content container
+    /// (`children_all_text_like == false`), mirrors official
+    /// `SetTextIRNode.generated`. Meaningless when `text_node_ref` is
+    /// `None`; defaults `true` (the pre-existing `_txt()` shape).
+    pub text_ref_generated: bool,
+    /// Set at `enter_element` by scanning this element's own children: `true`
+    /// unless at least one meaningful sibling is STRUCTURAL (component,
+    /// slot outlet, `<template v-slot>`, or a v-if/v-for-wrapped element —
+    /// `!is_template_contributing`). A plain element/comment sibling leaves
+    /// this `true` (narrower than official `isAllTextLike`, which any
+    /// element/comment sibling flips — Verter's existing deferred/combined
+    /// effect ordering already matches official there; only the structural
+    /// case has a real flush-timing requirement — see `enter_element`'s own
+    /// comment). A direct interpolation child only reuses
+    /// this element's own ref for `_txt()` extraction when `true`; when
+    /// `false` it instead reserves a shared nav-chain slot.
+    pub children_all_text_like: bool,
     /// Effects for this element specifically.
     pub own_effects: Vec<VaporEffect<'a>>,
     /// Navigation instructions from children (bubbled up).
@@ -1303,12 +1403,60 @@ pub struct VaporElementState<'a> {
     /// interpolation run, so the next adjacent text/interpolation coalesces
     /// into the same DOM child rather than advancing the cursor.
     pub dom_in_text_run: bool,
+    /// The scope HTML buffer's length at the start of the CURRENT DOM text
+    /// run (recorded when `dom_in_text_run` transitions `false` → `true`).
+    /// `None` outside a run. Lets the walker collapse a run's static prefix
+    /// back to a single space placeholder the moment an interpolation
+    /// arrives — see `text_run_has_dynamic` and
+    /// `VaporCodeGen::visit_text`/`visit_interpolation`.
+    pub text_run_html_start: Option<usize>,
+    /// Whether the CURRENT DOM text run has been established as dynamic
+    /// (contains at least one interpolation seen so far). Official Vue
+    /// collapses an entire dynamic run to ONE space in the static HTML
+    /// template, with all its content (static and dynamic) living only in
+    /// the `_setText`/`_toDisplayString` runtime expression — never baked
+    /// into the hoisted template string.
+    pub text_run_has_dynamic: bool,
     /// Queued child nav requests — this scope's own ref cannot be minted
     /// until every direct child has been visited (`PendingNavRequest`).
     ///
     /// [`PendingNavQueue`] is opaque here (default-construct and clear only).
     /// Construct/push/drain of `PendingNavRequest` stays in `vapor/**`.
     pub(in crate::template::code_gen) pending_nav_requests: PendingNavQueue,
+    /// Set at `enter_element` from this element's OWN tag kind: `true` for a
+    /// component (including a dynamic `<component :is>`/`KeepAlive`) or a
+    /// `<template v-slot>` wrapper — a scope with no real DOM container of
+    /// its own, whose children become slot content rather than DOM
+    /// descendants. Read by a CHILD's merge (`self.element_stack.last()` is
+    /// the parent at that point) to decide slot-root flag eligibility.
+    pub is_component_scope: bool,
+    /// Set at `enter_element` for a `<template v-if>`/`<template v-else-if>`/
+    /// `<template v-else>`/`<template v-for>` (no `v-slot`) — official Vue
+    /// treats every `<template>` tag as transparent IR, never a real DOM
+    /// node: it builds no open tag and owns no template/container of its
+    /// own. Distinct from `is_component_scope` (that flag also drives
+    /// slot-root flag eligibility, which a transparent template does NOT
+    /// participate in — confirmed against the pinned oracle: a component
+    /// nested directly under `<template v-if>` gets no `SLOT_ROOT` flag).
+    /// Read by `merge_into_stack_index` to decide whether a merged
+    /// structural child (v-if/v-for/component/slot) may be donated directly
+    /// as this scope's own body instead of nav/insertion-state-merged into
+    /// a container that doesn't exist.
+    pub is_transparent_wrapper: bool,
+    /// Set when a structural child was donated directly into this scope
+    /// (see `is_transparent_wrapper`): `node_ref` and `child_statements`
+    /// already fully express this scope's body (the donated construct's own
+    /// statement, which declares and returns its ref) — `build_closure_body`
+    /// must not additionally register a template/emit a `tN()` instantiation.
+    pub donated_construct: bool,
+    /// `(kind, own node ref)` of each child merged into this scope via
+    /// `merge_into_stack_index`, in visit order — used to detect the narrow
+    /// "this scope's entire content is one non-stable construct" case that
+    /// forwards through `_extend(..., { _: 8 /* NON_STABLE */ })` instead of
+    /// the normal slot form (official `hasStableSlotRoot`/
+    /// `markSlotRootOperations`). The node ref is the merged construct's own
+    /// root ref — the `return nN` target when that path applies.
+    pub merged_construct_kinds: Vec<(MergedConstructKind, u32)>,
 }
 
 impl Default for VaporElementState<'_> {
@@ -1324,6 +1472,8 @@ impl<'a> VaporElementState<'a> {
             text_parts: Vec::new(),
             node_ref: None,
             text_node_ref: None,
+            text_ref_generated: true,
+            children_all_text_like: true,
             own_effects: Vec::new(),
             child_nav: Vec::new(),
             child_text_creations: Vec::new(),
@@ -1332,7 +1482,13 @@ impl<'a> VaporElementState<'a> {
             named_slots: Vec::new(),
             dom_child_cursor: 0,
             dom_in_text_run: false,
+            text_run_html_start: None,
+            text_run_has_dynamic: false,
             pending_nav_requests: PendingNavQueue::new(),
+            is_component_scope: false,
+            is_transparent_wrapper: false,
+            donated_construct: false,
+            merged_construct_kinds: Vec::new(),
         }
     }
 
@@ -1343,6 +1499,8 @@ impl<'a> VaporElementState<'a> {
         self.text_parts.clear();
         self.node_ref = None;
         self.text_node_ref = None;
+        self.text_ref_generated = true;
+        self.children_all_text_like = true;
         self.own_effects.clear();
         self.child_nav.clear();
         self.child_text_creations.clear();
@@ -1351,16 +1509,28 @@ impl<'a> VaporElementState<'a> {
         self.named_slots.clear();
         self.dom_child_cursor = 0;
         self.dom_in_text_run = false;
+        self.text_run_html_start = None;
+        self.text_run_has_dynamic = false;
         self.pending_nav_requests.clear();
+        self.is_component_scope = false;
+        self.is_transparent_wrapper = false;
+        self.donated_construct = false;
+        self.merged_construct_kinds.clear();
     }
 
     /// Observe an adjacent text or interpolation child while walking this
     /// element's children: adjacent text/interpolation nodes coalesce into a
     /// single DOM child, so only the first of a run advances the cursor.
-    pub fn observe_dom_text_run(&mut self) {
+    /// Returns `true` when this call started a NEW run (the caller then
+    /// records `text_run_html_start`/resets `text_run_has_dynamic` itself,
+    /// since only it holds the live `html` buffer to measure).
+    pub fn observe_dom_text_run(&mut self) -> bool {
         if !self.dom_in_text_run {
             self.dom_in_text_run = true;
             self.dom_child_cursor += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -1368,6 +1538,8 @@ impl<'a> VaporElementState<'a> {
     /// one DOM child. Callers invoke this only when comment rendering is on.
     pub fn observe_dom_comment(&mut self) {
         self.dom_in_text_run = false;
+        self.text_run_html_start = None;
+        self.text_run_has_dynamic = false;
         self.dom_child_cursor += 1;
     }
 
@@ -1377,6 +1549,8 @@ impl<'a> VaporElementState<'a> {
     pub fn observe_dom_element(&mut self) -> u32 {
         let index = self.dom_child_cursor;
         self.dom_in_text_run = false;
+        self.text_run_html_start = None;
+        self.text_run_has_dynamic = false;
         self.dom_child_cursor += 1;
         index
     }
@@ -1406,6 +1580,23 @@ impl<'a> VaporElementState<'a> {
             r
         }
     }
+
+    /// Reserve a nav-chain text ref for a direct text/interpolation child of
+    /// a MIXED-content container (`children_all_text_like == false`) —
+    /// official `processInterpolation`'s `context.reference()`, a fresh id
+    /// distinct from this element's own container ref (unlike
+    /// `ensure_text_ref`, which deliberately reuses it). Idempotent per text
+    /// run: `Some(id)` only on the first call (the caller then queues the
+    /// nav-chain reservation); later calls in the same run return `None`.
+    pub fn reserve_nav_text_ref(&mut self, counters: &mut VaporCounters) -> Option<u32> {
+        if self.text_node_ref.is_some() {
+            return None;
+        }
+        let r = counters.next_node();
+        self.text_node_ref = Some(r);
+        self.text_ref_generated = false;
+        Some(r)
+    }
 }
 
 /// Completed root element data ready for assembly.
@@ -1421,10 +1612,15 @@ pub struct VaporRootElement<'a> {
     pub nav: Vec<&'a str>,
     /// Text node creations.
     pub text_creations: Vec<&'a str>,
-    /// Root's own text-node ref (`x{N}`), distinct from child-bubbled
-    /// `text_creations`. Set when the root's entire dynamic text is its own:
-    /// `const x{own_text_ref} = _txt(n{node_ref})`.
+    /// Root's own text-node ref, distinct from child-bubbled
+    /// `text_creations`. Set when the root's entire dynamic text is its own.
+    /// When `own_text_ref_generated`, needs its own extraction statement:
+    /// `const x{own_text_ref} = _txt(n{node_ref})`; otherwise the ref is
+    /// already a nav-chain node established in `nav` — no extraction line.
     pub own_text_ref: Option<u32>,
+    /// See `VaporElementState::text_ref_generated`. Meaningless when
+    /// `own_text_ref` is `None`.
+    pub own_text_ref_generated: bool,
     /// All effects (own + child).
     pub effects: Vec<VaporEffect<'a>>,
     /// Non-effect statements with authored anchors (relative to statement start).

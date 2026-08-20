@@ -941,7 +941,7 @@ fn v_memo_childless_component_emits_with_memo() {
 <script setup>import Comp from './Comp.vue'; const x = 1;</script>"#,
     );
     assert!(
-        code.contains("_withMemo([$setup.x], () => _createVNode($setup.Comp"),
+        code.contains(r#"_withMemo([$setup.x], () => _createVNode($setup["Comp"]"#),
         "childless component v-memo must wrap a plain _createVNode.\n{code}"
     );
     assert!(
@@ -950,7 +950,7 @@ fn v_memo_childless_component_emits_with_memo() {
     );
     // NEGATIVE: a childless component memo must NOT force a block.
     assert!(
-        !code.contains("() => (_openBlock(), _createBlock($setup.Comp"),
+        !code.contains(r#"() => (_openBlock(), _createBlock($setup["Comp"]"#),
         "nested childless component v-memo must not be block-forced.\n{code}"
     );
 }
@@ -2036,9 +2036,17 @@ fn vmodel_update_handler_key_not_in_dynamic_props_array() {
     let code = gen_vdom_template(
         "<template><MyComp v-model=\"val\"/></template>\n<script setup>\nimport MyComp from './MyComp.vue'\nconst val = 1\n</script>",
     );
+    // A component's dynamic-props keys array is never hoisted to a
+    // module-level _hoisted_N (verified against the real compiler — a
+    // component's resolved props aren't guaranteed constant across call
+    // sites, unlike a plain element's).
     assert!(
-        code.contains(r#"const _hoisted_1 = ["modelValue"]"#),
+        code.contains(r#"["modelValue"]))"#),
         "dynamicProps must contain only \"modelValue\", got:\n{code}"
+    );
+    assert!(
+        !code.contains("_hoisted_1"),
+        "a component's dynamicProps array must stay inline, not hoisted, got:\n{code}"
     );
     assert!(
         !code.contains(r#"["modelValue", "onUpdate:modelValue"]"#),
@@ -2424,7 +2432,7 @@ fn static_style_duplicate_keys_last_wins() {
         "Duplicate style key 'position' should be deduplicated (last wins), got:\n{code}"
     );
     assert!(
-        code.contains(r#"position: "relative""#),
+        code.contains(r#""position": "relative""#),
         "Last value 'relative' should win over 'absolute', got:\n{code}"
     );
     assert!(
@@ -2479,12 +2487,13 @@ fn vmodel_with_explicit_update_handler_byte_identical() {
     );
     // Only the model VALUE prop ("modelValue") goes in dynamicProps —
     // `onUpdate:modelValue` is a listener key, verified against the real
-    // compiler's `["modelValue"]`-only dynamicProps output.
+    // compiler's `["modelValue"]`-only dynamicProps output. A component's
+    // dynamicProps array is never hoisted to a module-level _hoisted_N
+    // (unlike a plain element's) — a component's resolved props aren't
+    // guaranteed constant across call sites.
     let expected = [
-        r#"const _hoisted_1 = ["modelValue"]"#,
-        r#""#,
         r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
-        r#"return (_openBlock(), _createBlock($setup.MyComp, { modelValue: $setup.val, "onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp] }, null, 8 /* PROPS */, _hoisted_1))"#,
+        r#"return (_openBlock(), _createBlock($setup["MyComp"], { modelValue: $setup.val, "onUpdate:modelValue": [$event => (($setup.val) = $event), $setup.onUp] }, null, 8 /* PROPS */, ["modelValue"]))"#,
         r#"}"#,
     ]
     .join("\n");
@@ -2510,7 +2519,7 @@ fn class_style_static_dynamic_merge_byte_identical() {
     );
     let expected = [
         r#"function render(_ctx, _cache) {"#,
-        r#"return (_openBlock(), _createElementBlock("div", { class: _normalizeClass(["a", _ctx.b]), style: _normalizeStyle([{ color: "red" }, _ctx.s]) }, "x", 6 /* CLASS, STYLE */))"#,
+        r#"return (_openBlock(), _createElementBlock("div", { class: _normalizeClass(["a", _ctx.b]), style: _normalizeStyle([{ "color": "red" }, _ctx.s]) }, "x", 6 /* CLASS, STYLE */))"#,
         r#"}"#,
     ]
     .join("\n");
@@ -2521,7 +2530,7 @@ fn class_style_static_dynamic_merge_byte_identical() {
         "static + dynamic class must merge via _normalizeClass, got:\n{code}"
     );
     assert!(
-        code.contains(r#"style: _normalizeStyle([{ color: "red" }, _ctx.s])"#),
+        code.contains(r#"style: _normalizeStyle([{ "color": "red" }, _ctx.s])"#),
         "static + dynamic style must merge via _normalizeStyle, got:\n{code}"
     );
     // Negative: the static class/style must not also be emitted as bare props.

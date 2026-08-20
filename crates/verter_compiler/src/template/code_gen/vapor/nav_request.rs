@@ -69,4 +69,24 @@ pub(in crate::template::code_gen::vapor) enum PendingNavRequest {
         /// Index into `child_nav` reserved for this establishment statement.
         nav_slot: usize,
     },
+    /// Direct text/interpolation run of a mixed-content container (siblings
+    /// include a structural child — component/slot-outlet/v-if/v-for,
+    /// `children_all_text_like == false`), reached through the same shared
+    /// nav chain instead of a standalone `_txt()` extraction. `own_ref`
+    /// doubles as the run's
+    /// `SetText` effect ref (official: no separate id space between a plain
+    /// node ref and a "generated" text ref).
+    ///
+    /// Official interleaves the resulting `_renderEffect(...)` at this run's
+    /// own DFS position (`flushBeforeDynamic`) rather than deferring it to
+    /// the block's aggregated effect list — `stmt_slot` reserves that
+    /// position the same way `Merge` reserves its `_setInsertionState`.
+    TextRef {
+        own_ref: u32,
+        /// Index into `child_nav` reserved for this establishment statement.
+        nav_slot: usize,
+        /// Index into `child_statements` reserved for the interleaved
+        /// `_renderEffect(...)` statement.
+        stmt_slot: usize,
+    },
 }

@@ -15,8 +15,8 @@
 //! - BEHAVIORAL mutations (helper family, patch flags, block topology,
 //!   exported/source-authored/member names, effect/setter topology, template
 //!   payload, event delegation routing, import source, diagnostics order,
-//!   semantic comments) must FAIL — each on its own detection axis so one
-//!   axis cannot mask another.
+//!   semantic comments, a genuine extra scope) must FAIL — each on its own
+//!   detection axis so one axis cannot mask another.
 //!
 //! Source maps are NOT a conformance dimension (a source map maps its own
 //! compiler's output, and generated positions/line numbers are cosmetic), so
@@ -388,25 +388,26 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
             DiffDim::Literal,
         );
 
-        // Remove event delegation (delegated setup deleted).
+        // Remove the event listener wiring entirely (`_on(...)` call deleted).
         let mutated = plant(
             &golden,
-            "_delegateEvents(\"click\")\n",
+            "  _on(n0, \"click\", () => (_ctx.count++))\n",
             "",
-            "drop delegation",
+            "drop event listener",
         );
         fail(
-            "vapor: drop event delegation",
+            "vapor: drop event listener",
             &mutated,
             &golden,
             &authored,
             DiffDim::Structure,
         );
 
-        // Reroute the delegated handler registration ($evtclick ABI name).
-        let mutated = plant(&golden, "n0.$evtclick", "n0.$evtfoo", "$evtclick ABI");
+        // Reroute the listener attach target to a different private binding
+        // (n0, the button root, -> x0, the interior text node).
+        let mutated = plant(&golden, "_on(n0,", "_on(x0,", "retarget listener node");
         fail(
-            "vapor: delegated handler ABI name",
+            "vapor: retarget listener node",
             &mutated,
             &golden,
             &authored,
@@ -430,6 +431,136 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
             &golden,
             &authored,
             DiffDim::Literal,
+        );
+    }
+
+    // =======================================================================
+    // BEHAVIORAL mutations — scope_ordinal invariance boundary — must FAIL.
+    //
+    // `BindingKey::scope_ordinal` (`canon/classify.rs`) ranks scopes by
+    // `ScopeId` creation order rather than raw `NodeId`, so it stays
+    // invariant to a redundant-parens plant (see the cosmetic recipe above)
+    // exactly like the structural diff already is. This must NOT extend to a
+    // GENUINE extra scope: inserting a real function still shifts every
+    // downstream scope's rank and must still be caught.
+    //
+    // The recipe below inserts a whole extra TOP-LEVEL function ahead of
+    // `render`, which changes `Program`'s own child count — that alone
+    // already fails on `[structure]` regardless of whether scope_ordinal is
+    // even consulted, so it doesn't by itself exercise the ScopeId-vs-NodeId
+    // fix. The two recipes that follow isolate the invariant properly: one
+    // proves a redundant paren ahead of a real scope still waives (the
+    // shape `ScopeId`-ranking was built to tolerate), the other proves a
+    // genuine extra scope is still caught even when the insertion cannot be
+    // explained away by a `Program`-level child-count change.
+    // =======================================================================
+    {
+        let case = "v-on/inline";
+        let golden = golden_code(VAPOR, case);
+        let authored = authored(case);
+
+        // Insert a real extra function (a real scope-creating node, unlike
+        // the waived `ParenthesizedExpression`) before `render` — every scope
+        // declared inside `render` (n0/x0's arrow scopes) now ranks one
+        // higher than golden's.
+        let mutated = plant(
+            &golden,
+            "function render(_ctx, $props, $emit, $attrs, $slots) {",
+            "function _extraScope() { return 1 }\nfunction render(_ctx, $props, $emit, $attrs, $slots) {",
+            "insert extra real scope",
+        );
+        fail(
+            "vapor: genuine extra scope still caught",
+            &mutated,
+            &golden,
+            &authored,
+            DiffDim::Structure,
+        );
+    }
+    {
+        // Isolation recipe 1: a redundant paren ahead of a REAL scope-
+        // creating node, mirroring how `script-setup/props-type-withdefaults`'s
+        // own golden is already shaped — `return (_openBlock(), ...)`
+        // precedes the `$event => (...)` arrow's own scope in source order.
+        // A `ParenthesizedExpression` never mints a `ScopeId` (`canon_expression`
+        // already unwraps it as cosmetic), so adding one more layer here must
+        // stay COSMETIC — exactly the invariance `scope_ordinal` ranking by
+        // `ScopeId` (not raw `NodeId`) exists to preserve.
+        let case = "script-setup/props-type-withdefaults";
+        let golden = golden_code(VDOM, case);
+        let authored = authored(case);
+
+        let opened = plant(
+            &golden,
+            "return (_openBlock()",
+            "return ((_openBlock()",
+            "extra paren open, ahead of the $event arrow's scope",
+        );
+        let doubled = plant(
+            &opened,
+            "_toDisplayString($props.tags.length), 1 /* TEXT */))",
+            "_toDisplayString($props.tags.length), 1 /* TEXT */)))",
+            "extra paren close",
+        );
+        pass(
+            "cosmetic: redundant paren ahead of a real scope stays waived",
+            &doubled,
+            &golden,
+            &authored,
+        );
+    }
+    {
+        // Isolation recipe 2: a genuine extra scope inserted where it CANNOT
+        // be explained away by a `Program`-level child-count change — nested
+        // inside `setup()`'s own body (a sibling top-level construct of
+        // `render`, not `render` itself), so `render`'s own subtree is
+        // BYTE-IDENTICAL to golden's. `scope_ordinal` is minted by one
+        // monotonic counter as the semantic builder visits scope-creating
+        // nodes in SOURCE order, so a new scope created inside `setup`
+        // (which precedes `render` in source) still shifts every scope
+        // created afterward — including `render`'s own function scope, and
+        // therefore `n0`/`x0`'s `scope_ordinal` — even though nothing
+        // syntactically changed inside `render` itself.
+        let case = "v-on/inline";
+        let golden = golden_code(VAPOR, case);
+        let authored = authored(case);
+
+        let mutated = plant(
+            &golden,
+            "const count = ref(0)",
+            "const count = ref(0)\nconst _extra = (() => 1)()",
+            "insert extra real scope inside setup(), not render()",
+        );
+
+        let render_fn = "function render(_ctx, $props, $emit, $attrs, $slots) {";
+        let render_golden = &golden[golden.find(render_fn).expect("golden has render()")..];
+        let render_mutated = &mutated[mutated.find(render_fn).expect("mutated has render()")..];
+        assert_eq!(
+            render_mutated, render_golden,
+            "this recipe must leave render()'s own text byte-identical — the \
+             catch below must come from scope_ordinal alone, not a local \
+             textual/structural change reaching render()"
+        );
+
+        let comparison = compare_code(&mutated, &golden, &authored);
+        assert!(
+            !comparison.passed(),
+            "vapor: genuine extra scope inside setup() must still be caught \
+             even though render() itself is untouched"
+        );
+        assert!(
+            comparison
+                .reasons
+                .iter()
+                .any(|r| r.dim == DiffDim::Identifier),
+            "the catch must be a private-binding scope_ordinal mismatch \
+             (DiffDim::Identifier), not merely the structural hit at the \
+             insertion site inside setup(): got {:?}",
+            comparison
+                .reasons
+                .iter()
+                .map(|r| r.summary())
+                .collect::<Vec<_>>()
         );
     }
 

@@ -467,8 +467,12 @@ fn no_error_x_v_for_malformed_expression_on_valid() {
     assert_no_error(&result, "XVForMalformedExpression");
 }
 
-// XVBindNoExpression — never emitted since Vue 3.4+ same-name shorthand
-// makes `:attr` and `v-bind:attr` without value always valid (expands to `:attr="attr"`).
+// XVBindNoExpression — with a named arg, Vue 3.4+ same-name shorthand
+// (`:attr`/`v-bind:attr` without value, expands to `:attr="attr"`) is valid;
+// an EXPLICIT but blank value (`:attr=""`) is a DIFFERENT authored shape and
+// IS an error, matching official (`v-bind is missing expression.`). Without
+// an arg (spread), the reverse holds: no value at all has nothing to spread
+// (an error), while an explicit — even blank — value compiles fine.
 #[test]
 fn no_error_x_v_bind_same_name_shorthand() {
     // v-bind with a named arg but no value — Vue 3.4+ same-name shorthand, NOT an error
@@ -496,6 +500,41 @@ fn no_error_x_v_bind_no_expression_on_valid() {
 fn no_error_x_v_bind_spread() {
     // v-bind with no arg (spread) is valid even without expression
     let src = r#"<template><div v-bind="obj">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVBindNoExpression");
+}
+
+#[test]
+fn error_x_v_bind_blank_value_is_not_shorthand() {
+    // `:id=""` is NOT the same-name shorthand — an explicit but blank
+    // value is a real compiler error, matching official.
+    let src = r#"<template><div :id="">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVBindNoExpression");
+    assert_error_severity(&result, "XVBindNoExpression");
+}
+
+#[test]
+fn error_x_v_bind_whitespace_only_value_is_not_shorthand() {
+    let src = r#"<template><div v-bind:id="   ">hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVBindNoExpression");
+}
+
+#[test]
+fn error_x_v_bind_spread_with_no_value_at_all() {
+    // Bare `v-bind` (no arg, no value at all) has nothing to spread.
+    let src = r#"<template><div v-bind>hello</div></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVBindNoExpression");
+    assert_error_severity(&result, "XVBindNoExpression");
+}
+
+#[test]
+fn no_error_x_v_bind_spread_with_explicit_blank_value() {
+    // `v-bind=""` — an explicit (if vacuous) spread expression compiles
+    // fine; only a value missing ENTIRELY is an error.
+    let src = r#"<template><div v-bind="">hello</div></template>"#;
     let result = compile_sfc(src);
     assert_no_error(&result, "XVBindNoExpression");
 }

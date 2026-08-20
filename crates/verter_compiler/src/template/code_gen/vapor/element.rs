@@ -122,12 +122,21 @@ pub fn finalize_text_parts(state: &mut VaporElementState<'_>, has_dynamic_text: 
     if !has_dynamic_text || state.text_parts.is_empty() {
         return;
     }
+    if !state.text_ref_generated {
+        // A nav-chain text ref (`PendingNavRequest::TextRef`) builds and
+        // interleaves its own `_renderEffect(...)` statement in
+        // `VaporCodeGen::resolve_pending_nav_requests` — leave `text_parts`
+        // for that arm to consume instead of deferring it here.
+        return;
+    }
 
     if let Some(text_ref) = state.text_node_ref {
         let parts = std::mem::take(&mut state.text_parts);
-        state
-            .own_effects
-            .push(VaporEffect::SetText { text_ref, parts });
+        state.own_effects.push(VaporEffect::SetText {
+            text_ref,
+            parts,
+            generated: true,
+        });
     }
 }
 
@@ -161,20 +170,36 @@ pub fn finalize_root_element<'a>(
 
     // Add imports
     out.add_vapor_import(VaporHelper::Template);
-    if !state.child_nav.is_empty() {
+    // `_child`/`_next` are imported per the nav content actually emitted —
+    // `merge_into_parent` above always writes `_child(...)` for the first
+    // dynamic child (`dom_child_index == 0`) and `_next(...)` for every
+    // later one; a single-dynamic-child element (the common case) never
+    // calls `_next` at all, so blanket-importing both here pulled in an
+    // unused `next` helper official never imports.
+    if state.child_nav.iter().any(|nav| nav.contains("_child(")) {
         out.add_vapor_import(VaporHelper::Child);
+    }
+    if state.child_nav.iter().any(|nav| nav.contains("_next(")) {
         out.add_vapor_import(VaporHelper::Next);
     }
     // `state.text_node_ref` is the root's OWN direct text extraction — set by
     // `finalize_text_parts` above whenever the root's dynamic text is its own
     // (not bubbled up from a child via `child_text_creations`, e.g. a bare
     // `<button>{{ label }}</button>` whose interpolation is the root's ONLY
-    // content). It needs the SAME `_txt()`/`_setText()` imports and its own
-    // `const x{ref} = _txt(n{node_ref})` statement — omitting either produced
-    // a `ReferenceError` at runtime (both the statement and the imports were
-    // silently dropped when a root's text never went through child bubbling).
-    if !state.child_text_creations.is_empty() || state.text_node_ref.is_some() {
+    // content). A GENERATED ref needs the SAME `_txt()`/`_setText()` imports
+    // and its own `const x{ref} = _txt(n{node_ref})` statement — omitting
+    // either produced a `ReferenceError` at runtime (both the statement and
+    // the imports were silently dropped when a root's text never went
+    // through child bubbling). A nav-chain ref (`!text_ref_generated`,
+    // mixed-content container) needs neither: its establishment is already
+    // in `nav`/`state.child_nav` and its `_renderEffect` statement is
+    // already in `child_statements` (`resolve_pending_nav_requests`'s
+    // `TextRef` arm) — still needs `SetText`, just not the extraction line.
+    let own_text_needs_extraction = state.text_node_ref.is_some() && state.text_ref_generated;
+    if !state.child_text_creations.is_empty() || own_text_needs_extraction {
         out.add_vapor_import(VaporHelper::Txt);
+    }
+    if !state.child_text_creations.is_empty() || state.text_node_ref.is_some() {
         out.add_vapor_import(VaporHelper::SetText);
     }
     if !all_effects.is_empty() {
@@ -188,6 +213,7 @@ pub fn finalize_root_element<'a>(
         nav: state.child_nav,
         text_creations: state.child_text_creations,
         own_text_ref: state.text_node_ref,
+        own_text_ref_generated: state.text_ref_generated,
         effects: all_effects,
         statements: state.child_statements,
         v_once: false,
@@ -234,10 +260,17 @@ pub fn merge_into_parent<'a>(
         };
         parent.child_nav.push(nav);
 
-        // If child has dynamic text, create its `_txt()` text node off `pN`.
+        // If child has dynamic text of its OWN (the child's entire content
+        // is text — `text_ref_generated`), create its `_txt()` text node off
+        // `pN`. A nav-chain text ref (child's own children were themselves
+        // mixed) is already a fully-resolved node from the CHILD's own
+        // `resolve_pending_nav_requests` — extracting it again off `pN`
+        // here would be redundant and wrong (a second, unrelated position).
         if let Some(text_ref) = child.text_node_ref {
-            let tc = out.alloc_fmt(format_args!("const x{text_ref} = _txt(p{path_idx})"));
-            parent.child_text_creations.push(tc);
+            if child.text_ref_generated {
+                let tc = out.alloc_fmt(format_args!("const x{text_ref} = _txt(p{path_idx})"));
+                parent.child_text_creations.push(tc);
+            }
         }
 
         // Bubble up child's own effects (append drains child vec, capacity retained)
@@ -585,6 +618,7 @@ mod tests {
         dynamic_child.own_effects = vec![VaporEffect::SetText {
             text_ref: 0,
             parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[])],
+            generated: true,
         }];
 
         let _ = merge_into_parent(dynamic_child, &mut parent, &mut counters, 1, true, &mut out);
@@ -614,6 +648,7 @@ mod tests {
         child.own_effects = vec![VaporEffect::SetText {
             text_ref: 0,
             parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[])],
+            generated: true,
         }];
 
         // dom_child_index=0 (first child), has dynamic text

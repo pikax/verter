@@ -16,7 +16,7 @@
  *   5. commit everything together.
  */
 
-export const VUE_ORACLE_VERSION = "3.6.0-rc.1";
+export const VUE_ORACLE_VERSION = "3.6.0-rc.3";
 
 /** The four packages that must ALL resolve to exactly VUE_ORACLE_VERSION. */
 export const ORACLE_PACKAGES = [

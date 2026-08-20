@@ -1,0 +1,55 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/static-class-style",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.3",
+    "@vue/compiler-sfc": "3.6.0-rc.3",
+    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/static-class-style.vue",
+    "sha256": "f6ac1360dcea4407df709122debbb8cd4c8e225e372fce719739413a15838783"
+  },
+  "options": {
+    "sha256": "374693cf743983ceb415183a80e8067645e3cab13c8c0d2ee0da86f329df2946",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/elements-text/static-class-style.vue",
+      "id": "elements-text/static-class-style",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.3/vapor/elements-text/static-class-style.js",
+      "sha256": "1e03c183264e18751fa039696c1fb80b1d97dd9210c4c734570729a3d37197ce",
+      "bytes": 338
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.3/vapor/elements-text/static-class-style.map.json",
+      "sha256": "89ef6bbc523fd5c6ff76d0a65231f25c0c3691bf363aff5f220f6936ed5fe4ba"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

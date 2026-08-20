@@ -331,6 +331,7 @@ fn vapor_effect_set_text() {
             VaporTextPart::Static("\"hello \""),
             VaporTextPart::Dynamic("_toDisplayString(_ctx.msg)", &[]),
         ],
+        generated: true,
     };
     assert_eq!(
         effect.to_code(),
@@ -343,10 +344,26 @@ fn vapor_effect_set_text_single_part() {
     let effect = VaporEffect::SetText {
         text_ref: 1,
         parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.count)", &[])],
+        generated: true,
     };
     assert_eq!(
         effect.to_code(),
         "_setText(x1, _toDisplayString(_ctx.count))"
+    );
+}
+
+#[test]
+fn vapor_effect_set_text_nav_chain_ref_uses_n_prefix() {
+    // `generated: false` — the ref is a plain nav-chain node (mixed-content
+    // container text run), not a `_txt()` extraction.
+    let effect = VaporEffect::SetText {
+        text_ref: 1,
+        parts: vec![VaporTextPart::Dynamic("_toDisplayString(_ctx.count)", &[])],
+        generated: false,
+    };
+    assert_eq!(
+        effect.to_code(),
+        "_setText(n1, _toDisplayString(_ctx.count))"
     );
 }
 

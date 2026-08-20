@@ -214,7 +214,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // separators-only path, which drops static fallback content out
             // of `_cache[N]` entirely and its `-1` CACHED patch-flag
             // optimization.
-            self.emit_slot_children_with_cache(&children, out, source, el_children);
+            self.emit_slot_children_with_cache(&children, out, source, el_children, false);
 
             // Close: ])
             buf.clear();
@@ -454,7 +454,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // and cache wrapping both prepend at child boundary positions —
             // two separate passes cause position collisions where cache
             // prefixes/suffixes appear inside _createTextVNode() content.
-            self.emit_slot_children_with_cache(&children, out, source, el_children);
+            self.emit_slot_children_with_cache(&children, out, source, el_children, true);
 
             // Close: `])`
             buf.clear();
@@ -644,6 +644,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 skip_prop,
                 self.options.force_js,
                 &mut props_anchors,
+                self.handler_cache_reservations.get(&id.0),
             );
             // v-if branch root (component) with user props: inject `key: N` as
             // the first property (unless the user authored an explicit :key).
@@ -812,10 +813,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push_str(flag_str);
             if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
                 buf.push_str(", ");
-                let props_ref = element::format_dynamic_props_ref(
-                    &dynamic_props,
-                    Some(&mut self.hoisted_constants),
-                );
+                // Component dynamic-props keys array is never hoisted to a
+                // module-level _hoisted_N — this call site is always
+                // component context (slots.rs only runs for components).
+                let props_ref = element::format_dynamic_props_ref(&dynamic_props, None);
                 buf.push_str(&props_ref);
             }
             buf.push(')');
@@ -940,7 +941,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // 1. Outer wrapper open FIRST (appears before inner wrappers)
                     out.prepend_static(group[0].start, "default: _withCtx(() => [");
                     // 2. Combined text wrapping + slot cache wrapping
-                    self.emit_slot_children_with_cache(group, out, source, el_children);
+                    self.emit_slot_children_with_cache(group, out, source, el_children, true);
                     // 3. Outer wrapper close LAST (appears after inner closings)
                     out.prepend_static(group.last().unwrap().end, "])");
                 }
@@ -1070,7 +1071,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     // 1. Outer wrapper open FIRST
                     out.prepend_static(group[0].start, "{ name: \"default\", fn: _withCtx(() => [");
                     // 2. Combined text wrapping + slot cache wrapping
-                    self.emit_slot_children_with_cache(group, out, source, el_children);
+                    self.emit_slot_children_with_cache(group, out, source, el_children, true);
                     // 3. Outer wrapper close LAST
                     out.prepend_static(group.last().unwrap().end, "]) }");
                 }
@@ -1172,6 +1173,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 skip_prop,
                 self.options.force_js,
                 &mut props_anchors,
+                self.handler_cache_reservations.get(&id.0),
             );
             // v-if branch root (component) with user props: inject `key: N` as
             // the first property (unless the user authored an explicit :key).
@@ -1270,10 +1272,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 buf.push_str(flag_str);
                 if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
                     buf.push_str(", ");
-                    let props_ref = element::format_dynamic_props_ref(
-                        &dynamic_props,
-                        Some(&mut self.hoisted_constants),
-                    );
+                    // Component dynamic-props keys array is never hoisted to a
+                    // module-level _hoisted_N — this call site is always
+                    // component context (slots.rs only runs for components).
+                    let props_ref = element::format_dynamic_props_ref(&dynamic_props, None);
                     buf.push_str(&props_ref);
                 }
             }
@@ -1341,7 +1343,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         // Combined text wrapping + slot cache wrapping
-        self.emit_slot_children_with_cache(&children, out, source, el_children);
+        self.emit_slot_children_with_cache(&children, out, source, el_children, true);
 
         buf.clear();
         // DYNAMIC iff the slot subtree references an OUTER template-scope
@@ -1591,10 +1593,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push_str(flag_str);
             if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
                 buf.push_str(", ");
-                let props_ref = element::format_dynamic_props_ref(
-                    dynamic_props,
-                    Some(&mut self.hoisted_constants),
-                );
+                // Component dynamic-props keys array is never hoisted to a
+                // module-level _hoisted_N — this call site is always
+                // component context (slots.rs only runs for components).
+                let props_ref = element::format_dynamic_props_ref(dynamic_props, None);
                 buf.push_str(&props_ref);
             }
         }
@@ -1643,10 +1645,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push_str(flag_str);
             if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
                 buf.push_str(", ");
-                let props_ref = element::format_dynamic_props_ref(
-                    dynamic_props,
-                    Some(&mut self.hoisted_constants),
-                );
+                // Component dynamic-props keys array is never hoisted to a
+                // module-level _hoisted_N — this call site is always
+                // component context (slots.rs only runs for components).
+                let props_ref = element::format_dynamic_props_ref(dynamic_props, None);
                 buf.push_str(&props_ref);
             }
         }
@@ -1702,12 +1704,23 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// - **Dynamic elements**: standalone elements with condition chain support
     ///
     /// Within a cache group, items get inner separators and text wrapping.
+    /// `allow_singleton_group`: whether a lone static child that IS the
+    /// entire children list still groups into the array+spread form
+    /// (`[...(_cache[N] || (_cache[N] = [child]))]`) rather than the bare
+    /// single-cache form. Verified against the real compiler
+    /// (`@vue/compiler-sfc`): a COMPONENT's slot content (`<template
+    /// #name>`, a component's implicit default slot) groups whenever every
+    /// child is cacheable, matching the plain-element-children rule — but a
+    /// `<slot>` OUTLET's fallback content never groups a lone child (text
+    /// OR element), only runs of 2+, regardless of it being the sole
+    /// content. Callers pass `false` only from `process_slot_outlet`.
     fn emit_slot_children_with_cache(
         &mut self,
         children: &[ChildRecord],
         out: &mut CodeGenOutput<'alloc>,
         source: &'alloc str,
         el_children: &[NodeId],
+        allow_singleton_group: bool,
     ) {
         if children.is_empty() {
             return;
@@ -1745,7 +1758,16 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     out.prepend_static(prev_item_end, ", ");
                 }
 
-                if run_len == 1 {
+                // A single static child still needs the array+spread form
+                // when it is the slot's ONLY child AND singleton grouping
+                // is allowed here (component slot content — official:
+                // grouping fires whenever every child is cacheable, not
+                // "run length > 1"). A `<slot>` outlet's fallback content
+                // never groups a lone child, regardless of it being the
+                // sole content — see this function's doc comment.
+                let run_is_all_children =
+                    allow_singleton_group && run_start == 0 && run_end == children.len();
+                if run_len == 1 && !run_is_all_children {
                     // Single static child: _cache[N] || (_cache[N] = <child>)
                     let child = &children[run_start];
                     if child.kind == ChildKind::Text {

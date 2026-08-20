@@ -60,6 +60,7 @@ pub mod element;
 pub mod interpolation;
 mod nav_request;
 pub mod props;
+mod repeated_reads;
 pub mod text;
 
 use nav_request::PendingNavRequest;
@@ -72,15 +73,20 @@ use crate::ast::types::{
 };
 use crate::code_transform::SegmentAnchor;
 use crate::parser::types::RootNodeTemplate;
-use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
+use crate::template::oxc::types::{Dynamism, OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
+use oxc_ast::ast::{
+    ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, ObjectPropertyKind,
+    PropertyKey,
+};
 use rustc_hash::FxHashSet;
 
 use super::binding::BindingResolver;
 use super::shared::helpers::{self, VaporHelper};
 use super::types::{
-    CodeGenOutput, SegmentedOverwriteAuthority, VaporCounters, VaporElementState, VaporRootElement,
+    CodeGenOutput, MergedConstructKind, SegmentedOverwriteAuthority, VaporCounters, VaporEffect,
+    VaporElementState, VaporRootElement,
 };
 use super::vdom::props::needs_quoted_key;
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
@@ -111,6 +117,37 @@ fn push_prop_key(buf: &mut String, key: &str) {
     } else {
         buf.push_str(key);
     }
+}
+
+/// Whether `expr` (trimmed) is a compile-time-constant JS literal —
+/// string/number/boolean/`null`/`undefined` — official's narrow leaf case
+/// of `isDirectConstantValue`/`isDirectConstantAst` (rc.3
+/// `generators/props.ts`). Deliberately narrower than official's full
+/// recursive array/object/template-literal-of-constants coverage (no
+/// fixture needs it); anything not recognized here conservatively wraps in
+/// a getter at the call site, matching official's own non-constant
+/// fallback — never emits an unwrapped non-constant.
+fn is_direct_constant_expr(expr: &str) -> bool {
+    matches!(expr, "true" | "false" | "null" | "undefined")
+        || is_string_literal_text(expr)
+        || is_numeric_literal_text(expr)
+}
+
+fn is_string_literal_text(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+        && !bytes[1..bytes.len() - 1].contains(&bytes[0])
+}
+
+fn is_numeric_literal_text(expr: &str) -> bool {
+    !expr.is_empty()
+        && expr.bytes().any(|b| b.is_ascii_digit())
+        && expr
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b.is_ascii_digit() || b == b'.' || (i == 0 && b == b'-'))
 }
 
 /// Extract the v-memo deps expression from an element's props.
@@ -169,6 +206,50 @@ fn resolve_expr(
     } else {
         resolver.resolve_simple_expr(expr)
     }
+}
+
+/// Detect `<component :is="expr">` / `<component v-bind:is="expr">` and
+/// resolve its bound expression. Returns `Some((resolved_expr, prop_idx))`
+/// — mirrors `vdom::component::resolve_dynamic_component`, the equivalent
+/// VDOM-backend detector; Vapor has no such helper of its own until now.
+fn resolve_vapor_dynamic_component<'a>(
+    el: &ElementNode,
+    tag_name: &str,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &BindingResolver<'a>,
+    force_js: bool,
+) -> Option<(String, usize)> {
+    if tag_name != "component" {
+        return None;
+    }
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        let directive_name = &source[prop.start as usize..prop.name_end as usize];
+        let is_bind = directive_name == ":" || directive_name == "v-bind";
+        if !is_bind {
+            continue;
+        }
+        let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) else {
+            continue;
+        };
+        let arg_name = &source[as_ as usize..ae as usize];
+        if arg_name != "is" {
+            continue;
+        }
+        let resolved_expr = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+            let value = &source[vs as usize..ve as usize];
+            let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+            resolve_expr(value, vs, oxc_exp, resolver, force_js)
+        } else {
+            // Value-less `:is` — Vue 3.4 same-name shorthand: `:is` == `:is="is"`.
+            resolve_expr(arg_name, as_, None, resolver, force_js)
+        };
+        return Some((resolved_expr, i));
+    }
+    None
 }
 
 /// Official `setInsertionState(parent, anchor)` 2nd arg (vendored rc.3):
@@ -290,54 +371,476 @@ fn compute_for_flags(only_child: bool, is_production: bool) -> Option<String> {
     })
 }
 
+/// A destructured leaf's accessor, relative to the shared wrapper base
+/// (`_for_item{depth}.value` / `_slotProps{depth}`) `render` is given.
+enum DestructureAccessor {
+    /// Plain member-path suffix appended directly to the base:
+    /// `{base}{suffix}`.
+    Path(String),
+    /// A rest element (`{ id, ...rest }`) — official's
+    /// `_getRestElement({base}{suffix}, [excludedKeys...])`, excluding the
+    /// STATIC sibling keys already destructured at the SAME nesting level
+    /// (rc.3 `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed
+    /// directly against the vendored dist and the real with-vapor runtime).
+    Rest {
+        suffix: String,
+        excluded_keys: Vec<String>,
+    },
+    /// A default value (`{ id = 99 }`) — official's
+    /// `_getDefaultValue({base}{suffix}, () => (resolvedDefaultExpr))`.
+    Default {
+        suffix: String,
+        resolved_default_expr: String,
+    },
+}
+
+impl DestructureAccessor {
+    /// Register the Vapor runtime helper this accessor needs, if any.
+    fn register_import(&self, out: &mut CodeGenOutput<'_>) {
+        match self {
+            DestructureAccessor::Path(_) => {}
+            DestructureAccessor::Rest { .. } => out.add_vapor_import(VaporHelper::GetRestElement),
+            DestructureAccessor::Default { .. } => {
+                out.add_vapor_import(VaporHelper::GetDefaultValue)
+            }
+        }
+    }
+
+    /// Render the final accessor expression against a shared `base`.
+    fn render(&self, base: &str) -> String {
+        match self {
+            DestructureAccessor::Path(suffix) => format!("{base}{suffix}"),
+            DestructureAccessor::Rest {
+                suffix,
+                excluded_keys,
+            } => {
+                let mut keys = String::with_capacity(excluded_keys.len() * 8);
+                for (i, key) in excluded_keys.iter().enumerate() {
+                    if i > 0 {
+                        keys.push_str(", ");
+                    }
+                    keys.push('"');
+                    helpers::escape_js_string_into(&mut keys, key);
+                    keys.push('"');
+                }
+                format!("_getRestElement({base}{suffix}, [{keys}])")
+            }
+            DestructureAccessor::Default {
+                suffix,
+                resolved_default_expr,
+            } => {
+                format!("_getDefaultValue({base}{suffix}, () => ({resolved_default_expr}))")
+            }
+        }
+    }
+}
+
+/// Per-leaf-identifier accessor for a destructuring pattern (`{ id, name }`,
+/// `[a, b]`, a rest element, a default value, arbitrary nesting/shorthand/
+/// renamed-key/string-literal-key mixes), walked off an already-parsed OXC
+/// AST — mirrors official `parseValueDestructure` (rc.3
+/// `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed directly
+/// against the vendored dist). Returns `false` only for a construct official
+/// ALSO doesn't destructure structurally (a computed key, or a rest/default
+/// target that is itself a nested pattern) — the caller then leaves the
+/// pattern's raw authored text as the closure's own param (still valid JS,
+/// just not official's `_for_item{depth}`/`_slotProps{depth}`-renamed form).
+fn collect_destructure_paths(
+    expr: &Expression<'_>,
+    path: &str,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+    out: &mut Vec<(String, DestructureAccessor)>,
+) -> bool {
+    use oxc_span::GetSpan;
+    match expr {
+        Expression::Identifier(id) => {
+            out.push((
+                id.name.as_str().to_string(),
+                DestructureAccessor::Path(path.to_string()),
+            ));
+            true
+        }
+        Expression::ParenthesizedExpression(p) => {
+            collect_destructure_paths(&p.expression, path, source, resolver, out)
+        }
+        Expression::AssignmentExpression(assign) => {
+            // Default value (`id = 99`) in a destructuring position — the
+            // v-for LHS parses leniently as a plain expression (not a
+            // formal `BindingPattern`), so a default surfaces as an
+            // `AssignmentExpression` here. A nested-pattern default
+            // (`{ a } = {}`) is unsupported; only a bare identifier target is.
+            let AssignmentTarget::AssignmentTargetIdentifier(target_id) = &assign.left else {
+                return false;
+            };
+            let default_span = assign.right.span();
+            let default_text = source
+                .get(default_span.start as usize..default_span.end as usize)
+                .unwrap_or_default();
+            let resolved_default_expr = resolver.resolve_simple_expr(default_text);
+            out.push((
+                target_id.name.as_str().to_string(),
+                DestructureAccessor::Default {
+                    suffix: path.to_string(),
+                    resolved_default_expr,
+                },
+            ));
+            true
+        }
+        Expression::ObjectExpression(obj) => {
+            // A rest element must be syntactically last, so every sibling
+            // key seen before it in this loop is already the complete
+            // exclusion list official's `_getRestElement` needs.
+            let mut declared_keys: Vec<String> = Vec::new();
+            for prop in &obj.properties {
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(p) => {
+                        if p.computed {
+                            return false;
+                        }
+                        let mut child = String::with_capacity(path.len() + 8);
+                        child.push_str(path);
+                        let key_name = match &p.key {
+                            PropertyKey::StaticIdentifier(name) => {
+                                child.push('.');
+                                child.push_str(name.name.as_str());
+                                name.name.as_str().to_string()
+                            }
+                            PropertyKey::StringLiteral(s) => {
+                                child.push_str("[\"");
+                                helpers::escape_js_string_into(&mut child, s.value.as_str());
+                                child.push_str("\"]");
+                                s.value.as_str().to_string()
+                            }
+                            _ => return false,
+                        };
+                        declared_keys.push(key_name);
+                        if !collect_destructure_paths(&p.value, &child, source, resolver, out) {
+                            return false;
+                        }
+                    }
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        let Expression::Identifier(rest_id) = &spread.argument else {
+                            return false; // nested rest target, unsupported
+                        };
+                        out.push((
+                            rest_id.name.as_str().to_string(),
+                            DestructureAccessor::Rest {
+                                suffix: path.to_string(),
+                                excluded_keys: declared_keys.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+            true
+        }
+        Expression::ArrayExpression(arr) => {
+            let mut idx = 0usize;
+            for elem in &arr.elements {
+                match elem {
+                    ArrayExpressionElement::Elision(_) => idx += 1,
+                    ArrayExpressionElement::SpreadElement(_) => return false,
+                    _ => {
+                        let Some(e) = elem.as_expression() else {
+                            return false;
+                        };
+                        let mut child = String::with_capacity(path.len() + 8);
+                        child.push_str(path);
+                        child.push('[');
+                        push_usize(&mut child, idx);
+                        child.push(']');
+                        if !collect_destructure_paths(e, &child, source, resolver, out) {
+                            return false;
+                        }
+                        idx += 1;
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `usize` decimal writer — `super::shared::helpers::push_u32` is `u32`-only.
+fn push_usize(buf: &mut String, n: usize) {
+    use std::fmt::Write as _;
+    let _ = write!(buf, "{n}");
+}
+
+/// Leaf-name → accessor list for a v-for VALUE position's destructuring
+/// pattern, or `None` if it isn't an object/array pattern at all (bare
+/// identifier — handled by the existing simple-ident path) or hits an
+/// unsupported construct. Official only destructures the value position —
+/// key/index stay identifier-only ([`collect_destructure_paths`]'s doc).
+fn destructure_value_paths(
+    expr: &Expression<'_>,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+) -> Option<Vec<(String, DestructureAccessor)>> {
+    if !matches!(
+        expr,
+        Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
+    ) {
+        return None;
+    }
+    let mut out = Vec::new();
+    if collect_destructure_paths(expr, "", source, resolver, &mut out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// The v-for value (item) position's own expression — first element of a
+/// parenthesized/sequence left-hand side (`(pattern, key) in …`), or the
+/// bare expression itself for a single-position `v-for="item in items"`.
+fn for_value_expr<'r, 'e>(left: &'r Expression<'e>) -> &'r Expression<'e> {
+    let mut cur = left;
+    while let Expression::ParenthesizedExpression(p) = cur {
+        cur = &p.expression;
+    }
+    match cur {
+        Expression::SequenceExpression(seq) => seq.expressions.first().unwrap_or(cur),
+        other => other,
+    }
+}
+
+/// The OXC-parsed v-for value pattern, if this element has a v-for with a
+/// successfully-parsed left-hand side. `None` for no v-for / no OXC data /
+/// a parse failure — callers fall back to the pre-existing raw-text path.
+fn v_for_value_pattern<'r, 'e>(
+    oxc_el: Option<&'r OxcParsedElement<'e>>,
+) -> Option<&'r Expression<'e>> {
+    let left = oxc_el?.v_for.as_ref()?.parsed.result.left.as_ref()?;
+    Some(for_value_expr(left))
+}
+
+/// Per-leaf-identifier accessor for a v-slot scoped-slot param's
+/// destructuring pattern, walked off the OXC-parsed `BindingPattern` — the
+/// v-slot counterpart of [`collect_destructure_paths`] (same rules:
+/// shorthand/renamed/nested keys, string-literal keys, rest elements, and
+/// default values all resolve; only a computed key or a nested-pattern
+/// rest/default target bails to `false`, leaving the caller's raw authored
+/// text as the closure's own param). Confirmed against the pinned oracle:
+/// `_getRestElement`/`_getDefaultValue` are the SAME helpers v-for uses,
+/// just against a `_slotProps{depth}` base instead of `_for_item{depth}.value`.
+fn collect_binding_destructure_paths(
+    pattern: &BindingPattern<'_>,
+    path: &str,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+    out: &mut Vec<(String, DestructureAccessor)>,
+) -> bool {
+    use oxc_span::GetSpan;
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            out.push((
+                id.name.as_str().to_string(),
+                DestructureAccessor::Path(path.to_string()),
+            ));
+            true
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            // Sibling keys declared before a rest element are its complete
+            // exclusion list — same reasoning as `collect_destructure_paths`.
+            let mut declared_keys: Vec<String> = Vec::new();
+            for prop in &obj.properties {
+                if prop.computed {
+                    return false;
+                }
+                let mut child = String::with_capacity(path.len() + 8);
+                child.push_str(path);
+                let key_name = match &prop.key {
+                    PropertyKey::StaticIdentifier(name) => {
+                        child.push('.');
+                        child.push_str(name.name.as_str());
+                        name.name.as_str().to_string()
+                    }
+                    PropertyKey::StringLiteral(s) => {
+                        child.push_str("[\"");
+                        helpers::escape_js_string_into(&mut child, s.value.as_str());
+                        child.push_str("\"]");
+                        s.value.as_str().to_string()
+                    }
+                    _ => return false,
+                };
+                declared_keys.push(key_name);
+                if !collect_binding_destructure_paths(&prop.value, &child, source, resolver, out) {
+                    return false;
+                }
+            }
+            if let Some(rest) = &obj.rest {
+                let BindingPattern::BindingIdentifier(rest_id) = &rest.argument else {
+                    return false; // nested rest target, unsupported
+                };
+                out.push((
+                    rest_id.name.as_str().to_string(),
+                    DestructureAccessor::Rest {
+                        suffix: path.to_string(),
+                        excluded_keys: declared_keys,
+                    },
+                ));
+            }
+            true
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            if arr.rest.is_some() {
+                return false;
+            }
+            for (idx, elem) in arr.elements.iter().enumerate() {
+                let Some(elem_pattern) = elem else {
+                    continue; // elision/hole
+                };
+                let mut child = String::with_capacity(path.len() + 8);
+                child.push_str(path);
+                child.push('[');
+                push_usize(&mut child, idx);
+                child.push(']');
+                if !collect_binding_destructure_paths(elem_pattern, &child, source, resolver, out) {
+                    return false;
+                }
+            }
+            true
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            let BindingPattern::BindingIdentifier(target_id) = &assign.left else {
+                return false; // nested-pattern default, unsupported
+            };
+            let default_span = assign.right.span();
+            let default_text = source
+                .get(default_span.start as usize..default_span.end as usize)
+                .unwrap_or_default();
+            let resolved_default_expr = resolver.resolve_simple_expr(default_text);
+            out.push((
+                target_id.name.as_str().to_string(),
+                DestructureAccessor::Default {
+                    suffix: path.to_string(),
+                    resolved_default_expr,
+                },
+            ));
+            true
+        }
+    }
+}
+
+/// The v-slot scoped-slot destructure leaves, if this `<template
+/// v-slot="…">` wrapper's own param is an object/array PATTERN (never a
+/// bare identifier — official only enters a fresh scope for a pattern; a
+/// bare identifier keeps the pre-existing, already-correct raw-passthrough
+/// behavior) AND every leaf resolves ([`collect_binding_destructure_paths`]
+/// — a computed key or nested-pattern rest/default target bails the whole
+/// element to `None`, same conservative fallback as the v-for value
+/// position).
+fn v_slot_destructure_leaves<'e>(
+    oxc_el: Option<&OxcParsedElement<'e>>,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+) -> Option<Vec<(String, DestructureAccessor)>> {
+    let params = oxc_el?.v_slot.as_ref()?.parsed.params()?;
+    if params.items.len() != 1 {
+        return None;
+    }
+    let pattern = &params.items[0].pattern;
+    if !matches!(
+        pattern,
+        BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_)
+    ) {
+        return None;
+    }
+    let mut out = Vec::new();
+    if collect_binding_destructure_paths(pattern, "", source, resolver, &mut out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 /// Loop-variable rename map for [`BindingResolver::push_for_scope`] —
 /// official `itemVar = _for_item${depth}` + `buildDestructureIdMap` (rc.3).
 /// `param_part` is [`helpers::parse_v_for_expression`]'s first return
 /// (parens stripped); positions are value → key → index
 /// ([`helpers::split_v_for_params`]).
 ///
-/// Only a bare identifier is renamed. Destructures (`{ id }`, `[a, b]`)
-/// stay un-renamed (official path-based `buildDestructureIdMap` is not
-/// implemented). `_` never gets an entry.
-fn build_for_scope_map(param_part: &str, depth: u32) -> rustc_hash::FxHashMap<String, String> {
+/// A bare identifier is always renamed. The VALUE position (index 0) also
+/// renames when it's a destructuring pattern [`destructure_value_paths`]
+/// can fully resolve — each leaf identifier maps to
+/// `_for_item{depth}.value<path>`. Key/index positions stay identifier-only
+/// (official doesn't destructure them). `_` never gets an entry.
+fn build_for_scope_map(
+    param_part: &str,
+    depth: u32,
+    value_pattern: Option<&Expression<'_>>,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+    out: &mut CodeGenOutput<'_>,
+) -> rustc_hash::FxHashMap<String, String> {
     use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
 
     let mut map = rustc_hash::FxHashMap::default();
     let parts = split_v_for_params(param_part);
     let prefixes = ["_for_item", "_for_key", "_for_index"];
-    for (part, prefix) in parts.iter().zip(prefixes.iter()) {
+    for (i, (part, prefix)) in parts.iter().zip(prefixes.iter()).enumerate() {
         let Some(name) = part.map(str::trim) else {
             continue;
         };
-        if name.is_empty() || name == "_" || !is_simple_ident(name) {
+        if name.is_empty() || name == "_" {
             continue;
         }
-        let mut accessor = String::with_capacity(prefix.len() + 10);
-        accessor.push_str(prefix);
-        push_u32(&mut accessor, depth);
-        accessor.push_str(".value");
-        map.insert(name.to_string(), accessor);
+        let mut accessor_base = String::with_capacity(prefix.len() + 10);
+        accessor_base.push_str(prefix);
+        push_u32(&mut accessor_base, depth);
+        accessor_base.push_str(".value");
+
+        if is_simple_ident(name) {
+            map.insert(name.to_string(), accessor_base);
+            continue;
+        }
+        if i == 0 {
+            if let Some(leaves) =
+                value_pattern.and_then(|p| destructure_value_paths(p, source, resolver))
+            {
+                for (leaf_name, accessor) in leaves {
+                    accessor.register_import(out);
+                    map.insert(leaf_name, accessor.render(&accessor_base));
+                }
+            }
+        }
     }
     map
 }
 
-/// Main-closure params: renamed `_for_item{depth}`… for each bare identifier,
-/// contiguous prefix only (no index without a value). A destructured
-/// position stays as authored text — same disclosed gap as
-/// [`build_for_scope_map`].
-fn build_for_callback_params(param_part: &str, depth: u32) -> String {
+/// Main-closure params: renamed `_for_item{depth}`… for each bare
+/// identifier, or for the VALUE position when it's a destructuring pattern
+/// [`destructure_value_paths`] can fully resolve — same eligibility as
+/// [`build_for_scope_map`], computed independently since the two run at
+/// different points in the walk (enter vs. leave). A position this pass
+/// can't destructure stays as authored text (still valid JS).
+fn build_for_callback_params(
+    param_part: &str,
+    depth: u32,
+    value_pattern: Option<&Expression<'_>>,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+) -> String {
     use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
 
     let parts = split_v_for_params(param_part);
     let prefixes = ["_for_item", "_for_key", "_for_index"];
     let mut pieces: Vec<String> = Vec::with_capacity(3);
-    for (part, prefix) in parts.iter().zip(prefixes.iter()) {
+    for (i, (part, prefix)) in parts.iter().zip(prefixes.iter()).enumerate() {
         let Some(name) = part.map(str::trim) else {
             break;
         };
-        if is_simple_ident(name) && name != "_" {
+        let renames = (is_simple_ident(name) && name != "_")
+            || (i == 0
+                && value_pattern
+                    .and_then(|p| destructure_value_paths(p, source, resolver))
+                    .is_some());
+        if renames {
             let mut renamed = String::with_capacity(prefix.len() + 3);
             renamed.push_str(prefix);
             push_u32(&mut renamed, depth);
@@ -436,12 +939,15 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     /// Set for O(1) dedup of delegated events.
     delegated_events_set: FxHashSet<&'alloc str>,
     /// Templates hoisted by structural directives (v-if/v-for closures).
-    /// Each entry is `(template_idx, html, is_static)`. `is_static` is official
-    /// `canUseStaticTemplate()` (no effects/nav/text-extractions/statements).
-    /// A closure template is never the document root (`root` is always false),
-    /// matching official `templateRoot` which never reaches into a
-    /// v-if/v-for/slot-fallback closure.
-    hoisted_templates: Vec<(u32, String, bool)>,
+    /// Each entry is `(template_idx, html, is_static, is_root)`. `is_static`
+    /// is official `canUseStaticTemplate()` (no effects/nav/text-extractions/
+    /// statements). `is_root` mirrors official `isSingleRootChild` — the
+    /// template-wide root bit propagates through v-if/v-else-if/v-else
+    /// branches (never v-for, never a component/slot boundary) exactly when
+    /// the whole chain IS the SFC's sole meaningful top-level construct
+    /// (`self.template_single_root`); every other closure (v-for body,
+    /// slot/fallback/default-slot content) stays `false`.
+    hoisted_templates: Vec<(u32, String, bool, bool)>,
     /// Pending v-if chain being accumulated across sibling elements.
     pending_vif_chain: Option<VIfChain<'alloc>>,
     /// Counter for v-memo cache slot allocation.
@@ -459,6 +965,12 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     /// (rc.3). Verter's bottom-up walker would otherwise consume a child
     /// interpolation id before `leave_element`.
     pending_construct_ref: Vec<Option<u32>>,
+    /// Whether the whole template has exactly one meaningful top-level
+    /// construct (official `hasSingleRootChild`/`isSingleRoot` at the
+    /// template root) — a v-else-if/v-else continuation doesn't count as a
+    /// separate root, mirroring `vdom::VdomCodeGen::single_root`. Computed
+    /// once in `enter_template`, before the walk assigns any node ids.
+    template_single_root: bool,
 }
 
 impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
@@ -488,6 +1000,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             memo_cache_idx: 0,
             if_index_counter: 0,
             pending_construct_ref: Vec::new(),
+            template_single_root: false,
         }
     }
 
@@ -506,15 +1019,55 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// `_createIf()` NO_SCOPE. `anchors` are this closure's own interpolation
     /// anchors, relative to `body`; a nested construct in `child_statements`
     /// keeps its own anchors on that entry, not flattened here.
+    ///
+    /// `is_root`: official `isSingleRootChild` propagated into this closure's
+    /// own hoisted template — `true` only for a v-if/v-else-if/v-else branch
+    /// whose whole chain IS the template's sole meaningful top-level
+    /// construct (`self.template_single_root`); `false` for every other
+    /// caller (v-for body, slot/fallback/default-slot content — a
+    /// component/slot boundary always breaks the propagation).
     fn build_closure_body(
         &mut self,
         mut state: VaporElementState<'alloc>,
         has_dynamic_text: bool,
         indent: &str,
+        is_root: bool,
         out: &mut CodeGenOutput<'alloc>,
     ) -> (String, bool, Vec<SegmentAnchor>) {
         use super::shared::helpers::push_u32;
         let mut anchors: Vec<SegmentAnchor> = Vec::new();
+
+        // A transparent `<template v-if>`/`<template v-for>` wrapper whose
+        // sole meaningful content is itself a structural construct (nested
+        // v-if/v-for/component/slot) owns no DOM container or template of
+        // its own — `merge_into_stack_index` already donated the child's
+        // own ref as `state.node_ref` and its statement as
+        // `state.child_statements`. This scope's body is exactly that
+        // statement, verbatim; no template registration, no `tN()`
+        // instantiation.
+        if state.donated_construct {
+            let node_ref = state
+                .node_ref
+                .expect("donation always sets node_ref before build_closure_body");
+            let is_static = state.own_effects.is_empty()
+                && state.child_effects.is_empty()
+                && state.child_nav.is_empty()
+                && state.child_text_creations.is_empty()
+                && state.text_node_ref.is_none()
+                && state.child_statements.is_empty();
+            let mut body = String::with_capacity(64);
+            for (stmt, stmt_anchors) in &state.child_statements {
+                body.push_str(indent);
+                body.push_str("  ");
+                push_body_with_anchors(&mut body, stmt, stmt_anchors, &mut anchors);
+                body.push('\n');
+            }
+            body.push_str(indent);
+            body.push_str("  return n");
+            push_u32(&mut body, node_ref);
+            body.push('\n');
+            return (body, is_static, anchors);
+        }
 
         // Finalize text parts
         element::finalize_text_parts(&mut state, has_dynamic_text);
@@ -539,8 +1092,12 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             && state.text_node_ref.is_none()
             && state.child_statements.is_empty();
 
-        self.hoisted_templates
-            .push((template_idx, std::mem::take(&mut state.html), is_static));
+        self.hoisted_templates.push((
+            template_idx,
+            std::mem::take(&mut state.html),
+            is_static,
+            is_root,
+        ));
 
         // Allocate inner node ref
         let inner_ref = state.ensure_node_ref(&mut self.counters);
@@ -567,8 +1124,13 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             body.push_str(nav);
             body.push('\n');
         }
-        if !state.child_nav.is_empty() {
+        // `_child`/`_next` are imported per the nav content actually
+        // emitted (see `element::finalize_root_element`'s matching comment)
+        // — a single-dynamic-child closure never calls `_next` at all.
+        if state.child_nav.iter().any(|nav| nav.contains("_child(")) {
             out.add_vapor_import(VaporHelper::Child);
+        }
+        if state.child_nav.iter().any(|nav| nav.contains("_next(")) {
             out.add_vapor_import(VaporHelper::Next);
         }
 
@@ -581,17 +1143,24 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
         // This closure root's own text extraction (e.g. a `{{ expr }}` v-if body).
         // Without `const xN = _txt(nRef)` + Txt/SetText, `_setText(xN, …)` is a
-        // runtime `ReferenceError` — see `element::finalize_root_element`.
-        if let Some(text_ref) = state.text_node_ref {
+        // runtime `ReferenceError` — see `element::finalize_root_element`. A
+        // nav-chain ref (`!text_ref_generated`, mixed-content container) needs
+        // no extraction line: its establishment is already in `child_nav` and
+        // its `_renderEffect` statement is already in `child_statements`
+        // (`resolve_pending_nav_requests`'s `TextRef` arm).
+        let own_text_needs_extraction = state.text_node_ref.is_some() && state.text_ref_generated;
+        if own_text_needs_extraction {
             body.push_str(indent);
             body.push_str("  const x");
-            push_u32(&mut body, text_ref);
+            push_u32(&mut body, state.text_node_ref.expect("checked Some above"));
             body.push_str(" = _txt(n");
             push_u32(&mut body, inner_ref);
             body.push_str(")\n");
         }
-        if !state.child_text_creations.is_empty() || state.text_node_ref.is_some() {
+        if !state.child_text_creations.is_empty() || own_text_needs_extraction {
             out.add_vapor_import(VaporHelper::Txt);
+        }
+        if !state.child_text_creations.is_empty() || state.text_node_ref.is_some() {
             out.add_vapor_import(VaporHelper::SetText);
         }
 
@@ -606,12 +1175,23 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
         // Effects
         if !all_effects.is_empty() {
+            // Official `processRepeatedVariables`: a `_ctx.` read repeated
+            // within this render effect hoists to a local `const` — forces
+            // the braced form even for what would otherwise be a single
+            // concise-arrow effect.
+            let hoisted = repeated_reads::hoist_repeated_ctx_reads(&mut all_effects, out);
             body.push_str(indent);
             body.push_str("  _renderEffect(() => ");
-            if all_effects.len() == 1 {
+            if hoisted.is_empty() && all_effects.len() == 1 {
                 all_effects[0].write_code_into_with_anchors(&mut body, &mut anchors);
             } else {
                 body.push_str("{\n");
+                for (decl_text, decl_anchors) in &hoisted {
+                    body.push_str(indent);
+                    body.push_str("    ");
+                    push_body_with_anchors(&mut body, decl_text, decl_anchors, &mut anchors);
+                    body.push('\n');
+                }
                 for effect in &all_effects {
                     body.push_str(indent);
                     body.push_str("    ");
@@ -657,8 +1237,15 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // construct id + one wasted branch-entry id before branch content (rc.3);
         // leave-time reservation is too late for this bottom-up walker.
         let outer_ref = construct_ref;
+        // Official `isSingleRootChild`: propagates through v-if/v-else-if/
+        // v-else branches (never v-for) exactly when this whole chain is the
+        // template's sole meaningful top-level construct. `self.depth` is
+        // already decremented to this branch element's OWN level (`leave_element`
+        // decrements before dispatching here) — 0 means this branch sits
+        // directly at the template root, not nested inside another element.
+        let is_root = self.template_single_root && self.depth == 0;
         let (body, is_static, body_anchors) =
-            self.build_closure_body(state, has_dynamic_text, "  ", out);
+            self.build_closure_body(state, has_dynamic_text, "  ", is_root, out);
 
         match cond.kind {
             ElementNodeConditionKind::If => {
@@ -782,6 +1369,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             text_creations: Vec::new(),
             effects: Vec::new(),
             own_text_ref: None,
+            own_text_ref_generated: true,
             statements: vec![(out.alloc_str(&stmt), out.alloc_segment_anchors(&anchors))],
             v_once: false,
             v_memo_expr: None,
@@ -923,6 +1511,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         &mut self,
         id: NodeId,
         el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         state: VaporElementState<'alloc>,
         has_dynamic_text: bool,
@@ -949,6 +1538,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 text_creations: Vec::new(),
                 effects: Vec::new(),
                 own_text_ref: None,
+                own_text_ref_generated: true,
                 statements: Vec::new(),
                 v_once: false,
                 v_memo_expr: None,
@@ -961,7 +1551,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // No mapped interpolation anchor sits inside a v-for closure today;
         // returned anchors are discarded.
         let (closure_body, _is_static, _closure_body_anchors) =
-            self.build_closure_body(state, has_dynamic_text, "  ", out);
+            self.build_closure_body(state, has_dynamic_text, "  ", false, out);
 
         // Extract :key expression if present
         let key_expr = self.extract_key_expr(el, source);
@@ -971,7 +1561,14 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // Main-closure params use renamed `_for_item{depth}`… (`itemVar`/`keyVar`/
         // `indexVar`). `for_scope_depth` here already matches this v-for's enter
         // depth (pop runs in `leave_element` before this function).
-        let for_callback_params = build_for_callback_params(param_part, self.for_scope_depth);
+        let value_pattern = v_for_value_pattern(oxc_el);
+        let for_callback_params = build_for_callback_params(
+            param_part,
+            self.for_scope_depth,
+            value_pattern,
+            source,
+            &self.resolver,
+        );
         let mut stmt = String::with_capacity(256);
         stmt.push_str("const n");
         push_u32(&mut stmt, outer_ref);
@@ -1019,6 +1616,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             text_creations: Vec::new(),
             effects: Vec::new(),
             own_text_ref: None,
+            own_text_ref_generated: true,
             statements: vec![(out.alloc_str(&stmt), &[])],
             v_once: false,
             v_memo_expr: None,
@@ -1162,6 +1760,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         &mut self,
         id: NodeId,
         root: VaporRootElement<'alloc>,
+        kind: MergedConstructKind,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
     ) {
@@ -1170,7 +1769,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let Some(parent_index) = self.element_stack.len().checked_sub(1) else {
             return;
         };
-        self.merge_into_stack_index(parent_index, id, root, source, out);
+        self.merge_into_stack_index(parent_index, id, root, kind, source, out);
     }
 
     /// Merge a finished v-if chain into its true DOM parent —
@@ -1189,7 +1788,17 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
     ) {
-        self.merge_into_stack_index(target_index, id, root, source, out);
+        // A v-if/v-else chain is never NON_STABLE-forwarding-eligible
+        // (official `markSlotRootIf` is a distinct, unimplemented branch —
+        // out of this pass's scope).
+        self.merge_into_stack_index(
+            target_index,
+            id,
+            root,
+            MergedConstructKind::Other,
+            source,
+            out,
+        );
     }
 
     /// Shared merge body; callers differ only in which `element_stack` index
@@ -1199,6 +1808,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         target_index: usize,
         id: NodeId,
         root: VaporRootElement<'alloc>,
+        kind: MergedConstructKind,
         source: &'alloc str,
         _out: &mut CodeGenOutput<'alloc>,
     ) {
@@ -1207,7 +1817,47 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             .get_mut(target_index)
             .map(|parent| parent.observe_dom_element())
             .unwrap_or(0);
-        let has_following = self.has_following_sibling(id, source);
+        let has_following = self.has_following_template_contributing_sibling(id, source);
+
+        // A transparent `<template v-if>`/`<template v-for>` target
+        // (`is_transparent_wrapper`) owns no DOM container to
+        // `_setInsertionState`/`_child`/`_next` into — official Vue never
+        // builds one either. When this merged construct is the target's
+        // SOLE meaningful content (`dom_child_index == 0 && !has_following`,
+        // nothing donated yet), donate it directly: the construct's own
+        // statement already declares and returns its ref, so that ref
+        // simply BECOMES the target's own `node_ref` and the statement
+        // becomes the target's own body — no nav, no insertion state, no
+        // second template. A non-sole structural child under a transparent
+        // wrapper (a mixed-sibling multi-root `<template v-if>`) is a
+        // distinct, larger feature (official's `TRUE_MULTI_ROOT` array
+        // return) and stays on the nav-based path below, which requires a
+        // container this wrapper doesn't have — not yet supported.
+        let donate = dom_child_index == 0
+            && !has_following
+            && self
+                .element_stack
+                .get(target_index)
+                .is_some_and(|parent| parent.is_transparent_wrapper && parent.node_ref.is_none());
+        if donate {
+            if let Some(parent) = self.element_stack.get_mut(target_index) {
+                parent.merged_construct_kinds.push((kind, root.node_ref));
+                parent.node_ref = Some(root.node_ref);
+                parent.donated_construct = true;
+                parent.child_nav.extend(root.nav);
+                parent.child_text_creations.extend(root.text_creations);
+                parent.child_effects.extend(root.effects);
+                if root.own_text_ref.is_some() {
+                    parent.text_node_ref = root.own_text_ref;
+                    parent.text_ref_generated = root.own_text_ref_generated;
+                }
+                for stmt in root.statements {
+                    parent.child_statements.push(stmt);
+                }
+            }
+            return;
+        }
+
         // `<!>` is meant to land at this construct's DFS position. Direct callers
         // (component/slot/element) run inside their own `leave_element`, before
         // later sibling markup. A v-if chain flushed after a following PLAIN
@@ -1222,6 +1872,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // Reserve TEXT SLOTS at this DFS position; NUMBERS are filled later,
         // once the whole parent scope's children have been visited.
         if let Some(parent) = self.element_stack.get_mut(target_index) {
+            parent.merged_construct_kinds.push((kind, root.node_ref));
             let nav_slot = if has_following {
                 let idx = parent.child_nav.len();
                 parent.child_nav.push("");
@@ -1349,14 +2000,85 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         out,
                     );
                 }
+                PendingNavRequest::TextRef {
+                    own_ref,
+                    nav_slot,
+                    stmt_slot,
+                } => {
+                    let container_ref = state.ensure_node_ref(&mut self.counters);
+                    self.emit_chained_nav(
+                        own_ref,
+                        container_ref,
+                        &mut chain,
+                        &mut state.child_nav,
+                        nav_slot,
+                        out,
+                    );
+                    self.emit_interleaved_text_effect(own_ref, state, stmt_slot, out);
+                }
             }
         }
     }
 
-    /// Whether `id` has a semantically-relevant following sibling. If so,
-    /// dynamic content needs a `<!>` anchor; otherwise it can append.
-    /// Whitespace-only text is not relevant.
-    fn has_following_sibling(&self, id: NodeId, source: &str) -> bool {
+    /// Build this text run's `_renderEffect(...)` statement and write it
+    /// into its reserved `child_statements` slot — official interleaves it
+    /// at the run's own DFS position (`flushBeforeDynamic`) instead of
+    /// deferring it to the block's aggregated effect list. Mirrors
+    /// `build_closure_body`'s concise-vs-braced choice (single effect, no
+    /// hoisted repeated `_ctx.` reads → concise arrow).
+    fn emit_interleaved_text_effect(
+        &mut self,
+        own_ref: u32,
+        state: &mut VaporElementState<'alloc>,
+        stmt_slot: usize,
+        out: &mut CodeGenOutput<'alloc>,
+    ) {
+        let parts = std::mem::take(&mut state.text_parts);
+        let mut effects = vec![VaporEffect::SetText {
+            text_ref: own_ref,
+            parts,
+            generated: false,
+        }];
+        let hoisted = repeated_reads::hoist_repeated_ctx_reads(&mut effects, out);
+
+        let mut stmt = String::with_capacity(64);
+        let mut stmt_anchors: Vec<SegmentAnchor> = Vec::new();
+        stmt.push_str("_renderEffect(() => ");
+        if hoisted.is_empty() {
+            effects[0].write_code_into_with_anchors(&mut stmt, &mut stmt_anchors);
+        } else {
+            stmt.push_str("{\n");
+            for (decl_text, decl_anchors) in &hoisted {
+                stmt.push_str("    ");
+                push_body_with_anchors(&mut stmt, decl_text, decl_anchors, &mut stmt_anchors);
+                stmt.push('\n');
+            }
+            for effect in &effects {
+                stmt.push_str("    ");
+                effect.write_code_into_with_anchors(&mut stmt, &mut stmt_anchors);
+                stmt.push('\n');
+            }
+            stmt.push_str("  }");
+        }
+        stmt.push(')');
+        out.add_vapor_import(VaporHelper::RenderEffect);
+        state.child_statements[stmt_slot] = (
+            out.alloc_str(&stmt),
+            out.alloc_segment_anchors(&stmt_anchors),
+        );
+    }
+
+    /// Official `processDynamicChildren`'s "reusable `p*` cursor" rule: a
+    /// dynamic child (component/slot outlet/v-if/v-for) needs a REAL `<!>`
+    /// comment anchor + chained nav only when a TEMPLATE-CONTRIBUTING
+    /// sibling — plain static markup, a text/interpolation run, or a
+    /// rendered comment — still follows it. Another dynamic construct
+    /// contributes no template content of its own, so it doesn't count:
+    /// once nothing template-contributing remains, every further dynamic
+    /// child is a bare numeric `_setInsertionState(container, index)` with
+    /// no comment marker at all (`lastTemplateIndex` in the official
+    /// source — every dynamic child at or after it skips the anchor).
+    fn has_following_template_contributing_sibling(&self, id: NodeId, source: &str) -> bool {
         let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
             return false;
         };
@@ -1371,9 +2093,68 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let Some(pos) = siblings.iter().position(|s| s.0 == id.0) else {
             return false;
         };
-        siblings[pos + 1..]
-            .iter()
-            .any(|&sib| self.is_meaningful_sibling(sib, source))
+        siblings[pos + 1..].iter().any(|&sib| {
+            self.is_meaningful_sibling(sib, source) && self.is_template_contributing(sib)
+        })
+    }
+
+    /// Whether a sibling writes directly into the parent's own static
+    /// template — a plain element with no `v-if`/`v-for`, a rendered
+    /// comment, or text/interpolation. A component, slot outlet, `<template
+    /// v-slot>`, or any `v-if`/`v-for`-wrapped element never contributes to
+    /// the parent's template (it always renders through the block/
+    /// insertion-state mechanism instead), so it does not count.
+    fn is_template_contributing(&self, id: NodeId) -> bool {
+        match &self.ast.nodes[id.0].kind {
+            AstNodeKind::Element(el) => {
+                el.v_condition.is_none() && el.v_for.is_none() && el.tag_type == TagType::Element
+            }
+            AstNodeKind::Text(_) | AstNodeKind::Interpolation(_) => true,
+            AstNodeKind::Comment(_) => self.options.comments,
+        }
+    }
+
+    /// Whether AST node `id` is an Element or a Comment — vdom
+    /// `element::is_element_or_comment`'s own whitespace-condense check,
+    /// mirrored here for vapor's streaming walk (vdom builds a full
+    /// `Vec<ChildRecord>` first and resolves whitespace in one pass; vapor
+    /// visits one child at a time, so `visit_text` asks per-node instead).
+    fn is_element_or_comment(&self, id: NodeId) -> bool {
+        matches!(
+            self.ast.nodes[id.0].kind,
+            AstNodeKind::Element(_) | AstNodeKind::Comment(_)
+        )
+    }
+
+    /// Official `condenseWhitespace`: an INTERIOR whitespace-only text node
+    /// containing a newline is dropped only when BOTH neighbors are
+    /// element/comment; otherwise it collapses to a single space instead of
+    /// vanishing (e.g. between a `<slot>` and a following interpolation —
+    /// `components/child-comp.vue`'s `</slot>\n{{ label }}`). A LEADING or
+    /// TRAILING whitespace-newline (no previous/next sibling) is always
+    /// dropped, matching vdom `resolve_whitespace`'s separate leading/
+    /// trailing trim step (mirrored here, not shared — see
+    /// `is_element_or_comment`'s doc).
+    fn whitespace_newline_collapses_to_space(&self, id: NodeId) -> bool {
+        let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
+            return false;
+        };
+        let siblings: &[NodeId] = match &self.ast.nodes[parent_id.0].kind {
+            AstNodeKind::Element(el) => el
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]),
+            _ => return false,
+        };
+        let Some(pos) = siblings.iter().position(|s| s.0 == id.0) else {
+            return false;
+        };
+        if pos == 0 || pos + 1 == siblings.len() {
+            return false;
+        }
+        !(self.is_element_or_comment(siblings[pos - 1])
+            && self.is_element_or_comment(siblings[pos + 1]))
     }
 
     /// Whether an AST child renders a DOM node (skip whitespace-only text).
@@ -1385,6 +2166,31 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             AstNodeKind::Comment(_) => self.options.comments,
             _ => true,
         }
+    }
+
+    /// Whether `id` is the ONLY meaningful child of its parent (any kind of
+    /// parent) — unlike [`Self::v_for_is_only_child`], not restricted to a
+    /// plain-element parent. Used to gate the "this plain element IS its
+    /// component-scope parent's own root" merge: a parent with more than one
+    /// meaningful child is a different (unimplemented) multi-root-slot
+    /// shape, not this narrow single-child case.
+    fn is_sole_meaningful_child(&self, id: NodeId, source: &str) -> bool {
+        let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
+            return false;
+        };
+        let siblings: &[NodeId] = match &self.ast.nodes[parent_id.0].kind {
+            AstNodeKind::Element(el) => el
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]),
+            _ => return false,
+        };
+        siblings
+            .iter()
+            .filter(|&&sib| self.is_meaningful_sibling(sib, source))
+            .count()
+            == 1
     }
 
     /// Official FAST_REMOVE source: `isOnlyChild = parent &&
@@ -1430,11 +2236,29 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         tag_name: &str,
         node_ref: u32,
         source: &'alloc str,
-        mut state: VaporElementState<'alloc>,
+        state: VaporElementState<'alloc>,
         oxc_el: Option<&OxcParsedElement<'alloc>>,
         out: &mut CodeGenOutput<'alloc>,
     ) -> VaporRootElement<'alloc> {
         use super::shared::helpers::{is_builtin_component, push_u32, to_pascal_case};
+
+        // `<component :is="expr">` — official Vapor routes this through
+        // `_createDynamicComponent(() => (expr), props, slots)`, a
+        // dedicated helper distinct from `_createComponent`'s
+        // statically-resolved-reference path below. Detected FIRST since
+        // `component` is never itself a direct/PascalCase/built-in binding.
+        let dynamic_is = resolve_vapor_dynamic_component(
+            el,
+            tag_name,
+            source,
+            oxc_el,
+            &self.resolver,
+            self.options.force_js,
+        );
+        if let Some((is_expr, _is_prop_idx)) = dynamic_is {
+            return self
+                .build_dynamic_component_root(el, is_expr, node_ref, source, state, oxc_el, out);
+        }
 
         // Resolve the component reference.
         // Priority: 1) direct binding, 2) PascalCase binding, 3) built-in, 4) _resolveComponent
@@ -1458,10 +2282,25 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 s.push_str(&pascal);
                 s.push_str(suffix);
                 (None, out.alloc_str(&s))
+            } else if matches!(tag_name, "Teleport" | "teleport")
+                || matches!(pascal.as_str(), "Teleport")
+            {
+                // Vapor has its OWN Teleport/KeepAlive runtime components —
+                // `_VaporTeleport`/`_VaporKeepAlive`, imported from `"vue"`
+                // like any other Vapor helper, never the VDOM `_Teleport`/
+                // `_KeepAlive` names `is_builtin_component` returns.
+                out.add_vapor_import(VaporHelper::VaporTeleport);
+                (None, VaporHelper::VaporTeleport.name())
+            } else if matches!(tag_name, "KeepAlive" | "keep-alive")
+                || matches!(pascal.as_str(), "KeepAlive")
+            {
+                out.add_vapor_import(VaporHelper::VaporKeepAlive);
+                (None, VaporHelper::VaporKeepAlive.name())
             } else if let Some((flag, helper_name)) =
                 is_builtin_component(tag_name).or_else(|| is_builtin_component(&pascal))
             {
-                // Vue built-in component (Transition, KeepAlive, Teleport, Suspense)
+                // Other Vue built-ins (Transition, Suspense, …) — not yet
+                // ported to Vapor-specific names; unchanged for now.
                 out.add_builtin_component(flag);
                 (None, out.alloc_str(helper_name))
             } else {
@@ -1491,69 +2330,34 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         };
 
         // Build component props object
-        let props_str = self.build_component_props(el, source, oxc_el, out);
+        let props_str = self.build_component_props(el, source, oxc_el, false, out);
 
         // Build slot closures from children
-        let named_slots = std::mem::take(&mut state.named_slots);
-        let has_default_content = !state.html.is_empty()
-            || !state.child_nav.is_empty()
-            || !state.child_effects.is_empty()
-            || !state.child_statements.is_empty()
-            || !state.child_text_creations.is_empty();
-
-        let slots_str = if !named_slots.is_empty() {
-            // Has named slots (and possibly an implicit default slot)
-            let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
-            let mut result = String::with_capacity(256);
-            result.push_str("{ ");
-            for (i, entry) in named_slots.iter().enumerate() {
-                if i > 0 {
-                    result.push_str(", ");
-                }
-                result.push_str(entry);
-            }
-            if has_default_content {
-                // Implicit default slot from non-template children. No mapped
-                // interpolation anchor in a slot-fallback closure today.
-                let (body, _is_static, _body_anchors) =
-                    self.build_closure_body(state, has_dynamic_text, "    ", out);
-                if !named_slots.is_empty() {
-                    result.push_str(", ");
-                }
-                result.push_str("default: () => {\n");
-                result.push_str(&body);
-                result.push_str("    }");
-            }
-            result.push_str(", _: 2 }");
-            Some(result)
-        } else if has_default_content {
-            Some(self.build_default_slot_closure(state, el, out))
-        } else {
-            None
-        };
+        let raw_children = super::shared::helpers::is_raw_children_builtin(tag_name);
+        let slots_str = self.build_component_slots(state, el, raw_children, out);
 
         let mut create_line = String::with_capacity(128);
         create_line.push_str("const n");
         push_u32(&mut create_line, node_ref);
-        create_line.push_str(" = _createComponentWithFallback(");
+        create_line.push_str(" = _createComponent(");
         create_line.push_str(comp_ref);
-
-        if props_str.is_some() || slots_str.is_some() {
-            create_line.push_str(", ");
-            if let Some(props) = &props_str {
-                create_line.push_str(props);
-            } else {
-                create_line.push_str("null");
-            }
-            if let Some(slots) = &slots_str {
-                create_line.push_str(", ");
-                create_line.push_str(slots);
-            }
+        create_line.push_str(", ");
+        if let Some(props) = &props_str {
+            create_line.push_str(props);
         } else {
-            create_line.push_str(", null, null, true");
+            create_line.push_str("null");
         }
-        create_line.push(')');
-        out.add_vapor_import(VaporHelper::CreateComponentWithFallback);
+        create_line.push_str(", ");
+        if let Some(slots) = &slots_str {
+            create_line.push_str(slots);
+        } else {
+            create_line.push_str("null");
+        }
+        // Trailing `true` — official Vue's `isSingleRoot` marker, present
+        // on every statically-resolved `_createComponent(...)` call
+        // observed (with or without props/slots).
+        create_line.push_str(", true)");
+        out.add_vapor_import(VaporHelper::CreateComponent);
 
         let mut statements = Vec::new();
         if let Some(resolve) = resolve_line {
@@ -1569,7 +2373,220 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             text_creations: Vec::new(),
             effects: Vec::new(),
             own_text_ref: None,
+            own_text_ref_generated: true,
             statements,
+            v_once: false,
+            v_memo_expr: None,
+        }
+    }
+
+    /// Build a component's slot closures from its accumulated child state
+    /// (named `<template #x>` entries plus any implicit default content).
+    /// Shared by [`Self::build_component_root`] (statically-resolved
+    /// components) and [`Self::build_dynamic_component_root`]
+    /// (`<component :is>`) — identical slot shape either way.
+    /// `raw_children`: true for Teleport/KeepAlive (`is_raw_children_builtin`)
+    /// — official Vapor passes their default content as a BARE `() => {
+    /// ... }` closure, never the `{ default: ..., _: 2 }` slot-object form
+    /// normal components use. Only applies to the no-named-slots case
+    /// (Teleport/KeepAlive don't take named slots).
+    fn build_component_slots(
+        &mut self,
+        mut state: VaporElementState<'alloc>,
+        el: &ElementNode,
+        raw_children: bool,
+        out: &mut CodeGenOutput<'alloc>,
+    ) -> Option<String> {
+        let named_slots = std::mem::take(&mut state.named_slots);
+
+        // Official `hasStableSlotRoot`/`markSlotRootOperations`: an implicit
+        // default slot whose ENTIRE content is one non-stable construct (a
+        // bare `<slot>` forward or a `<component :is>`, with no static HTML
+        // at all) forwards through `_extend(() => {...}, { _: 8 /*
+        // NON_STABLE */ })` directly as the slots argument — ahead of both
+        // the raw-children (Teleport/KeepAlive) and named-slots forms below.
+        if named_slots.is_empty() {
+            if let Some(non_stable) = self.try_build_non_stable_slot_root(&mut state, out) {
+                return Some(non_stable);
+            }
+        }
+
+        let has_default_content = !state.html.is_empty()
+            || !state.child_nav.is_empty()
+            || !state.child_effects.is_empty()
+            || !state.child_statements.is_empty()
+            || !state.child_text_creations.is_empty();
+
+        if raw_children && named_slots.is_empty() {
+            return has_default_content.then(|| self.build_raw_children_closure(state, el, out));
+        }
+
+        if !named_slots.is_empty() {
+            // Has named slots (and possibly an implicit default slot)
+            let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+            let mut result = String::with_capacity(256);
+            result.push_str("{ ");
+            for (i, entry) in named_slots.iter().enumerate() {
+                if i > 0 {
+                    result.push_str(", ");
+                }
+                result.push_str(entry);
+            }
+            if has_default_content {
+                // Implicit default slot from non-template children. No mapped
+                // interpolation anchor in a slot-fallback closure today.
+                let (body, _is_static, _body_anchors) =
+                    self.build_closure_body(state, has_dynamic_text, "    ", false, out);
+                if !named_slots.is_empty() {
+                    result.push_str(", ");
+                }
+                result.push_str("\"default\": () => {\n");
+                result.push_str(&body);
+                result.push_str("    }");
+            }
+            result.push_str(" }");
+            Some(result)
+        } else if has_default_content {
+            Some(self.build_default_slot_closure(state, el, out))
+        } else {
+            None
+        }
+    }
+
+    /// Official `hasStableSlotRoot`/`markSlotRootOperations`, restricted to
+    /// the narrow shape this backend can positively confirm: the implicit
+    /// default slot's ENTIRE content is a single merged
+    /// `SlotOutlet`/`DynamicComponent` construct, no static HTML, no other
+    /// nav/effects/text extraction. That is never a "stable" root (a bare
+    /// `<slot>` forward has no template of its own; a dynamic `<component
+    /// :is>` isn't statically resolved), so it forwards as `_extend(() => {
+    /// ...; return n{ref} }, { _: 8 /* NON_STABLE */ })` — the merged
+    /// construct's OWN statements verbatim, no synthetic empty template and
+    /// no `_setInsertionState` (there is no real DOM container to insert
+    /// into). Returns `None` when the shape doesn't match; the caller falls
+    /// through to its normal path.
+    fn try_build_non_stable_slot_root(
+        &mut self,
+        state: &mut VaporElementState<'alloc>,
+        out: &mut CodeGenOutput<'alloc>,
+    ) -> Option<String> {
+        use super::shared::helpers::push_u32;
+
+        if !state.html.is_empty()
+            || state.merged_construct_kinds.len() != 1
+            || !state.child_nav.is_empty()
+            || !state.child_effects.is_empty()
+            || !state.child_text_creations.is_empty()
+        {
+            return None;
+        }
+        let (kind, child_ref) = state.merged_construct_kinds[0];
+        if !matches!(
+            kind,
+            MergedConstructKind::SlotOutlet | MergedConstructKind::DynamicComponent
+        ) {
+            return None;
+        }
+
+        out.add_vapor_import(VaporHelper::Extend);
+        let mut result = String::with_capacity(128);
+        result.push_str("_extend(() => {\n");
+        for (stmt, _anchors) in &state.child_statements {
+            // The merge's reserved placeholder slot — a real DOM container's
+            // `_setInsertionState(...)` this path never needs, so it was
+            // never resolved.
+            if stmt.is_empty() {
+                continue;
+            }
+            result.push_str("    ");
+            result.push_str(stmt);
+            result.push('\n');
+        }
+        result.push_str("    return n");
+        push_u32(&mut result, child_ref);
+        result.push('\n');
+        result.push_str("  }, { _: 8 /* NON_STABLE */ })");
+        Some(result)
+    }
+
+    /// Build a `<component :is="expr">` root: `_createDynamicComponent(()
+    /// => (expr), props, slots)`. Distinct helper from
+    /// [`Self::build_component_root`]'s statically-resolved
+    /// `_createComponent(...)` path — official Vapor never resolves a
+    /// dynamic tag through `_resolveComponent`/a direct binding lookup.
+    #[allow(clippy::too_many_arguments)]
+    fn build_dynamic_component_root(
+        &mut self,
+        el: &ElementNode,
+        is_expr: String,
+        node_ref: u32,
+        source: &'alloc str,
+        state: VaporElementState<'alloc>,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+        out: &mut CodeGenOutput<'alloc>,
+    ) -> VaporRootElement<'alloc> {
+        use super::shared::helpers::push_u32;
+
+        // This construct's OWN parent is still on the stack — `leave_element`
+        // pops this element's entry before calling here.
+        let is_sole_template_root = self.template_single_root && self.depth == 0;
+        let is_slot_content_root = self
+            .element_stack
+            .last()
+            .is_some_and(|parent| parent.is_component_scope);
+        let props_str = self.build_component_props(el, source, oxc_el, true, out);
+        let slots_str = self.build_component_slots(state, el, false, out);
+
+        let mut create_line = String::with_capacity(128);
+        create_line.push_str("const n");
+        push_u32(&mut create_line, node_ref);
+        create_line.push_str(" = _createDynamicComponent(() => (");
+        create_line.push_str(&is_expr);
+        create_line.push_str("), ");
+        if let Some(props) = &props_str {
+            create_line.push_str(props);
+        } else {
+            create_line.push_str("null");
+        }
+        create_line.push_str(", ");
+        if let Some(slots) = &slots_str {
+            create_line.push_str(slots);
+        } else {
+            create_line.push_str("null");
+        }
+        // Trailing block-topology flag: the sole template root gets
+        // SINGLE_ROOT (1); a dynamic component nested inside another
+        // component's slot content gets SLOT_ROOT (4) — verified against
+        // `components/component-is` (root) and `built-ins/keep-alive`'s
+        // inner dynamic child (slot content). A dynamic component that is
+        // neither (e.g. one sibling of a multi-root template) gets no
+        // trailing flag at all — verified against `components/dynamic-multi-root`.
+        if is_sole_template_root {
+            if self.options.is_production {
+                create_line.push_str(", 1");
+            } else {
+                create_line.push_str(", 1 /* SINGLE_ROOT */");
+            }
+        } else if is_slot_content_root {
+            if self.options.is_production {
+                create_line.push_str(", 4");
+            } else {
+                create_line.push_str(", 4 /* SLOT_ROOT */");
+            }
+        }
+        create_line.push(')');
+        out.add_vapor_import(VaporHelper::CreateDynamicComponent);
+
+        VaporRootElement {
+            html: String::new(),
+            template_idx: None,
+            node_ref,
+            nav: Vec::new(),
+            text_creations: Vec::new(),
+            effects: Vec::new(),
+            own_text_ref: None,
+            own_text_ref_generated: true,
+            statements: vec![(out.alloc_str(&create_line), &[] as &[SegmentAnchor])],
             v_once: false,
             v_memo_expr: None,
         }
@@ -1587,12 +2604,32 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
         // No mapped interpolation anchor in a default-slot closure today.
         let (body, _is_static, _body_anchors) =
-            self.build_closure_body(state, has_dynamic_text, "    ", out);
+            self.build_closure_body(state, has_dynamic_text, "    ", false, out);
 
         let mut result = String::with_capacity(128);
         result.push_str("{ default: () => {\n");
         result.push_str(&body);
         result.push_str("    }, _: 2 }");
+        result
+    }
+
+    /// Build the bare `() => { ...; return n0 }` closure Teleport/KeepAlive
+    /// take for their default content — no `{ default: ..., _: 2 }` slot
+    /// object, see `build_component_slots`'s `raw_children` doc comment.
+    fn build_raw_children_closure(
+        &mut self,
+        state: VaporElementState<'alloc>,
+        el: &ElementNode,
+        out: &mut CodeGenOutput<'alloc>,
+    ) -> String {
+        let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+        let (body, _is_static, _body_anchors) =
+            self.build_closure_body(state, has_dynamic_text, "  ", false, out);
+
+        let mut result = String::with_capacity(128);
+        result.push_str("() => {\n");
+        result.push_str(&body);
+        result.push('}');
         result
     }
 
@@ -1607,6 +2644,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         el: &ElementNode,
         source: &'alloc str,
         oxc_el: Option<&OxcParsedElement<'alloc>>,
+        skip_is: bool,
         _out: &mut CodeGenOutput<'alloc>,
     ) -> Option<String> {
         if el.props.is_empty() {
@@ -1693,18 +2731,32 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     if attr_name == "key" {
                         continue; // :key handled separately
                     }
+                    if attr_name == "is" && skip_is {
+                        continue; // <component :is> — consumed by the dynamic-component resolver, not a prop
+                    }
                     let mut entry = String::with_capacity(32);
                     push_prop_key(&mut entry, attr_name);
-                    entry.push_str(": () => (");
+                    entry.push_str(": ");
                     let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
-                    entry.push_str(&resolve_expr(
-                        value,
-                        vs,
-                        oxc_exp,
-                        &self.resolver,
-                        self.options.force_js,
-                    ));
-                    entry.push(')');
+                    let resolved =
+                        resolve_expr(value, vs, oxc_exp, &self.resolver, self.options.force_js);
+                    // A pure-literal value (`:count="3"`) is constant — no
+                    // reactive re-evaluation is ever needed, so official
+                    // Vue emits the bare value rather than a `() => (...)`
+                    // lazy getter (verified against the real compiler).
+                    let is_pure_literal = oxc_exp.is_some_and(|e| {
+                        e.dynamism == Dynamism::Static
+                            && e.bindings
+                                .as_ref()
+                                .is_some_and(|b| b.non_ignored_binding_names().is_empty())
+                    });
+                    if is_pure_literal {
+                        entry.push_str(&resolved);
+                    } else {
+                        entry.push_str("() => (");
+                        entry.push_str(&resolved);
+                        entry.push(')');
+                    }
                     entries.push(entry);
                 }
             } else {
@@ -1747,6 +2799,118 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         Some(result)
     }
 
+    /// Named `:prop="expr"` / static-attribute slot-outlet props — official
+    /// `genRawProps`/`genProp` (rc.3 `generators/slotOutlet.ts` +
+    /// `generators/props.ts`, confirmed against the vendored dist): a
+    /// compile-time-constant value (string/number/boolean/`null`/
+    /// `undefined` literal, or a static HTML attribute — always a source
+    /// literal) is emitted directly; anything else — including a bare
+    /// identifier reference like `count` — wraps in a getter (`() => (…)`)
+    /// to preserve lazy/reactive access on read.
+    ///
+    /// A `v-bind` spread and a dynamic key (`:[key]="val"`) are OUT OF
+    /// SCOPE and CONFIRMED WRONG, not merely non-conformant — official
+    /// routes ALL of static/dynamic-key/spread props through one shared
+    /// `{ $: [fn, ...] }` merge-array form (`genRawProps`'s
+    /// `PropsExpression::MergeExpression`, confirmed against the vendored
+    /// dist and directly probed against the pinned oracle); this function
+    /// builds only the flat-object form:
+    /// - `v-bind="expr"` (spread, no arg): the loop `continue`s before
+    ///   contributing anything — the spread source is SILENTLY DROPPED.
+    ///   `<slot v-bind="extra">` with `extra` the ONLY prop compiles to a
+    ///   bare `_createSlot()` — `extra`'s data never reaches the slot at
+    ///   all (confirmed via `scoped_slot_outlet_spread_is_silently_dropped`,
+    ///   the same "prop silently vanishes" class the `<slot :total="count">`
+    ///   fix elsewhere in this module closed once already).
+    /// - `:[key]="val"` (dynamic key): `arg_start`/`arg_end` span the RAW
+    ///   bracketed text (`"[key]"`), which this function then emits as a
+    ///   literal STATIC prop key — a bogus prop named `"[key]"`, not the
+    ///   intended runtime-computed key (confirmed via
+    ///   `scoped_slot_outlet_dynamic_key_emits_wrong_literal_key`).
+    ///
+    /// Closing either needs the shared `$:` merge-array mechanism — a
+    /// materially separate, larger feature (interleaving static/dynamic-key/
+    /// spread sources in official's exact merge order), not a quick fix; a
+    /// naive one-off spread (`{ ...expr }`) would trade this bug for a
+    /// different one (losing the getter-wrapped lazy/reactive read official's
+    /// form preserves). `v-model` on a `<slot>` outlet is not a construct
+    /// Vue templates author (no fixture exercises it either).
+    /// Returns `None` when no named prop is present.
+    fn build_slot_outlet_props(
+        &self,
+        el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> Option<String> {
+        let mut buf = String::new();
+        let mut count = 0usize;
+        for (prop_idx, prop) in el.props.iter().enumerate() {
+            if !prop.is_directive {
+                let name = &source[prop.start as usize..prop.name_end as usize];
+                if name == "name" {
+                    continue;
+                }
+                if count > 0 {
+                    buf.push_str(", ");
+                }
+                push_prop_key(&mut buf, name);
+                buf.push_str(": ");
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    buf.push('"');
+                    helpers::escape_js_string_into(&mut buf, &source[vs as usize..ve as usize]);
+                    buf.push('"');
+                } else {
+                    buf.push_str("true");
+                }
+                count += 1;
+                continue;
+            }
+
+            let dname = &source[prop.start as usize..prop.name_end as usize];
+            if !super::vdom::is_v_bind(dname) {
+                continue;
+            }
+            let Some((as_, ae)) = prop.arg_start.zip(prop.arg_end) else {
+                continue; // bare `v-bind="expr"` spread — unsupported here
+            };
+            let arg = &source[as_ as usize..ae as usize];
+            if arg == "name" {
+                continue;
+            }
+            if count > 0 {
+                buf.push_str(", ");
+            }
+            let key = super::vdom::props::camelize(arg);
+            push_prop_key(&mut buf, &key);
+            buf.push_str(": ");
+            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                let raw = &source[vs as usize..ve as usize];
+                let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                let resolved =
+                    resolve_expr(raw, vs, oxc_exp, &self.resolver, self.options.force_js);
+                if is_direct_constant_expr(raw.trim()) {
+                    buf.push_str(&resolved);
+                } else {
+                    buf.push_str("() => (");
+                    buf.push_str(&resolved);
+                    buf.push(')');
+                }
+            } else {
+                // Same-name shorthand: `:total` → `total: () => (resolved)`
+                let resolved = self.resolver.resolve_simple_expr(&key);
+                buf.push_str("() => (");
+                buf.push_str(&resolved);
+                buf.push(')');
+            }
+            count += 1;
+        }
+        if count == 0 {
+            None
+        } else {
+            Some(format!("{{ {buf} }}"))
+        }
+    }
+
     /// `_createSlot(name, props, fallback)`, trailing default-valued args
     /// omitted (rc.3 `slots.vue`: named + fallback emits all three; bare
     /// `<slot />` emits `_createSlot()`).
@@ -1757,6 +2921,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     fn build_slot_outlet_root(
         &mut self,
         el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
         node_ref: u32,
         mut state: VaporElementState<'alloc>,
@@ -1794,7 +2959,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             state.node_ref = None;
             // No mapped interpolation anchor in a slot-fallback closure today.
             let (body, _is_static, _body_anchors) =
-                self.build_closure_body(state, has_dynamic_text, "  ", out);
+                self.build_closure_body(state, has_dynamic_text, "  ", false, out);
             let mut closure = String::with_capacity(64 + body.len());
             closure.push_str("() => {\n");
             closure.push_str(&body);
@@ -1804,10 +2969,28 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             None
         };
 
+        // A bare `<slot>` forward that is the ENTIRE content of a
+        // component's implicit default slot (this construct's immediate
+        // parent — still on the stack, `leave_element` pops its own entry
+        // before calling here — has no real DOM container) is never a
+        // stable slot root (official `markSlotRootOperations`'s type-12
+        // branch): SLOT_ROOT (4) always, INHERIT_FALLBACK (32) since this
+        // backend does not yet detect the SHARED_FALLBACK (v-for-forced)
+        // case. `try_build_non_stable_slot_root` decides whether the WHOLE
+        // slot ends up NON_STABLE-forwarded; this only needs to know
+        // whether trailing flags apply to ITS OWN `_createSlot(...)` call.
+        let is_slot_content_root = self
+            .element_stack
+            .last()
+            .is_some_and(|parent| parent.is_component_scope);
+        let flags: u32 = if is_slot_content_root { 4 | 32 } else { 0 };
+
         // Omit trailing defaults: fallback, then props (`null`), then name (`"default"`).
-        let props_is_default = true; // no fixture drives dynamic slot props yet
+        let props_arg = self.build_slot_outlet_props(el, oxc_el, source);
+        let props_is_default = props_arg.is_none();
         let name_is_default = slot_name == "default";
-        let name_arg_included = fallback.is_some() || !props_is_default || !name_is_default;
+        let name_arg_included =
+            fallback.is_some() || !props_is_default || !name_is_default || flags != 0;
 
         let mut create_line = String::with_capacity(48);
         create_line.push_str("const n");
@@ -1831,11 +3014,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             }
             first_arg = false;
         }
-        if fallback.is_some() || !props_is_default {
+        if fallback.is_some() || !props_is_default || flags != 0 {
             if !first_arg {
                 create_line.push_str(", ");
             }
-            create_line.push_str("null");
+            create_line.push_str(props_arg.as_deref().unwrap_or("null"));
             first_arg = false;
         }
         if let Some(fallback) = fallback {
@@ -1843,6 +3026,21 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 create_line.push_str(", ");
             }
             create_line.push_str(&fallback);
+            first_arg = false;
+        } else if flags != 0 {
+            if !first_arg {
+                create_line.push_str(", ");
+            }
+            create_line.push_str("null");
+        }
+        if flags != 0 {
+            if !first_arg {
+                create_line.push_str(", ");
+            }
+            push_u32(&mut create_line, flags);
+            if !self.options.is_production {
+                create_line.push_str(" /* SLOT_ROOT, INHERIT_FALLBACK */");
+            }
         }
         create_line.push(')');
         out.add_vapor_import(VaporHelper::CreateSlot);
@@ -1855,6 +3053,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             text_creations: Vec::new(),
             effects: Vec::new(),
             own_text_ref: None,
+            own_text_ref_generated: true,
             statements: vec![(
                 out.alloc_str(&create_line),
                 out.alloc_segment_anchors(&anchors),
@@ -1887,11 +3086,15 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // (`root_elements.template_idx` vs `hoisted_templates`) must interleave
         // by index (rc.3 `slots.vue`: `t0` = fallback, `t1` = root skeleton).
         //
-        // Official `genTemplates` (rc.3): `root` is true only for the SFC's
-        // single top-level template — never a closure template, never any root
-        // of a multi-root fragment (`hasSingleRootChild` false; rc.1
-        // `elements-text/multi-root.vue` uses flag 2 only). `static` is
-        // `canUseStaticTemplate()`.
+        // Official `genTemplates` (rc.3): `root` (official `isSingleRoot`) is
+        // true whenever the template has a single meaningful top-level
+        // construct — for a direct root element that's `root_elements.len()
+        // == 1`; for a v-if/v-else-if/v-else branch closure whose whole
+        // chain IS that sole construct, the bit propagates in too
+        // (`hoisted_templates`' own stored `is_root`, computed in
+        // `build_closure_body` from `self.template_single_root`; rc.1
+        // `elements-text/multi-root.vue` uses flag 2 only — no single root
+        // there). `static` is `canUseStaticTemplate()`.
         let single_root = self.root_elements.len() == 1;
         let mut templates: Vec<(u32, &str, bool, bool)> = self
             .root_elements
@@ -1909,7 +3112,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             .chain(
                 self.hoisted_templates
                     .iter()
-                    .map(|(idx, html, is_static)| (*idx, html.as_str(), false, *is_static)),
+                    .map(|(idx, html, is_static, is_root)| {
+                        (*idx, html.as_str(), *is_root, *is_static)
+                    }),
             )
             .collect();
         templates.sort_unstable_by_key(|(idx, ..)| *idx);
@@ -1952,7 +3157,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
 
         // 4. Body for each root element
-        for root in &self.root_elements {
+        for root in &mut self.root_elements {
             // Template instantiation — only for template-based roots
             if let Some(template_idx) = root.template_idx {
                 buf.push_str("  const n");
@@ -1977,12 +3182,16 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             }
             // This root's own direct text extraction (see `own_text_ref` /
             // `finalize_root_element`); separate from child-bubbled `text_creations`.
+            // A nav-chain ref (`!own_text_ref_generated`) is already
+            // established in `nav` — no extraction line.
             if let Some(text_ref) = root.own_text_ref {
-                buf.push_str("  const x");
-                push_u32(&mut buf, text_ref);
-                buf.push_str(" = _txt(n");
-                push_u32(&mut buf, root.node_ref);
-                buf.push_str(")\n");
+                if root.own_text_ref_generated {
+                    buf.push_str("  const x");
+                    push_u32(&mut buf, text_ref);
+                    buf.push_str(" = _txt(n");
+                    push_u32(&mut buf, root.node_ref);
+                    buf.push_str(")\n");
+                }
             }
 
             // Official `flushPendingOperations` (rc.3): one-time operations
@@ -2022,13 +3231,30 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     out.add_vapor_import(VaporHelper::RenderEffect);
                     out.add_vapor_import(VaporHelper::WithMemo);
                 } else {
-                    buf.push_str("  _renderEffect(() => {\n");
-                    for effect in &root.effects {
-                        buf.push_str("    ");
-                        effect.write_code_into_with_anchors(&mut buf, &mut anchors);
-                        buf.push('\n');
+                    // A single effect gets a concise arrow body — matches
+                    // official Vue and the sibling non-root closure path
+                    // above (`build_closure_body`'s identical `len() == 1`
+                    // special case). A repeated `_ctx.` read forces the
+                    // braced form even here (see `repeated_reads`).
+                    let hoisted = repeated_reads::hoist_repeated_ctx_reads(&mut root.effects, out);
+                    buf.push_str("  _renderEffect(() => ");
+                    if hoisted.is_empty() && root.effects.len() == 1 {
+                        root.effects[0].write_code_into_with_anchors(&mut buf, &mut anchors);
+                    } else {
+                        buf.push_str("{\n");
+                        for (decl_text, decl_anchors) in &hoisted {
+                            buf.push_str("    ");
+                            push_body_with_anchors(&mut buf, decl_text, decl_anchors, &mut anchors);
+                            buf.push('\n');
+                        }
+                        for effect in &root.effects {
+                            buf.push_str("    ");
+                            effect.write_code_into_with_anchors(&mut buf, &mut anchors);
+                            buf.push('\n');
+                        }
+                        buf.push_str("  }");
                     }
-                    buf.push_str("  })\n");
+                    buf.push_str(")\n");
                     out.add_vapor_import(VaporHelper::RenderEffect);
                 }
             }
@@ -2063,14 +3289,55 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
     fn enter_template(
         &mut self,
-        _root: &RootNodeTemplate,
-        _source: &'alloc str,
+        root: &RootNodeTemplate,
+        source: &'alloc str,
         _out: &mut CodeGenOutput<'alloc>,
     ) {
         // Reset state for the template
         self.depth = 0;
         self.html.clear();
         self.html_scope_stack.clear();
+
+        // Pre-compute whether the template has a single effective root —
+        // official `hasSingleRootChild`, mirrored from
+        // `vdom::VdomCodeGen::enter_template`'s `effective` count. Determines
+        // `is_root` propagation into v-if/v-else branch closures below.
+        let root_children = root
+            .content
+            .as_ref()
+            .map(|c| c.children.as_slice())
+            .unwrap_or(&[]);
+        let mut effective = 0usize;
+        for &child_id in root_children {
+            let node = &self.ast.nodes[child_id.0];
+            match &node.kind {
+                AstNodeKind::Element(el) => {
+                    // v-else-if / v-else continuations don't count as separate roots
+                    if el.v_condition.as_ref().is_some_and(|c| {
+                        matches!(
+                            c.kind,
+                            ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else
+                        )
+                    }) {
+                        continue;
+                    }
+                    effective += 1;
+                }
+                AstNodeKind::Text(text) => {
+                    let content = &source[text.start as usize..text.end as usize];
+                    if !content.trim().is_empty() {
+                        effective += 1;
+                    }
+                }
+                AstNodeKind::Interpolation(_) => effective += 1,
+                AstNodeKind::Comment(_) => {
+                    if self.options.comments {
+                        effective += 1;
+                    }
+                }
+            }
+        }
+        self.template_single_root = effective == 1;
     }
 
     fn leave_template(
@@ -2109,9 +3376,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         &mut self,
         _id: NodeId,
         el: &ElementNode,
-        _oxc: Option<&OxcParsedElement<'alloc>>,
+        oxc: Option<&OxcParsedElement<'alloc>>,
         source: &'alloc str,
-        _out: &mut CodeGenOutput<'alloc>,
+        out: &mut CodeGenOutput<'alloc>,
     ) -> super::WalkAction {
         helpers::debug_assert_element_bounds(
             source,
@@ -2120,12 +3387,57 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             el.tag_open.name_end,
         );
         // Take a recycled state from the pool (retains capacity) or create new
-        let state = self.state_pool.pop().unwrap_or_default();
+        let mut state = self.state_pool.pop().unwrap_or_default();
 
-        // Components, slot outlets, and template slot wrappers don't build HTML templates
+        // Components, slot outlets, and template slot wrappers don't build HTML
+        // templates. Neither does a `<template v-if>`/`<template v-else-if>`/
+        // `<template v-else>`/`<template v-for>`: official Vue treats every
+        // directive-bearing `<template>` as transparent IR (its children
+        // render directly at the wrapper's position), never a literal `<template>`
+        // DOM node — a bare, directive-less `<template>` stays a real element
+        // (matches VDOM's identical `leave_template_fragment` gate).
         let builds_open_tag = el.tag_type != TagType::Component
             && el.tag_type != TagType::SlotOutlet
-            && !(el.tag_type == TagType::Template && el.v_slot.is_some());
+            && !(el.tag_type == TagType::Template
+                && (el.v_slot.is_some() || el.v_condition.is_some() || el.v_for.is_some()));
+
+        // A direct interpolation child only reuses this scope's own ref for
+        // `_txt()` extraction when every OTHER meaningful sibling is itself
+        // plain template-contributing content (text/interpolation, a rendered
+        // comment, or a plain static/dynamic-attr element with no v-if/v-for).
+        // A STRUCTURAL sibling (component, slot outlet, `<template v-slot>`,
+        // or a v-if/v-for-wrapped element — `!is_template_contributing`,
+        // reused from `has_following_template_contributing_sibling`) flips it
+        // false: that sibling already reaches its position through the
+        // shared `_setInsertionState`/`PendingNavRequest::Merge` nav chain,
+        // and the text run must reach ITS position through that SAME chain
+        // instead of a standalone `_txt()` off this scope's own ref, which
+        // would silently read the WRONG DOM node once a structural sibling
+        // (e.g. a `<slot>`) precedes it (official `isAllTextLike`, scoped to
+        // the structural case — see `visit_interpolation`). A plain element
+        // sibling with no structural construct leaves this `true`: Verter's
+        // existing deferred/combined effect ordering already matches
+        // official there (nothing forces an early flush), only the
+        // structural case has a real flush-timing requirement.
+        state.children_all_text_like = el.content.as_ref().is_none_or(|content| {
+            !content.children.iter().any(|&child| {
+                self.is_meaningful_sibling(child, source) && !self.is_template_contributing(child)
+            })
+        });
+
+        // A component (incl. dynamic `<component :is>`/`KeepAlive`) or a
+        // `<template v-slot>` wrapper has no real DOM container — read by a
+        // child's merge to decide slot-root flag eligibility.
+        state.is_component_scope = el.tag_type == TagType::Component
+            || (el.tag_type == TagType::Template && el.v_slot.is_some());
+        // A directive-bearing `<template>` (v-if/else-if/else/for, no
+        // v-slot) is ALSO a no-DOM-container scope, but — confirmed against
+        // the pinned oracle — it never participates in slot-root flag
+        // eligibility (`is_component_scope`'s other reader), so it stays a
+        // separate flag rather than folding into that one.
+        state.is_transparent_wrapper = el.tag_type == TagType::Template
+            && el.v_slot.is_none()
+            && (el.v_condition.is_some() || el.v_for.is_some());
 
         // New HTML scope at every root, every component/slot/slot-template,
         // and every v-if/v-else-if/v-else/v-for: structural content must not
@@ -2166,7 +3478,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             if let (Some(vs), Some(ve)) = (v_for_prop.value_start, v_for_prop.value_end) {
                 let full_expr = &source[vs as usize..ve as usize];
                 let (param_part, _source_part) = helpers::parse_v_for_expression(full_expr);
-                let map = build_for_scope_map(param_part, self.for_scope_depth - 1);
+                let value_pattern = v_for_value_pattern(oxc);
+                let map = build_for_scope_map(
+                    param_part,
+                    self.for_scope_depth - 1,
+                    value_pattern,
+                    source,
+                    &self.resolver,
+                    out,
+                );
                 self.resolver.push_for_scope(map);
             } else {
                 self.resolver
@@ -2191,6 +3511,28 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             None
         };
         self.pending_construct_ref.push(construct_ref);
+
+        // Push this v-slot scoped-slot param's destructure rename map before
+        // descending — same reasoning as v-for's push above: body
+        // expressions resolve during their own visit, well before
+        // `leave_element`. Shares `for_scope_depth` with v-for (official's
+        // `context.scopeLevel`, doc'd on the field) — a bare-identifier
+        // param stays un-pushed (no scope, no depth burn), matching
+        // official's `.ast`-gated `enterScope()`.
+        if el.tag_type == TagType::Template && el.v_slot.is_some() {
+            if let Some(leaves) = v_slot_destructure_leaves(oxc, source, &self.resolver) {
+                self.for_scope_depth += 1;
+                let mut base = String::with_capacity(16);
+                base.push_str("_slotProps");
+                helpers::push_u32(&mut base, self.for_scope_depth - 1);
+                let mut map = rustc_hash::FxHashMap::default();
+                for (name, accessor) in leaves {
+                    accessor.register_import(out);
+                    map.insert(name, accessor.render(&base));
+                }
+                self.resolver.push_for_scope(map);
+            }
+        }
 
         self.element_stack.push(state);
         self.depth += 1;
@@ -2234,13 +3576,27 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         // `allow_no_scope` sees the enclosing scope, not this closed branch.
         let builds_open_tag_here = el.tag_type != TagType::Component
             && el.tag_type != TagType::SlotOutlet
-            && !(el.tag_type == TagType::Template && el.v_slot.is_some());
+            && !(el.tag_type == TagType::Template
+                && (el.v_slot.is_some() || el.v_condition.is_some() || el.v_for.is_some()));
         if !builds_open_tag_here || el.v_condition.is_some() || el.v_for.is_some() {
             self.block_depth -= 1;
         }
         // Pop before `build_v_for_root` so `:key` stays unrenamed (official
         // `genSimpleIdMap`) and no v-for scope leaks to siblings.
         if el.v_for.is_some() {
+            self.resolver.pop_for_scope();
+            self.for_scope_depth -= 1;
+        }
+        // Same pairing for a v-slot destructured scoped-slot param — computed
+        // once here and reused below for the `_slotProps{depth}` param text
+        // (`for_scope_depth` after this pop reads back this v-slot's own
+        // depth, same trick `build_for_callback_params` relies on).
+        let v_slot_leaves = if el.tag_type == TagType::Template && el.v_slot.is_some() {
+            v_slot_destructure_leaves(oxc_el, source, &self.resolver)
+        } else {
+            None
+        };
+        if v_slot_leaves.is_some() {
             self.resolver.pop_for_scope();
             self.for_scope_depth -= 1;
         }
@@ -2254,12 +3610,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             .expect("leave without enter");
         let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
 
-        // Components, slot outlets, and slot templates accumulated their content
-        // into the scope buffer started at `enter`; hand it to `state.html` and
-        // restore the enclosing buffer before the per-kind builders read it.
+        // Components, slot outlets, slot templates, and transparent
+        // `<template v-if>`/`<template v-for>` wrappers accumulated their
+        // content into the scope buffer started at `enter`; hand it to
+        // `state.html` and restore the enclosing buffer before the per-kind
+        // builders read it.
         if el.tag_type == TagType::Component
             || el.tag_type == TagType::SlotOutlet
-            || (el.tag_type == TagType::Template && el.v_slot.is_some())
+            || (el.tag_type == TagType::Template
+                && (el.v_slot.is_some() || el.v_condition.is_some() || el.v_for.is_some()))
         {
             self.take_scope_html(&mut state);
         }
@@ -2267,13 +3626,31 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         // Component elements
         if el.tag_type == TagType::Component {
             // Pending v-if already flushed above.
+            // A statically-resolved component is a stable slot root
+            // (official `markSlotRootComponent`'s `!isStatic` gate); only a
+            // dynamic `<component :is>` is merge-eligible for NON_STABLE
+            // forwarding.
+            let merge_kind = if resolve_vapor_dynamic_component(
+                el,
+                tag_name,
+                source,
+                oxc_el,
+                &self.resolver,
+                self.options.force_js,
+            )
+            .is_some()
+            {
+                MergedConstructKind::DynamicComponent
+            } else {
+                MergedConstructKind::Other
+            };
             let node_ref = state.ensure_node_ref(&mut self.counters);
             let root =
                 self.build_component_root(el, tag_name, node_ref, source, state, oxc_el, out);
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
-                self.merge_non_root_into_parent(id, root, source, out);
+                self.merge_non_root_into_parent(id, root, merge_kind, source, out);
             }
             return;
         }
@@ -2284,11 +3661,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             // Reserved at enter — never mint here (fallback body would steal the id).
             let node_ref = construct_ref.expect("slot outlet always reserves a construct-own id");
             state.node_ref = Some(node_ref);
-            let root = self.build_slot_outlet_root(el, source, node_ref, state, out);
+            let root = self.build_slot_outlet_root(el, oxc_el, source, node_ref, state, out);
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
-                self.merge_non_root_into_parent(id, root, source, out);
+                self.merge_non_root_into_parent(
+                    id,
+                    root,
+                    MergedConstructKind::SlotOutlet,
+                    source,
+                    out,
+                );
             }
             return;
         }
@@ -2298,7 +3681,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
             // No mapped interpolation anchor in a named-slot closure today.
             let (body, _is_static, _body_anchors) =
-                self.build_closure_body(state, has_dynamic_text, "    ", out);
+                self.build_closure_body(state, has_dynamic_text, "    ", false, out);
 
             // Extract slot name from v-slot directive
             let slot_name = if let Some(ref v_slot) = el.v_slot {
@@ -2327,11 +3710,20 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     _ => None,
                 });
 
-            // Build the slot entry string: `name: (params) => { ... }`
+            // Build the slot entry string: `"name": (params) => { ... }` —
+            // official `genStaticSlots` always JSON-quotes a static slot
+            // name (`${JSON.stringify(name)}: `), unlike a prop key's
+            // needs-quoting-only rule.
             let mut entry = String::with_capacity(128);
-            push_prop_key(&mut entry, slot_name);
-            entry.push_str(": (");
-            if let Some(params) = slot_params {
+            entry.push('"');
+            helpers::escape_js_string_into(&mut entry, slot_name);
+            entry.push_str("\": (");
+            if v_slot_leaves.is_some() {
+                // Destructured pattern renames to `_slotProps{depth}` —
+                // official `genSlotBlockWithProps`'s `propsName`.
+                entry.push_str("_slotProps");
+                helpers::push_u32(&mut entry, self.for_scope_depth);
+            } else if let Some(params) = slot_params {
                 entry.push_str(params);
             }
             entry.push_str(") => {\n");
@@ -2348,9 +3740,101 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             return;
         }
 
+        // Transparent `<template v-if>`/`<template v-else-if>`/`<template
+        // v-else>`/`<template v-for>` (no `v-slot`): no open/close tag, no
+        // attrs, no v-text — its accumulated children ARE its whole body.
+        // Dispatches straight into the same v-if/v-for construct machinery a
+        // normal element uses below, skipping every real-element-only step
+        // (`is_void`/v-text/`close_html_tag`/`process_dynamic_props`) since
+        // there is no DOM tag to close or attribute.
+        if el.tag_type == TagType::Template
+            && el.v_slot.is_none()
+            && (el.v_condition.is_some() || el.v_for.is_some())
+        {
+            let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+
+            if el.v_condition.is_some() {
+                self.handle_v_if_chain(
+                    id,
+                    el,
+                    source,
+                    oxc_el,
+                    state,
+                    has_dynamic_text,
+                    construct_ref,
+                    out,
+                );
+                return;
+            }
+
+            let root = self.build_v_for_root(
+                id,
+                el,
+                oxc_el,
+                source,
+                state,
+                has_dynamic_text,
+                construct_ref,
+                out,
+            );
+            if self.depth == 0 {
+                self.root_elements.push(root);
+            } else {
+                // A v-for chain is never NON_STABLE-forwarding-eligible
+                // (official `markSlotRootFor` is a distinct, unimplemented
+                // branch — out of this pass's scope), same as a normal
+                // element's own v-for merge below.
+                self.merge_non_root_into_parent(id, root, MergedConstructKind::Other, source, out);
+            }
+            return;
+        }
+
         // Normal elements
         let is_void = el.is_self_closing || el.content.is_none();
+
+        // v-text: the element's ENTIRE DOM text content is set via
+        // _setText, exactly like a lone interpolation child spanning the
+        // whole element (one space placeholder in the static HTML, the
+        // resolved+toDisplayString-wrapped expression in a text part).
+        // Handled here — not in `process_dynamic_props` — because it needs
+        // the scope HTML buffer, which that function's context doesn't
+        // carry. Pushed BEFORE `close_html_tag` appends the closing tag:
+        // `strip_trailing_close_tags` (Vue 3.6 minimization) trims trailing
+        // whitespace before stripping a trailing `</tag>`, so a space
+        // pushed AFTER the closing tag is silently swallowed along with it.
+        let v_text_expr = el.props.iter().enumerate().find_map(|(idx, p)| {
+            if !p.is_directive {
+                return None;
+            }
+            let dname = &source[p.start as usize..p.name_end as usize];
+            if dname != "v-text" {
+                return None;
+            }
+            let (vs, ve) = (p.value_start?, p.value_end?);
+            let value = &source[vs as usize..ve as usize];
+            let oxc_exp = find_prop_oxc_exp(oxc_el, idx);
+            Some(resolve_expr(
+                value,
+                vs,
+                oxc_exp,
+                &self.resolver,
+                self.options.force_js,
+            ))
+        });
+        let has_v_text = v_text_expr.is_some();
+        if let Some(expr) = &v_text_expr {
+            self.html.push(' ');
+            let wrapped = format!("_toDisplayString({expr})");
+            state.text_parts.push(super::types::VaporTextPart::Dynamic(
+                out.alloc_str(&wrapped),
+                &[],
+            ));
+            state.ensure_text_ref(&mut self.counters);
+            out.add_vapor_import(VaporHelper::ToDisplayString);
+        }
+
         element::close_html_tag(&mut self.html, tag_name, is_void);
+
         if self.depth == 0 || el.v_condition.is_some() || el.v_for.is_some() {
             // Root or nested v-if/v-for owns the scope buffer it opened at enter.
             self.take_scope_html(&mut state);
@@ -2371,8 +3855,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             props::process_dynamic_props(el, &mut props_ctx, oxc_el);
         }
 
-        // Derive has_dynamic_text from the AST children flags
-        let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation);
+        // Derive has_dynamic_text from the AST children flags — v-text
+        // counts too (it has no interpolation CHILD, but produces the same
+        // dynamic-text-part/_setText shape).
+        let has_dynamic_text = el.children_flag.has(ChildrenFlags::HasInterpolation) || has_v_text;
 
         // v-if/v-else-if/v-else
         // Depth-agnostic: `flush_vif_chain` routes to `merge_non_root_into_parent`
@@ -2395,18 +3881,46 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
 
         // v-for
         if el.v_for.is_some() {
-            let root =
-                self.build_v_for_root(id, el, source, state, has_dynamic_text, construct_ref, out);
+            let root = self.build_v_for_root(
+                id,
+                el,
+                oxc_el,
+                source,
+                state,
+                has_dynamic_text,
+                construct_ref,
+                out,
+            );
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
-                self.merge_non_root_into_parent(id, root, source, out);
+                // A v-for chain is never NON_STABLE-forwarding-eligible
+                // (official `markSlotRootFor` is a distinct, unimplemented
+                // branch — out of this pass's scope).
+                self.merge_non_root_into_parent(id, root, MergedConstructKind::Other, source, out);
             }
             return;
         }
 
         // Finalize text parts into effects
         element::finalize_text_parts(&mut state, has_dynamic_text);
+
+        // A plain element that is the SOLE meaningful content of a
+        // component's implicit default slot or a `<template v-slot>`
+        // wrapper (`is_component_scope`, no real DOM container) IS that
+        // closure's own root — same relationship the whole template has to
+        // its own depth-0 root, one level in. Its own dynamic text/effects/
+        // nav become the enclosing scope's OWN fields directly; there is no
+        // real DOM container between them to `_child`/`_next` into (a bare
+        // `_txt(nN)` read directly off this element's own ref, not a nested
+        // `_child()` hop first). A purely static such element already
+        // worked (nothing to bubble), so this only changes the dynamic
+        // case.
+        let parent_is_sole_component_scope_content = self
+            .element_stack
+            .last()
+            .is_some_and(|p| p.is_component_scope)
+            && self.is_sole_meaningful_child(id, source);
 
         if self.depth == 0 {
             // Resolve this scope's child nav requests before `finalize_root_element`
@@ -2423,6 +3937,23 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                 root.v_memo_expr = Some(memo_expr);
             }
             self.root_elements.push(root);
+        } else if parent_is_sole_component_scope_content {
+            self.resolve_pending_nav_requests(&mut state, out);
+            let node_ref = state.ensure_node_ref(&mut self.counters);
+            if let Some(parent) = self.element_stack.last_mut() {
+                parent.node_ref = Some(node_ref);
+                parent.own_effects.append(&mut state.own_effects);
+                parent.child_effects.append(&mut state.child_effects);
+                parent.child_nav.append(&mut state.child_nav);
+                parent
+                    .child_text_creations
+                    .append(&mut state.child_text_creations);
+                parent.text_node_ref = state.text_node_ref;
+                parent.text_ref_generated = state.text_ref_generated;
+                parent.child_statements.append(&mut state.child_statements);
+            }
+            state.reset();
+            self.state_pool.push(state);
         } else {
             // Same resolve, before bubbling `child_nav`/`child_statements` up.
             self.resolve_pending_nav_requests(&mut state, out);
@@ -2465,22 +3996,32 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         out: &mut CodeGenOutput<'alloc>,
     ) {
         helpers::debug_assert_slice_bounds(source, text_node.start, text_node.end, "visit_text");
-        // Newline-containing whitespace-only text between tags is not a DOM
-        // node under Vue condense (rc.3 `basic-interpolation.vue` / `slots.vue`
-        // emit zero inter-tag bytes). Emitting it both pollutes the skeleton
-        // and occupies a real sibling that `_child`/`_next` never skip
-        // (`HierarchyRequestError: Node can't be inserted in a #text parent`).
-        // Whitespace-only WITHOUT a newline condenses to one space and stays.
+        // Newline-containing whitespace-only text between two ELEMENT/COMMENT
+        // tags is not a DOM node under Vue condense (rc.3
+        // `basic-interpolation.vue` / `slots.vue` emit zero inter-tag bytes).
+        // Emitting it both pollutes the skeleton and occupies a real sibling
+        // that `_child`/`_next` never skip (`HierarchyRequestError: Node
+        // can't be inserted in a #text parent`). When at least one neighbor
+        // is text/interpolation instead (or this is leading/trailing), it
+        // collapses to a single space and stays — same as a
+        // WITHOUT-a-newline whitespace run (`whitespace_newline_collapses_
+        // to_space`, mirroring vdom `resolve_whitespace`).
         // Reuses `vdom::text::classify_text_kind`.
         use super::vdom::text::classify_text_kind;
         let content = &source[text_node.start as usize..text_node.end as usize];
-        if classify_text_kind(content) == Some(super::types::ChildKind::WhitespaceNewline) {
+        let text_kind = classify_text_kind(content);
+        if text_kind == Some(super::types::ChildKind::WhitespaceNewline)
+            && !self.whitespace_newline_collapses_to_space(id)
+        {
             return;
         }
         if let Some(parent) = self.element_stack.last_mut() {
             // Adjacent text/interpolation coalesce into one DOM child: advance
             // the parent's running child cursor only at the start of a run.
-            parent.observe_dom_text_run();
+            if parent.observe_dom_text_run() {
+                parent.text_run_html_start = Some(self.html.len());
+                parent.text_run_has_dynamic = false;
+            }
             // Check if the parent element has interpolation children.
             // If not, skip text_parts allocation (they'd never be consumed).
             let has_interpolation = self
@@ -2496,12 +4037,32 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     _ => false,
                 })
                 .unwrap_or(false);
-            if classify_text_kind(content) == Some(super::types::ChildKind::WhitespaceSpace) {
-                self.html.push(' ');
+            // Once this run has an interpolation, its static text bytes must
+            // NOT be baked into the hoisted HTML template — only the run's
+            // single collapsed space (emitted in `visit_interpolation`)
+            // stays. The text still needs its own `_setText` text part.
+            let write_html = !parent.text_run_has_dynamic;
+            // Reaching here with `WhitespaceNewline` means it collapsed to a
+            // space (the drop case already returned above) — same handling
+            // as a plain `WhitespaceSpace` run.
+            if matches!(
+                text_kind,
+                Some(super::types::ChildKind::WhitespaceSpace)
+                    | Some(super::types::ChildKind::WhitespaceNewline)
+            ) {
+                if write_html {
+                    self.html.push(' ');
+                }
                 if has_interpolation {
+                    // `VaporTextPart::Static` stores a JS EXPRESSION fragment
+                    // (quoted string literal), not raw content — an unquoted
+                    // `" "` here previously spliced as bare whitespace into
+                    // the `_setText(...)` argument list (`+   +`), broken JS
+                    // never reached before nothing routed a whitespace-only
+                    // run through here with `has_interpolation` true.
                     parent
                         .text_parts
-                        .push(super::types::VaporTextPart::Static(" "));
+                        .push(super::types::VaporTextPart::Static("\" \""));
                 }
             } else {
                 text::process_text(
@@ -2510,6 +4071,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                     &mut self.html,
                     parent,
                     has_interpolation,
+                    write_html,
                     out,
                 );
             }
@@ -2533,13 +4095,54 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
         if let Some(parent) = self.element_stack.last_mut() {
             // Interpolation coalesces with an adjacent text run into one DOM
             // child; advance the parent's running child cursor accordingly.
-            parent.observe_dom_text_run();
+            if parent.observe_dom_text_run() {
+                parent.text_run_html_start = Some(self.html.len());
+                parent.text_run_has_dynamic = false;
+            }
+            // First interpolation in this run: collapse any static text
+            // already written for it down to a single space placeholder —
+            // official Vue never bakes a dynamic run's static content into
+            // the hoisted HTML template, only into the `_setText` runtime
+            // expression. A later interpolation in the SAME run adds no
+            // further space (one placeholder covers the whole run).
+            if !parent.text_run_has_dynamic {
+                if let Some(start) = parent.text_run_html_start {
+                    self.html.truncate(start);
+                }
+                self.html.push(' ');
+                parent.text_run_has_dynamic = true;
+            }
+            // Mixed-content container (`children_all_text_like == false`,
+            // e.g. this text run sits next to a `<slot>`/component/v-if/
+            // v-for sibling): reserve this run's nav-chain slot BEFORE
+            // `process_interpolation` mints a ref — official
+            // `processInterpolation`'s `context.reference()`, a fresh id
+            // distinct from this scope's own container ref, resolved
+            // through the same shared `_child`/`_next` chain as the
+            // surrounding structural siblings instead of a standalone
+            // `_txt()` extraction. Idempotent: only the run's FIRST
+            // interpolation reserves a slot (`reserve_nav_text_ref` returns
+            // `None` once `text_node_ref` is already set).
+            if !parent.children_all_text_like {
+                if let Some(text_ref) = parent.reserve_nav_text_ref(&mut self.counters) {
+                    let nav_slot = parent.child_nav.len();
+                    parent.child_nav.push("");
+                    let stmt_slot = parent.child_statements.len();
+                    parent.child_statements.push(("", &[]));
+                    parent
+                        .pending_nav_requests
+                        .push(PendingNavRequest::TextRef {
+                            own_ref: text_ref,
+                            nav_slot,
+                            stmt_slot,
+                        });
+                }
+            }
             interpolation::process_interpolation(
                 interp,
                 source,
                 oxc,
                 &self.resolver,
-                &mut self.html,
                 parent,
                 &mut self.counters,
                 out,

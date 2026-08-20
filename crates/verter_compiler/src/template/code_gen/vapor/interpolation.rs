@@ -1,7 +1,9 @@
 //! Vapor interpolation code generation.
 //!
 //! `{{ expr }}` in Vapor mode:
-//! 1. A space placeholder is appended to the parent's HTML buffer (DOM text node).
+//! 1. The caller (`VaporCodeGen::visit_interpolation`) appends a single space
+//!    placeholder to the parent's HTML buffer, once per coalesced text run
+//!    (on the run's first interpolation) — never here.
 //! 2. The expression is wrapped in `_toDisplayString(expr)` and recorded as a
 //!    dynamic text part.
 //! 3. The parent element is marked as having dynamic text, which triggers
@@ -19,8 +21,11 @@ use crate::template::oxc::types::OxcParsedExpression;
 
 /// Process an interpolation node in Vapor mode.
 ///
-/// - Appends a space placeholder to `html`, the shared scope buffer for the
-///   enclosing template (it represents the text DOM node).
+/// - The HTML space placeholder for the enclosing DOM text run is the
+///   CALLER's responsibility (`VaporCodeGen::visit_interpolation`) — exactly
+///   one space per coalesced run, emitted on the run's first interpolation,
+///   collapsing any static text already written for that run. This function
+///   never touches the HTML buffer.
 /// - Wraps the expression in `_toDisplayString()`.
 /// - Uses OXC binding data for compound expressions, falling back to
 ///   `resolve_simple_expr` for single identifiers.
@@ -31,14 +36,10 @@ pub fn process_interpolation<'a>(
     source: &str,
     oxc: &OxcParsedExpression<'_>,
     resolver: &BindingResolver<'_>,
-    html: &mut String,
     parent: &mut VaporElementState<'a>,
     counters: &mut VaporCounters,
     out: &mut CodeGenOutput<'a>,
 ) {
-    // Append space placeholder to HTML (represents the text DOM node)
-    html.push(' ');
-
     // Extract expression content (untrimmed — build_prefixed_expr handles trimming internally
     // and needs the raw range to correctly compute binding offsets relative to inner_start)
     let expr = &source[interp.inner_start as usize..interp.inner_end as usize];
@@ -144,40 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn interpolation_appends_space_to_html() {
-        let alloc = oxc_allocator::Allocator::default();
-        let mut out = CodeGenOutput::new(&alloc);
-        let mut html = String::new();
-        let mut parent = make_parent();
-        let mut counters = VaporCounters::default();
-        let resolver = make_resolver_empty();
-
-        let interp = InterpolationNode {
-            start: 0,
-            end: 9,
-            inner_start: 3,
-            inner_end: 6,
-        };
-        let oxc = make_empty_oxc();
-        process_interpolation(
-            &interp,
-            "{{ msg }}",
-            &oxc,
-            &resolver,
-            &mut html,
-            &mut parent,
-            &mut counters,
-            &mut out,
-        );
-
-        assert_eq!(html, " ");
-    }
-
-    #[test]
     fn interpolation_records_dynamic_part() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
-        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_with_ctx();
@@ -194,7 +164,6 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
-            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
@@ -210,7 +179,6 @@ mod tests {
     fn interpolation_allocates_text_ref() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
-        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_empty();
@@ -227,7 +195,6 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
-            &mut html,
             &mut parent,
             &mut counters,
             &mut out,
@@ -242,7 +209,6 @@ mod tests {
     fn interpolation_adds_import() {
         let alloc = oxc_allocator::Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
-        let mut html = String::new();
         let mut parent = make_parent();
         let mut counters = VaporCounters::default();
         let resolver = make_resolver_empty();
@@ -259,7 +225,6 @@ mod tests {
             "{{ msg }}",
             &oxc,
             &resolver,
-            &mut html,
             &mut parent,
             &mut counters,
             &mut out,

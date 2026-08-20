@@ -3,6 +3,8 @@
 //! Extracted from `element.rs`: text-concat separator logic, array-mode
 //! separators, and `_createTextVNode()` wrapping for text runs.
 
+use rustc_hash::FxHashMap;
+
 use crate::ast::types::{AstNodeKind, ChildrenMode, TemplateAst};
 use crate::types::NodeId;
 
@@ -137,6 +139,7 @@ pub(super) fn text_separator(prev: ChildKind, next: ChildKind) -> &'static str {
 ///
 /// For text-concat mode: `" + "`, `" + _toDisplayString`, etc.
 /// For array mode: delegates to [`wrap_array_text_runs`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn add_children_separators<'alloc>(
     children: &[ChildRecord],
     children_mode: ChildrenMode,
@@ -145,6 +148,7 @@ pub(super) fn add_children_separators<'alloc>(
     source: &'alloc str,
     ast: &TemplateAst,
     ast_children: &[NodeId],
+    text_run_cache_indices: &FxHashMap<u32, usize>,
 ) {
     if children.is_empty() {
         return;
@@ -164,7 +168,15 @@ pub(super) fn add_children_separators<'alloc>(
             }
         }
         ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
-            wrap_array_text_runs(children, out, options, source, ast, ast_children);
+            wrap_array_text_runs(
+                children,
+                out,
+                options,
+                source,
+                ast,
+                ast_children,
+                text_run_cache_indices,
+            );
         }
         _ => {}
     }
@@ -174,6 +186,8 @@ pub(super) fn add_children_separators<'alloc>(
 ///
 /// Delegates to [`wrap_array_text_runs`] which handles text/interpolation
 /// grouping into `_createTextVNode()` calls and `, ` element separators.
+/// Root-level static text runs are not yet individually cached (no current
+/// tracked case needs it — `text_run_cache_indices` is always empty here).
 pub(super) fn add_children_separators_array<'alloc>(
     children: &[ChildRecord],
     out: &mut CodeGenOutput<'alloc>,
@@ -185,7 +199,15 @@ pub(super) fn add_children_separators_array<'alloc>(
     if children.is_empty() {
         return;
     }
-    wrap_array_text_runs(children, out, options, source, ast, ast_children);
+    wrap_array_text_runs(
+        children,
+        out,
+        options,
+        source,
+        ast,
+        ast_children,
+        &FxHashMap::default(),
+    );
 }
 
 /// Wrap text runs in array children with `_createTextVNode()` calls.
@@ -212,6 +234,7 @@ pub(super) fn wrap_array_text_runs<'alloc>(
     source: &'alloc str,
     ast: &TemplateAst,
     ast_children: &[NodeId],
+    text_run_cache_indices: &FxHashMap<u32, usize>,
 ) {
     let mut i = 0;
     let mut is_first_item = true;
@@ -245,8 +268,23 @@ pub(super) fn wrap_array_text_runs<'alloc>(
                 out.prepend_static(prev_item_end, ", ");
             }
 
+            // A static-only run (no interpolation) that isn't the element's
+            // entire content gets its own `_cache[N] || (_cache[N] = ...)`
+            // wrap, same as a static element sibling — see
+            // `VdomCodeGen::reserve_static_text_run_caches`.
+            let cache_idx = (!has_dynamic)
+                .then(|| text_run_cache_indices.get(&children[run_start].start))
+                .flatten();
+
             // Build prefix: _createTextVNode( + first child content prefix
             let mut prefix = String::new();
+            if let Some(&idx) = cache_idx {
+                prefix.push_str("_cache[");
+                prefix.push_str(&idx.to_string());
+                prefix.push_str("] || (_cache[");
+                prefix.push_str(&idx.to_string());
+                prefix.push_str("] = ");
+            }
             prefix.push_str("_createTextVNode(");
             out.add_vdom_import(VdomHelper::CreateTextVNode);
 
@@ -283,8 +321,17 @@ pub(super) fn wrap_array_text_runs<'alloc>(
                 } else {
                     suffix.push_str(", 1 /* TEXT */");
                 }
+            } else if cache_idx.is_some() {
+                if options.is_production {
+                    suffix.push_str(", -1");
+                } else {
+                    suffix.push_str(", -1 /* CACHED */");
+                }
             }
             suffix.push(')'); // close _createTextVNode
+            if cache_idx.is_some() {
+                suffix.push(')'); // close _cache[N] || (_cache[N] = ...)
+            }
             out.prepend_alloc(last.end, &suffix);
 
             prev_item_end = last.end;

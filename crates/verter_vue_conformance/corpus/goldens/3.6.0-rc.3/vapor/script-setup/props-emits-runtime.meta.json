@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-emits-runtime",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.3",
+    "@vue/compiler-sfc": "3.6.0-rc.3",
+    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-emits-runtime.vue",
+    "sha256": "e8300a565d35d56de7b1ca2c25fbb4d1e4a0b48ad2fea3b5afc8e63b21eae91a"
+  },
+  "options": {
+    "sha256": "22084672daa0790f9b4c85d63f4c8336218d9f9057dd62ebe023ae76f5d08fd6",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/script-setup/props-emits-runtime.vue",
+      "id": "script-setup/props-emits-runtime",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.3/vapor/script-setup/props-emits-runtime.js",
+      "sha256": "1918572ee09a8d3fbb1bbd80b0442583bc6dc52cd28205ab61471333fe3c2f5e",
+      "bytes": 1013
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.3/vapor/script-setup/props-emits-runtime.map.json",
+      "sha256": "b3b3fa0cb4505353a69b912c3bcb1e8e6e69145a91cb5399e5a5a36bf3891522"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "on",
+      "alias": "_on"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

@@ -384,14 +384,17 @@ fn self_closing_no_props() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -434,14 +437,17 @@ fn empty_element_no_props() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     assert_eq!(record.kind, ChildKind::Element);
@@ -488,14 +494,17 @@ fn element_with_static_text() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -547,14 +556,17 @@ fn element_with_static_class() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -614,14 +626,17 @@ fn element_with_multiple_static_props() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -681,14 +696,17 @@ fn element_with_props_and_text_child() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -733,14 +751,17 @@ fn element_with_boolean_attr() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -792,14 +813,17 @@ fn element_with_click_handler() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);
@@ -867,14 +891,17 @@ fn element_with_leading_trailing_whitespace_removed() {
         &mut buf,
         None,
         &make_ast(),
-        false, // not block root (inner element test)
-        false, // not force-open-block
-        None,  // no injected branch key
-        None,  // no hoisting in unit tests
-        None,  // no cache in unit tests
-        None,  // no resolved components in unit tests
-        false, // not slot cached
-        None,  // no pre-reserved hoist in unit tests
+        false,                 // not block root (inner element test)
+        false,                 // not force-open-block
+        None,                  // no injected branch key
+        None,                  // no hoisting in unit tests
+        None,                  // no cache in unit tests
+        None,                  // no resolved components in unit tests
+        false,                 // not slot cached
+        None,                  // no pre-reserved hoist in unit tests
+        None,                  // no reserved handler caches in unit tests
+        None,                  // no array-group cache reservation in unit tests
+        &FxHashMap::default(), // no text-run cache reservations in unit tests
     );
 
     let result = apply_output(source, out, &alloc);

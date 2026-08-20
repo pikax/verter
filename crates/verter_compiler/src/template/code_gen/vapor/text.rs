@@ -11,7 +11,12 @@ use crate::template::code_gen::types::{CodeGenOutput, VaporElementState, VaporTe
 /// Process a text node in Vapor mode.
 ///
 /// - Appends the text content to `html`, the shared scope buffer for the
-///   enclosing template.
+///   enclosing template — UNLESS `write_html` is false, which the caller
+///   (`VaporCodeGen::visit_text`) passes once this text's coalesced DOM run
+///   has already been established as dynamic (contains an interpolation):
+///   the run's static content then lives only in the `_setText` expression
+///   (via the `text_parts` push below), collapsed to a single space
+///   placeholder in `html` by the caller instead of this text's own bytes.
 /// - If the text contains characters needing JS escaping (only matters for
 ///   template string), we use the raw source since HTML templates don't need
 ///   JS escaping — they're HTML context.
@@ -22,12 +27,23 @@ pub fn process_text<'a>(
     html: &mut String,
     parent: &mut VaporElementState<'a>,
     has_interpolation: bool,
+    write_html: bool,
     out: &CodeGenOutput<'a>,
 ) {
     let content = &source[text.start as usize..text.end as usize];
 
-    // Append raw text to the scope HTML buffer (HTML context, no JS escaping needed)
-    html.push_str(content);
+    // Append to the scope HTML buffer, condensing consecutive whitespace to
+    // a single space — Vue's condense mode applies to raw template HTML
+    // text the same way it applies to `_setText`'s JS string parts below
+    // (`vdom::text::process_text`'s identical rule, mirrored here for the
+    // HTML-context, non-JS-escaped case).
+    if write_html {
+        if helpers::has_consecutive_ws(content) {
+            helpers::condense_whitespace_into(html, content);
+        } else {
+            html.push_str(content);
+        }
+    }
 
     // Only record text parts when the parent has interpolation children.
     // For purely static elements, text_parts are never consumed, so skip the allocation.
@@ -35,7 +51,10 @@ pub fn process_text<'a>(
         // Build quoted+escaped string into local buffer, then bump-allocate
         let mut buf = String::with_capacity(content.len() + 4);
         buf.push('"');
-        if helpers::needs_js_escaping(content) {
+        if helpers::has_consecutive_ws(content) {
+            // Condensation implies escaping (single-pass).
+            buf.push_str(&helpers::condense_and_escape_js(content));
+        } else if helpers::needs_js_escaping(content) {
             helpers::escape_js_string_into(&mut buf, content);
         } else {
             buf.push_str(content);
@@ -69,7 +88,7 @@ mod tests {
             is_whitespace_only: false,
         };
         let source = "hello";
-        process_text(&text, source, &mut html, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, true, &out);
 
         assert_eq!(html, "hello");
     }
@@ -93,8 +112,8 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&t1, source, &mut html, &mut parent, true, &out);
-        process_text(&t2, source, &mut html, &mut parent, true, &out);
+        process_text(&t1, source, &mut html, &mut parent, true, true, &out);
+        process_text(&t2, source, &mut html, &mut parent, true, true, &out);
 
         assert_eq!(html, "hello world");
         assert_eq!(parent.text_parts.len(), 2);
@@ -112,7 +131,7 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, "hello", &mut html, &mut parent, true, &out);
+        process_text(&text, "hello", &mut html, &mut parent, true, true, &out);
 
         assert_eq!(parent.text_parts.len(), 1);
         assert_eq!(parent.text_parts[0].to_js(), "\"hello\"");
@@ -132,7 +151,7 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, source, &mut html, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, true, &out);
 
         // HTML buffer has raw content
         assert_eq!(html, r#"say "hi""#);
@@ -152,12 +171,35 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, "hello", &mut html, &mut parent, false, &out);
+        process_text(&text, "hello", &mut html, &mut parent, false, true, &out);
 
         // HTML buffer still populated
         assert_eq!(html, "hello");
         // But no text_parts recorded (no sibling interpolations)
         assert!(parent.text_parts.is_empty());
+    }
+
+    #[test]
+    fn write_html_false_skips_html_but_still_records_text_part() {
+        // Once a coalesced DOM text run is established as dynamic, static
+        // text within it must NOT be written to `html` (the run collapses
+        // to one caller-emitted space instead) but still needs its
+        // `_setText` text part recorded.
+        let alloc = Allocator::default();
+        let out = CodeGenOutput::new(&alloc);
+        let mut html = String::from("<p> ");
+        let mut parent = make_parent();
+        let text = TextNode {
+            start: 0,
+            end: 5,
+            is_entity: false,
+            is_whitespace_only: false,
+        };
+        process_text(&text, "hello", &mut html, &mut parent, true, false, &out);
+
+        assert_eq!(html, "<p> ", "write_html=false must not touch html");
+        assert_eq!(parent.text_parts.len(), 1);
+        assert_eq!(parent.text_parts[0].to_js(), "\"hello\"");
     }
 
     #[test]
@@ -173,7 +215,7 @@ mod tests {
             is_entity: false,
             is_whitespace_only: false,
         };
-        process_text(&text, source, &mut html, &mut parent, true, &out);
+        process_text(&text, source, &mut html, &mut parent, true, true, &out);
 
         assert_eq!(html, "line1\nline2");
         assert_eq!(parent.text_parts[0].to_js(), "\"line1\\nline2\"");

@@ -6365,8 +6365,9 @@ fn static_style_multiple_properties() {
         r#"<template><div style="color: red; font-size: 14px">text</div></template>"#,
     );
     assert!(
-        code.contains(r#"color: "red""#),
-        "Should parse color property\n{}",
+        code.contains(r#""color": "red""#),
+        "Should parse color property (all style-object keys are quoted, \
+         even valid identifiers)\n{}",
         code
     );
     assert!(
@@ -13983,21 +13984,31 @@ fn static_hoist_mixed_static_and_dynamic() {
 /// @ai-generated — Consecutive static siblings each get _cache[N] entries
 #[test]
 fn static_hoist_consecutive_siblings_merge() {
+    // All three <p> are direct children of <div> and are ALL individually
+    // cacheable — official Vue's `cacheStatic` groups them into ONE cached
+    // array and spreads it back (`[...(_cache[0] || (_cache[0] = [a, b,
+    // c]))]`), rather than caching each sibling separately. Verified
+    // against the vendored `@vue/compiler-sfc`/`@vue/compiler-core` output
+    // for this exact shape (also matches the conformance goldens for
+    // `elements-text/static-element` and `elements-text/static-class-style`).
     let code =
         compile_and_validate_hoisted(r#"<template><div><p>a</p><p>b</p><p>c</p></div></template>"#);
     assert!(
-        code.contains("_cache[0]"),
-        "first static element should use _cache[0]\n--- code ---\n{}",
+        code.contains("...(_cache[0] || (_cache[0] = ["),
+        "the three static siblings should be ONE grouped cache array, not \
+         three individually cached elements\n--- code ---\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("_cache[0]").count(),
+        2,
+        "exactly one grouped cache slot (referenced twice: `_cache[0] ||` \
+         and `_cache[0] =`)\n--- code ---\n{}",
         code
     );
     assert!(
-        code.contains("_cache[1]"),
-        "second static element should use _cache[1]\n--- code ---\n{}",
-        code
-    );
-    assert!(
-        code.contains("_cache[2]"),
-        "third static element should use _cache[2]\n--- code ---\n{}",
+        !code.contains("_cache[1]"),
+        "must not be three independently cached elements\n--- code ---\n{}",
         code
     );
 }
@@ -21503,8 +21514,10 @@ fn newline_separated_handler_gets_a_statement_body_in_every_backend() {
     );
     let vapor = compile_and_validate_vapor_template(source);
     assert!(
-        vapor.contains("$event => { _ctx.count++"),
-        "Vapor must give a newline-separated list a statement body, got:\n{vapor}"
+        vapor.contains("() => { _ctx.count++"),
+        "Vapor must give a newline-separated list a statement body -- and \
+         omit the unused $event param (verified against the real compiler), \
+         got:\n{vapor}"
     );
     let inline = compile_and_validate_inline_script(source);
     assert!(
@@ -21534,8 +21547,9 @@ const foo = (s) => s
     );
     let vapor = compile_and_validate_vapor_template(source);
     assert!(
-        vapor.contains("$event => (_ctx.foo('a;b'))"),
-        "Vapor must reach the same decision as VDOM, got:\n{vapor}"
+        vapor.contains("() => (_ctx.foo('a;b'))"),
+        "Vapor must reach the same expression-container decision as VDOM \
+         -- and omit the unused $event param, got:\n{vapor}"
     );
 }
 
@@ -21586,8 +21600,9 @@ const a = ref(0)
     );
     let vapor = compile_and_validate_vapor_template(source);
     assert!(
-        vapor.contains("$event => { a = 1; return }"),
-        "Vapor must keep the statement body, got:\n{vapor}"
+        vapor.contains("() => { a = 1; return }"),
+        "Vapor must keep the statement body -- and omit the unused $event \
+         param, got:\n{vapor}"
     );
 }
 
@@ -21645,7 +21660,7 @@ fn a_for_of_assignment_target_resolves_in_every_position() {
 
     let vapor = compile_and_validate_vapor_template(&source);
     assert!(
-        vapor.contains("$event => { for (_ctx.x of _ctx.xs) _ctx.log(_ctx.x) }"),
+        vapor.contains("() => { for (_ctx.x of _ctx.xs) _ctx.log(_ctx.x) }"),
         "Vapor must resolve the target, got:\n{vapor}"
     );
 
@@ -21692,7 +21707,7 @@ fn a_for_in_assignment_target_resolves_in_every_position() {
 
     let vapor = compile_and_validate_vapor_template(&source);
     assert!(
-        vapor.contains("$event => { for (_ctx.x in _ctx.xs) _ctx.log(_ctx.x) }"),
+        vapor.contains("() => { for (_ctx.x in _ctx.xs) _ctx.log(_ctx.x) }"),
         "Vapor must resolve the target, got:\n{vapor}"
     );
 }
@@ -21717,7 +21732,7 @@ fn a_for_of_member_target_resolves_in_every_position() {
 
     let vapor = compile_and_validate_vapor_template(&source);
     assert!(
-        vapor.contains("$event => { for (_ctx.obj.k of _ctx.xs) _ctx.log(_ctx.obj.k) }"),
+        vapor.contains("() => { for (_ctx.obj.k of _ctx.xs) _ctx.log(_ctx.obj.k) }"),
         "Vapor must resolve the member target's root, got:\n{vapor}"
     );
 }
@@ -21747,7 +21762,7 @@ fn a_for_of_destructured_target_resolves_in_every_position() {
 
     let vapor = compile_and_validate_vapor_template(&source);
     assert!(
-        vapor.contains("$event => { for ([_ctx.a, _ctx.b] of _ctx.xs) _ctx.log(_ctx.a) }"),
+        vapor.contains("() => { for ([_ctx.a, _ctx.b] of _ctx.xs) _ctx.log(_ctx.a) }"),
         "Vapor must resolve both pattern elements, got:\n{vapor}"
     );
 

@@ -14,58 +14,11 @@
 use crate::ast::types::TextNode;
 
 use super::super::shared::helpers::{
-    decode_html_entities_into, escape_js_string_into, has_html_entities, needs_js_escaping,
+    condense_and_escape_js as condense_and_escape, decode_html_entities_into,
+    escape_js_string_into, has_consecutive_ws, has_html_entities, is_condense_ws as is_ws,
+    needs_js_escaping,
 };
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
-
-/// Check if a byte is whitespace (space, tab, newline, carriage return).
-#[inline]
-fn is_ws(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-/// Check if text has consecutive whitespace that needs condensing.
-#[inline]
-fn has_consecutive_ws(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    for i in 0..bytes.len().saturating_sub(1) {
-        if is_ws(bytes[i]) && is_ws(bytes[i + 1]) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Condense consecutive whitespace to single space AND escape for JS string literal.
-/// Combined in a single pass for efficiency.
-fn condense_and_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_ws = false;
-
-    for ch in text.chars() {
-        if ch.is_ascii() && is_ws(ch as u8) {
-            if !in_ws {
-                out.push(' ');
-                in_ws = true;
-            }
-            continue;
-        }
-        in_ws = false;
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\0' => out.push_str("\\0"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if c.is_ascii_control() => {
-                use std::fmt::Write;
-                let _ = write!(out, "\\x{:02x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
 
 /// Classify text content into a [`ChildKind`] for parent-level processing.
 ///

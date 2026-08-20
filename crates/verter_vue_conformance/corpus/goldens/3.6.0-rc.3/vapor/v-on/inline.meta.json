@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "v-on/inline",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.3",
+    "@vue/compiler-sfc": "3.6.0-rc.3",
+    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-on/inline.vue",
+    "sha256": "c5ac8d1c17b243093fb14c65327ce52338b0164973d14d8575558b6d313b66a8"
+  },
+  "options": {
+    "sha256": "0d8dd5ac7c9f9c931af4e884496fc2cbd786275ddf6e4dd1ce64da790f77d522",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-on/inline.vue",
+      "id": "v-on/inline",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.3/vapor/v-on/inline.js",
+      "sha256": "4860310dc972cfdee9ad9a9e71f171d5582bb71c9b789beb46e5efb97822e18e",
+      "bytes": 790
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.3/vapor/v-on/inline.map.json",
+      "sha256": "eec1ccd2c5f326dac31f03c8fbc81b724ddccaa192a87406869b63ee9b0eb3b6"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "on",
+      "alias": "_on"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

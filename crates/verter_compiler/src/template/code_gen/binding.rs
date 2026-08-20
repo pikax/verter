@@ -299,6 +299,43 @@ impl<'alloc> BindingResolver<'alloc> {
         }
     }
 
+    /// Resolve an ASSET reference (a component or directive tag name) to
+    /// its fully-qualified access expression.
+    ///
+    /// Distinct from [`Self::resolve_prefix`]/[`Self::resolve_suffix`],
+    /// which resolve a plain expression IDENTIFIER (event handler values,
+    /// prop values, …) with dot access. Official Vue's `resolveSetupReference`
+    /// (`@vue/compiler-core`) always uses COMPUTED/bracket access for an
+    /// asset id in non-inline mode — `$setup["Name"]`, never `$setup.Name`
+    /// — because asset names are not guaranteed to be valid JS identifiers
+    /// and the compiler never special-cases "is this name a valid
+    /// identifier" for this position. Inline mode still resolves to the
+    /// bare const name (unprefixed), same as a plain identifier.
+    ///
+    /// Only the `setup`-kind binding case is covered (script-setup
+    /// component imports/consts) — every other binding kind falls back to
+    /// [`Self::resolve_prefix`]/[`Self::resolve_suffix`]'s existing dot
+    /// form, unverified for this position but unchanged from prior
+    /// behavior.
+    pub fn resolve_asset_ref(&self, ident: &str) -> String {
+        if !self.is_vapor && !self.is_tsx && !self.is_inline {
+            if let Some(bt) = self.bindings.get(ident) {
+                if bt.is_setup() {
+                    let mut s = String::with_capacity(ident.len() + 11);
+                    s.push_str("$setup[\"");
+                    s.push_str(ident);
+                    s.push_str("\"]");
+                    return s;
+                }
+            }
+        }
+        let mut s = String::with_capacity(ident.len() + 16);
+        s.push_str(self.resolve_prefix(ident));
+        s.push_str(ident);
+        s.push_str(self.resolve_suffix(ident));
+        s
+    }
+
     /// Resolve a simple identifier expression to its prefixed/suffixed form.
     ///
     /// If the expression is a simple identifier (no dots, brackets, operators),

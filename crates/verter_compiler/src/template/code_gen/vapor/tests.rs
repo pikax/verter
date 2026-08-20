@@ -472,7 +472,9 @@ fn v_html_directive() {
 
 #[test]
 fn component_simple() {
-    // Vue 3.6: _resolveComponent + _createComponentWithFallback
+    // A statically-resolved component uses _createComponent, never the
+    // _createComponentWithFallback SSR/vdom-interop fallback helper --
+    // verified against the real compiler.
     let source = "<template><my-element></my-element></template>";
     let result = run_full_pipeline(source);
     assert!(
@@ -480,19 +482,23 @@ fn component_simple() {
         "Expected _resolveComponent, got: {result}"
     );
     assert!(
-        result.contains("_createComponentWithFallback("),
-        "Expected _createComponentWithFallback, got: {result}"
+        result.contains("_createComponent("),
+        "Expected _createComponent, got: {result}"
+    );
+    assert!(
+        !result.contains("_createComponentWithFallback("),
+        "must not use the fallback helper for a plain component, got: {result}"
     );
 }
 
 #[test]
 fn component_with_static_props() {
-    // Vue 3.6: _createComponentWithFallback(comp, { title: "hello" })
+    // _createComponent(comp, { title: "hello" }, null, true)
     let source = "<template><my-comp title=\"hello\"></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("_createComponentWithFallback("),
-        "Expected _createComponentWithFallback, got: {result}"
+        result.contains("_createComponent("),
+        "Expected _createComponent, got: {result}"
     );
     assert!(
         result.contains("title: \"hello\""),
@@ -555,6 +561,89 @@ fn slot_named_outlet() {
     assert!(
         result.contains("_createSlot(\"header\""),
         "Expected _createSlot(\"header\"), got: {result}"
+    );
+}
+
+/// A dynamic `:prop="expr"` slot-outlet prop wraps in a getter — official
+/// `genProp`'s non-constant path (rc.3, confirmed against the vendored
+/// dist and the `components/child-comp` golden: `_createSlot("footer", {
+/// total: () => ($props.count) })`).
+#[test]
+fn slot_outlet_dynamic_prop_wraps_in_getter() {
+    let source = "<script setup>\ndefineProps({ count: { type: Number, default: 0 } })\n</script>\n<template><slot name=\"footer\" :total=\"count\"></slot></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_createSlot(\"footer\", { total: () => ($props.count) })"),
+        "Expected the dynamic prop wrapped in a getter, got: {result}"
+    );
+}
+
+/// A compile-time-constant slot-outlet prop (string/number/bool literal)
+/// is emitted directly, no getter wrap — official's `isDirectConstantValue`
+/// leaf case.
+#[test]
+fn slot_outlet_constant_prop_skips_getter() {
+    let source = "<template><slot name=\"footer\" :total=\"42\" :label=\"'x'\"></slot></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("total: 42") && !result.contains("total: () => (42)"),
+        "Expected a numeric-literal prop unwrapped, got: {result}"
+    );
+    assert!(
+        result.contains("label: 'x'") && !result.contains("() => ('x')"),
+        "Expected a string-literal prop unwrapped, got: {result}"
+    );
+}
+
+/// A static (non-directive) HTML attribute on `<slot>` also becomes a
+/// (string) slot prop — never a getter, since it's always source-literal
+/// text.
+#[test]
+fn slot_outlet_static_attr_becomes_prop() {
+    let source = "<template><slot name=\"footer\" variant=\"outline\"></slot></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_createSlot(\"footer\", { variant: \"outline\" })"),
+        "Expected the static attribute passed through as a slot prop, got: {result}"
+    );
+}
+
+/// DISCLOSED GAP, confirmed real (not merely non-conformant): `v-bind`
+/// spread on a `<slot>` outlet is SILENTLY DROPPED — `extra`'s data never
+/// reaches the slot at all. Closing this needs official's `{ $: [fn, ...] }`
+/// merge-array form (`build_slot_outlet_props`'s doc comment) — a
+/// materially separate, larger feature. If this now emits `extra`'s data,
+/// the merge-array mechanism has been implemented and this test (and the
+/// doc comment it's named from) should be replaced with a real assertion.
+#[test]
+fn scoped_slot_outlet_spread_is_silently_dropped() {
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst extra = ref({ a: 1 })\n</script>\n<template><slot v-bind=\"extra\"></slot></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("_createSlot()")
+            && !result.contains("_ctx.extra")
+            && !result.contains("$setup.extra"),
+        "disclosed gap: a v-bind spread's data must currently vanish \
+         entirely from the slot outlet, got: {result}"
+    );
+}
+
+/// DISCLOSED GAP, confirmed real (not merely non-conformant): a dynamic key
+/// (`:[key]="val"`) on a `<slot>` outlet is treated as a literal STATIC prop
+/// key equal to the raw bracketed text — a bogus `"[key]"`-named prop, never
+/// the intended runtime-computed key. Same closing path as the spread gap
+/// above. If this now emits a computed key, replace this test (and the doc
+/// comment it's named from) with a real assertion.
+#[test]
+fn scoped_slot_outlet_dynamic_key_emits_wrong_literal_key() {
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst key = ref('a')\nconst val = ref(1)\n</script>\n<template><slot :[key]=\"val\"></slot></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("[key]")
+            && !result.contains("_ctx.key]:")
+            && !result.contains("$setup.key]:"),
+        "disclosed gap: a dynamic slot-outlet key must currently emit as a \
+         bogus literal key, never the computed runtime key, got: {result}"
     );
 }
 
@@ -1056,8 +1145,8 @@ fn non_root_component_emits_insertion_state() {
         "Expected _setInsertionState for non-root component, got: {result}"
     );
     assert!(
-        result.contains("_createComponentWithFallback("),
-        "Expected _createComponentWithFallback, got: {result}"
+        result.contains("_createComponent("),
+        "Expected _createComponent, got: {result}"
     );
     // The parent div should still have a template
     assert!(
@@ -1121,38 +1210,46 @@ fn non_root_component_after_sibling() {
 
 // ==================== Named & scoped slots ====================
 
-/// @ai-generated — Named slot via <template #header>
+/// @ai-generated — Named slot via <template #header>. Official
+/// `genStaticSlots` always JSON-quotes a static slot name
+/// (confirmed against the vendored rc.3 dist and the `components/slots`
+/// golden), never a bare identifier key.
 #[test]
 fn component_with_named_slot() {
     let source =
         "<template><my-comp><template #header><span>Header</span></template></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("header: () => {"),
+        result.contains("\"header\": () => {"),
         "Expected named slot 'header' closure, got: {result}"
     );
     assert!(
-        !result.contains("default: () => {"),
+        !result.contains("\"default\": () => {"),
         "Should not have default slot when only named slot is present, got: {result}"
     );
 }
 
-/// @ai-generated — Multiple named slots
+/// @ai-generated — Multiple named slots. Vapor's plain named-slots object
+/// carries NO trailing `_: N` stability marker (that's a VDOM-only
+/// convention; Vapor's own non-stable marker is the distinct `_extend(...,
+/// { _: 8 })` forwarding form — confirmed against the vendored rc.3 dist's
+/// `genStaticSlots`, which never emits a bare `_` field).
 #[test]
 fn component_with_multiple_named_slots() {
     let source = "<template><my-comp><template #header><span>Header</span></template><template #footer><span>Footer</span></template></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("header: () => {"),
+        result.contains("\"header\": () => {"),
         "Expected named slot 'header', got: {result}"
     );
     assert!(
-        result.contains("footer: () => {"),
+        result.contains("\"footer\": () => {"),
         "Expected named slot 'footer', got: {result}"
     );
     assert!(
-        result.contains(", _: 2 }"),
-        "Expected slot flags, got: {result}"
+        !result.contains("_: 2"),
+        "Vapor's plain named-slots object must not carry a VDOM-style \
+         stability marker, got: {result}"
     );
 }
 
@@ -1162,34 +1259,86 @@ fn component_with_named_and_default_slots() {
     let source = "<template><my-comp><template #header><span>Header</span></template><span>Default content</span></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("header: () => {"),
+        result.contains("\"header\": () => {"),
         "Expected named slot 'header', got: {result}"
     );
     assert!(
-        result.contains("default: () => {"),
+        result.contains("\"default\": () => {"),
         "Expected implicit default slot, got: {result}"
     );
 }
 
-/// @ai-generated — Scoped slot with destructured params
+/// @ai-generated — Scoped slot with destructured params. Official collapses
+/// `{ item }` into a single `_slotProps{depth}` param and rewrites `item`
+/// references to `_slotProps{depth}.item` (`genSlotBlockWithProps` +
+/// `parseValueDestructure`, confirmed against the vendored rc.3 dist and the
+/// `components/slots` golden).
 #[test]
 fn component_with_scoped_slot() {
     let source = "<template><my-comp><template #default=\"{ item }\"><span>{{ item }}</span></template></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("default: ({ item }) => {"),
-        "Expected scoped default slot with params, got: {result}"
+        result.contains("\"default\": (_slotProps0) => {"),
+        "Expected the destructured param collapsed to _slotProps0, got: {result}"
+    );
+    assert!(
+        result.contains("_slotProps0.item"),
+        "Expected the destructured `item` rewritten to _slotProps0.item, got: {result}"
     );
 }
 
-/// @ai-generated — Named scoped slot
+/// @ai-generated — Named scoped slot, same destructure-collapse rule as
+/// [`component_with_scoped_slot`].
 #[test]
 fn component_with_named_scoped_slot() {
     let source = "<template><my-comp><template #header=\"{ title }\"><span>{{ title }}</span></template></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("header: ({ title }) => {"),
-        "Expected scoped named slot 'header' with params, got: {result}"
+        result.contains("\"header\": (_slotProps0) => {"),
+        "Expected the destructured param collapsed to _slotProps0, got: {result}"
+    );
+    assert!(
+        result.contains("_slotProps0.title"),
+        "Expected the destructured `title` rewritten to _slotProps0.title, got: {result}"
+    );
+}
+
+/// A scoped-slot rest element (`{ id, ...rest }`) destructures via official's
+/// own `_getRestElement(_slotProps0, [excludedKeys])` helper — confirmed
+/// byte-for-byte against the pinned rc.3 compiler's own generated code.
+#[test]
+fn component_with_scoped_slot_rest_element() {
+    let source = "<template><my-comp><template #default=\"{ id, ...rest }\"><span>{{ id }}-{{ rest.x }}</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("\"default\": (_slotProps0) => {"),
+        "Expected the destructured param collapsed to _slotProps0, got: {result}"
+    );
+    assert!(
+        result.contains("_slotProps0.id"),
+        "Expected the sibling leaf rewritten to _slotProps0.id, got: {result}"
+    );
+    assert!(
+        result.contains("_getRestElement(_slotProps0, [\"id\"]).x"),
+        "Expected the rest binding to resolve via _getRestElement, got: {result}"
+    );
+}
+
+/// A scoped-slot default value (`{ id = 99 }`) destructures via official's
+/// own `_getDefaultValue(_slotProps0.id, () => (99))` helper — v-slot params
+/// are formal `BindingPattern`s (unlike v-for's plain-`Expression` LHS), so
+/// this shape is NOT blocked by any parser-mode limitation.
+#[test]
+fn component_with_scoped_slot_default_value() {
+    let source = "<template><my-comp><template #default=\"{ id = 99 }\"><span>{{ id }}</span></template></my-comp></template>";
+    let result = run_full_pipeline(source);
+    assert!(
+        result.contains("\"default\": (_slotProps0) => {"),
+        "Expected the destructured param collapsed to _slotProps0, got: {result}"
+    );
+    assert!(
+        result.contains("_getDefaultValue(_slotProps0.id, () => (99))"),
+        "Expected the defaulted binding to resolve via _getDefaultValue, got: {result}"
     );
 }
 
@@ -1200,7 +1349,7 @@ fn component_with_bare_v_slot() {
         "<template><my-comp><template v-slot><span>Content</span></template></my-comp></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("default: () => {"),
+        result.contains("\"default\": () => {"),
         "Expected bare v-slot to produce default slot, got: {result}"
     );
 }
@@ -1233,14 +1382,15 @@ fn builtin_component_transition() {
     );
 }
 
-/// @ai-generated — KeepAlive uses direct import
+/// @ai-generated — KeepAlive uses Vapor's OWN built-in name (not VDOM's
+/// _KeepAlive) -- verified against the real compiler.
 #[test]
 fn builtin_component_keep_alive() {
     let source = "<template><KeepAlive><div>content</div></KeepAlive></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("_KeepAlive"),
-        "Expected _KeepAlive helper, got: {result}"
+        result.contains("_VaporKeepAlive"),
+        "Expected _VaporKeepAlive helper, got: {result}"
     );
     assert!(
         !result.contains("_resolveComponent"),
@@ -1248,14 +1398,15 @@ fn builtin_component_keep_alive() {
     );
 }
 
-/// @ai-generated — Teleport uses direct import
+/// @ai-generated — Teleport uses Vapor's OWN built-in name (not VDOM's
+/// _Teleport) -- verified against the real compiler.
 #[test]
 fn builtin_component_teleport() {
     let source = "<template><Teleport to=\"body\"><div>content</div></Teleport></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("_Teleport"),
-        "Expected _Teleport helper, got: {result}"
+        result.contains("_VaporTeleport"),
+        "Expected _VaporTeleport helper, got: {result}"
     );
     assert!(
         !result.contains("_resolveComponent"),
@@ -1284,8 +1435,8 @@ fn builtin_component_kebab_case_keep_alive() {
     let source = "<template><keep-alive><div>content</div></keep-alive></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("_KeepAlive"),
-        "Expected _KeepAlive for kebab-case keep-alive, got: {result}"
+        result.contains("_VaporKeepAlive"),
+        "Expected _VaporKeepAlive for kebab-case keep-alive, got: {result}"
     );
     assert!(
         !result.contains("_resolveComponent"),
@@ -1320,8 +1471,9 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
     (
         "mixed_static_dynamic_children",
         "<template><div><span>static</span><p>{{ msg }}</p><span>more</span></div></template>",
-        // Dynamic <p> text ref consumes id 0 before the root nav ref.
-        "const t0 = _template(\"<div><span>static</span><p> </p><span>more\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 1)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.msg))\n  })\n  return n1\n}",
+        // Dynamic <p> text ref consumes id 0 before the root nav ref. A
+        // single effect gets a concise (non-block) arrow body.
+        "const t0 = _template(\"<div><span>static</span><p> </p><span>more\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 1)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.msg)))\n  return n1\n}",
     ),
     (
         "dynamic_after_siblings",
@@ -1329,30 +1481,35 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         // (1) Hoisted templates emit in allocation-index order (nested
         // closure template before enclosing root — DFS visits children first).
         // (2) Mounted-once component uses 2-arg `_setInsertionState(parent, index)`.
-        "const t0 = _template(\" \")\nconst t1 = _template(\"<div><a>x</a><b>y\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1, 2)\n  const _component_c = _resolveComponent(\"c\")\n  const n0 = _createComponentWithFallback(_component_c, null, { default: () => {\n      const n0 = t0()\n      const x0 = _txt(n0)\n      _renderEffect(() => _setText(x0, _toDisplayString(_ctx.z)))\n      return n0\n    }, _: 2 })\n  return n1\n}",
+        "const t0 = _template(\" \")\nconst t1 = _template(\"<div><a>x</a><b>y\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1, 2)\n  const _component_c = _resolveComponent(\"c\")\n  const n0 = _createComponent(_component_c, null, { default: () => {\n      const n0 = t0()\n      const x0 = _txt(n0)\n      _renderEffect(() => _setText(x0, _toDisplayString(_ctx.z)))\n      return n0\n    }, _: 2 }, true)\n  return n1\n}",
     ),
     (
         "text_interp_coalesce",
         "<template><div>hello {{ name }} world</div></template>",
-        "const t0 = _template(\"<div>hello   world\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = t0()\n  const x0 = _txt(n0)\n  _renderEffect(() => {\n    _setText(x0, \"hello \" + _toDisplayString(_ctx.name) + \" world\")\n  })\n  return n0\n}",
+        // A dynamic text run's static content lives only in the _setText
+        // expression -- the hoisted HTML template collapses the whole run
+        // to one space (verified against the real compiler).
+        "const t0 = _template(\"<div> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = t0()\n  const x0 = _txt(n0)\n  _renderEffect(() => _setText(x0, \"hello \" + _toDisplayString(_ctx.name) + \" world\"))\n  return n0\n}",
     ),
     (
         "comment_between_siblings",
         "<template><div><span>a</span><!-- c --><p>{{ b }}</p></div></template>",
         // Dynamic <p> text ref consumes id 0 before the root nav ref.
-        "const t0 = _template(\"<div><span>a</span><!-- c --><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 2)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.b))\n  })\n  return n1\n}",
+        "const t0 = _template(\"<div><span>a</span><!-- c --><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 2)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.b)))\n  return n1\n}",
     ),
     (
         "component",
         "<template><div><MyComp :title=\"t\">child</MyComp></div></template>",
         // Nested closure template before enclosing root; 1-arg append
         // (`_setInsertionState(n2)` — component is the div's only content).
-        "const t0 = _template(\"child\", 2)\nconst t1 = _template(\"<div>\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponentWithFallback(_component_MyComp, { title: () => (_ctx.t) }, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 })\n  return n1\n}",
+        "const t0 = _template(\"child\", 2)\nconst t1 = _template(\"<div>\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  _setInsertionState(n1)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponent(_component_MyComp, { title: () => (_ctx.t) }, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 }, true)\n  return n1\n}",
     ),
     (
         "component_named_slots",
         "<template><MyComp><template #header>H {{ x }}</template>default</MyComp></template>",
-        "const t0 = _template(\"H  \")\nconst t1 = _template(\"default\", 2)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n1 = _createComponentWithFallback(_component_MyComp, null, { header: () => {\n      const n0 = t0()\n      const x0 = _txt(n0)\n      _renderEffect(() => _setText(x0, \"H \" + _toDisplayString(_ctx.x)))\n      return n0\n    }, default: () => {\n      const n1 = t1()\n      return n1\n    }, _: 2 })\n  return n1\n}",
+        // A dynamic text run's static content lives only in _setText -- the
+        // hoisted HTML template collapses the whole run to one space.
+        "const t0 = _template(\" \")\nconst t1 = _template(\"default\", 2)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n1 = _createComponent(_component_MyComp, null, { \"header\": () => {\n      const n0 = t0()\n      const x0 = _txt(n0)\n      _renderEffect(() => _setText(x0, \"H \" + _toDisplayString(_ctx.x)))\n      return n0\n    }, \"default\": () => {\n      const n1 = t1()\n      return n1\n    } }, true)\n  return n1\n}",
     ),
     (
         "slot_outlet",
@@ -1367,8 +1524,12 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         // Flags match official `genIfFlags` (rc.3 `basic-interpolation.vue`
         // v-if/v-else: 325, same shape). Id order: construct-own, wasted
         // branch-entry, then content (`n0`=if, `n2`=true, `n4`=false; 1 and 3
-        // wasted, never printed).
-        "const t0 = _template(\"<div>A  \")\nconst t1 = _template(\"<div>B\", 2)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = _createIf(() => (_ctx.a), () => {\n    const n2 = t0()\n    const x2 = _txt(n2)\n    _renderEffect(() => _setText(x2, \"A \" + _toDisplayString(_ctx.x)))\n    return n2\n  }, () => {\n    const n4 = t1()\n    return n4\n}, 325 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, FALSE_NO_SCOPE, KEYED_INDEX_0 */)\n  return n0\n}",
+        // wasted, never printed). Each branch's own `_template()` root bit
+        // propagates from `isSingleRootChild`: the v-if/v-else pair is the
+        // template's sole top-level construct, so `t0` (dynamic, not static)
+        // gets root-only (1) and `t1` (static) gets root|static (3) —
+        // verified directly against `@vue/compiler-vapor` 3.6.0-rc.3.
+        "const t0 = _template(\"<div> \", 1)\nconst t1 = _template(\"<div>B\", 3)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = _createIf(() => (_ctx.a), () => {\n    const n2 = t0()\n    const x2 = _txt(n2)\n    _renderEffect(() => _setText(x2, \"A \" + _toDisplayString(_ctx.x)))\n    return n2\n  }, () => {\n    const n4 = t1()\n    return n4\n}, 325 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, FALSE_NO_SCOPE, KEYED_INDEX_0 */)\n  return n0\n}",
     ),
     (
         "v_for",
@@ -1383,7 +1544,7 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         "multi_root",
         "<template><div>a</div><span>{{ b }}</span></template>",
         // `x`/`n` share one counter — span text ref is `x1`, not `x0`.
-        "const t0 = _template(\"<div>a\", 2)\nconst t1 = _template(\"<span> \")\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = t0()\n  const n1 = t1()\n  const x1 = _txt(n1)\n  _renderEffect(() => {\n    _setText(x1, _toDisplayString(_ctx.b))\n  })\n  return [n0, n1]\n}",
+        "const t0 = _template(\"<div>a\", 2)\nconst t1 = _template(\"<span> \")\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n0 = t0()\n  const n1 = t1()\n  const x1 = _txt(n1)\n  _renderEffect(() => _setText(x1, _toDisplayString(_ctx.b)))\n  return [n0, n1]\n}",
     ),
     (
         "void_self_closing",
@@ -1400,18 +1561,24 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         "<template><div><section><article><p>{{ deep }}</p></article></section></div></template>",
         // Deep interpolation text ref (x0) consumes id 0 before root nav
         // (n/x merge shifts root from n2 to n3).
-        "const t0 = _template(\"<div><section><article><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t0()\n  const p2 = _child(n3)\n  const p1 = _child(n2)\n  const p0 = _child(n1)\n  const x0 = _txt(p0)\n  _renderEffect(() => {\n    _setText(x0, _toDisplayString(_ctx.deep))\n  })\n  return n3\n}",
+        "const t0 = _template(\"<div><section><article><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t0()\n  const p2 = _child(n3)\n  const p1 = _child(n2)\n  const p0 = _child(n1)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.deep)))\n  return n3\n}",
     ),
     (
         "component_in_element_with_trailing_text",
         "<template><div><MyComp>x</MyComp>after {{ a }}</div></template>",
         // Following dynamic text in the same parent needs `_next()` past
         // this position → persistent `<!>` even though this is a component
-        // (`t1 = "<div><!> "`, `_setInsertionState(n4, n3)`). `x`/`n` share
-        // one counter (`x1`). `_setInsertionState`+create before
-        // `_renderEffect` (`flushPendingOperations`). Official 3rd-arg
-        // default-slot form vs `{default:...}` is a disclosed divergence.
-        "const t0 = _template(\"x\", 2)\nconst t1 = _template(\"<div><!>after  \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t1()\n  const n2 = _child(n1)\n  const x1 = _txt(n1)\n  _setInsertionState(n1, n2)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponentWithFallback(_component_MyComp, null, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 })\n  _renderEffect(() => {\n    _setText(x1, \"after \" + _toDisplayString(_ctx.a))\n  })\n  return n1\n}",
+        // (`t1 = "<div><!> "`, `_setInsertionState(n3, n2)`). The trailing
+        // text is a direct sibling of a STRUCTURAL (component) child, so it
+        // reaches its own position through the SAME shared nav chain the
+        // component's anchor uses (`n1 = _next(n2)`), not a standalone
+        // `_txt()` off the container — confirmed against live
+        // `@vue/compiler-vapor` 3.6.0-rc.3 (`_next(n0)`/no `_txt()`, same
+        // shape modulo Verter's own id numbering). Official ALSO interleaves
+        // the resulting `_renderEffect` right after the component statement
+        // instead of deferring it to the end. Official 3rd-arg default-slot
+        // form vs `{default:...}` is a disclosed, separate divergence.
+        "const t0 = _template(\"x\", 2)\nconst t1 = _template(\"<div><!> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t1()\n  const n2 = _child(n3)\n  const n1 = _next(n2)\n  _setInsertionState(n3, n2)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponent(_component_MyComp, null, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 }, true)\n  _renderEffect(() => _setText(n1, \"after \" + _toDisplayString(_ctx.a)))\n  return n3\n}",
     ),
 ];
 
@@ -2364,6 +2531,157 @@ fn v_for_key_callback_stays_unrenamed() {
     assert!(
         r.contains("(item) => (item)"),
         "the :key callback must keep the raw, unrenamed loop-variable name, got:\n{r}"
+    );
+}
+
+// v-for item destructuring — official's real `parseValueDestructure` +
+// `buildDestructureIdMap` (confirmed directly against the vendored rc.3
+// `@vue/compiler-vapor` dist): the main closure's own param renames to
+// `_for_item{depth}` EVEN when the value position is a destructuring
+// pattern, and every leaf identifier in the body rewrites to
+// `_for_item{depth}.value<path>`.
+
+/// `{ id, name }` destructures to path-based body rewrites; the main
+/// closure's own param renames to `_for_item0` (never the raw pattern).
+#[test]
+fn v_for_object_pattern_destructures_to_path_access() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst users = ref([{ id: 1, name: 'a' }])\n</script>\n<template><ul><li v-for=\"{ id, name } in users\" :key=\"id\">{{ name }}</li></ul></template>",
+    );
+    assert!(
+        r.contains("(_for_item0) => {"),
+        "the main closure's own param must rename to _for_item0 even for a \
+         destructured value, got:\n{r}"
+    );
+    assert!(
+        r.contains("_toDisplayString(_for_item0.value.name)"),
+        "the destructured `name` must rewrite to _for_item0.value.name, got:\n{r}"
+    );
+    assert!(
+        !r.contains("_toDisplayString(name)") && !r.contains("_ctx.name"),
+        "the raw destructured name must not survive as an unrewritten/\
+         _ctx-prefixed reference, got:\n{r}"
+    );
+    // The `:key` callback keeps the RAW, unrenamed pattern text (official
+    // `genCallback`/`genSimpleIdMap` never renames there — same rule as the
+    // bare-identifier case).
+    assert!(
+        r.contains("({ id, name }) => (id)"),
+        "the :key callback must keep the raw destructuring pattern, got:\n{r}"
+    );
+}
+
+/// `[a, b]` destructures to positional index access.
+#[test]
+fn v_for_array_pattern_destructures_to_index_access() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst pairs = ref([[1, 2]])\n</script>\n<template><ul><li v-for=\"[a, b] in pairs\">{{ a }} {{ b }}</li></ul></template>",
+    );
+    assert!(r.contains("(_for_item0) => {"), "got:\n{r}");
+    assert!(
+        r.contains("_for_item0.value[0]") && r.contains("_for_item0.value[1]"),
+        "array-pattern elements must rewrite to positional index access, got:\n{r}"
+    );
+}
+
+/// `{ user: { name } }` — nested object pattern accumulates a multi-hop path.
+#[test]
+fn v_for_nested_object_pattern_accumulates_path() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst list = ref([{ user: { name: 'x' } }])\n</script>\n<template><ul><li v-for=\"{ user: { name } } in list\">{{ name }}</li></ul></template>",
+    );
+    assert!(
+        r.contains("_for_item0.value.user.name"),
+        "a nested destructure must accumulate a multi-hop path, got:\n{r}"
+    );
+}
+
+/// A rest element (`...rest`) DOES destructure — official's own
+/// `_getRestElement(base, [excludedKeys])` helper, confirmed byte-for-byte
+/// against the pinned rc.3 compiler's own generated code AND its real mount
+/// output (a bare fallback to the raw pattern text used to destructure
+/// directly off the `_for_item0` WRAPPER instead of `_for_item0.value`,
+/// silently reading `undefined` at runtime — see
+/// `nested_v_for_runtime_proof`'s rest-element mount proof).
+#[test]
+fn v_for_rest_element_pattern_destructures_via_get_rest_element() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst list = ref([{ id: 1, x: 2 }])\n</script>\n<template><ul><li v-for=\"{ id, ...rest } in list\">{{ id }}-{{ rest.x }}</li></ul></template>",
+    );
+    assert!(
+        r.contains("(_for_item0) => {"),
+        "the main closure's own param must rename to _for_item0 even for a \
+         rest-element pattern, got:\n{r}"
+    );
+    assert!(
+        r.contains("_for_item0.value.id"),
+        "the plain sibling leaf must still resolve to a path access, got:\n{r}"
+    );
+    assert!(
+        r.contains("_getRestElement(_for_item0.value, [\"id\"]).x"),
+        "the rest binding must resolve via _getRestElement, excluding its \
+         declared sibling keys, got:\n{r}"
+    );
+    assert!(
+        !r.contains("{ id, ...rest }"),
+        "the raw authored pattern must NOT survive as the closure's own \
+         param once destructuring is attempted, got:\n{r}"
+    );
+}
+
+/// A default value in an ARRAY-position element (`[a = 99, b]`) destructures
+/// via official's own `_getDefaultValue(base, () => (default))` helper.
+/// `a = 99` is valid as a plain array-literal element expression, so the
+/// v-for LHS (parsed as a plain `Expression`, not a `BindingPattern`) reaches
+/// codegen as an `AssignmentExpression` element like any other. The pre-fix
+/// fallback didn't recognize `a` as a v-for-scoped local at all, silently
+/// reading `_ctx.a` (undefined) instead.
+#[test]
+fn v_for_array_default_value_destructures_via_get_default_value() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst list = ref([[undefined, 2]])\n</script>\n<template><ul><li v-for=\"[a = 99, b] in list\">{{ a }}-{{ b }}</li></ul></template>",
+    );
+    assert!(
+        r.contains("(_for_item0) => {"),
+        "the main closure's own param must rename to _for_item0 even for a \
+         default-value pattern, got:\n{r}"
+    );
+    assert!(
+        r.contains("_getDefaultValue(_for_item0.value[0], () => (99))"),
+        "the defaulted binding must resolve via _getDefaultValue, got:\n{r}"
+    );
+    assert!(
+        !r.contains("_ctx.a"),
+        "must not fall through to _ctx.a, got:\n{r}"
+    );
+}
+
+/// A default value on an OBJECT-shorthand key (`{ id = 99 }`) is a DIFFERENT,
+/// STILL-DISCLOSED gap: `id = 99` is valid ONLY in a destructuring/binding-
+/// pattern grammar, not as a plain object-literal property value — but the
+/// v-for LHS parses as a plain `Expression` (`VForParseResult::left`'s own
+/// doc), so OXC's expression parser rejects this shape before codegen ever
+/// sees an AST to destructure. Closing it needs re-parsing the v-for LHS
+/// through a binding-pattern-permissive grammar (the same one v-slot params
+/// already use) — a materially separate, deeper parser change, not a
+/// codegen-level fix. Confirmed still non-conformant (not merely
+/// "differently shaped"): the closure param stays the raw authored pattern
+/// text, and — same as before this pass — `id` silently reads through to
+/// `_ctx.id` (undefined) inside the body instead of the destructured value
+/// or its default.
+#[test]
+fn v_for_object_shorthand_default_value_stays_disclosed_gap() {
+    let r = run_full_pipeline(
+        "<script setup>\nimport { ref } from 'vue'\nconst list = ref([{}])\n</script>\n<template><ul><li v-for=\"{ id = 99 } in list\">{{ id }}</li></ul></template>",
+    );
+    assert!(
+        r.contains("_ctx.id"),
+        "disclosed gap: an object-shorthand default in v-for still falls \
+         through to _ctx.id (the v-for LHS parses as a plain Expression, \
+         which rejects `id = 99` as an object-literal property value) — if \
+         this now resolves correctly, the v-for LHS parser has gained \
+         binding-pattern support and this test (and its doc comment) should \
+         be replaced with a real destructuring assertion, got:\n{r}"
     );
 }
 

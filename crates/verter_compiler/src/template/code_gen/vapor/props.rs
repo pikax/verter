@@ -157,6 +157,31 @@ pub fn process_dynamic_props(
             continue;
         }
 
+        // Dynamic bind key: `:[attrName]="value"` / `v-bind:[attrName]="value"`.
+        // The key itself isn't known until runtime, so it can't be a literal
+        // `_setProp(nN, "attr", …)` attr name — official routes it through
+        // `_setDynamicProps` with a single computed-key object, mirroring
+        // VDOM's `_normalizeProps({ [key]: value })` handling.
+        if (name == ":" || name == "v-bind") && prop.is_dynamic == Some(true) {
+            if let Some(raw_arg) = arg {
+                let inner = raw_arg
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(raw_arg);
+                let key_expr = ctx.resolver.resolve_simple_expr(inner);
+                let value_resolved =
+                    resolve_expr(value, value_start, oxc_exp, ctx.resolver, ctx.force_js);
+                let node_ref = ctx.state.ensure_node_ref(ctx.counters);
+                let obj_expr = format!("{{ [{key_expr}]: {value_resolved} }}");
+                ctx.state.own_effects.push(VaporEffect::SetDynamicProps {
+                    node_ref,
+                    expr: ctx.out.alloc_str(&obj_expr),
+                });
+                ctx.out.add_vapor_import(VaporHelper::SetDynamicProps);
+            }
+            continue;
+        }
+
         if value.is_empty() && arg.is_none() {
             continue; // Skip directives without values
         }
@@ -176,8 +201,30 @@ pub fn process_dynamic_props(
         // Ensure node ref for effects
         let node_ref = ctx.state.ensure_node_ref(ctx.counters);
 
-        // Resolve the expression via OXC binding data, falling back to simple resolution
-        let resolved = resolve_expr(value, value_start, oxc_exp, ctx.resolver, ctx.force_js);
+        // Vue 3.4 same-name shorthand: `:id` with NO `="..."` at all
+        // (`prop.value_start.is_none()`) binds to a setup binding named
+        // after the (camelized) arg itself (`:id` == `:id="id"`) — resolved
+        // as a bare identifier, mirroring VDOM's `bind_shorthand_arg`
+        // handling. No OXC expression data exists for a value that was
+        // never authored. An explicit but BLANK value (`:id=""`, `:id="  "`)
+        // is a DIFFERENT authored shape — official rejects it outright
+        // (`X_V_BIND_NO_EXPRESSION`, parser-diagnosed) rather than treating
+        // it as shorthand; its own recovery falls back to a literal
+        // empty-string expression, which this mirrors instead of silently
+        // aliasing the authored-empty value to the shorthand binding.
+        let resolved = if prop.value_start.is_none() {
+            match arg {
+                Some(attr_name) => {
+                    let camelized = crate::template::code_gen::vdom::props::camelize(attr_name);
+                    ctx.resolver.resolve_simple_expr(&camelized)
+                }
+                None => String::new(),
+            }
+        } else if value.trim().is_empty() {
+            "\"\"".to_string()
+        } else {
+            resolve_expr(value, value_start, oxc_exp, ctx.resolver, ctx.force_js)
+        };
         let resolved_expr = ctx.out.alloc_str(&resolved);
 
         // Cross-file optimization: if all bindings in the expression are const props,
@@ -185,7 +232,23 @@ pub fn process_dynamic_props(
         let expr_bindings = oxc_exp.and_then(|e| e.bindings.as_ref());
         let is_const = ctx.resolver.all_bindings_const_props(expr_bindings);
 
-        match classify_directive(arg, &element.prop_flag) {
+        let mut has_prop_modifier = false;
+        let mut has_attr_modifier = false;
+        for modifier in &prop.modifiers {
+            let mod_name = &ctx.source[modifier.start as usize..modifier.end as usize];
+            match mod_name {
+                "prop" => has_prop_modifier = true,
+                "attr" => has_attr_modifier = true,
+                _ => {}
+            }
+        }
+
+        match classify_directive(
+            arg,
+            &element.prop_flag,
+            has_prop_modifier,
+            has_attr_modifier,
+        ) {
             DirectiveKind::Class => {
                 let effect = VaporEffect::SetClass {
                     node_ref,
@@ -244,6 +307,21 @@ pub fn process_dynamic_props(
                 }
                 ctx.out.add_vapor_import(VaporHelper::SetAttr);
             }
+            DirectiveKind::DomProp(attr) => {
+                let effect = VaporEffect::SetDomProp {
+                    node_ref,
+                    attr,
+                    expr: resolved_expr,
+                };
+                if is_const {
+                    ctx.state
+                        .child_statements
+                        .push((ctx.out.alloc_str(&effect.to_statement()), &[]));
+                } else {
+                    ctx.state.own_effects.push(effect);
+                }
+                ctx.out.add_vapor_import(VaporHelper::SetDomProp);
+            }
             DirectiveKind::Unknown => {}
         }
     }
@@ -286,6 +364,11 @@ fn process_event(
     // Collect modifiers
     let mut runtime_mods: Vec<&str> = Vec::new();
     let mut key_mods: Vec<&str> = Vec::new();
+    // Listener-option modifiers (`capture`/`passive`/`once`), kept in AUTHORED
+    // order — the official compiler emits the `_on(...)` options object in
+    // the order the modifiers were written (`@click.once.capture` → `{ once:
+    // true, capture: true }`), not a fixed schema order.
+    let mut option_mods: Vec<&str> = Vec::new();
     let mut has_capture = false;
     let mut has_passive = false;
     let mut has_once = false;
@@ -294,14 +377,34 @@ fn process_event(
     for modifier in &prop.modifiers {
         let mod_name = &ctx.source[modifier.start as usize..modifier.end as usize];
         match mod_name {
-            "capture" => has_capture = true,
-            "passive" => has_passive = true,
-            "once" => has_once = true,
+            "capture" => {
+                has_capture = true;
+                option_mods.push("capture");
+            }
+            "passive" => {
+                has_passive = true;
+                option_mods.push("passive");
+            }
+            "once" => {
+                has_once = true;
+                option_mods.push("once");
+            }
             "delegate" => has_delegate = true,
             m if RUNTIME_MODIFIERS.contains(&m) => runtime_mods.push(m),
             m if KEY_MODIFIERS.contains(&m) => key_mods.push(m),
             _ => {}
         }
+    }
+
+    // Register the modifier-wrapper helpers the handler will actually call —
+    // `write_handler_expression` below emits the `_withModifiers`/`_withKeys`
+    // call syntax but never wires its own import (VDOM/SSR wire theirs at
+    // their own call sites; Vapor must do the same here).
+    if !runtime_mods.is_empty() {
+        ctx.out.add_vapor_import(VaporHelper::WithModifiers);
+    }
+    if !key_mods.is_empty() {
+        ctx.out.add_vapor_import(VaporHelper::WithKeys);
     }
 
     let is_dynamic_arg = prop.is_dynamic == Some(true);
@@ -365,25 +468,14 @@ fn process_event(
             force_js,
         );
 
-        if has_capture || has_passive || has_once {
+        if !option_mods.is_empty() {
             line.push_str(", { ");
-            let mut first = true;
-            if has_capture {
-                line.push_str("capture: true");
-                first = false;
-            }
-            if has_passive {
-                if !first {
+            for (i, m) in option_mods.iter().enumerate() {
+                if i > 0 {
                     line.push_str(", ");
                 }
-                line.push_str("passive: true");
-                first = false;
-            }
-            if has_once {
-                if !first {
-                    line.push_str(", ");
-                }
-                line.push_str("once: true");
+                line.push_str(m);
+                line.push_str(": true");
             }
             line.push_str(" }");
         }
@@ -502,15 +594,54 @@ fn push_inline_handler(buf: &mut String, resolved: &str, is_statement_list: bool
     if trimmed.is_empty() {
         // Empty handler: @event="" → no-op
         buf.push_str("$event => {}");
-    } else if is_statement_list {
-        buf.push_str("$event => { ");
+        return;
+    }
+    // Official Vue omits the `$event` parameter entirely when the handler
+    // body never references it — `@click="count++"` compiles to `() =>
+    // (count++)`, not `$event => (...)` (verified against the real
+    // compiler). `$event` is a compiler-synthesized pseudo-identifier
+    // meaningful only inside an inline handler body, not a real binding —
+    // official's own `transformOn` makes this same call from the raw
+    // handler text, so a text check here is not a resolver-core violation.
+    let param = if references_event_param(trimmed) {
+        "$event"
+    } else {
+        "()"
+    };
+    if is_statement_list {
+        buf.push_str(param);
+        buf.push_str(" => { ");
         buf.push_str(trimmed);
         buf.push_str(" }");
     } else {
-        buf.push_str("$event => (");
+        buf.push_str(param);
+        buf.push_str(" => (");
         buf.push_str(trimmed);
         buf.push(')');
     }
+}
+
+/// Whether `body` references the `$event` pseudo-identifier as a whole
+/// word (not merely as a substring of a longer identifier).
+fn references_event_param(body: &str) -> bool {
+    const NEEDLE: &str = "$event";
+    let bytes = body.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = body[start..].find(NEEDLE) {
+        let idx = start + pos;
+        let before_ok = idx == 0
+            || !(bytes[idx - 1].is_ascii_alphanumeric()
+                || bytes[idx - 1] == b'_'
+                || bytes[idx - 1] == b'$');
+        let after = idx + NEEDLE.len();
+        let after_ok =
+            after >= bytes.len() || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + NEEDLE.len();
+    }
+    false
 }
 
 /// Process v-model directive.
@@ -642,6 +773,9 @@ enum DirectiveKind<'a> {
     Prop(&'a str),
     /// `:attr` binding — HTML attribute (e.g., `data-*`, `aria-*`, hyphenated).
     Attr(&'a str),
+    /// `:attr.prop` binding — explicitly forced DOM property regardless of
+    /// hyphenation (e.g. `:text-content.prop`).
+    DomProp(&'a str),
     /// Unknown directive (skip).
     Unknown,
 }
@@ -660,9 +794,17 @@ fn is_attr_not_prop(name: &str) -> bool {
 }
 
 /// Classify a directive arg + prop flags into a `DirectiveKind`.
+///
+/// `has_prop_modifier`/`has_attr_modifier` are the explicit `.prop`/`.attr`
+/// modifiers read off the directive (`:text-content.prop`, `:data-x.attr`) —
+/// they override the implicit hyphenation-based classification below, since
+/// the official Vapor compiler forces DOM-property or attribute routing
+/// regardless of the attribute name's shape when the modifier is present.
 fn classify_directive<'a>(
     arg: Option<&'a str>,
     prop_flag: &crate::ast::types::PropFlag,
+    has_prop_modifier: bool,
+    has_attr_modifier: bool,
 ) -> DirectiveKind<'a> {
     // v-bind shorthand: :class, :style, :attr
     if let Some(attr_name) = arg {
@@ -671,6 +813,12 @@ fn classify_directive<'a>(
         }
         if attr_name == "style" && prop_flag.has(PropFlags::HasDynamicStyle) {
             return DirectiveKind::Style;
+        }
+        if has_prop_modifier {
+            return DirectiveKind::DomProp(attr_name);
+        }
+        if has_attr_modifier {
+            return DirectiveKind::Attr(attr_name);
         }
         // Vue 3.6: data-*, aria-*, and hyphenated attrs use _setAttr; DOM props use _setProp
         if is_attr_not_prop(attr_name) {
@@ -728,6 +876,30 @@ mod tests {
         value_start: Option<u32>,
         value_end: Option<u32>,
     ) -> NodeProp {
+        make_directive_prop_with_modifiers(
+            start,
+            name_end,
+            arg_start,
+            arg_end,
+            value_start,
+            value_end,
+            &[],
+        )
+    }
+
+    /// Like [`make_directive_prop`] but with modifier spans sliced from
+    /// `ctx.source` at the given byte ranges (matching `.modName` in the
+    /// authored source).
+    #[allow(clippy::too_many_arguments)]
+    fn make_directive_prop_with_modifiers(
+        start: u32,
+        name_end: u32,
+        arg_start: Option<u32>,
+        arg_end: Option<u32>,
+        value_start: Option<u32>,
+        value_end: Option<u32>,
+        modifiers: &[(u32, u32)],
+    ) -> NodeProp {
         NodeProp {
             start,
             name_end,
@@ -737,7 +909,10 @@ mod tests {
             is_dynamic: None,
             value_start,
             value_end,
-            modifiers: SmallVec::new(),
+            modifiers: modifiers
+                .iter()
+                .map(|&(s, e)| crate::common::Span::new(s, e))
+                .collect(),
         }
     }
 
@@ -792,6 +967,136 @@ mod tests {
         assert_eq!(state.own_effects.len(), 1);
         assert_eq!(state.own_effects[0].to_code(), "_setClass(n0, _ctx.cls)");
         assert!(out.vapor_imports().has(VaporHelper::SetClass));
+    }
+
+    /// `:id` with NO `="..."` at all is the Vue 3.4+ same-name shorthand —
+    /// resolves to the identically-named binding.
+    #[test]
+    fn bind_shorthand_no_value_resolves_to_binding() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        let source = ":id";
+        let element = ElementNode {
+            tag_open: make_tag(0, 20, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop(0, 3, Some(1), Some(3), None, None)],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.own_effects.len(), 1);
+        assert_eq!(
+            state.own_effects[0].to_code(),
+            "_setProp(n0, \"id\", _ctx.id)"
+        );
+    }
+
+    /// `:id=""` is a DIFFERENT authored shape from `:id` — an explicit but
+    /// blank value, not the same-name shorthand. It must NOT silently
+    /// resolve to the `id` binding (the pre-fix conflation): official
+    /// rejects this outright (`X_V_BIND_NO_EXPRESSION`), and its own
+    /// recovery falls back to a literal empty-string expression.
+    #[test]
+    fn bind_explicit_blank_value_does_not_alias_to_shorthand() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        let source = ":id=\"\"";
+        let element = ElementNode {
+            tag_open: make_tag(0, 20, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop(
+                0,
+                3,
+                Some(1),
+                Some(3),
+                Some(5),
+                Some(5),
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        // `id` IS a real binding here — if the fix regressed to the old
+        // `value.is_empty()` conflation, this would silently resolve to
+        // `_ctx.id`/`$setup.id` instead of the literal empty string.
+        let resolver = make_resolver_with(
+            &[(
+                "id",
+                crate::template::code_gen::binding::BindingType::SetupRef,
+            )],
+            false,
+        );
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        let code = state
+            .own_effects
+            .first()
+            .map(|e| e.to_code())
+            .or_else(|| {
+                state
+                    .child_statements
+                    .first()
+                    .map(|(s, _)| (*s).to_string())
+            })
+            .expect("blank value still emits a setter, just with a literal empty expression");
+        assert!(
+            !code.contains("id.value") && !code.contains("_ctx.id") && !code.contains("$setup.id"),
+            "an explicit blank value must NOT alias to the same-name shorthand binding, got: {code}"
+        );
+        assert_eq!(code, "_setProp(n0, \"id\", \"\")");
     }
 
     #[test]
@@ -1054,6 +1359,307 @@ mod tests {
         );
         // Same node ref for both
         assert_eq!(state.node_ref, Some(0));
+    }
+
+    // ==================== Modifier helper-routing tests ====================
+
+    #[test]
+    fn event_runtime_modifier_wires_with_modifiers_import() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        //                0123456789012345678901
+        let source = r#"@click.stop="handler""#;
+        let element = ElementNode {
+            tag_open: make_tag(0, 30, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop_with_modifiers(
+                0,
+                6,
+                None,
+                None,
+                Some(13),
+                Some(20),
+                &[(7, 11)],
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.child_statements.len(), 1);
+        assert_eq!(
+            state.child_statements[0].0,
+            r#"_on(n0, "click", _withModifiers(e => _ctx.handler(e), ["stop"]))"#
+        );
+        assert!(out.vapor_imports().has(VaporHelper::WithModifiers));
+        assert!(!out.vapor_imports().has(VaporHelper::WithKeys));
+    }
+
+    #[test]
+    fn event_key_modifier_wires_with_keys_import() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        //                012345678901234567890123
+        let source = r#"@keyup.enter="onEnter""#;
+        let element = ElementNode {
+            tag_open: make_tag(0, 30, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop_with_modifiers(
+                0,
+                6,
+                None,
+                None,
+                Some(14),
+                Some(21),
+                &[(7, 12)],
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.child_statements.len(), 1);
+        assert_eq!(
+            state.child_statements[0].0,
+            r#"_on(n0, "keyup", _withKeys(e => _ctx.onEnter(e), ["enter"]))"#
+        );
+        assert!(out.vapor_imports().has(VaporHelper::WithKeys));
+        assert!(!out.vapor_imports().has(VaporHelper::WithModifiers));
+    }
+
+    #[test]
+    fn prop_modifier_forces_set_dom_prop_even_when_hyphenated() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        //                0         1         2
+        //                0123456789012345678901234
+        let source = r#":text-content.prop="text""#;
+        let element = ElementNode {
+            tag_open: make_tag(0, 30, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop_with_modifiers(
+                0,
+                13,
+                Some(1),
+                Some(13),
+                Some(20),
+                Some(24),
+                &[(14, 18)],
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.own_effects.len(), 1);
+        assert_eq!(
+            state.own_effects[0].to_code(),
+            r#"_setDOMProp(n0, "text-content", _ctx.text)"#
+        );
+        assert!(out.vapor_imports().has(VaporHelper::SetDomProp));
+        assert!(!out.vapor_imports().has(VaporHelper::SetAttr));
+    }
+
+    #[test]
+    fn attr_modifier_forces_set_attr_even_when_not_hyphenated() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        //                0         1
+        //                012345678901234567
+        let source = r#":title.attr="ttl""#;
+        let element = ElementNode {
+            tag_open: make_tag(0, 20, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop_with_modifiers(
+                0,
+                6,
+                Some(1),
+                Some(6),
+                Some(13),
+                Some(16),
+                &[(7, 11)],
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.own_effects.len(), 1);
+        assert_eq!(
+            state.own_effects[0].to_code(),
+            r#"_setAttr(n0, "title", _ctx.ttl)"#
+        );
+        assert!(out.vapor_imports().has(VaporHelper::SetAttr));
+        assert!(!out.vapor_imports().has(VaporHelper::SetProp));
+        assert!(!out.vapor_imports().has(VaporHelper::SetDomProp));
+    }
+
+    /// Negative control (explicit-request §5): a plain hyphenated attribute
+    /// WITHOUT `.prop` must NOT flip to the new DOM-property helper — the
+    /// implicit hyphen-based `_setAttr` routing is unaffected.
+    #[test]
+    fn hyphenated_attr_without_prop_modifier_stays_set_attr() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut counters = VaporCounters::default();
+        let mut state = VaporElementState::new();
+
+        let source = r#":data-x="dataX""#;
+        let element = ElementNode {
+            tag_open: make_tag(0, 20, 4),
+            tag_close: None,
+            tag_type: TagType::Element,
+            is_self_closing: false,
+            props: vec![make_directive_prop(
+                0,
+                7,
+                Some(1),
+                Some(7),
+                Some(9),
+                Some(14),
+            )],
+            content: None,
+            v_condition: None,
+            v_for: None,
+            v_slot: None,
+            v_once: None,
+            v_ref: None,
+            prop_flag: PropFlag::empty(),
+            children_flag: ChildrenFlag::empty(),
+            children_mode: ChildrenMode::Empty,
+            is_fully_static: false,
+        };
+
+        let mut del_events: Vec<&str> = Vec::new();
+        let mut del_set: FxHashSet<&str> = FxHashSet::default();
+        let resolver = make_resolver();
+        let mut ctx = VaporPropsContext {
+            source,
+            resolver: &resolver,
+            state: &mut state,
+            counters: &mut counters,
+            out: &mut out,
+            delegated_events: &mut del_events,
+            delegated_events_set: &mut del_set,
+            force_js: false,
+        };
+        process_dynamic_props(&element, &mut ctx, None);
+
+        assert_eq!(state.own_effects.len(), 1);
+        assert_eq!(
+            state.own_effects[0].to_code(),
+            r#"_setAttr(n0, "data-x", _ctx.dataX)"#
+        );
+        assert!(out.vapor_imports().has(VaporHelper::SetAttr));
+        assert!(!out.vapor_imports().has(VaporHelper::SetDomProp));
     }
 
     // ==================== Binding resolution tests ====================

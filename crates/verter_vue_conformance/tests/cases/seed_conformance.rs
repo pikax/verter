@@ -22,8 +22,19 @@
 //!
 //! `VERTER_CONFORMANCE_UPDATE=1` regenerates the dispositions file from the
 //! actual results (curated `note`s are preserved); review the diff before
-//! committing. `VERTER_CONFORMANCE_DEBUG=<case-id-substring>` prints one
-//! cell's assembled Verter module, golden, and comparator reasons.
+//! committing. Run the regeneration with `-- --test-threads=1`: this test is
+//! the only one in the binary that drives `corpus_host()`'s shared
+//! `VerterHost` through a real compile, and under `cargo test`'s default
+//! concurrent-test-thread scheduling the emitted module text has been
+//! observed to vary between runs on an otherwise-unchanged tree (private
+//! binding scope/declaration ordinals and even helper-import sets shift) —
+//! a compile-pipeline determinism gap under thread contention, tracked
+//! separately from this suite's own scope. `cargo nextest` is unaffected
+//! (one process per test, no shared state to race on); the canonical gate
+//! uses nextest and is not exposed to this.
+//!
+//! `VERTER_CONFORMANCE_DEBUG=<case-id-substring>` prints one cell's
+//! assembled Verter module, golden, and comparator reasons.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -122,7 +133,7 @@ fn golden_meta(backend: Backend, topology: Topology, case_id: &str) -> GoldenMet
     let path = corpus_file(
         &corpus_root(),
         &format!(
-            "goldens/3.6.0-rc.1/{}/{case_id}.meta.json",
+            "goldens/3.6.0-rc.3/{}/{case_id}.meta.json",
             golden_dir(backend, topology)
         ),
     );

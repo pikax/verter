@@ -58,6 +58,7 @@ pub const SET_CLASS: &str = "_setClass";
 pub const SET_STYLE: &str = "_setStyle";
 pub const SET_PROP: &str = "_setProp";
 pub const SET_ATTR: &str = "_setAttr";
+pub const SET_DOM_PROP: &str = "_setDOMProp";
 pub const SET_HTML: &str = "_setHtml";
 pub const SET_DYNAMIC_PROPS: &str = "_setDynamicProps";
 pub const CHILD: &str = "_child";
@@ -81,6 +82,12 @@ pub const APPLY_SELECT_MODEL: &str = "_applySelectModel";
 pub const CREATE_COMPONENT_WITH_FALLBACK: &str = "_createComponentWithFallback";
 pub const CREATE_TEMPLATE_REF_SETTER: &str = "_createTemplateRefSetter";
 pub const SET_INSERTION_STATE: &str = "_setInsertionState";
+pub const CREATE_DYNAMIC_COMPONENT: &str = "_createDynamicComponent";
+pub const VAPOR_EXTEND: &str = "_extend";
+pub const VAPOR_TELEPORT: &str = "_VaporTeleport";
+pub const VAPOR_KEEP_ALIVE: &str = "_VaporKeepAlive";
+pub const GET_REST_ELEMENT: &str = "_getRestElement";
+pub const GET_DEFAULT_VALUE: &str = "_getDefaultValue";
 
 // ======================== Runtime helpers (SSR) ========================
 // Imported from "vue/server-renderer"
@@ -281,8 +288,8 @@ impl VdomHelperFlags {
     }
 }
 
-/// Vapor runtime helper identifier. Each variant is a distinct bit in a `u32`.
-#[repr(u32)]
+/// Vapor runtime helper identifier. Each variant is a distinct bit in a `u64`.
+#[repr(u64)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum VaporHelper {
     Template = 1,
@@ -316,7 +323,14 @@ pub enum VaporHelper {
     CreateTemplateRefSetter = 1 << 28,
     SetInsertionState = 1 << 29,
     WithModifiers = 1 << 30,
-    WithKeys = 1u32 << 31,
+    WithKeys = 1 << 31,
+    SetDomProp = 1 << 32,
+    CreateDynamicComponent = 1 << 33,
+    Extend = 1 << 34,
+    VaporTeleport = 1 << 35,
+    VaporKeepAlive = 1 << 36,
+    GetRestElement = 1 << 37,
+    GetDefaultValue = 1 << 38,
 }
 
 impl VaporHelper {
@@ -356,12 +370,19 @@ impl VaporHelper {
             Self::SetInsertionState => SET_INSERTION_STATE,
             Self::WithModifiers => WITH_MODIFIERS,
             Self::WithKeys => WITH_KEYS,
+            Self::SetDomProp => SET_DOM_PROP,
+            Self::CreateDynamicComponent => CREATE_DYNAMIC_COMPONENT,
+            Self::Extend => VAPOR_EXTEND,
+            Self::VaporTeleport => VAPOR_TELEPORT,
+            Self::VaporKeepAlive => VAPOR_KEEP_ALIVE,
+            Self::GetRestElement => GET_REST_ELEMENT,
+            Self::GetDefaultValue => GET_DEFAULT_VALUE,
         }
     }
 }
 
 /// Ordered lookup table for `VaporHelperFlags::to_imports()`.
-const ALL_VAPOR: [VaporHelper; 32] = [
+const ALL_VAPOR: [VaporHelper; 39] = [
     VaporHelper::Template,
     VaporHelper::Txt,
     VaporHelper::SetText,
@@ -394,11 +415,18 @@ const ALL_VAPOR: [VaporHelper; 32] = [
     VaporHelper::SetInsertionState,
     VaporHelper::WithModifiers,
     VaporHelper::WithKeys,
+    VaporHelper::SetDomProp,
+    VaporHelper::CreateDynamicComponent,
+    VaporHelper::Extend,
+    VaporHelper::VaporTeleport,
+    VaporHelper::VaporKeepAlive,
+    VaporHelper::GetRestElement,
+    VaporHelper::GetDefaultValue,
 ];
 
-/// Bitflag set of Vapor runtime helpers. Wraps a `u32` with O(1) add/has.
+/// Bitflag set of Vapor runtime helpers. Wraps a `u64` with O(1) add/has.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct VaporHelperFlags(pub u32);
+pub struct VaporHelperFlags(pub u64);
 
 impl VaporHelperFlags {
     /// Empty set.
@@ -418,13 +446,13 @@ impl VaporHelperFlags {
     #[cfg(test)]
     #[inline(always)]
     pub const fn has(self, h: VaporHelper) -> bool {
-        (self.0 & (h as u32)) != 0
+        (self.0 & (h as u64)) != 0
     }
 
     /// Add a helper (returns new value).
     #[inline(always)]
     pub const fn add(self, h: VaporHelper) -> Self {
-        Self(self.0 | (h as u32))
+        Self(self.0 | (h as u64))
     }
 
     /// Merge two flag sets.
@@ -800,6 +828,76 @@ pub fn escape_js_string(s: &str) -> String {
     let mut buf = String::with_capacity(s.len() + 8);
     escape_js_string_into(&mut buf, s);
     buf
+}
+
+// ======================== Whitespace condensation ========================
+// Vue's condense mode: a text node's content collapses runs of space/tab/
+// newline/CR to a single space. Shared by VDOM (`_createElementVNode` JS
+// string children) and Vapor (raw HTML template text plus `_setText` JS
+// string parts) — same rule, different escaping context per caller.
+
+/// Whether a byte is condense-mode whitespace (space, tab, newline, CR).
+#[inline]
+pub fn is_condense_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Whether `text` contains two ADJACENT condense-whitespace bytes — i.e.
+/// whether condensing would actually change anything.
+#[inline]
+pub fn has_consecutive_ws(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(1))
+        .any(|i| is_condense_ws(bytes[i]) && is_condense_ws(bytes[i + 1]))
+}
+
+/// Append `text` to `buf`, condensing consecutive whitespace to a single
+/// space. No JS escaping — for raw HTML template text (Vapor's hoisted
+/// `_template(...)` source).
+pub fn condense_whitespace_into(buf: &mut String, text: &str) {
+    let mut in_ws = false;
+    for ch in text.chars() {
+        if ch.is_ascii() && is_condense_ws(ch as u8) {
+            if !in_ws {
+                buf.push(' ');
+                in_ws = true;
+            }
+            continue;
+        }
+        in_ws = false;
+        buf.push(ch);
+    }
+}
+
+/// Condense consecutive whitespace to a single space AND escape for a JS
+/// string literal, in one pass.
+pub fn condense_and_escape_js(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_ws = false;
+
+    for ch in text.chars() {
+        if ch.is_ascii() && is_condense_ws(ch as u8) {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+            continue;
+        }
+        in_ws = false;
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\0' => out.push_str("\\0"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if c.is_ascii_control() => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ======================== HTML entity decoding ========================
