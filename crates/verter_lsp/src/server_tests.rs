@@ -4463,13 +4463,7 @@ async fn provider_only_completion_keeps_typed_slot_lexical_locals() {
 
 #[tokio::test]
 async fn initialized_returns_before_background_configure_paths_completes() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "verter-lsp-init-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos()
-    ));
+    let temp_root = verter_test_support::unique_temp_dir("verter-lsp-init");
     std::fs::create_dir_all(temp_root.join("src")).expect("temp project should be created");
     std::fs::write(
         temp_root.join("tsconfig.json"),

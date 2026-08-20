@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
@@ -93,11 +93,7 @@ fn norm(p: &Path) -> String {
 }
 
 fn tempdir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("verter_lsp_vcfg_{}_{nanos}", std::process::id()));
+    let dir = verter_test_support::unique_temp_dir("verter_lsp_vcfg");
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }

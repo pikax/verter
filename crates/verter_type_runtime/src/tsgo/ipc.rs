@@ -4749,6 +4749,7 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod dto_path_canonicalization_tests {
     use super::{parse_rename_edit, parse_text_edit_to_code_edit, uri_to_file_path};
+    use verter_test_support::unique_temp_dir;
 
     fn edit_json() -> serde_json::Value {
         serde_json::json!({
@@ -4809,14 +4810,7 @@ mod dto_path_canonicalization_tests {
         assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
 
         // Write the target to a real temp file, derive its canonical path + matching file:// URI.
-        let dir = std::env::temp_dir().join(format!(
-            "verter_tsgo_rename_pertarget_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_temp_dir("verter_tsgo_rename_pertarget");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("target.ts");
         std::fs::write(&file, target_src).unwrap();
@@ -4869,14 +4863,7 @@ mod dto_path_canonicalization_tests {
         let (want_line, want_char) = super::offset_to_position(target_src, want_off);
         assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
 
-        let dir = std::env::temp_dir().join(format!(
-            "verter_tsgo_codeaction_pertarget_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_temp_dir("verter_tsgo_codeaction_pertarget");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("target.ts");
         std::fs::write(&file, target_src).unwrap();
@@ -4938,15 +4925,7 @@ mod dto_path_canonicalization_tests {
     /// Returned in the same `file://` form production resolves through.
     fn absent_target_uri(tag: &str) -> String {
         use super::{path_to_file_uri_string, uri_to_file_path};
-        let dir = std::env::temp_dir().join(format!(
-            "verter_tsgo_{}_{}_{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_temp_dir(&format!("verter_tsgo_{tag}"));
         // Ensure absence: remove the directory tree if a prior run left it behind.
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("gone.ts");

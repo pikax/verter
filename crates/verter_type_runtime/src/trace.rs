@@ -648,6 +648,7 @@ pub(crate) fn test_trace_env_guard() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use verter_test_support::unique_temp_dir;
 
     #[test]
     fn format_runtime_trace_line_uses_component_meta_shape() {
@@ -671,12 +672,7 @@ mod tests {
     #[test]
     fn runtime_trace_scope_inherits_host_request_context() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace").with_extension("log");
         let _ = std::fs::remove_file(&path);
 
         unsafe {
@@ -774,12 +770,7 @@ mod tests {
     #[test]
     fn interleaved_async_trace_scopes_do_not_corrupt_span_stack() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-interleave-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-interleave").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
@@ -836,12 +827,7 @@ mod tests {
     #[test]
     fn nested_async_trace_scope_parents_under_outer_span() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-nested-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-nested").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
@@ -905,12 +891,7 @@ mod tests {
     #[test]
     fn guard_dropped_under_foreign_nested_async_state_is_fault_contained() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-f1-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-f1").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
@@ -994,12 +975,7 @@ mod tests {
     #[test]
     fn guard_dropped_after_async_state_gone_is_graceful_noop() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-f2-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-f2").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");
@@ -1115,12 +1091,7 @@ mod tests {
     #[should_panic(expected = "trace guard must pop its own span from its own state")]
     fn same_state_out_of_order_drop_trips_lifo_assertion() {
         let _guard = test_trace_env_guard();
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "verter-type-runtime-trace-lifo-{}-{}.log",
-            std::process::id(),
-            type_runtime_next_span_id()
-        ));
+        let path = unique_temp_dir("verter-type-runtime-trace-lifo").with_extension("log");
         let _ = std::fs::remove_file(&path);
         unsafe {
             std::env::set_var("VERTER_TYPE_RUNTIME_TRACE", "1");

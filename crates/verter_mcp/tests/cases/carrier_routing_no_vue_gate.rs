@@ -600,7 +600,8 @@ async fn detect_css_bleed(&self) -> Result<X, Y> {
     }
 }
 ";
-    let tmp = std::env::temp_dir().join("mcp_guard_fn_scope_selftest.rs");
+    let tmp =
+        verter_test_support::unique_temp_dir("mcp_guard_fn_scope_selftest").with_extension("rs");
     fs::write(&tmp, src).unwrap();
     let v = file_violations(&tmp);
     let _ = fs::remove_file(&tmp);

@@ -1,4 +1,5 @@
 use super::*;
+use verter_test_support::unique_temp_dir;
 
 #[test]
 fn process_death_closes_pending_registration_atomically() {
@@ -876,10 +877,7 @@ fn test_parse_tsserver_location_line_10_not_packed() {
 
 #[test]
 fn test_parse_tsserver_location_without_cache_reads_disk_content() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "verter-tsserver-location-disk-{}",
-        std::process::id()
-    ));
+    let temp_root = unique_temp_dir("verter-tsserver-location-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("types.ts");
@@ -928,10 +926,7 @@ fn test_parse_tsserver_rename_span_with_content() {
 /// distinguishable from the real byte offset.
 #[test]
 fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "verter-tsserver-rename-disk-{}",
-        std::process::id()
-    ));
+    let temp_root = unique_temp_dir("verter-tsserver-rename-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("child.ts");
@@ -978,11 +973,7 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
 /// on disk and is not in the (empty) cache.
 #[test]
 fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
-    let missing = std::env::temp_dir()
-        .join(format!(
-            "verter-tsserver-rename-missing-{}-absent.ts",
-            std::process::id()
-        ))
+    let missing = unique_temp_dir("verter-tsserver-rename-missing-absent")
         .to_string_lossy()
         .replace('\\', "/");
     let _ = std::fs::remove_file(&missing);
@@ -2818,11 +2809,7 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
 #[test]
 fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
     // A path that does not exist on disk and is NOT in the (empty) contents cache.
-    let missing = std::env::temp_dir()
-        .join(format!(
-            "verter-tsserver-missing-{}-does-not-exist.ts",
-            std::process::id()
-        ))
+    let missing = unique_temp_dir("verter-tsserver-missing-does-not-exist")
         .to_string_lossy()
         .replace('\\', "/");
     // Belt-and-suspenders: ensure it really is absent.
@@ -3009,10 +2996,7 @@ fn parse_tsserver_file_code_edits_drops_inverted_span() {
 /// rename/location paths' content resolution.
 #[test]
 fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "verter-tsserver-codeedit-disk-{}",
-        std::process::id()
-    ));
+    let temp_root = unique_temp_dir("verter-tsserver-codeedit-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("child.ts");

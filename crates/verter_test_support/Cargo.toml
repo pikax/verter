@@ -1,0 +1,21 @@
+[package]
+name = "verter_test_support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared test-only primitives (per-process scratch paths, ephemeral ports, deterministic counters) that prevent the flake classes a per-crate duplicate would reintroduce"
+publish = false
+
+# Test-only harness crate: NEVER a `[dependencies]` entry of a layered crate,
+# only ever a `[dev-dependencies]` one. See
+# `crates/verter_identity/tests/cases/workspace_dependency_layers.rs`
+# (LAYER_7_HARNESSES) — dev-dependencies are outside the tracked production
+# closure, so this crate being widely dev-depended-on does not violate the
+# "nothing may depend on a harness" firewall.
+[dependencies]
+
+[dev-dependencies]

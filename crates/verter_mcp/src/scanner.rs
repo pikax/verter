@@ -111,24 +111,14 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use verter_session::HostConfig;
+    use verter_test_support::unique_temp_dir;
 
     /// Allocate a fresh, process-unique scratch directory under the OS temp dir
     /// (no `tempfile` dependency in this crate). Hermetic: depends only on
     /// locally-created fixtures.
     fn fresh_scratch_dir(tag: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "verter_mcp_scanner_{tag}_{}_{nanos}_{seq}",
-            std::process::id()
-        ));
+        let dir = unique_temp_dir(&format!("verter_mcp_scanner_{tag}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

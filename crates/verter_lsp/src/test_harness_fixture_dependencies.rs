@@ -61,6 +61,12 @@ fn staged_fixture_root(name: &str) -> std::path::PathBuf {
 /// A per-process staging area. Process identity varies the path for the same
 /// reason the carrier-store test roots do: under one-test-per-process execution
 /// a shared directory is shared mutable state between concurrent runs.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this IS the sanctioned lease-based staging root (see the module doc comment) — the \
+              exact primitive verter_test_support::unique_temp_dir exists beside, not the \
+              collide-on-cleanup anti-pattern it guards against"
+)]
 fn stage_area() -> std::path::PathBuf {
     static AREA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     AREA.get_or_init(|| {

@@ -112,6 +112,7 @@ pub fn make_relative(path: &str, root: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_test_support::unique_temp_dir;
 
     #[test]
     fn content_hash_deterministic() {
@@ -169,12 +170,7 @@ mod tests {
         baseline.add("src/Foo.vue", "no-v-html", "v-html content");
         baseline.add("src/Bar.vue", "require-v-for-key", "v-for item");
 
-        // A per-PROCESS path: the bare literal is a shared OS path with no
-        // per-process component, so two concurrent invocations of this test
-        // suite on the same machine (e.g. two worktrees) would save/load/
-        // remove the SAME file and race each other's content.
-        let tmp =
-            std::env::temp_dir().join(format!("verter-baseline-test-{}.json", std::process::id()));
+        let tmp = unique_temp_dir("verter-baseline-test").with_extension("json");
         baseline.save(&tmp).expect("save");
 
         let loaded = Baseline::load(&tmp).expect("load");

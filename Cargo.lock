@@ -4114,6 +4114,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
  "verter_type_expr",
  "verter_type_runtime",
@@ -4154,6 +4155,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
  "verter_type_expr",
  "verter_workspace",
@@ -4344,6 +4346,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_parser",
  "verter_span",
+ "verter_test_support",
  "verter_type_expr",
  "verter_type_expr_oxc",
  "verter_workspace",
@@ -4456,6 +4459,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_test_support"
+version = "0.0.1-beta.3"
+
+[[package]]
 name = "verter_tsc"
 version = "0.0.1-beta.3"
 dependencies = [
@@ -4536,6 +4543,7 @@ dependencies = [
  "trybuild",
  "verter_language",
  "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
 ]
 

@@ -555,6 +555,7 @@ mod tests {
     use crate::protocol::*;
     use crate::traits::{ProviderFuture, TypeProvider};
     use std::sync::Mutex as StdMutex;
+    use verter_test_support::unique_temp_dir;
 
     /// Test-side mint through a genuine provider impl (the witness route).
     fn test_display_signature(value: &str) -> DisplaySignature {
@@ -962,10 +963,7 @@ mod tests {
 
     #[tokio::test]
     async fn definition_type_query_uses_definition_site_hover() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "verter-provider-adapter-definition-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_dir("verter-provider-adapter-definition");
         let _ = std::fs::remove_dir_all(&temp_root);
         std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
         let definition_path = temp_root.join("types.ts");

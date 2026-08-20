@@ -149,6 +149,12 @@ pub mod test_store_dir_override {
 /// LSP writes. `host_version` is the per-host-version segment (use
 /// [`default_carrier_store_host_version`] on the live path).
 #[must_use]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "content-addressed cache root keyed by host version + workspace hash, not a per-test \
+              scratch dir removed and rewritten across runs — see verter_test_support::unique_temp_dir \
+              for the anti-pattern this lint actually guards against"
+)]
 pub fn carrier_store_dir_for(host_version: &str, workspace_root: &str) -> PathBuf {
     std::env::temp_dir()
         .join(STORE_DIR_NAME)

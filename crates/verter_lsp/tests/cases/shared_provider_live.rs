@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -103,14 +103,7 @@ fn norm(p: &Path) -> String {
 }
 
 fn tempdir(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "verter_shared_live_{tag}_{}_{nanos}",
-        std::process::id()
-    ));
+    let dir = verter_test_support::unique_temp_dir(&format!("verter_shared_live_{tag}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use verter_type_runtime::protocol::TypeDiagnostic;
 use verter_type_runtime::traits::TypeProvider;
@@ -43,12 +43,7 @@ fn slash(p: &Path) -> String {
 }
 
 fn tempdir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("verter_owned_prov_{}_{nanos}", std::process::id()));
+    let dir = verter_test_support::unique_temp_dir("verter_owned_prov");
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }

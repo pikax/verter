@@ -26,6 +26,7 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
 blake3 = { workspace = true }
+verter_test_support = { path = "../verter_test_support" }
 # Compile-fail SEAL witness for the branded `DisplaySignature` (P1-03): the
 # fixtures under `tests/cases/compile-fail/` prove the out-of-crate forge
 # vectors (struct literal, witness forge, Deserialize, &str coercion) do not
