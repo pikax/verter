@@ -5656,15 +5656,26 @@ pub(crate) mod foundations_guards {
         // and session assembly tests drive the GENUINE shipped runtime-Main
         // assembly (compile → bundle → assemble) instead of a hand copy.
         // Test-support public API (consumer: verter_vue_conformance dev-dep).
-        // Alongside it, the typed code-plus-map result and the fail-closed
-        // outcome it can return instead: both appear in the assembler's own
-        // signature, so a caller outside this crate cannot name its return
-        // type without them.
+        // Alongside it, the typed code-plus-map result and `MapFragment`
+        // (named by `AssembleMapFailure`'s own variants, still reachable
+        // through `VueMainAssemblyFailure::InputMap`): both appear in the
+        // assembler's own signature, so a caller outside this crate cannot
+        // name its return type without them.
         "pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment}",
         // The exhaustive uncomposable-input-map taxonomy carried by
         // `AssembleMapFailure`, so a caller can discriminate the exact sub-code
-        // and its family rather than matching on a rendered message.
-        "pub use compile::{UncomposableCode, UncomposableFamily}",
+        // and its family rather than matching on a rendered message. Also
+        // `SfcRewriteRefusal`, carried by `AssembleMapFailure::InvalidSfcExportPlacement`
+        // for the same reason: a caller needs to name the reason type to
+        // discriminate it, not just match on a rendered message.
+        "pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily}",
+        // `VueMainAssemblyFailure` — the fail-closed outcome
+        // `assemble_vue_main_module` actually returns (every internal
+        // failure category — input-map/`__sfc__`-rewrite, fragment-grammar,
+        // composition, publication — propagates through this ONE typed enum
+        // rather than a panic), so a caller outside this crate must be able
+        // to name it to match on it.
+        "pub use compile::VueMainAssemblyFailure",
         // Stamped handoff callers hash code and maps with the host-owned domain.
         "pub use block_content::hash_block_content",
         // verter_napi::meta, verter_wasm::tests::audit

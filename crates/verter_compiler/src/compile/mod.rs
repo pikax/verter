@@ -1264,7 +1264,14 @@ fn compile_inner(
 
             // Splice the render chunk into setup: the whole template region
             // (now the `return (...) => { ... }` statement) moves to the
-            // setup close-tag position, before the wrapper end.
+            // setup close-tag position, before the wrapper end. An unmapped
+            // `\n` prefix separates it from whatever the authored setup body
+            // ends with — every existing fixture happens to have `</script>`
+            // on its own line already, but a tightly-packed body with no
+            // trailing whitespace/semicolon (`const n = 1</script>`) would
+            // otherwise abut the closure directly (`1return`), which is a
+            // genuine ECMAScript syntax error (`NumericLiteral` may not be
+            // immediately followed by `IdentifierStart`).
             let root = &template_ast.root;
             let tpl_start = root.tag_open.start;
             let tpl_end = root
@@ -1273,7 +1280,7 @@ fn compile_inner(
                 .map(|tc| tc.end)
                 .unwrap_or(root.tag_open.end);
             let inject_pos = inline_inject_pos.expect("inline mode sets inline_inject_pos");
-            ct.move_slice(tpl_start, tpl_end, inject_pos);
+            ct.move_with_prefix(tpl_start, tpl_end, inject_pos, "\n");
         }
         const RUNTIME_TEMPLATE_HOLE: &str = "/* verter-runtime-template-hole */";
         let runtime_template_marker = verter_options
@@ -1323,6 +1330,28 @@ fn compile_inner(
         let script_code = ct.build_string();
         let generated_template_hole =
             runtime_template_marker.and_then(|marker| ct.generated_content_range(marker));
+        // Resolve the declared `__sfc__` markers into built-output bytes —
+        // only now, after every later edit (import hoisting, the inline
+        // `move_slice`) has been applied and `build_string()` has run.
+        // Positions can still shift after the rename target is written, so
+        // this must run last, never at the point of writing.
+        let sfc_binding_ranges: Vec<std::ops::Range<u32>> = script_result
+            .sfc_binding_markers
+            .iter()
+            .filter_map(|marker| ct.generated_content_range(*marker))
+            .collect();
+        let sfc_export_statement_range = script_result
+            .sfc_export_statement_marker
+            .and_then(|marker| ct.generated_content_range(marker));
+        let sfc_export_placement =
+            if sfc_binding_ranges.is_empty() && sfc_export_statement_range.is_none() {
+                None
+            } else {
+                Some(crate::assembly::fragment::SfcExportPlacement {
+                    binding_ranges: sfc_binding_ranges,
+                    export_statement_range: sfc_export_statement_range,
+                })
+            };
         let sourcemap_start = Instant::now();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
@@ -1366,12 +1395,16 @@ fn compile_inner(
                 attrs: script_attrs,
                 generated_template_hole,
                 runtime_imports: all_imports.clone(),
+                sfc_export_placement,
             })
         } else if has_scoped_style || use_vapor || verter_options.ssr {
             // Template-only component with scoped styles, vapor mode, or SSR:
             // Emit a synthetic script block so __scopeId / __vapor propagates
             // to consumers (playground, bundler, etc.).
+            use crate::assembly::fragment::SfcExportPlacement;
+            use crate::script::{push_default_export_statement, push_sfc_binding};
             let mut code = String::with_capacity(128);
+            let mut binding_ranges = Vec::with_capacity(3);
             // Official `@vue/compiler-sfc` (`compileScript`'s non-TS
             // `runtimeOptions` string) builds `__vapor: true` as an INLINE
             // object-literal property, never a separate trailing
@@ -1384,19 +1417,24 @@ fn compile_inner(
             // helper, not `compileScript`'s `runtimeOptions` at all) — its
             // existing separate-statement emission is left untouched;
             // neither in-scope seed fixture exercises scoped styles.
+            code.push_str("const ");
+            binding_ranges.push(push_sfc_binding(&mut code));
             if use_vapor {
-                code.push_str("const __sfc__ = { __vapor: true };\n");
+                code.push_str(" = { __vapor: true };\n");
             } else {
-                code.push_str("const __sfc__ = {};\n");
+                code.push_str(" = {};\n");
             }
             if has_scoped_style {
-                code.push_str("__sfc__.__scopeId = \"");
+                binding_ranges.push(push_sfc_binding(&mut code));
+                code.push_str(".__scopeId = \"");
                 code.push_str(&scope_id_full);
                 code.push_str("\";\n");
             }
             // Non-inline SSR attaches `ssrRender` on the component after
             // template codegen; do not claim `__ssrInlineRender`.
-            code.push_str("export default __sfc__;\n");
+            let (export_binding_range, export_statement_range) =
+                push_default_export_statement(&mut code);
+            binding_ranges.push(export_binding_range);
             Some(VerterScriptBlock {
                 code,
                 duration_ms: script_duration_ms,
@@ -1405,6 +1443,10 @@ fn compile_inner(
                 attrs: Vec::new(),
                 generated_template_hole: None,
                 runtime_imports: Vec::new(),
+                sfc_export_placement: Some(SfcExportPlacement {
+                    binding_ranges,
+                    export_statement_range: Some(export_statement_range),
+                }),
             })
         } else {
             // A completely empty SFC is a valid EMPTY component (see
@@ -1621,6 +1663,11 @@ fn compile_inner(
                     source_map: tpl_source_map,
                     imports: tpl_imports.vue,
                     ssr_imports: tpl_imports.ssr,
+                    render_export: if verter_options.ssr {
+                        crate::framework_common::TemplateRenderExport::SsrRender
+                    } else {
+                        crate::framework_common::TemplateRenderExport::Render
+                    },
                     duration_ms: tpl_duration_ms,
                     attrs: tpl_attrs,
                 })

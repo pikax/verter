@@ -40,6 +40,8 @@ pub mod css;
 pub mod js_number;
 pub mod strip_types;
 
+pub mod assembly;
+
 pub mod compile;
 
 pub mod compile_request;

@@ -15,7 +15,7 @@ mod ported_tests;
 use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::code_transform::CodeTransform;
+use crate::code_transform::{CodeTransform, GeneratedContentMarker};
 use crate::css::types::VBindVar;
 use crate::parser::types::RootNodeScript;
 use crate::script::prepared::PreparedScript;
@@ -56,6 +56,35 @@ pub struct ScriptCodeGenOptions<'a> {
     /// only included in `__returned__` when their name appears in this set.
     /// `None` means no template — all imports are included.
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+}
+
+/// The literal internal binding name every runtime-emission site writes at
+/// least once before host assembly renames it to `_sfc_main`.
+pub(crate) const SFC_BINDING: &str = "__sfc__";
+
+/// Write [`SFC_BINDING`] into `out` and return its own local byte range
+/// within `out` — the declared fact
+/// [`crate::template::code_gen::types::CodeGenOutput::record_sfc_export_fact`]
+/// needs, recorded at the point of writing rather than rediscovered later
+/// by scanning generated text for the literal string.
+pub(crate) fn push_sfc_binding(out: &mut String) -> std::ops::Range<u32> {
+    let start = out.len() as u32;
+    out.push_str(SFC_BINDING);
+    start..out.len() as u32
+}
+
+/// Write the terminal `export default __sfc__;\n` statement into `out` and
+/// return `(binding_local_range, statement_local_range)` — the binding
+/// reference within the statement, and the statement's own full range
+/// (removed entirely once host assembly re-exports the composed module).
+pub(crate) fn push_default_export_statement(
+    out: &mut String,
+) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
+    let stmt_start = out.len() as u32;
+    out.push_str("export default ");
+    let binding_range = push_sfc_binding(out);
+    out.push_str(";\n");
+    (binding_range, stmt_start..out.len() as u32)
 }
 
 /// Visit every public binding name supplied by one authoritative runtime macro
@@ -116,6 +145,18 @@ pub struct ScriptCodeGenResult<'alloc> {
     /// template refs to these names bind `ref_key`/`ref: name` (see
     /// [`ScriptContext::ref_bindable_imports`]).
     pub ref_bindable_imports: FxHashSet<&'alloc str>,
+    /// Every declared `__sfc__`→`_sfc_main` rename target, as UNRESOLVED
+    /// markers — the caller resolves these with
+    /// `ct.generated_content_range(marker)` only after every later edit
+    /// (import hoisting, the inline-template `move_slice`) has been
+    /// applied to `ct` and `ct.build_string()` has run. Never rediscovered
+    /// by scanning the built script for the landmark text.
+    pub(crate) sfc_binding_markers: Vec<GeneratedContentMarker<'alloc>>,
+    /// The declared terminal default-export statement's own range, as an
+    /// unresolved marker. `None` for a script with no default export to
+    /// remove (a synthetic/no-script cell never reaches this producer at
+    /// all — see `compile/mod.rs` and `compile/helpers.rs` for those).
+    pub(crate) sfc_export_statement_marker: Option<GeneratedContentMarker<'alloc>>,
 }
 
 /// Process `<script>` and/or `<script setup>` blocks.
@@ -185,6 +226,8 @@ pub fn generate_script<'alloc>(
         inline_inject_pos: ctx.inline_inject_pos,
         imports: ctx.imports,
         ref_bindable_imports: ctx.ref_bindable_imports,
+        sfc_binding_markers: codegen_imports.sfc_binding_markers,
+        sfc_export_statement_marker: codegen_imports.sfc_export_statement_marker,
     }
 }
 

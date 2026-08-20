@@ -11,14 +11,14 @@
 
 use verter_compiler::framework_common::{
     RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeTemplateBlock,
-    SourceMapFidelity,
+    SourceMapFidelity, TemplateRenderExport,
 };
 
-use super::map_compose::SegmentOrigin;
 use super::map_input::{
-    validate_and_decode, MapFragment, UncomposableCode, UncomposableFamily, WireSegment,
+    validate_and_decode, DecodedFragmentMap, MapFragment, UncomposableCode, UncomposableFamily,
+    WireSegment,
 };
-use super::{assemble_vue_main_module, AssembleMapFailure};
+use super::{assemble_vue_main_module, AssembleMapFailure, VueMainAssemblyFailure};
 use crate::types::{CompileProfile, FileMeta};
 
 // Fixtures
@@ -40,6 +40,7 @@ fn script(code: &str, source_map: &str) -> RuntimeScriptBlock {
         output_descriptor: descriptor(code),
         generated_template_hole: None,
         runtime_imports: Vec::new(),
+        sfc_export_placement: super::map_compose::literal_scan_placement_for_fixture(code),
     }
 }
 
@@ -49,6 +50,7 @@ fn template(code: &str, source_map: &str) -> RuntimeTemplateBlock {
         source_map: source_map.to_string(),
         imports: Vec::new(),
         ssr_imports: Vec::new(),
+        render_export: TemplateRenderExport::Render,
         output_descriptor: descriptor(code),
     }
 }
@@ -242,8 +244,16 @@ fn expect_failure(
         template: template_block,
         ..RuntimeCompileOutput::default()
     };
-    assemble_vue_main_module("Comp.vue", &compiled, &meta, &mapping_profile())
-        .expect_err("this input must fail closed")
+    // Every fixture in this suite is specifically about INPUT-MAP
+    // validation (missing/uncomposable maps, source-root disagreement) —
+    // any other `VueMainAssemblyFailure` variant here is a genuine
+    // regression in what the fixture actually exercises, not an
+    // equivalent outcome to unwrap past.
+    match assemble_vue_main_module("Comp.vue", &compiled, &meta, &mapping_profile()) {
+        Err(VueMainAssemblyFailure::InputMap(failure)) => failure,
+        Err(other) => panic!("expected an input-map failure, got: {other:?}"),
+        Ok(_) => panic!("this input must fail closed"),
+    }
 }
 
 fn expect_script_code(raw_map: &str) -> UncomposableCode {
@@ -922,9 +932,13 @@ fn source_root_agrees_or_fails_closed() {
         template: Some(template("function render() {}\n", &with_root("/two"))),
         ..RuntimeCompileOutput::default()
     };
-    assert_eq!(
+    let Err(VueMainAssemblyFailure::InputMap(failure)) =
         assemble_vue_main_module("Comp.vue", &conflicting, &meta, &mapping_profile())
-            .expect_err("disagreeing roots fail closed"),
+    else {
+        panic!("disagreeing roots must fail closed with an input-map failure");
+    };
+    assert_eq!(
+        failure,
         AssembleMapFailure::UncomposableInputMap {
             fragment: MapFragment::Template,
             code: UncomposableCode::SourceRootConflict
@@ -1027,87 +1041,187 @@ fn the_assembled_code_is_identical_with_and_without_a_map() {
     assert!(with_map.source_map.is_some() && without_map.source_map.is_none());
 }
 
-/// Driving the rewrites through `CodeTransform` reproduces the pinned bytes
-/// exactly, including the non-identifier-aware match the pinned behaviour has:
-/// `___sfc__` contains `__sfc__` at offset 1 and IS rewritten.
+/// `rewrite_script` applies ONLY the ranges a producer-declared
+/// `SfcExportPlacement` fact names — never a scan for the `__sfc__` /
+/// `export default` landmark strings. Every declared binding is renamed;
+/// the declared export statement (including its own internal binding) is
+/// removed wholesale, not separately renamed then removed.
+/// `authored_text_matching_the_landmarks_is_left_untouched` below is the
+/// companion collision proof: an UNDECLARED occurrence of either landmark
+/// string is left untouched.
 #[test]
-fn the_rewrites_reproduce_the_pinned_replace_semantics() {
-    for source in [
-        "const __sfc__ = {}\nexport default __sfc__;\n",
-        "const ___sfc__ = {}\n",
-        "__sfc____sfc__\n",
-        "export default _sfc_main;\n",
-        "export default __sfc__;\nexport default __sfc__;\n",
-        "no occurrence at all\n",
-        "",
-        "trailing __sfc__",
-    ] {
-        let expected = source
-            .replace("__sfc__", "_sfc_main")
-            .replace("export default _sfc_main;\n", "");
-        let (rewritten, _) = super::map_compose::rewrite_script(source, None);
-        assert_eq!(
-            rewritten, expected,
-            "the transform-driven rewrite must be byte-identical to the pinned \
-             literal replacement for {source:?}"
-        );
+fn rewrite_applies_only_the_declared_ranges() {
+    use verter_compiler::assembly::SfcExportPlacement;
+
+    // A binding NOT part of the export statement, plus the export
+    // statement's own internal binding — the general two-binding shape a
+    // real producer declares.
+    let code = "const __sfc__ = {}\n__sfc__.__scopeId = \"x\";\nexport default __sfc__;\n";
+    let first_start = code.find("__sfc__").unwrap() as u32;
+    let first = first_start..first_start + 7;
+    let second_start = code[first.end as usize..].find("__sfc__").unwrap() as u32 + first.end;
+    let second = second_start..second_start + 7;
+    let export_start = code.find("export default").unwrap() as u32;
+    let export = export_start..code.len() as u32;
+    let export_binding = export_start + "export default ".len() as u32;
+    let export_binding = export_binding..export_binding + 7;
+    let fact = SfcExportPlacement {
+        binding_ranges: vec![first, second, export_binding],
+        export_statement_range: Some(export),
+    };
+    let (rewritten, _) = super::map_compose::rewrite_script(code, Some(&fact), None)
+        .expect("a fact whose declared ranges match the script's own bytes is accepted");
+    assert_eq!(
+        rewritten, "const _sfc_main = {}\n_sfc_main.__scopeId = \"x\";\n",
+        "every declared binding is renamed, and the declared export statement \
+         (including its own internal binding) is removed wholesale, not \
+         separately renamed then removed"
+    );
+}
+
+/// Authored source text containing the literal strings `__sfc__` or
+/// `export default _sfc_main` is left untouched when no fact declares it as
+/// a rename/removal target — `rewrite_script` acts only on declared ranges,
+/// never on an incidental text match.
+#[test]
+fn authored_text_matching_the_landmarks_is_left_untouched() {
+    use verter_compiler::assembly::SfcExportPlacement;
+
+    let code = "const __sfc__ = {}\n\
+                 const decoy = \"__sfc__\";\n\
+                 const other = \"export default _sfc_main;\";\n\
+                 export default __sfc__;\n";
+    let binding = 6..13; // the ONLY declared binding: the real one.
+    let export_start = code.rfind("export default __sfc__;\n").unwrap() as u32;
+    let export = export_start..export_start + "export default __sfc__;\n".len() as u32;
+    let export_binding_start = export_start + "export default ".len() as u32;
+    let export_binding = export_binding_start..export_binding_start + 7;
+    let fact = SfcExportPlacement {
+        binding_ranges: vec![binding, export_binding],
+        export_statement_range: Some(export),
+    };
+    let (rewritten, _) = super::map_compose::rewrite_script(code, Some(&fact), None)
+        .expect("a fact whose declared ranges match the script's own bytes is accepted");
+    assert!(
+        rewritten.contains("const decoy = \"__sfc__\";"),
+        "an UNDECLARED `__sfc__` occurrence inside authored text must survive \
+         verbatim, got:\n{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const other = \"export default _sfc_main;\";"),
+        "an UNDECLARED `export default _sfc_main` occurrence inside authored \
+         text must survive verbatim, got:\n{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const _sfc_main = {}"),
+        "the DECLARED binding is still renamed, got:\n{rewritten}"
+    );
+    assert!(
+        !rewritten.contains("export default _sfc_main;\n\n") && rewritten.ends_with('\n'),
+        "the DECLARED export statement is still removed, got:\n{rewritten}"
+    );
+}
+
+/// A declared range whose bytes do not match the fact's claim (a producer
+/// defect) is a typed refusal — never silently rescanned or half-applied.
+#[test]
+fn inconsistent_declared_range_is_a_typed_refusal() {
+    use verter_compiler::assembly::SfcExportPlacement;
+
+    let code = "const __sfc__ = {}\n";
+    let wrong_range = 0..7; // "const _" — not "__sfc__"
+    let fact = SfcExportPlacement {
+        binding_ranges: vec![wrong_range],
+        export_statement_range: None,
+    };
+    let err = super::map_compose::rewrite_script(code, Some(&fact), None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            super::map_compose::SfcRewriteRefusal::InconsistentBindingRange { start: 0, end: 7 }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A missing fact (`None`) is indistinguishable, without scanning, from a
+/// genuinely empty declared fact — `rewrite_script` treats it the same:
+/// zero edits, `code` returned verbatim. Never a refusal (a script with no
+/// `__sfc__` at all is legitimate — e.g. a fixture built purely to exercise
+/// unrelated map-composition mechanics) and never a scan to find out which
+/// case it is.
+#[test]
+fn missing_fact_is_treated_as_an_empty_fact() {
+    let code = "const x = 1\n";
+    let (rewritten, _) = super::map_compose::rewrite_script(code, None, None)
+        .expect("a missing fact is never itself a refusal");
+    assert_eq!(rewritten, code);
+}
+
+/// `rewrite_script` chains its own overwrite-only transform onto the
+/// caller-supplied script map (`CodeTransform::chain_source_map`), which
+/// genuinely returns failures for a map whose declared generated position
+/// does not exist in the transform's own text. Exercised DIRECTLY against
+/// `rewrite_script` (not through [`super::assemble_vue_main_module`]):
+/// through the one production call site, `map_input::validate_and_decode`'s
+/// own generated-position bound check (step 1.24) already rejects any
+/// segment naming a nonexistent line/column against this SAME text
+/// (`script.code`) before `rewrite_script` ever runs, so a genuinely
+/// out-of-bounds segment cannot reach this call by way of
+/// `assemble_vue_main_module`'s public entry point today. `rewrite_script`'s
+/// own signature does not, and must not, assume its `map` argument was
+/// already validated against `code` — this proves the typed refusal fires
+/// (not a panic) when that invariant is broken directly, which is exactly
+/// the discipline the removed `.expect()` violated.
+#[test]
+fn chain_source_map_failure_is_a_typed_refusal_not_a_panic() {
+    let code = "const x = 1\n"; // one line, plus the trailing-newline empty line
+    let map = DecodedFragmentMap {
+        sources: vec!["a.vue".to_string()],
+        names: Vec::new(),
+        sources_content: None,
+        source_root: None,
+        ignore_list: Vec::new(),
+        segments: vec![WireSegment {
+            // `code` has only lines 0 and 1 (the trailing empty line); line 99
+            // names a generated position `chain_source_map`'s own text tiling
+            // cannot resolve.
+            generated_line: 99,
+            generated_column: 0,
+            payload: None,
+        }],
+    };
+    match super::map_compose::rewrite_script(code, None, Some(&map)) {
+        Err(super::map_compose::SfcRewriteRefusal::ChainFailed(_)) => {}
+        other => panic!("expected a typed ChainFailed refusal, got: {other:?}"),
     }
 }
 
-/// Provenance is composition-time bookkeeping: every emitted segment carries an
-/// origin tagged where it entered, and no member of the serialized artifact
-/// carries it.
+/// Provenance: the composed map's wire form carries no fragment-identity
+/// tag. `assemble_sequence`'s own `SequenceTables`/`Token` composition has
+/// no such field to serialize — the composed artifact stays plain
+/// oxc-sourcemap JSON with no extra member.
 #[test]
-fn provenance_is_tracked_but_never_serialized() {
-    use super::map_compose::{FragmentWrite, MapComposer, ModuleWriter};
-
-    let script_map = validate_and_decode(&map_json("[\"a.vue\"]", "[]", "AACA"), "const x = 1\n")
-        .expect("valid");
-    let template_map =
-        validate_and_decode(&map_json("[\"b.vue\"]", "[]", "AACA"), "function r() {}\n")
-            .expect("valid");
-
-    let mut writer = ModuleWriter::with_capacity(64);
-    let mut composer = MapComposer::default();
-    let (script_code, chained) =
-        super::map_compose::rewrite_script("const x = 1\n", Some(&script_map));
-    composer.write_fragment(
-        &mut writer,
-        FragmentWrite {
-            code: &script_code,
-            chained: chained.as_deref(),
-            map: Some(&script_map),
-            origin: SegmentOrigin::Script,
-        },
-    );
-    composer.write_fragment(
-        &mut writer,
-        FragmentWrite {
-            code: "function r() {}\n",
-            chained: Some(&template_map.segments),
-            map: Some(&template_map),
-            origin: SegmentOrigin::Template,
-        },
-    );
-
-    let origins: Vec<SegmentOrigin> = composer
-        .segments()
-        .iter()
-        .map(|segment| segment.origin)
-        .collect();
-    assert_eq!(
-        origins,
-        [
-            SegmentOrigin::Script,
-            SegmentOrigin::AssemblyBoundary,
-            SegmentOrigin::Template,
-            SegmentOrigin::AssemblyBoundary,
-        ],
-        "each tag comes from the fragment the segment entered through, not from \
-         its final coordinate"
-    );
-
-    let raw = composer.into_artifact(None);
+fn provenance_never_reaches_the_wire() {
+    let compiled = RuntimeCompileOutput {
+        script: Some(script(
+            "const x = 1\n",
+            &map_json("[\"a.vue\"]", "[]", "AACA"),
+        )),
+        template: Some(template(
+            "function r() {}\n",
+            &map_json("[\"b.vue\"]", "[]", "AACA"),
+        )),
+        ..RuntimeCompileOutput::default()
+    };
+    let meta = FileMeta {
+        has_script: true,
+        has_template: true,
+        ..FileMeta::default()
+    };
+    let assembled =
+        assemble_vue_main_module("Comp.vue", &compiled, &meta, &mapping_profile()).unwrap();
+    let raw = assembled.source_map.expect("map requested");
     for token in [
         "Script",
         "Template",
@@ -1332,9 +1446,13 @@ fn every_uncomposable_sub_code_is_reachable_from_a_real_input() {
         has_script: true,
         ..FileMeta::default()
     };
-    assert_eq!(
+    let Err(VueMainAssemblyFailure::InputMap(failure)) =
         assemble_vue_main_module("Comp.vue", &compiled, &meta, &mapping_profile())
-            .expect_err("a surrogate-splitting column addresses no byte offset"),
+    else {
+        panic!("a surrogate-splitting column must fail closed with an input-map failure");
+    };
+    assert_eq!(
+        failure,
         AssembleMapFailure::UncomposableInputMap {
             fragment: MapFragment::Script,
             code: C::GeneratedColumnSplitsASurrogatePair

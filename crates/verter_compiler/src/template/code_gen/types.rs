@@ -6,7 +6,7 @@
 use oxc_allocator::Allocator;
 use smallvec::SmallVec;
 
-use crate::code_transform::{CodeTransform, SegmentAnchor};
+use crate::code_transform::{CodeTransform, GeneratedContentMarker, SegmentAnchor};
 
 use super::vapor::PendingNavQueue;
 
@@ -114,6 +114,11 @@ pub struct CodeGenOutput<'alloc> {
     /// identifier the `verbatim-carry` oracle must land on).
     sourcemap_locations: Vec<u32>,
 
+    /// Declared script-export-placement facts (see
+    /// [`record_sfc_export_fact`](Self::record_sfc_export_fact)), resolved
+    /// into markers in [`apply_to`](Self::apply_to).
+    sfc_export_facts: Vec<SfcExportFact<'alloc>>,
+
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
 
@@ -142,6 +147,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             wrapped_moves: Vec::new(),
             helper_preamble: None,
             sourcemap_locations: Vec::new(),
+            sfc_export_facts: Vec::new(),
             alloc,
             scratch: String::new(),
         }
@@ -166,6 +172,16 @@ impl<'alloc> CodeGenOutput<'alloc> {
     pub fn overwrite_unmapped(&mut self, start: u32, end: u32, content: &str) {
         let allocated = self.alloc.alloc_str(content);
         self.unmapped_overwrites.push((start, end, allocated));
+    }
+
+    /// Same as [`overwrite_unmapped`](Self::overwrite_unmapped), but
+    /// `content` is already bump-allocated — avoids a second allocation,
+    /// and lets the caller later mint a
+    /// [`CodeTransform::mark_generated_sub_range`] fact against the EXACT
+    /// pointer this call inserts (see [`record_sfc_export_fact`]).
+    #[inline]
+    pub fn overwrite_unmapped_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
+        self.unmapped_overwrites.push((start, end, content));
     }
 
     /// Segmented overwrite: `content` replaces `[start, end)`; each `anchors`
@@ -225,6 +241,17 @@ impl<'alloc> CodeGenOutput<'alloc> {
         }
     }
 
+    /// Same dispatch as
+    /// [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix), but
+    /// `content` is already bump-allocated.
+    pub fn overwrite_or_root_prefix_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
+        if start == end {
+            self.prepends.insert(0, (start, content));
+        } else {
+            self.overwrite_unmapped_alloc(start, end, content);
+        }
+    }
+
     /// Segmented [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix):
     /// authored anchors (e.g. a hoisted static-props `class` key) survive.
     /// Zero-width stays an unmapped prepend; nonzero-width goes through
@@ -257,6 +284,40 @@ impl<'alloc> CodeGenOutput<'alloc> {
         } else {
             self.overwrite_unmapped(start, end, content);
         }
+    }
+
+    /// Same dispatch as
+    /// [`overwrite_or_root_suffix`](Self::overwrite_or_root_suffix), but
+    /// `content` is already bump-allocated.
+    pub fn overwrite_or_root_suffix_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
+        if start == end {
+            self.prepends.push((start, content));
+        } else {
+            self.overwrite_unmapped_alloc(start, end, content);
+        }
+    }
+
+    /// Record a declared script-export-placement fact for `content` — a
+    /// chunk ALREADY inserted via one of this call's siblings above (e.g.
+    /// [`overwrite_or_root_suffix_alloc`](Self::overwrite_or_root_suffix_alloc)).
+    /// `binding_local_ranges` are every `__sfc__`→`_sfc_main` rename target
+    /// within `content`; `export_local_range` is the terminal default-export
+    /// statement's own range within `content`, when this chunk contains one.
+    /// Resolved into built-output positions in [`apply_to`](Self::apply_to),
+    /// once every later edit (import hoisting, moves) has been queued —
+    /// never rediscovered by scanning the built script for these strings.
+    #[inline]
+    pub(crate) fn record_sfc_export_fact(
+        &mut self,
+        content: &'alloc str,
+        binding_local_ranges: Vec<std::ops::Range<u32>>,
+        export_local_range: Option<std::ops::Range<u32>>,
+    ) {
+        self.sfc_export_facts.push(SfcExportFact {
+            content,
+            binding_local_ranges,
+            export_local_range,
+        });
     }
 
     /// Push the leading helper-import preamble as an (unmapped) prepend-left AND record its content
@@ -550,7 +611,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Returns the categorized runtime helper imports collected during codegen.
     /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports {
+    pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports<'alloc> {
         // Carry the recorded helper-import preamble identity into the transform. The same `&'alloc
         // str` becomes an `Inserted` chunk below, so source-map generation can locate it by pointer
         // and report the typed preamble-end boundary. No-op when no preamble was emitted.
@@ -593,10 +654,18 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         // Unmapped overwrites are few and never overlap `overwrites` (both
         // target root-level tag spans) — a sorted loop is enough.
+        //
+        // `overwrite_unmapped_alloc`, not `overwrite_unmapped`: every entry
+        // here is ALREADY bump-allocated against this same `'alloc`
+        // allocator (`overwrite_unmapped_alloc`/`overwrite_or_root_prefix_alloc`/
+        // `overwrite_or_root_suffix_alloc`'s nonzero-width branch all push
+        // here) — `overwrite_unmapped`'s unconditional re-allocation would
+        // mint a NEW pointer, breaking any `record_sfc_export_fact` marker
+        // minted against the original.
         self.unmapped_overwrites
             .sort_unstable_by_key(|&(start, ..)| start);
         for &(start, end, content) in &self.unmapped_overwrites {
-            ct.overwrite_unmapped(start, end, content);
+            ct.overwrite_unmapped_alloc(start, end, content);
         }
 
         // Segmented overwrites: disjoint from the other overwrite channels
@@ -664,8 +733,50 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         let ssr = self.ssr_imports.to_imports();
 
-        TemplateImports { vue, ssr }
+        // Resolve every declared script-export-placement fact into markers
+        // NOW — after every above op (imports, moves, prepends) has been
+        // queued onto `ct` — never earlier, since a later edit can still
+        // shift where `content` lands. `generated_content_range` (called by
+        // this method's own caller, once `ct.build_string()` has run) turns
+        // each marker into its final built-output byte range.
+        let mut sfc_binding_markers = Vec::new();
+        let mut sfc_export_statement_marker = None;
+        for fact in &self.sfc_export_facts {
+            for range in &fact.binding_local_ranges {
+                if let Some(marker) =
+                    ct.mark_generated_sub_range(fact.content, range.start, range.end)
+                {
+                    sfc_binding_markers.push(marker);
+                }
+            }
+            if let Some(range) = &fact.export_local_range {
+                if let Some(marker) =
+                    ct.mark_generated_sub_range(fact.content, range.start, range.end)
+                {
+                    sfc_export_statement_marker = Some(marker);
+                }
+            }
+        }
+
+        TemplateImports {
+            vue,
+            ssr,
+            sfc_binding_markers,
+            sfc_export_statement_marker,
+        }
     }
+}
+
+/// One producer's declared script-export-placement fact: `content` is a
+/// chunk already queued for insertion elsewhere in this `CodeGenOutput`;
+/// `binding_local_ranges`/`export_local_range` are byte ranges WITHIN
+/// `content`'s own LOCAL coordinate space — never a range from a different
+/// content chunk or a different space (assembled-output, original-source).
+#[derive(Clone)]
+struct SfcExportFact<'alloc> {
+    content: &'alloc str,
+    binding_local_ranges: Vec<std::ops::Range<u32>>,
+    export_local_range: Option<std::ops::Range<u32>>,
 }
 
 // ======================== TemplateImports ========================
@@ -674,14 +785,23 @@ impl<'alloc> CodeGenOutput<'alloc> {
 ///
 /// Separates Vue helpers (from `"vue"`) and SSR helpers (from `"vue/server-renderer"`)
 /// so the caller can emit two distinct import lines for SSR builds.
-pub struct TemplateImports {
+pub struct TemplateImports<'alloc> {
     /// Helpers imported from `"vue"` (e.g., `_mergeProps`, `_resolveComponent`).
     pub vue: Vec<&'static str>,
     /// Helpers imported from `"vue/server-renderer"` (e.g., `_ssrRenderAttrs`).
     pub ssr: Vec<&'static str>,
+    /// Every declared `__sfc__`→`_sfc_main` rename target, as an unresolved
+    /// marker — resolve with `ct.generated_content_range(marker)` once
+    /// `ct.build_string()` has run (every later edit must be queued first).
+    /// Empty for every template-codegen caller; populated only by script
+    /// codegen's `CodeGenOutput::record_sfc_export_fact` producers.
+    pub(crate) sfc_binding_markers: Vec<GeneratedContentMarker<'alloc>>,
+    /// The declared terminal default-export statement's own range, as an
+    /// unresolved marker. `None` when no script producer recorded one.
+    pub(crate) sfc_export_statement_marker: Option<GeneratedContentMarker<'alloc>>,
 }
 
-impl TemplateImports {
+impl TemplateImports<'_> {
     /// Returns true if there are no imports at all.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {

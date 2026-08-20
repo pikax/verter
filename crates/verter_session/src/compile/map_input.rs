@@ -194,8 +194,9 @@ impl UncomposableCode {
     }
 }
 
-/// Why assembly produced no result. Both variants are hard failures —
-/// never code without a map, never code with an empty map.
+/// Why assembly produced no result. Every variant is a hard failure — never
+/// code without a map, never code with an empty map, never a rewrite applied
+/// from a fact that does not match the script's own bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssembleMapFailure {
     /// A fragment that is both authored and present carries an empty map.
@@ -207,13 +208,22 @@ pub enum AssembleMapFailure {
         fragment: MapFragment,
         code: UncomposableCode,
     },
+    /// The script's declared `__sfc__` export-placement fact
+    /// (`verter_compiler::assembly::fragment::SfcExportPlacement`) is out
+    /// of bounds or does not match the script's own bytes — a producer
+    /// defect, reported rather than silently rediscovered by scanning
+    /// generated text for the landmark string.
+    InvalidSfcExportPlacement {
+        reason: super::map_compose::SfcRewriteRefusal,
+    },
 }
 
 impl AssembleMapFailure {
-    pub fn fragment(&self) -> MapFragment {
+    pub fn fragment(&self) -> Option<MapFragment> {
         match self {
             AssembleMapFailure::MissingRequiredInputMap { fragment }
-            | AssembleMapFailure::UncomposableInputMap { fragment, .. } => *fragment,
+            | AssembleMapFailure::UncomposableInputMap { fragment, .. } => Some(*fragment),
+            AssembleMapFailure::InvalidSfcExportPlacement { .. } => None,
         }
     }
 }
@@ -231,6 +241,10 @@ impl std::fmt::Display for AssembleMapFailure {
                 "the {} fragment's source map is uncomposable: {}",
                 fragment.as_str(),
                 code.as_str()
+            ),
+            AssembleMapFailure::InvalidSfcExportPlacement { reason } => write!(
+                f,
+                "the script's declared __sfc__ export-placement fact is invalid: {reason:?}"
             ),
         }
     }
@@ -272,7 +286,12 @@ pub(crate) struct DecodedFragmentMap {
     /// to a small integer type; the wide storage exists because every numeric
     /// predicate BEFORE the bounds proof (type check, two-spelling agreement)
     /// operates on the converted binary64 value, which an integer pre-narrow
-    /// would corrupt (distinct values ≥ 2^64 saturate to one).
+    /// would corrupt (distinct values ≥ 2^64 saturate to one). Read by
+    /// `map_compose::to_source_map` when chaining the script's map through
+    /// the `__sfc__` rewrite — the template's copy is otherwise unread by
+    /// composition, which sequences the template's RAW already-encoded map
+    /// string directly (`assemble_sequence` decodes it, and this field's
+    /// ignore-list bounds, again, independently).
     pub(crate) ignore_list: Vec<f64>,
     pub(crate) segments: Vec<WireSegment>,
 }

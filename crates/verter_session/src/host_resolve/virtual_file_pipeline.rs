@@ -14,7 +14,7 @@ use super::compile_request_build::{
     build_compile_request, derive_runtime_compile_options, request_construction_refused_diagnostics,
 };
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::{assemble_vue_main_module, AssembleMapFailure};
+use crate::compile::{assemble_vue_main_module, VueMainAssemblyFailure};
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
@@ -23,25 +23,143 @@ use crate::VerterHost;
 use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{
-    CarrierCompileOutcome, CompileUnsupported, RuntimeDiagnosticSeverity,
+    CarrierCompileOutcome, CompileUnsupported, RuntimeDiagnosticSeverity, RuntimeTemplateBlock,
 };
 
-/// Fail-closed assembled-map outcome as a compile error.
-///
-/// A missing or uncomposable required map produces no success — not
-/// code without a map, not code with an empty map. `source_len` spans
-/// the whole document; the failure is not one authored location.
+/// Fail-closed Main-module assembly outcome as a compile error — every
+/// [`VueMainAssemblyFailure`] variant (missing/uncomposable input map,
+/// invalid `__sfc__` fact, fragment-grammar refusal, composition defect,
+/// or publication refusal) maps to this ONE stable host diagnostic, never
+/// an unwind. `source_len` spans the whole document; the failure is not
+/// one authored location.
 fn assembled_map_failure_diagnostics(
-    failure: AssembleMapFailure,
+    failure: VueMainAssemblyFailure,
     source_len: u32,
 ) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
         severity: HostSeverity::Error,
-        code: "HOST_UNCOMPOSABLE_MAIN_SOURCE_MAP".to_string(),
+        code: "HOST_MAIN_MODULE_ASSEMBLY_FAILED".to_string(),
         message: failure.to_string(),
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])
+}
+
+fn template_compose_refusal_diagnostics(
+    refusal: verter_compiler::assembly::ComposeRefusal,
+    source_len: u32,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "HOST_UNCOMPOSABLE_TEMPLATE_SOURCE_MAP".to_string(),
+        message: format!("template virtual-file map composition failed: {refusal:?}"),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
+}
+
+/// The Template virtual file's code + map. Verbatim when the template
+/// declares no runtime imports; otherwise the import preamble is composed
+/// through the typed assembly engine so the map stays in sync with the
+/// shifted bytes. Fails closed on `Err` — never a map-dropping fallback
+/// that silently serves wrong-but-plausible code.
+fn compose_template_virtual_file(
+    template: RuntimeTemplateBlock,
+    runtime_module_name: Option<&str>,
+) -> Result<(String, Option<String>), verter_compiler::assembly::ComposeRefusal> {
+    if template.imports.is_empty() {
+        let source_map = (!template.source_map.is_empty()).then_some(template.source_map);
+        return Ok((template.code, source_map));
+    }
+    let runtime = runtime_module_name.unwrap_or("vue");
+    let specifiers: Vec<String> = template
+        .imports
+        .iter()
+        .map(|name| format_import_specifier(name))
+        .collect();
+    let preamble = format!(
+        "import {{ {} }} from \"{}\"\n",
+        specifiers.join(", "),
+        runtime
+    );
+    let existing_map = (!template.source_map.is_empty()).then_some(template.source_map.as_str());
+    let composed =
+        verter_compiler::assembly::prepend_preamble(&preamble, &template.code, existing_map)?;
+    Ok((composed.code, existing_map.map(|_| composed.source_map)))
+}
+
+#[cfg(test)]
+mod compose_template_virtual_file_tests {
+    use super::*;
+    use verter_compiler::framework_common::{
+        RuntimeOutputDescriptor, SourceMapFidelity, TemplateRenderExport,
+    };
+
+    fn template(code: &str, source_map: &str, imports: Vec<String>) -> RuntimeTemplateBlock {
+        RuntimeTemplateBlock {
+            code: code.to_string(),
+            source_map: source_map.to_string(),
+            imports,
+            ssr_imports: Vec::new(),
+            render_export: TemplateRenderExport::Render,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                code,
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+        }
+    }
+
+    #[test]
+    fn no_imports_returns_the_template_verbatim() {
+        let (code, map) = compose_template_virtual_file(template("const a = 1", "", vec![]), None)
+            .expect("no-import template composes trivially");
+        assert_eq!(code, "const a = 1");
+        assert!(map.is_none());
+    }
+
+    #[test]
+    fn imports_present_prepends_the_import_line_and_shifts_the_map() {
+        let map_json =
+            "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
+        let (code, map) = compose_template_virtual_file(
+            template("const n = 1", map_json, vec!["_openBlock".to_string()]),
+            None,
+        )
+        .expect("import template composes");
+        assert_eq!(
+            code, "import { openBlock as _openBlock } from \"vue\"\nconst n = 1",
+            "the import preamble must precede the template's own code verbatim"
+        );
+        let map = map.expect("a present input map must still be present after composition");
+        let decoded = verter_compiler::oxc_sourcemap::SourceMap::from_json_string(&map).unwrap();
+        let token = decoded
+            .get_tokens()
+            .next()
+            .expect("the shifted segment survives composition");
+        assert_eq!(
+            token.get_dst_line(),
+            1,
+            "the segment must move down by exactly the one-line preamble"
+        );
+        assert_eq!(token.get_dst_col(), 6);
+        assert_eq!(
+            decoded.get_source(token.get_source_id().unwrap()),
+            Some("Comp.vue"),
+            "the original source identity must survive — never a synthetic placeholder"
+        );
+    }
+
+    #[test]
+    fn custom_runtime_module_name_reaches_the_import_specifier() {
+        let (code, _) = compose_template_virtual_file(
+            template("const n = 1", "", vec!["_openBlock".to_string()]),
+            Some("@vue/runtime-dom"),
+        )
+        .expect("composes");
+        assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
+    }
 }
 
 pub(crate) fn vue_macro_output_matches_revision(
@@ -3299,7 +3417,7 @@ impl VerterHost {
         let publish_style = profile.target.needs_style();
 
         if publish_runtime_module && compiled.has_runtime_surface() {
-            let (main_code, main_source_map) = match &compiled.main.body_code {
+            let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
                 // A carrier that emits its own self-contained ESM body uses it
                 // verbatim (e.g. Svelte's official-shaped runtime output),
                 // paired with the map that carrier produced for it.
@@ -3307,12 +3425,27 @@ impl VerterHost {
                     body.clone(),
                     (!compiled.main.source_map.is_empty())
                         .then(|| Arc::from(compiled.main.source_map.clone())),
+                    compiled.main.lang.clone().unwrap_or_else(|| {
+                        if profile.force_js {
+                            "js".to_string()
+                        } else {
+                            snapshot
+                                .meta
+                                .script_lang
+                                .as_deref()
+                                .unwrap_or("js")
+                                .to_string()
+                        }
+                    }),
                 ),
                 // Vue: the host assembles the `_sfc_main` module from the
                 // neutral block fields (its virtual-file concern) — and the map
                 // it composed while assembling them. The code and the map are
                 // one result of one assembly, so the map here always describes
-                // the exact code beside it.
+                // the exact code beside it. `assembled.lang` is the SAME
+                // dialect the assembler derived once and validated every
+                // fragment/the final artifact under — reused here instead of
+                // independently re-deriving it a second time.
                 None => {
                     let assembled = assemble_vue_main_module(
                         &snapshot.canonical_id,
@@ -3323,21 +3456,13 @@ impl VerterHost {
                     .map_err(|failure| {
                         assembled_map_failure_diagnostics(failure, snapshot.source.len() as u32)
                     })?;
-                    (assembled.code, assembled.source_map.map(Arc::from))
+                    (
+                        assembled.code,
+                        assembled.source_map.map(Arc::from),
+                        assembled.lang,
+                    )
                 }
             };
-            let main_lang = compiled.main.lang.clone().unwrap_or_else(|| {
-                if profile.force_js {
-                    "js".to_string()
-                } else {
-                    snapshot
-                        .meta
-                        .script_lang
-                        .as_deref()
-                        .unwrap_or("js")
-                        .to_string()
-                }
-            });
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
@@ -3373,31 +3498,16 @@ impl VerterHost {
         }
 
         if let Some(template) = compiled.template.filter(|_| publish_template) {
-            let code = if template.imports.is_empty() {
-                template.code
-            } else {
-                let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
-                let specifiers: Vec<String> = template
-                    .imports
-                    .iter()
-                    .map(|name| format_import_specifier(name))
-                    .collect();
-                format!(
-                    "import {{ {} }} from \"{}\"\n{}",
-                    specifiers.join(", "),
-                    runtime,
-                    template.code,
-                )
-            };
+            let (code, source_map) =
+                compose_template_virtual_file(template, profile.runtime_module_name.as_deref())
+                    .map_err(|refusal| {
+                        template_compose_refusal_diagnostics(refusal, snapshot.source.len() as u32)
+                    })?;
             outputs.insert(
                 VirtualNodeKind::Template,
                 CachedVirtualFile {
                     code: Arc::from(code),
-                    source_map: if template.source_map.is_empty() {
-                        None
-                    } else {
-                        Some(Arc::from(template.source_map))
-                    },
+                    source_map: source_map.map(Arc::from),
                     lang: Some("tsx".to_string()),
                     meta: VirtualMeta::default(),
                 },
@@ -3790,13 +3900,30 @@ impl VerterHost {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let (main_code, main_source_map) = match &compiled.main.body_code {
+        let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
             Some(body) => (
                 body.clone(),
                 (!compiled.main.source_map.is_empty())
                     .then(|| Arc::from(compiled.main.source_map.clone())),
+                // The `Main` language, derived IDENTICALLY to the HostBacked
+                // `Main`-node path so the bundler consumer routes
+                // sub-requests the same way.
+                compiled.main.lang.clone().unwrap_or_else(|| {
+                    if profile.force_js {
+                        "js".to_string()
+                    } else {
+                        snapshot
+                            .meta
+                            .script_lang
+                            .as_deref()
+                            .unwrap_or("js")
+                            .to_string()
+                    }
+                }),
             ),
             // Vue: code and map are one result of the host's own assembly.
+            // `assembled.lang` is the SAME dialect the assembler derived
+            // once and validated every fragment/the final artifact under.
             None => {
                 let assembled = assemble_vue_main_module(
                     &snapshot.canonical_id,
@@ -3815,24 +3942,13 @@ impl VerterHost {
                         downgrade_reason: None,
                     })
                 })?;
-                (assembled.code, assembled.source_map.map(Arc::from))
+                (
+                    assembled.code,
+                    assembled.source_map.map(Arc::from),
+                    assembled.lang,
+                )
             }
         };
-        // The `Main` language, derived IDENTICALLY to the HostBacked
-        // `Main`-node path so the bundler consumer routes sub-requests the
-        // same way.
-        let main_lang = compiled.main.lang.clone().unwrap_or_else(|| {
-            if profile.force_js {
-                "js".to_string()
-            } else {
-                snapshot
-                    .meta
-                    .script_lang
-                    .as_deref()
-                    .unwrap_or("js")
-                    .to_string()
-            }
-        });
 
         Ok(RenderOnlyMain {
             code: Arc::from(main_code),

@@ -18,6 +18,8 @@ use crate::script::prepared::{PreparedCompanion, PreparedScript};
 use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::vue::{AsyncKind, ImportSpecifierKind, ScriptImport, ScriptItem};
 
+use super::{push_default_export_statement, push_sfc_binding};
+
 use super::macros::{
     js_string_literal, process_companion_script, process_macro_item, push_runtime_prop_key,
     MacroState, StrippedSections,
@@ -457,7 +459,7 @@ pub fn process_script_setup<'alloc>(
     // surface locked in (`!ctx.hasDefineExposeCall && !inlineMode`).
     let bind_expose = macro_state.has_expose || !options.inline_template;
     let emit_bare_expose_call = !macro_state.has_expose && !options.inline_template;
-    let mut wrapper_start = build_setup_wrapper_start(
+    let (mut wrapper_start, mut wrapper_start_binding_range) = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
         bind_expose,
@@ -478,11 +480,25 @@ pub fn process_script_setup<'alloc>(
         // Start the inserted wrapper on a new statement boundary even when the
         // carrier supplied no whitespace between the two script blocks.
         wrapper_start.insert(0, '\n');
+        // The insert shifts every later byte offset by exactly one ('\n' is
+        // one UTF-8 byte) — the declared range must track the same shift, or
+        // it would drift by one byte from the binding it actually names.
+        wrapper_start_binding_range.start += 1;
+        wrapper_start_binding_range.end += 1;
     }
 
     // Overwrite open tag with wrapper
-    ctx.out
-        .overwrite_or_root_prefix(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
+    let wrapper_start_content = ctx.out.alloc_str(&wrapper_start);
+    ctx.out.overwrite_or_root_prefix_alloc(
+        setup.tag_open.start,
+        setup.tag_open.end,
+        wrapper_start_content,
+    );
+    ctx.out.record_sfc_export_fact(
+        wrapper_start_content,
+        vec![wrapper_start_binding_range],
+        None,
+    );
 
     // Build wrapper closing
     let returned = if !options.inline_template {
@@ -496,20 +512,27 @@ pub fn process_script_setup<'alloc>(
         None
     };
 
-    let wrapper_end = build_setup_wrapper_end(
-        returned.as_deref(),
-        if options.has_scoped_style {
-            Some(options.scope_id)
-        } else {
-            None
-        },
-        wrap,
-    );
+    let (wrapper_end, wrapper_end_binding_ranges, wrapper_end_export_range) =
+        build_setup_wrapper_end(
+            returned.as_deref(),
+            if options.has_scoped_style {
+                Some(options.scope_id)
+            } else {
+                None
+            },
+            wrap,
+        );
 
     // Handle close tag
     if let Some(tag_close) = &setup.tag_close {
+        let wrapper_end_content = ctx.out.alloc_str(&wrapper_end);
         ctx.out
-            .overwrite_or_root_suffix(tag_close.start, tag_close.end, &wrapper_end);
+            .overwrite_or_root_suffix_alloc(tag_close.start, tag_close.end, wrapper_end_content);
+        ctx.out.record_sfc_export_fact(
+            wrapper_end_content,
+            wrapper_end_binding_ranges,
+            Some(wrapper_end_export_range),
+        );
 
         // Set inline inject position
         if options.inline_template {
@@ -566,7 +589,14 @@ pub fn process_script_only<'alloc>(
             // Replace "export default" with "const __sfc__ ="
             let export_default_text = "export default";
             let replace_end = abs_start + export_default_text.len() as u32;
-            ctx.out.overwrite(abs_start, replace_end, "const __sfc__ =");
+            let mut replacement = String::with_capacity(16);
+            replacement.push_str("const ");
+            let binding_range = push_sfc_binding(&mut replacement);
+            replacement.push_str(" =");
+            let content = ctx.out.alloc_str(&replacement);
+            ctx.out.overwrite_alloc(abs_start, replace_end, content);
+            ctx.out
+                .record_sfc_export_fact(content, vec![binding_range], None);
         }
     }
 
@@ -576,29 +606,39 @@ pub fn process_script_only<'alloc>(
 
     // Build close tag replacement
     let mut close_text = String::with_capacity(64);
+    let mut binding_ranges = Vec::with_capacity(3);
     // The authored default-export expression may end immediately before the
     // closing tag. Keep the generated module export in a fresh statement even
     // when the carrier supplied no trailing whitespace or semicolon.
     close_text.push('\n');
     if !has_default_export {
         // No default export — create a minimal __sfc__
-        close_text.push_str("const __sfc__ = {};\n");
+        close_text.push_str("const ");
+        binding_ranges.push(push_sfc_binding(&mut close_text));
+        close_text.push_str(" = {};\n");
     }
     if options.is_vapor {
-        close_text.push_str("__sfc__.__vapor = true;\n");
+        binding_ranges.push(push_sfc_binding(&mut close_text));
+        close_text.push_str(".__vapor = true;\n");
     }
     // Non-inline SSR attaches `ssrRender` separately (not returned from setup),
     // so do not claim `__ssrInlineRender`.
     if options.has_scoped_style && !options.scope_id.is_empty() {
-        close_text.push_str("__sfc__.__scopeId = \"");
+        binding_ranges.push(push_sfc_binding(&mut close_text));
+        close_text.push_str(".__scopeId = \"");
         close_text.push_str(options.scope_id);
         close_text.push_str("\";\n");
     }
-    close_text.push_str("export default __sfc__;\n");
+    let (export_binding_range, export_statement_range) =
+        push_default_export_statement(&mut close_text);
+    binding_ranges.push(export_binding_range);
 
     if let Some(tag_close) = &script.tag_close {
+        let content = ctx.out.alloc_str(&close_text);
         ctx.out
-            .overwrite_or_root_suffix(tag_close.start, tag_close.end, &close_text);
+            .overwrite_or_root_suffix_alloc(tag_close.start, tag_close.end, content);
+        ctx.out
+            .record_sfc_export_fact(content, binding_ranges, Some(export_statement_range));
     }
 }
 
@@ -613,18 +653,25 @@ fn emit_minimal_component(
     has_companion_default: bool,
 ) {
     let mut s = String::with_capacity(160);
+    let mut binding_ranges = Vec::with_capacity(3);
     // Official gate: TS keeps `_defineComponent` (spreading `__default__`);
     // JS emits a plain object — or the `Object.assign(__default__, …)` merge
     // when a companion default exists.
     if is_ts {
-        s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+        s.push_str("const ");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(" = /*@__PURE__*/_defineComponent({\n");
         if has_companion_default {
             s.push_str("  ...__default__,\n");
         }
     } else if has_companion_default {
-        s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(__default__, {\n");
+        s.push_str("const ");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(" = /*@__PURE__*/Object.assign(__default__, {\n");
     } else {
-        s.push_str("const __sfc__ = {\n");
+        s.push_str("const ");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(" = {\n");
     }
     if !options.component_name.is_empty() {
         s.push_str("  __name: '");
@@ -637,22 +684,28 @@ fn emit_minimal_component(
         s.push_str("};\n");
     }
     if options.is_vapor {
-        s.push_str("__sfc__.__vapor = true;\n");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(".__vapor = true;\n");
     }
     // Non-inline SSR attaches `ssrRender` separately — no `__ssrInlineRender`.
     if options.has_scoped_style && !options.scope_id.is_empty() {
-        s.push_str("__sfc__.__scopeId = \"");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(".__scopeId = \"");
         s.push_str(options.scope_id);
         s.push_str("\";\n");
     }
-    s.push_str("export default __sfc__;\n");
+    let (export_binding_range, export_statement_range) = push_default_export_statement(&mut s);
+    binding_ranges.push(export_binding_range);
 
     let end = setup
         .tag_close
         .as_ref()
         .map(|t| t.end)
         .unwrap_or(setup.tag_open.end);
-    ctx.out.overwrite(setup.tag_open.start, end, &s);
+    let content = ctx.out.alloc_str(&s);
+    ctx.out.overwrite_alloc(setup.tag_open.start, end, content);
+    ctx.out
+        .record_sfc_export_fact(content, binding_ranges, Some(export_statement_range));
 
     if is_ts {
         ctx.imports.push("_defineComponent");
@@ -716,11 +769,13 @@ fn build_setup_wrapper_start(
     wrap: ComponentWrap,
     is_vapor: bool,
     ssr: bool,
-) -> String {
+) -> (String, std::ops::Range<u32>) {
     let mut s = String::with_capacity(256);
+    s.push_str("const ");
+    let binding_range = push_sfc_binding(&mut s);
     match wrap {
         ComponentWrap::DefineComponent => {
-            s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+            s.push_str(" = /*@__PURE__*/_defineComponent({\n");
             // Official spreads the companion default and defineOptions, in
             // order, before the runtime options.
             if has_companion_default {
@@ -733,12 +788,12 @@ fn build_setup_wrapper_start(
             }
         }
         ComponentWrap::Plain => {
-            s.push_str("const __sfc__ = {\n");
+            s.push_str(" = {\n");
         }
         ComponentWrap::ObjectAssign => {
             // Official merge targets, in order: `__default__` (companion),
             // the raw defineOptions expression, then the runtime object.
-            s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(");
+            s.push_str(" = /*@__PURE__*/Object.assign(");
             let mut first = true;
             if has_companion_default {
                 s.push_str("__default__");
@@ -844,7 +899,7 @@ fn build_setup_wrapper_start(
     if emit_bare_expose_call {
         s.push_str("  __expose();\n\n");
     }
-    s
+    (s, binding_range)
 }
 
 /// Build the closing part of the setup wrapper.
@@ -860,8 +915,9 @@ fn build_setup_wrapper_end(
     returned: Option<&str>,
     scope_id: Option<&str>,
     wrap: ComponentWrap,
-) -> String {
+) -> (String, Vec<std::ops::Range<u32>>, std::ops::Range<u32>) {
     let mut s = String::with_capacity(128);
+    let mut binding_ranges = Vec::with_capacity(2);
     if let Some(ret) = returned {
         // Matches Vue's official compiler unconditionally — assign returned
         // bindings and mark with `__isScriptSetup` so @vue/test-utils/devtools
@@ -885,12 +941,14 @@ fn build_setup_wrapper_end(
         ComponentWrap::DefineComponent | ComponentWrap::ObjectAssign => s.push_str("\n}});\n"),
     }
     if let Some(id) = scope_id {
-        s.push_str("__sfc__.__scopeId = \"");
+        binding_ranges.push(push_sfc_binding(&mut s));
+        s.push_str(".__scopeId = \"");
         s.push_str(id);
         s.push_str("\";\n");
     }
-    s.push_str("export default __sfc__;\n");
-    s
+    let (export_binding_range, export_statement_range) = push_default_export_statement(&mut s);
+    binding_ranges.push(export_binding_range);
+    (s, binding_ranges, export_statement_range)
 }
 
 /// Build the `__returned__` object from bindings.

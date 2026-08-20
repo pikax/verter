@@ -28,7 +28,7 @@ fn wrap_gate_js_object_assign_with_options() {
 fn build_wrapper_start_plain_js_no_define_component() {
     // JS <script setup> with runtime props/emits still emits a PLAIN object
     // (official emits _defineComponent only for TS).
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -63,7 +63,7 @@ fn build_wrapper_start_plain_js_no_define_component() {
 #[test]
 fn build_wrapper_start_object_assign_merges_options() {
     // JS + defineOptions → Object.assign(<raw defineOptions expr>, runtime).
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -99,7 +99,7 @@ fn build_wrapper_start_object_assign_merges_options() {
 #[test]
 fn build_wrapper_start_object_assign_companion_default_target() {
     // JS + companion `export default <expr>` → `__default__` is the merge target.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -125,7 +125,7 @@ fn build_wrapper_start_object_assign_companion_default_target() {
 #[test]
 fn build_wrapper_start_object_assign_both_sources_official_order() {
     // JS + companion default + defineOptions → Object.assign(__default__, <expr>, runtime).
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -152,7 +152,8 @@ fn build_wrapper_start_object_assign_both_sources_official_order() {
 
 #[test]
 fn build_wrapper_end_plain_closes_object_without_call() {
-    let result = build_setup_wrapper_end(Some("{ msg }"), None, ComponentWrap::Plain);
+    let (result, _binding_ranges, _export_range) =
+        build_setup_wrapper_end(Some("{ msg }"), None, ComponentWrap::Plain);
     assert!(
         result.contains("\n}};\n"),
         "plain wrapper closes the object literal directly, got:\n{}",
@@ -164,7 +165,7 @@ fn build_wrapper_end_plain_closes_object_without_call() {
 
 #[test]
 fn build_wrapper_start_basic() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -198,7 +199,7 @@ fn build_wrapper_start_basic() {
 
 #[test]
 fn build_wrapper_start_vapor_js_plain_inlines_vapor_flag_after_emits() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -224,7 +225,7 @@ fn build_wrapper_start_vapor_js_plain_inlines_vapor_flag_after_emits() {
 
 #[test]
 fn build_wrapper_start_non_vapor_js_plain_omits_vapor_flag() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -245,7 +246,7 @@ fn build_wrapper_start_non_vapor_js_plain_omits_vapor_flag() {
 
 #[test]
 fn build_wrapper_start_vapor_ts_define_component_ssr_inlines_vapor_flag() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -275,7 +276,7 @@ fn build_wrapper_start_vapor_ts_define_component_ssr_inlines_vapor_flag() {
 /// rather than a claim that this shape is correct.
 #[test]
 fn build_wrapper_start_vapor_ts_define_component_non_ssr_omits_vapor_flag() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -302,7 +303,7 @@ fn build_wrapper_start_vapor_ts_define_component_non_ssr_omits_vapor_flag() {
 
 #[test]
 fn build_wrapper_start_async() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         true,
         false,
@@ -323,7 +324,7 @@ fn build_wrapper_start_async() {
 
 #[test]
 fn build_wrapper_start_no_name() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "",
         false,
         false,
@@ -344,7 +345,7 @@ fn build_wrapper_start_no_name() {
 
 #[test]
 fn build_wrapper_start_with_props() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -365,7 +366,7 @@ fn build_wrapper_start_with_props() {
 
 #[test]
 fn build_wrapper_start_with_emits() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -387,7 +388,7 @@ fn build_wrapper_start_with_emits() {
 
 #[test]
 fn build_wrapper_start_with_expose() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         true,
@@ -408,7 +409,7 @@ fn build_wrapper_start_with_expose() {
 
 #[test]
 fn build_wrapper_start_with_expose_and_emit() {
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         true,
@@ -436,7 +437,7 @@ fn build_wrapper_start_non_inline_no_define_expose_binds_and_emits_bare_expose_c
     // Caller-computed non-inline, no-authored-defineExpose case:
     // `bind_expose = has_expose || !inline_template` = `false || true` = `true`;
     // `emit_bare_expose_call = !has_expose && !inline_template` = `true`.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         true,
@@ -479,7 +480,7 @@ fn build_wrapper_start_inline_no_define_expose_omits_bind_and_bare_call() {
     // the binding nor the bare call are official behavior for inline mode
     // (`bind_expose = false || false = false`; `emit_bare_expose_call = true
     // && false = false`).
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "",
         false,
         false,
@@ -514,7 +515,7 @@ fn build_wrapper_start_non_inline_with_authored_define_expose_binds_without_dupl
     // must NOT also be emitted (that would double-invoke __expose).
     // `bind_expose = true || true = true`; `emit_bare_expose_call = false &&
     // true = false`.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         true,
@@ -541,7 +542,7 @@ fn build_wrapper_start_non_inline_with_authored_define_expose_binds_without_dupl
 #[test]
 fn build_wrapper_start_with_options() {
     // TS + defineOptions → official spread of the raw expression before __name.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -567,7 +568,7 @@ fn build_wrapper_start_with_options() {
 #[test]
 fn build_wrapper_start_ts_companion_default_spread() {
     // TS + companion default → `...__default__` spread before runtime options.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -593,7 +594,7 @@ fn build_wrapper_start_ts_companion_default_spread() {
 #[test]
 fn build_wrapper_start_ts_both_spreads_official_order() {
     // TS + companion default + defineOptions → both spreads, official order.
-    let result = build_setup_wrapper_start(
+    let (result, _binding_range) = build_setup_wrapper_start(
         "Test",
         false,
         false,
@@ -620,7 +621,7 @@ fn build_wrapper_start_ts_both_spreads_official_order() {
 
 #[test]
 fn build_wrapper_end_with_return() {
-    let result =
+    let (result, _binding_ranges, _export_range) =
         build_setup_wrapper_end(Some("{ msg, count }"), None, ComponentWrap::DefineComponent);
     assert!(result.contains("const __returned__ = { msg, count }"));
     assert!(result.contains("__isScriptSetup"));
@@ -631,14 +632,16 @@ fn build_wrapper_end_with_return() {
 
 #[test]
 fn build_wrapper_end_no_return() {
-    let result = build_setup_wrapper_end(None, None, ComponentWrap::DefineComponent);
+    let (result, _binding_ranges, _export_range) =
+        build_setup_wrapper_end(None, None, ComponentWrap::DefineComponent);
     assert!(!result.contains("return"));
     assert!(result.contains("}});"));
 }
 
 #[test]
 fn build_wrapper_end_with_scope_id() {
-    let result = build_setup_wrapper_end(None, Some("data-v-abc"), ComponentWrap::DefineComponent);
+    let (result, _binding_ranges, _export_range) =
+        build_setup_wrapper_end(None, Some("data-v-abc"), ComponentWrap::DefineComponent);
     assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
 }
 
@@ -812,7 +815,8 @@ fn build_returned_setup_import_excluded_when_genuinely_unused() {
 // for the coverage this used to (incorrectly) claim here.
 #[test]
 fn build_wrapper_end_never_touches_vapor_flag() {
-    let result = build_setup_wrapper_end(Some("{ msg }"), None, ComponentWrap::DefineComponent);
+    let (result, _binding_ranges, _export_range) =
+        build_setup_wrapper_end(Some("{ msg }"), None, ComponentWrap::DefineComponent);
     assert!(
         !result.contains("__vapor"),
         "build_setup_wrapper_end must never reference __vapor (that's \
@@ -827,7 +831,8 @@ fn build_wrapper_end_scope_id_still_a_separate_trailing_assignment() {
     // @vitejs/plugin-vue (attachedProps + the _export_sfc helper, not
     // compileScript's runtimeOptions at all) — its existing separate-
     // statement emission here is untouched by the __vapor fix.
-    let result = build_setup_wrapper_end(None, Some("data-v-abc"), ComponentWrap::DefineComponent);
+    let (result, _binding_ranges, _export_range) =
+        build_setup_wrapper_end(None, Some("data-v-abc"), ComponentWrap::DefineComponent);
     assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
     assert!(!result.contains("__vapor"));
 }

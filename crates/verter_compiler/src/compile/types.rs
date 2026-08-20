@@ -413,6 +413,13 @@ pub struct VerterScriptBlock {
     pub attrs: Vec<(String, String)>,
     pub generated_template_hole: Option<std::ops::Range<u32>>,
     pub runtime_imports: Vec<&'static str>,
+    /// Every `__sfc__`→`_sfc_main` rename target plus the removable
+    /// terminal default-export statement, declared by this block's own
+    /// producer — the host assembler's sole authority for the `__sfc__`
+    /// rewrite (see `crate::assembly::fragment::SfcExportPlacement`).
+    /// `None` only when this block is genuinely not reachable — every
+    /// producer that constructs a `VerterScriptBlock` declares one.
+    pub sfc_export_placement: Option<crate::assembly::fragment::SfcExportPlacement>,
 }
 
 /// Generated output for the `<template>` block (VDOM, Vapor, or SSR render function).
@@ -424,6 +431,9 @@ pub struct VerterTemplateBlock {
     /// SSR runtime helper imports from `"vue/server-renderer"`.
     /// Empty for non-SSR builds.
     pub ssr_imports: Vec<&'static str>,
+    /// Which property the emitted function attaches to — set from the
+    /// backend that produced this block, not recovered from `code`.
+    pub render_export: crate::framework_common::TemplateRenderExport,
     pub duration_ms: f64,
     pub attrs: Vec<(String, String)>,
 }

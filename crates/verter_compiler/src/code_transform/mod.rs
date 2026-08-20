@@ -42,6 +42,7 @@ mod source_map;
 
 pub use chain::SourceMapChainError;
 pub use code_transform::CodeTransform;
+pub(crate) use code_transform::GeneratedContentMarker;
 pub use code_transform::GeneratedSourceRange;
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
 // alongside `CodeTransform` as this module's public error type (the inner

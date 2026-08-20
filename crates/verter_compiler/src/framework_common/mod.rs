@@ -40,6 +40,7 @@ pub use carrier_compiler::{
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
+    TemplateRenderExport,
 };
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
 #[doc(hidden)]
