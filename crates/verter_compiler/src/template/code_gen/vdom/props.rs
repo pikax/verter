@@ -164,13 +164,12 @@ pub fn emit_static_style_object(buf: &mut String, style: &str) {
         if i > 0 {
             buf.push_str(", ");
         }
-        if needs_quoted_key(prop) {
-            buf.push('"');
-            helpers::escape_js_string_into(buf, prop);
-            buf.push('"');
-        } else {
-            buf.push_str(prop);
-        }
+        // Official Vue always quotes style-object keys as strings — even
+        // valid-identifier CSS properties like `color` — unlike a general
+        // props object, where only keys that need it are quoted.
+        buf.push('"');
+        helpers::escape_js_string_into(buf, prop);
+        buf.push('"');
         buf.push_str(": \"");
         helpers::escape_js_string_into(buf, val);
         buf.push('"');
@@ -386,7 +385,10 @@ mod tests {
 
     #[test]
     fn style_obj_simple() {
-        assert_eq!(style_to_obj("color: red"), r#"{ color: "red" }"#);
+        // Official Vue quotes EVERY style-object key as a string, even a
+        // valid identifier like `color` — verified against
+        // `elements-text/static-class-style.js`'s golden.
+        assert_eq!(style_to_obj("color: red"), r#"{ "color": "red" }"#);
     }
 
     #[test]
@@ -401,7 +403,7 @@ mod tests {
     fn style_obj_multiple() {
         assert_eq!(
             style_to_obj("margin-top: 15px; color: red"),
-            r#"{ "margin-top": "15px", color: "red" }"#
+            r#"{ "margin-top": "15px", "color": "red" }"#
         );
     }
 
@@ -413,7 +415,7 @@ mod tests {
 
     #[test]
     fn style_obj_trailing_semicolon() {
-        assert_eq!(style_to_obj("color: red;"), r#"{ color: "red" }"#);
+        assert_eq!(style_to_obj("color: red;"), r#"{ "color": "red" }"#);
     }
 
     #[test]
@@ -470,7 +472,7 @@ mod tests {
         // CSS cascade: last declaration wins. Matches Vue's parseStringStyle (plain object).
         assert_eq!(
             style_to_obj("position: absolute; position: relative; width: 100%"),
-            r#"{ position: "relative", width: "100%" }"#
+            r#"{ "position": "relative", "width": "100%" }"#
         );
     }
 
@@ -479,7 +481,7 @@ mod tests {
         // Three declarations of same key → last wins
         assert_eq!(
             style_to_obj("color: red; color: blue; color: green"),
-            r#"{ color: "green" }"#
+            r#"{ "color": "green" }"#
         );
     }
 

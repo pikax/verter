@@ -422,6 +422,24 @@ fn contains_assignment_operator(s: &str) -> bool {
     }
     false
 }
+
+/// True when a `v-on` handler value is an inline statement/expression that
+/// gets `$event => …` wrapped (a fresh function created on every render) —
+/// exactly the case official Vue's `cacheHandlers` wraps in
+/// `_cache[N] || (_cache[N] = …)` to keep a stable function identity. A
+/// method reference (`@click="onClick"`, `@click="foo.bar"`) is already a
+/// stable value and is neither `$event`-wrapped nor cached.
+pub(crate) fn is_cacheable_inline_event_handler(
+    value: &str,
+    oxc_exp: Option<&OxcParsedExpression<'_>>,
+) -> bool {
+    !value.trim().is_empty()
+        && !is_function_expression_value(value, oxc_exp)
+        && (is_multi_statement_handler(oxc_exp)
+            || contains_assignment_operator(value)
+            || !is_member_expression(value))
+}
+
 /// Resolve an expression using OXC binding data when available, falling back
 /// to simple identifier resolution.
 ///
@@ -615,6 +633,19 @@ pub struct PropsResult {
     pub native_vmodel: Option<NativeVModel>,
     /// Runtime directive entries (v-show, custom directives) for `_withDirectives()`.
     pub directive_entries: Vec<DirectiveEntry>,
+    /// True when a `v-text` binding emitted a `_toDisplayString(...)`-wrapped
+    /// `textContent` prop, so the caller must import `toDisplayString`.
+    pub uses_to_display_string: bool,
+    /// True when any event-listener key is NOT exactly `onClick` — official
+    /// Vue's NEED_HYDRATION (32) flag for eager listener attachment. See
+    /// the local `has_hydration_binding` doc comment.
+    pub has_hydration_binding: bool,
+    /// True when a `:[expr]` dynamic BIND KEY is present (`v-bind`'s
+    /// argument itself is dynamic, not just its value) — official Vue's
+    /// FULL_PROPS (16): the key set itself can change, so a full diff is
+    /// always needed to remove a stale key. See the local
+    /// `has_dynamic_key` variable.
+    pub has_dynamic_key: bool,
 }
 
 /// Determine the appropriate vModel directive helper for a native element.
@@ -974,6 +1005,7 @@ pub(crate) fn build_props_object_into(
     skip_prop_index: Option<usize>,
     force_js: bool,
     anchors: &mut Vec<SegmentAnchor>,
+    handler_cache_indices: Option<&FxHashMap<usize, usize>>,
 ) -> PropsResult {
     let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
     // Collect spread expressions from v-bind/v-on without args.
@@ -989,6 +1021,12 @@ pub(crate) fn build_props_object_into(
     // True when the props object embeds an event-handler value. Blocks
     // props-object hoisting — see `PropsResult::has_event_handler`.
     let mut has_event_handler = false;
+    // True when NEED_HYDRATION (32) applies: any event-listener key that is
+    // NOT exactly `onClick` (bare, no Capture/Once/Passive option-modifier
+    // suffix — a plain `onClick` is exempt), or a `.prop`/`.attr`-forced
+    // DOM binding. Official Vue sets this so async/lazy hydration compares
+    // or attaches these eagerly rather than waiting for a later patch.
+    let mut has_hydration_binding = false;
     // True when a `ref` needs dynamic handling (inline static ref naming a
     // setup binding, or a dynamic `:ref` with a non-literal value). Blocks
     // props-object hoisting so the scope-bound reference is not evaluated at
@@ -998,6 +1036,7 @@ pub(crate) fn build_props_object_into(
     let mut uses_normalize_style = false;
     let mut uses_with_modifiers = false;
     let mut uses_with_keys = false;
+    let mut uses_to_display_string = false;
     let mut native_vmodel: Option<NativeVModel> = None;
     let mut directive_entries: Vec<DirectiveEntry> = Vec::new();
 
@@ -1418,6 +1457,12 @@ pub(crate) fn build_props_object_into(
                         // binding never needs a PATCH_PROPS re-patch. Official
                         // `genEventHandler`/`buildProps` never adds the `on*`
                         // key to `dynamicPropNames`.
+                        // Component listeners are attached by the child's
+                        // OWN render, not the parent's hydration pass — the
+                        // NEED_HYDRATION flag is native-element-only.
+                        if &buf[key_start..] != "onClick" && !element.tag_type.is_component() {
+                            has_hydration_binding = true;
+                        }
                         if props::needs_quoted_key(&buf[key_start..]) {
                             buf.insert(key_start, '"');
                             buf.push('"');
@@ -1447,11 +1492,33 @@ pub(crate) fn build_props_object_into(
                         } else if is_bind && arg_name == "style" {
                             prop_is_style = true;
                         }
+                        // `.prop`/`.attr` modifiers force DOM-property vs
+                        // HTML-attribute binding by prefixing the key with a
+                        // `.`/`^` marker the runtime's `patchProp` reads —
+                        // the key stays EXACTLY as authored (hyphens kept,
+                        // never camelized) with that marker prepended.
+                        let dom_prop_marker = prop.modifiers.iter().find_map(|m| {
+                            match &source[m.start as usize..m.end as usize] {
+                                "prop" => Some('.'),
+                                "attr" => Some('^'),
+                                _ => None,
+                            }
+                        });
+                        // A forced DOM-property/attribute binding also gets
+                        // NEED_HYDRATION, same as a non-click event listener
+                        // — the hydration mismatch check needs to compare it
+                        // eagerly rather than waiting for a later patch.
+                        if dom_prop_marker.is_some() {
+                            has_hydration_binding = true;
+                        }
                         // data-* and aria-* attributes must NOT be camelized —
                         // they are standard HTML attributes that preserve hyphens.
-                        let skip_camelize =
-                            arg_name.starts_with("data-") || arg_name.starts_with("aria-");
-                        let key: std::borrow::Cow<'_, str> = if skip_camelize {
+                        let skip_camelize = dom_prop_marker.is_some()
+                            || arg_name.starts_with("data-")
+                            || arg_name.starts_with("aria-");
+                        let key: std::borrow::Cow<'_, str> = if let Some(marker) = dom_prop_marker {
+                            std::borrow::Cow::Owned(format!("{marker}{arg_name}"))
+                        } else if skip_camelize {
                             std::borrow::Cow::Borrowed(arg_name)
                         } else {
                             props::camelize(arg_name)
@@ -1642,10 +1709,25 @@ pub(crate) fn build_props_object_into(
                             }
                             first = false;
 
-                            // Emit: "onUpdate:modelValue": $event => ((<resolved>) = $event)
-                            buf.push_str("\"onUpdate:modelValue\": $event => ((");
+                            // Emit: "onUpdate:modelValue": $event => ((<resolved>) = $event),
+                            // cache-wrapped when a `_cache[N]` slot was
+                            // reserved for it (stable handler identity —
+                            // official `cacheHandlers`).
+                            buf.push_str("\"onUpdate:modelValue\": ");
+                            let cache_idx = handler_cache_indices.and_then(|m| m.get(&prop_idx));
+                            if let Some(idx) = cache_idx {
+                                buf.push_str("_cache[");
+                                buf.push_str(&idx.to_string());
+                                buf.push_str("] || (_cache[");
+                                buf.push_str(&idx.to_string());
+                                buf.push_str("] = ");
+                            }
+                            buf.push_str("$event => ((");
                             buf.push_str(&resolved);
                             buf.push_str(") = $event)");
+                            if cache_idx.is_some() {
+                                buf.push(')');
+                            }
 
                             // Determine the directive helper based on tag and type attribute
                             let tag_name = &source[element.tag_open.start as usize + 1
@@ -1680,14 +1762,48 @@ pub(crate) fn build_props_object_into(
                         continue;
                     }
 
+                    // v-text / v-html: lower to a `textContent`/`innerHTML` prop
+                    // (v-text wraps the value in `_toDisplayString()`; v-html
+                    // does not). Both enter `dynamic_props` so PATCH_PROPS +
+                    // the hoisted keys array are emitted, matching official.
+                    if directive_name == "v-text" || directive_name == "v-html" {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw, vs, oxc_exp, resolver, force_js);
+
+                            if !first {
+                                buf.push_str(", ");
+                            }
+                            first = false;
+                            has_regular_props = true;
+
+                            let key = if directive_name == "v-text" {
+                                "textContent"
+                            } else {
+                                "innerHTML"
+                            };
+                            buf.push_str(key);
+                            buf.push_str(": ");
+                            if directive_name == "v-text" {
+                                buf.push_str("_toDisplayString(");
+                                buf.push_str(&resolved);
+                                buf.push(')');
+                                uses_to_display_string = true;
+                            } else {
+                                buf.push_str(&resolved);
+                            }
+
+                            dynamic_props.push(key.to_string());
+                        }
+                        continue;
+                    }
+
                     // Other directives with no arg: v-show, v-focus, v-loading, etc.
                     // These are collected as directive entries for _withDirectives() wrapping.
                     let is_vshow = directive_name == "v-show";
                     // Skip codegen-only directives that don't need runtime wrapping
-                    let is_codegen_only = matches!(
-                        directive_name,
-                        "v-text" | "v-html" | "v-cloak" | "v-memo" | "v-pre"
-                    );
+                    let is_codegen_only = matches!(directive_name, "v-cloak" | "v-memo" | "v-pre");
                     if !is_codegen_only {
                         let directive_ref = if is_vshow {
                             "_vShow".to_string()
@@ -1785,6 +1901,23 @@ pub(crate) fn build_props_object_into(
                     } else if prop_is_event {
                         let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                         let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+                        // A cacheable inline handler gets `_cache[N] || (_cache[N] = …)`
+                        // for a stable function identity across renders
+                        // (official `cacheHandlers`) — but only when no
+                        // modifier wrapping applies to this prop (the
+                        // `_withModifiers`/`_withKeys` wrap composes around
+                        // this span separately via `value_start_pos`, and no
+                        // current case needs both together).
+                        let cache_idx = (!has_event_modifiers)
+                            .then(|| handler_cache_indices.and_then(|m| m.get(&prop_idx)))
+                            .flatten();
+                        if let Some(idx) = cache_idx {
+                            buf.push_str("_cache[");
+                            buf.push_str(&idx.to_string());
+                            buf.push_str("] || (_cache[");
+                            buf.push_str(&idx.to_string());
+                            buf.push_str("] = ");
+                        }
                         if is_function_expression_value(value, oxc_exp) {
                             // Inline arrow/function is already the handler.
                             // Do not wrap — `$event => { (e) => {…} }` is a no-op.
@@ -1804,6 +1937,9 @@ pub(crate) fn build_props_object_into(
                             buf.push(')');
                         } else {
                             buf.push_str(&resolved);
+                        }
+                        if cache_idx.is_some() {
+                            buf.push(')');
                         }
                     } else {
                         let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
@@ -2058,6 +2194,9 @@ pub(crate) fn build_props_object_into(
         has_event_handler,
         native_vmodel,
         directive_entries,
+        uses_to_display_string,
+        has_hydration_binding,
+        has_dynamic_key,
     }
 }
 
@@ -2245,6 +2384,27 @@ pub fn process_element_leave<'alloc>(
     // (dynamic props, component, fully-static subtree, hoist_static
     // disabled, …) and the logic below is the sole, unchanged authority.
     pre_reserved_hoist: Option<usize>,
+    // `_cache[N]` indices reserved for THIS element's own inline event
+    // handlers / native `v-model` update handler, keyed by `prop_idx` —
+    // see `VdomCodeGen::handler_cache_reservations`. Reserved in a
+    // document-order pre-pass (`enter_template`) so handler caching numbers
+    // before any static-vnode/`v-memo` caching, matching official Vue's
+    // main-transform-then-`cacheStatic` pass ordering. `None`/absent-key
+    // means the prop is not a cacheable inline handler.
+    handler_cache_indices: Option<&FxHashMap<usize, usize>>,
+    // `_cache[N]` reserved to hold THIS element's ENTIRE static children
+    // array (official Vue: when every one of a node's children is
+    // individually cacheable, `cacheStatic` groups them into ONE cached
+    // array and spreads it back: `[...(_cache[N] || (_cache[N] = [c1, c2,
+    // …]))]`, rather than caching each child separately). `Some` means the
+    // children-array open/close brackets below emit the spread wrapper
+    // instead of a bare `[`/`]`, and each child renders un-individually-
+    // cached (see `VdomCodeGen::array_group_reservations`).
+    array_group_cache_index: Option<usize>,
+    // `_cache[N]` reserved for each static-only text/interpolation run
+    // among THIS element's array-mode children, keyed by the run's start
+    // offset — see `VdomCodeGen::reserve_static_text_run_caches`.
+    text_run_cache_indices: &FxHashMap<u32, usize>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
     debug_assert!((tag_open.start as usize + 1) <= source.len());
@@ -2344,11 +2504,17 @@ pub fn process_element_leave<'alloc>(
     }
     // Block root elements (v-for items, v-if branches) need their own block scope
     // so that dynamic children are tracked in dynamicChildren and patched correctly.
-    // Template root: wrapping is handled by leave_template, not here.
+    // Template root: wrapping is handled by leave_template, not here — EXCEPT
+    // when the root also needs `_withDirectives()` wrapping, in which case
+    // `(_openBlock(), …)` must nest INSIDE `_withDirectives(` (official
+    // Vue's `_withDirectives((_openBlock(), createXBlock(...)), [...])`);
+    // `leave_template`'s `root_element_has_directives_wrap` bypass then
+    // skips its own outer wrapper for that case.
     // `force_open_block` covers built-ins (Teleport/KeepAlive) that must open a
     // block at any nesting even without a structural directive.
     let needs_block_wrapper = force_open_block
-        || (is_block_root && (element.v_for.is_some() || element.v_condition.is_some()));
+        || (is_block_root
+            && (element.v_for.is_some() || element.v_condition.is_some() || has_directives_wrap));
     if needs_block_wrapper {
         buf.push_str("(_openBlock(), ");
         out.add_vdom_import(VdomHelper::OpenBlock);
@@ -2391,7 +2557,14 @@ pub fn process_element_leave<'alloc>(
     };
 
     // Props
-    let (dynamic_props, has_dynamic_ref, native_vmodel, directive_entries) = if has_props {
+    let (
+        dynamic_props,
+        has_dynamic_ref,
+        native_vmodel,
+        directive_entries,
+        has_hydration_binding,
+        has_dynamic_key,
+    ) = if has_props {
         buf.push_str(", ");
         if let Some(idx) = pre_reserved_hoist {
             // Reserved during enter_element, in document pre-order, before
@@ -2403,7 +2576,7 @@ pub fn process_element_leave<'alloc>(
             // entirely and reference the already-hoisted constant.
             buf.push_str("_hoisted_");
             buf.push_str(&idx.to_string());
-            (Vec::new(), false, None, Vec::new())
+            (Vec::new(), false, None, Vec::new(), false, false)
         } else {
             let props_start = buf.len();
             let mut props_anchors: Vec<SegmentAnchor> = Vec::new();
@@ -2416,6 +2589,7 @@ pub fn process_element_leave<'alloc>(
                 skip_is_prop,
                 options.force_js,
                 &mut props_anchors,
+                handler_cache_indices,
             );
             // Hoist fully-static props objects to const _hoisted_N when:
             // - hoist_static is enabled
@@ -2474,6 +2648,21 @@ pub fn process_element_leave<'alloc>(
                 // first property. Hoisting is disabled above for this
                 // element.
                 inject_branch_key(buf, props_start, k);
+            } else {
+                // A directive-only prop set (v-show, v-cloak, custom
+                // directives, …) never writes into the props object — an
+                // element with ONLY such directives still reaches this
+                // branch (`has_props` is true because `element.props` is
+                // non-empty) but leaves the object empty. Official Vue
+                // emits `null` for props here, not `{}` — collapse it.
+                let compact: String = buf[props_start..]
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if compact == "{}" {
+                    buf.truncate(props_start);
+                    buf.push_str("null");
+                }
             }
             if props_result.uses_merge {
                 out.add_vdom_import(VdomHelper::MergeProps);
@@ -2499,18 +2688,23 @@ pub fn process_element_leave<'alloc>(
             if props_result.uses_to_handlers {
                 out.add_vdom_import(VdomHelper::ToHandlers);
             }
+            if props_result.uses_to_display_string {
+                out.add_vdom_import(VdomHelper::ToDisplayString);
+            }
             (
                 props_result.dynamic_props,
                 props_result.has_dynamic_ref,
                 props_result.native_vmodel,
                 props_result.directive_entries,
+                props_result.has_hydration_binding,
+                props_result.has_dynamic_key,
             )
         }
     } else if let Some(k) = injected_key {
         if let Some(idx) = pre_reserved_hoist {
             buf.push_str(", _hoisted_");
             buf.push_str(&idx.to_string());
-            (Vec::new(), false, None, Vec::new())
+            (Vec::new(), false, None, Vec::new(), false, false)
         } else {
             // v-if branch root with no user props: the branch key IS the props
             // object — `_createElementBlock("p", { key: 0 }, …)`. Official
@@ -2544,14 +2738,14 @@ pub fn process_element_leave<'alloc>(
                 buf.push_str(", ");
                 buf.push_str(&key_props_str);
             }
-            (Vec::new(), false, None, Vec::new())
+            (Vec::new(), false, None, Vec::new(), false, false)
         }
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags
             buf.push_str(", null");
         }
-        (Vec::new(), false, None, Vec::new())
+        (Vec::new(), false, None, Vec::new(), false, false)
     };
     // For components with dynamic bound props, add PATCH_PROPS so that
     // shouldUpdateComponent can check listed dynamic props.
@@ -2568,9 +2762,24 @@ pub fn process_element_leave<'alloc>(
     }
     // Official emits 512 /* NEED_PATCH */ for dynamic refs (an inline
     // ref_key/ref binding or a dynamic `:ref`) so the patcher traverses and
-    // updates the ref binding.
-    if has_dynamic_ref {
+    // updates the ref binding. The same flag marks a VNode that needs
+    // special ref/directive patching — native `v-model` and runtime
+    // directives (`v-show`, custom directives) wrapped in `_withDirectives()`
+    // set it too.
+    if has_dynamic_ref || native_vmodel.is_some() || !directive_entries.is_empty() {
         patch_flag |= helpers::PATCH_NEED_PATCH;
+    }
+    // Official emits 32 /* NEED_HYDRATION */ for any event listener whose
+    // key isn't exactly `onClick`, so async/lazy hydration attaches it
+    // eagerly instead of waiting — see `has_hydration_binding`.
+    if has_hydration_binding {
+        patch_flag |= helpers::PATCH_NEED_HYDRATION;
+    }
+    // A dynamic BIND KEY (`:[expr]`) means the key set itself can change —
+    // official emits FULL_PROPS (16) so the patcher always does a full
+    // diff, since a stale key can't be targeted by name.
+    if has_dynamic_key {
+        patch_flag |= helpers::PATCH_FULL_PROPS;
     }
 
     // Children opening
@@ -2587,7 +2796,15 @@ pub fn process_element_leave<'alloc>(
                 }
             }
             ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
-                buf.push('[');
+                if let Some(idx) = array_group_cache_index {
+                    buf.push_str("[...(_cache[");
+                    buf.push_str(&idx.to_string());
+                    buf.push_str("] || (_cache[");
+                    buf.push_str(&idx.to_string());
+                    buf.push_str("] = [");
+                } else {
+                    buf.push('[');
+                }
             }
             _ => {}
         }
@@ -2613,7 +2830,16 @@ pub fn process_element_leave<'alloc>(
         // omitting this causes `Cannot read properties of null (reading 'length')`.
         if (patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
             buf.push_str(", ");
-            let props_ref = format_dynamic_props_ref(&dynamic_props, hoisted_constants);
+            // A component's dynamic-props keys array is never hoisted to a
+            // module-level _hoisted_N — verified against the real compiler
+            // (Teleport, a built-in "component", keeps `["disabled"]`
+            // inline in both topologies). Only plain elements hoist it.
+            let props_hoisted_constants = if element.tag_type.is_component() {
+                None
+            } else {
+                hoisted_constants
+            };
+            let props_ref = format_dynamic_props_ref(&dynamic_props, props_hoisted_constants);
             buf.push_str(&props_ref);
         }
         let suffix = out.alloc_str(&buf[saved..]);
@@ -2693,6 +2919,7 @@ pub fn process_element_leave<'alloc>(
         source,
         ast,
         ast_children,
+        text_run_cache_indices,
     );
 
     // Step 5: Build close tag overwrite (reuse buffer)
@@ -2711,7 +2938,11 @@ pub fn process_element_leave<'alloc>(
                 // Interpolation already ends with ) from interpolation.rs
             }
             ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
-                buf.push(']');
+                if array_group_cache_index.is_some() {
+                    buf.push_str("]))]");
+                } else {
+                    buf.push(']');
+                }
             }
             _ => {}
         }
@@ -2719,6 +2950,13 @@ pub fn process_element_leave<'alloc>(
 
     // Patch flag (only if non-zero or cached) — reuse pre-built suffix
     if has_cached_patchflag || patch_flag != 0 {
+        // Need null children placeholder before patch flags (mirrors the
+        // self-closing branch above — an explicit close tag with no
+        // children, e.g. `<p v-text="x"></p>`, still needs the `null`
+        // positional children argument before the patch flag).
+        if !has_children {
+            buf.push_str(", null");
+        }
         buf.push_str(patch_suffix);
     }
 

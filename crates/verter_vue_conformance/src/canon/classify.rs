@@ -119,7 +119,16 @@ impl Classifier {
             if class == IdentClass::Alpha {
                 let scope_id = scoping.symbol_scope_id(symbol_id);
                 let key = BindingKey {
-                    scope_ordinal: scoping.get_node_id(scope_id).index() as u32,
+                    // `ScopeId` is handed out by a single monotonic counter as the
+                    // semantic builder visits scope-creating nodes in source order
+                    // (`SemanticBuilder::enter_scope` -> `Scoping::add_scope`), so its
+                    // index is already a dense scope-creation rank — unlike the
+                    // underlying node's raw `NodeId`, it never advances for a non-scope
+                    // node (e.g. a redundant `ParenthesizedExpression`, which
+                    // `canon_expression` already unwraps as cosmetic). Using it keeps
+                    // this ordinal invariant to exactly the same node category the
+                    // structural diff waives, without waiving a real added/removed scope.
+                    scope_ordinal: scope_id.index() as u32,
                     declaration_ordinal: *declaration_ordinals.get(&symbol_id).unwrap_or(&u32::MAX),
                     pattern_slot: binding_pattern_slot(scoping, nodes, symbol_id),
                     kind: binding_kind(scoping, nodes, symbol_id, flags),

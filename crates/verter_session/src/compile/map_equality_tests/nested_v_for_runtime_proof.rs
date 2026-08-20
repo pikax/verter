@@ -283,16 +283,14 @@ fn v_if_flushed_by_later_plain_sibling_of_a_non_immediate_ancestor_mounts_correc
     );
 }
 
-/// Known limitation, not the flush-gate class: `<template v-if>` is not a
-/// transparent wrapper (`builds_open_tag` only special-cases `v-slot`).
-/// Children land in `.content` (invisible to `innerHTML`). Both
-/// `_createIf`s are present and nested. Tracked follow-up.
+/// `<template v-if>` is a transparent wrapper in Vapor codegen: no open tag
+/// of its own, no separate template/DOM container — its sole structural
+/// child's own construct (here the inner `_createIf`) is donated directly
+/// as the outer branch's body. Confirmed byte-for-byte against the pinned
+/// rc.3 compiler's own generated code AND its real mount output (both
+/// `_createIf`s emit a `<!--if-->` anchor comment — official Vapor's
+/// `createIf` always anchors its branch, transparent wrapper or not).
 #[test]
-#[ignore = "confirmed separate defect: <template v-if> is not a transparent \
-            root element in Vapor codegen (needs build_closure_body support \
-            for a template-wrapped branch with no DOM footprint of its \
-            own) — distinct from, and not fixed by, the leave_element \
-            flush-gate correction the rest of this module covers"]
 fn template_v_if_wrapping_inner_v_if_mounts_and_renders_inner_content() {
     let source = "<template><div><template v-if=\"outer\"><p v-if=\"inner\">x</p></template></div></template>\
                   <script setup>import { ref } from 'vue'; const outer = ref(true); const inner = ref(true);</script>";
@@ -304,8 +302,51 @@ fn template_v_if_wrapping_inner_v_if_mounts_and_renders_inner_content() {
         "the compiled module threw when mounted through the real with-vapor runtime. Error:\n{detail}\n\nmodule:\n{module_code}"
     );
     assert_eq!(
-        detail, "<div><p>x</p></div>",
+        detail, "<div><p>x</p><!--if--><!--if--></div>",
         "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly \
          (confirmed independently against the real oracle), got:\n{detail}\n\nmodule:\n{module_code}"
+    );
+}
+
+/// A v-for rest-element destructure (`{ id, ...rest }`) must read the ACTUAL
+/// item's fields, not the `_for_item0` wrapper's own — a fallback that
+/// destructures directly off the wrapper (skipping `.value`) silently reads
+/// `undefined` for every field. Confirmed byte-for-byte against the pinned
+/// rc.3 compiler's own generated code for this fixture.
+#[test]
+fn v_for_rest_element_destructure_reads_correct_runtime_values() {
+    let source = "<template><ul><li v-for=\"{ id, ...rest } in list\">{{ id }}-{{ rest.x }}</li></ul></template>\
+                  <script setup>import { ref } from 'vue'; const list = ref([{ id: 1, x: 2 }]);</script>";
+    let module_code = assemble_inline_vapor_module(source);
+    let (ok, detail) = execute_through_official_vapor_runtime(&module_code);
+    assert!(
+        ok,
+        "the compiled module threw when mounted through the real with-vapor runtime. Error:\n{detail}\n\nmodule:\n{module_code}"
+    );
+    assert_eq!(
+        detail, "<ul><li>1-2</li><!--for--></ul>",
+        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
+    );
+}
+
+/// A v-for array-position default value (`[a = 99, b]`) must read the
+/// ACTUAL item's element when present and fall back to the default only
+/// when it's `undefined` — a fallback that skips destructuring entirely
+/// silently reads `undefined` unconditionally instead. Confirmed
+/// byte-for-byte against the pinned rc.3 compiler's own generated code for
+/// this fixture.
+#[test]
+fn v_for_array_default_value_destructure_reads_correct_runtime_values() {
+    let source = "<template><ul><li v-for=\"[a = 99, b] in list\">{{ a }}-{{ b }}</li></ul></template>\
+                  <script setup>import { ref } from 'vue'; const list = ref([[undefined, 2]]);</script>";
+    let module_code = assemble_inline_vapor_module(source);
+    let (ok, detail) = execute_through_official_vapor_runtime(&module_code);
+    assert!(
+        ok,
+        "the compiled module threw when mounted through the real with-vapor runtime. Error:\n{detail}\n\nmodule:\n{module_code}"
+    );
+    assert_eq!(
+        detail, "<ul><li>99-2</li><!--for--></ul>",
+        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }

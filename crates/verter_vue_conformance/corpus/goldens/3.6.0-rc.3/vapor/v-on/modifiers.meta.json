@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "caseId": "v-on/modifiers",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.3",
+    "@vue/compiler-sfc": "3.6.0-rc.3",
+    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-on/modifiers.vue",
+    "sha256": "4e7931b192b685118b8b0bca72127015747b665d692879671fa2c719c5d5bf5e"
+  },
+  "options": {
+    "sha256": "b9b715da68c4aaac737b7f924e95ea33b32540c5fbb2fbc33b9bf8a9c7d969c5",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-on/modifiers.vue",
+      "id": "v-on/modifiers",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.3/vapor/v-on/modifiers.js",
+      "sha256": "36334bdc3f8dc1ac6ccb2c63b4eca0b0c3f1736f818f15dd8364e356851775f9",
+      "bytes": 901
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.3/vapor/v-on/modifiers.map.json",
+      "sha256": "83bfa1c29a49d8f5c998062db80c23d8968b79a24df4e414a80c81ae33fc9834"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "child",
+      "alias": "_child"
+    },
+    {
+      "imported": "next",
+      "alias": "_next"
+    },
+    {
+      "imported": "on",
+      "alias": "_on"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "withModifiers",
+      "alias": "_withModifiers"
+    }
+  ]
+}

@@ -542,8 +542,17 @@ pub fn process_script_setup<'alloc>(
 
     // Track the _defineComponent import only when the wrapper emits the call
     // (TS components). Plain-object and Object.assign shapes need no helper.
+    // A non-SSR Vapor TS component routes through the separate
+    // `defineVaporComponent` runtime wrapper instead (see
+    // `build_setup_wrapper_start`'s matching gate) — its runtime
+    // implementation sets `.__vapor = true` itself, so no `_defineComponent`
+    // import is tracked for that branch.
     if wrap == ComponentWrap::DefineComponent {
-        ctx.imports.push("_defineComponent");
+        if options.is_vapor && !options.ssr {
+            ctx.imports.push("_defineVaporComponent");
+        } else {
+            ctx.imports.push("_defineComponent");
+        }
     }
 }
 
@@ -775,7 +784,17 @@ fn build_setup_wrapper_start(
     let binding_range = push_sfc_binding(&mut s);
     match wrap {
         ComponentWrap::DefineComponent => {
-            s.push_str(" = /*@__PURE__*/_defineComponent({\n");
+            // Non-SSR Vapor routes through the dedicated `defineVaporComponent`
+            // runtime wrapper instead of `defineComponent` (verified directly
+            // against `@vue/compiler-sfc` 3.6.0-rc.3: `vapor && !ssr ?
+            // defineVaporComponent : defineComponent`) — its own
+            // implementation sets `.__vapor = true`, so `emits_vapor_flag_here`
+            // below stays false for this branch.
+            if is_vapor && !ssr {
+                s.push_str(" = /*@__PURE__*/_defineVaporComponent({\n");
+            } else {
+                s.push_str(" = /*@__PURE__*/_defineComponent({\n");
+            }
             // Official spreads the companion default and defineOptions, in
             // order, before the runtime options.
             if has_companion_default {

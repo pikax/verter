@@ -1246,6 +1246,17 @@ fn compile_inner(
                 &tpl_options,
             );
             inline_tpl_imports = tpl_imports.vue;
+            // Inline-mode hoisted constants (`_hoisted_N`) go through
+            // `ct.prepend` — a position-anchored prepend here would lose the
+            // ordering race against the script codegen's own position-0
+            // user-import hoist (already applied by this point). Applying it
+            // BEFORE the helper-import-line `ct.prepend` below means the
+            // final order is: helper import, hoisted consts, user code —
+            // each `ct.prepend` call lands its content immediately in front
+            // of whatever the transform's intro already holds.
+            if let Some(preamble) = tpl_imports.module_preamble {
+                ct.prepend(preamble);
+            }
 
             // Strip TypeScript syntax from template expressions when force_js
             // is set (same pass the standalone template lane runs).
@@ -1297,22 +1308,22 @@ fn compile_inner(
             })
             .flatten();
 
-        // Emit imports from script codegen. Inline mode merges the script and
-        // template helper sets into ONE deduplicated import line (official
-        // inline output has a single `import { ... } from "vue"` statement;
-        // two statements importing the same helper would be a duplicate
-        // binding). Emitted AFTER the inline codegen's hoist prepend so the
-        // final order is imports → hoists → user code (official).
+        // Emit imports. `runtime_imports` (below) stays the union of both
+        // sets for output metadata regardless of topology — only the
+        // CODE-TEXT emission differs by topology.
         let all_imports: Vec<&'static str> = if inline_active {
             let mut v = script_result.imports.clone();
-            v.extend(inline_tpl_imports);
+            v.extend(inline_tpl_imports.iter().copied());
             v
         } else {
             script_result.imports.clone()
         };
-        if !all_imports.is_empty() {
+        let emit_import_line = |ct: &mut CodeTransform<'_>, names: &[&'static str]| {
+            if names.is_empty() {
+                return;
+            }
             let runtime = options.runtime_module_name.as_deref().unwrap_or("vue");
-            let mut sorted = all_imports.clone();
+            let mut sorted = names.to_vec();
             sorted.sort_unstable();
             sorted.dedup();
             let specifiers: Vec<String> = sorted
@@ -1325,6 +1336,24 @@ fn compile_inner(
                 runtime,
             );
             ct.prepend(&import_line);
+        };
+        if inline_active && !script_result.imports.is_empty() && !inline_tpl_imports.is_empty() {
+            // Official Vue's script-setup wrap codegen and its template
+            // compiler independently prepend their OWN import line — they
+            // are never merged into one deduplicated statement, even when
+            // both import from the same module source (verified against
+            // `@vue/compiler-sfc`: `compileScript`'s own `defineComponent`
+            // helper import and `compileTemplate`'s returned preamble are
+            // two separate `MagicString.prepend()` calls). `ct.prepend` is
+            // LIFO (matching `MagicString.prepend`), so prepending the
+            // template line first and the script line second puts the
+            // script's import line frontmost, then the template's, then
+            // the already-prepended hoisted-const preamble, then user code
+            // — official's exact order.
+            emit_import_line(&mut ct, &inline_tpl_imports);
+            emit_import_line(&mut ct, &script_result.imports);
+        } else {
+            emit_import_line(&mut ct, &all_imports);
         }
 
         let script_code = ct.build_string();
@@ -1617,6 +1646,14 @@ fn compile_inner(
                     script_bindings,
                     &tpl_options,
                 );
+                // See the merged/inline_active lane's identical call for why
+                // this goes through `ct.prepend` rather than a
+                // position-anchored prepend. This standalone lane's `tpl_ct`
+                // has no script content of its own to race against, but the
+                // consumption stays symmetric with the merged lane.
+                if let Some(preamble) = tpl_imports.module_preamble {
+                    tpl_ct.prepend(preamble);
+                }
 
                 // Strip TypeScript syntax from template expressions when force_js is set.
                 if verter_options.force_js {

@@ -12,6 +12,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
 
@@ -269,6 +270,191 @@ const STACK_EXCEPTION_STATUSES = new Set(["READY", "IN_PROGRESS", "REVIEW"]);
 
 const SHA_RE = /^[0-9a-f]{40}$/; // full lowercase git object id
 const DIGEST_RE = /^[0-9a-f]{64}$/; // lowercase SHA-256
+
+// Live-mode git identity verification.
+//
+// base_sha/candidate_sha/accepted_sha/candidate_tree/accepted_tree are shape-
+// checked above (SHA_RE) but that never asked git whether a commit exists or
+// carries the stated tree — a well-formed-looking, entirely fabricated or
+// dangling identity passed. This section is that check: it consults the real
+// repository so a self-declared identity is never treated as evidence
+// (CLAUDE.md "Verification Must Prove Execution"). Template mode never
+// reaches this — a template ledger's identity fields are placeholders and
+// carry no promise of naming real objects.
+//
+// One batched `git cat-file --batch-check` pass covers existence (every
+// well-formed sha) and tree-pairing (every well-formed tree field, resolved
+// via its paired sha's `^{tree}`) in a single shell-out, never one per field.
+// Reachability-from-tip is one `git rev-list <tip>` pass, checked in-memory
+// for every ACCEPTED block's accepted_sha. Only the base_sha-ancestor-of-
+// accepted_sha check (different target commit per block) shells out once per
+// ACCEPTED block — bounded by the count of accepted blocks, not by field
+// count across the whole ledger.
+
+function runGit(args, cwd, input) {
+  try {
+    return spawnSync("git", args, { cwd, input, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  } catch (err) {
+    return { error: err, status: null, stdout: "", stderr: "" };
+  }
+}
+
+function gitFailureReason(res) {
+  if (res.error) return res.error.message;
+  const stderr = (res.stderr ?? "").trim();
+  return stderr !== "" ? stderr : `git exited with status ${res.status}`;
+}
+
+// One batched pass over every distinct object spec (a bare 40-char sha, or
+// `<sha>^{tree}`) collected across every block/field. Returns a Map spec ->
+// {oid, type} for a resolved object, spec -> null for "missing", or `null`
+// (not a Map) if the batch-check invocation itself failed.
+function batchCatFileCheck(cwd, specs) {
+  const map = new Map();
+  if (specs.length === 0) return map;
+  const res = runGit(
+    ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+    cwd,
+    specs.map((s) => `${s}\n`).join(""),
+  );
+  if (res.status !== 0) return null;
+  const lines = (res.stdout ?? "").split("\n");
+  for (let i = 0; i < specs.length; i++) {
+    const m = /^([0-9a-f]{40}) (\S+)$/.exec(lines[i] ?? "");
+    // A missing/ambiguous object echoes the literal input token followed by
+    // "missing"/"ambiguous" rather than a resolved oid+type — a 40-hex input
+    // spec (a bare sha, as opposed to a `<sha>^{tree}` derivation) would
+    // otherwise false-match the regex above as if it were a resolved commit.
+    map.set(specs[i], m && m[2] !== "missing" && m[2] !== "ambiguous" ? { oid: m[1], type: m[2] } : null);
+  }
+  return map;
+}
+
+function verifyLiveGitIdentities(stateById, v) {
+  const cwd = process.cwd();
+  const probe = runGit(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (probe.status !== 0 || (probe.stdout ?? "").trim() !== "true") {
+    v(
+      `live mode requires a git repository to verify base_sha/candidate_sha/accepted_sha/candidate_tree/accepted_tree against real git objects, but git is unavailable at ${cwd}: ${gitFailureReason(probe)} — this is a loud setup failure, never a silent skip of identity verification`,
+    );
+    return;
+  }
+
+  const SHA_FIELDS = ["base_sha", "candidate_sha", "accepted_sha"];
+  const TREE_PAIRS = [
+    { treeField: "candidate_tree", shaField: "candidate_sha" },
+    { treeField: "accepted_tree", shaField: "accepted_sha" },
+  ];
+  const wellFormed = (b, f) => typeof b[f] === "string" && SHA_RE.test(b[f]);
+
+  const specs = new Set();
+  for (const [, b] of stateById) {
+    for (const f of SHA_FIELDS) if (wellFormed(b, f)) specs.add(b[f]);
+    for (const { treeField, shaField } of TREE_PAIRS) {
+      if (wellFormed(b, treeField)) specs.add(b[treeField]);
+      if (wellFormed(b, treeField) && wellFormed(b, shaField)) specs.add(`${b[shaField]}^{tree}`);
+    }
+  }
+
+  const resolved = batchCatFileCheck(cwd, [...specs]);
+  if (resolved === null) {
+    v(
+      `live mode git cat-file --batch-check failed while verifying identity fields against ${specs.size} object spec(s) — cannot verify base_sha/candidate_sha/accepted_sha/candidate_tree/accepted_tree`,
+    );
+    return;
+  }
+
+  // Check 1: every well-formed base_sha/candidate_sha/accepted_sha must
+  // resolve to an existing commit object.
+  for (const [id, b] of stateById) {
+    for (const f of SHA_FIELDS) {
+      if (!wellFormed(b, f)) continue;
+      const info = resolved.get(b[f]);
+      if (!info || info.type !== "commit") {
+        v(
+          `state block ${id} field ${f} = ${b[f]} does not resolve to an existing git commit object (git reports: ${info ? `object exists but is type ${info.type}` : "missing"})`,
+        );
+      }
+    }
+  }
+
+  // Check 2: candidate_tree/accepted_tree must be EXACTLY the tree of the
+  // commit recorded beside it (its paired candidate_sha/accepted_sha).
+  for (const [id, b] of stateById) {
+    for (const { treeField, shaField } of TREE_PAIRS) {
+      if (!wellFormed(b, treeField)) continue;
+      if (!wellFormed(b, shaField)) {
+        v(
+          `state block ${id} field ${treeField} = ${b[treeField]} cannot be verified — its paired ${shaField} is not a well-formed git object id`,
+        );
+        continue;
+      }
+      const commitInfo = resolved.get(b[shaField]);
+      if (!commitInfo || commitInfo.type !== "commit") continue; // already reported by check 1
+      const derived = resolved.get(`${b[shaField]}^{tree}`);
+      if (!derived) {
+        v(
+          `state block ${id} field ${treeField} = ${b[treeField]} could not be checked — git could not resolve ${b[shaField]}^{tree}`,
+        );
+        continue;
+      }
+      if (derived.oid !== b[treeField]) {
+        v(
+          `state block ${id} field ${treeField} = ${b[treeField]} is not the tree of ${shaField} ${b[shaField]} — git reports that commit's tree as ${derived.oid}`,
+        );
+      }
+    }
+  }
+
+  // Checks 3 & 4 are ACCEPTED-only: accepted_sha must be genuinely landed
+  // (reachable from the repository tip — never a dangling or since-rewritten
+  // commit), and base_sha must be its ancestor.
+  const tipRes = runGit(["rev-parse", "HEAD"], cwd);
+  if (tipRes.status !== 0) {
+    v(
+      `live mode could not resolve the repository tip (git rev-parse HEAD) to verify accepted_sha landing: ${gitFailureReason(tipRes)}`,
+    );
+    return;
+  }
+  const tip = tipRes.stdout.trim();
+  const revListRes = runGit(["rev-list", tip], cwd);
+  if (revListRes.status !== 0) {
+    v(
+      `live mode could not enumerate commits reachable from the repository tip ${tip} (git rev-list) to verify accepted_sha landing: ${gitFailureReason(revListRes)}`,
+    );
+    return;
+  }
+  const reachableFromTip = new Set(revListRes.stdout.split("\n").filter((l) => l !== ""));
+  reachableFromTip.add(tip);
+
+  for (const [id, b] of stateById) {
+    if (b.status !== "ACCEPTED") continue;
+    if (wellFormed(b, "accepted_sha")) {
+      const info = resolved.get(b.accepted_sha);
+      if (info && info.type === "commit" && !reachableFromTip.has(b.accepted_sha)) {
+        v(
+          `state block ${id} is ACCEPTED with accepted_sha ${b.accepted_sha} but that commit is not reachable from the repository tip ${tip} — it is not genuinely landed (a dangling or since-rewritten commit is not sufficient evidence of acceptance)`,
+        );
+      }
+    }
+    if (wellFormed(b, "base_sha") && wellFormed(b, "accepted_sha")) {
+      const baseInfo = resolved.get(b.base_sha);
+      const accInfo = resolved.get(b.accepted_sha);
+      if (baseInfo?.type === "commit" && accInfo?.type === "commit") {
+        const anc = runGit(["merge-base", "--is-ancestor", b.base_sha, b.accepted_sha], cwd);
+        if (anc.status !== 0 && anc.status !== 1) {
+          v(
+            `state block ${id} base_sha ${b.base_sha} ancestry against accepted_sha ${b.accepted_sha} could not be checked: ${gitFailureReason(anc)}`,
+          );
+        } else if (anc.status === 1) {
+          v(
+            `state block ${id} is ACCEPTED but base_sha ${b.base_sha} is not an ancestor of accepted_sha ${b.accepted_sha} (git merge-base --is-ancestor)`,
+          );
+        }
+      }
+    }
+  }
+}
 
 // Validation
 
@@ -981,6 +1167,10 @@ function main() {
         }
       }
     }
+
+    // -- Git identity verification (see the block comment above
+    // verifyLiveGitIdentities for what this proves and why).
+    verifyLiveGitIdentities(stateById, v);
   }
 
   // -- Non-vacuous work

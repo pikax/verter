@@ -91,8 +91,11 @@ impl Canon {
 /// `(structural scope identity, declaration ordinal, pattern slot, kind)`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BindingKey {
-    /// Pre-order `NodeId` index of the scope-creating node (stable across
-    /// cosmetically-reformatted isomorphic modules).
+    /// Dense creation-order rank of the binding's scope among all scopes in
+    /// the module (its `ScopeId` index) — stable across cosmetically-
+    /// reformatted isomorphic modules, since it only advances on an actual
+    /// scope-creating node, never on an interposed cosmetic node such as a
+    /// redundant parenthesis pair.
     pub scope_ordinal: u32,
     /// Rank among the scope's bindings by declaration position.
     pub declaration_ordinal: u32,

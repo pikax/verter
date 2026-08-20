@@ -62,16 +62,16 @@ pub(crate) fn is_v_on(name: &str) -> bool {
 }
 pub mod text;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::code_transform::SegmentAnchor;
 
 use crate::ast::types::{
-    AstNodeKind, CommentNode, ElementNode, ElementNodeCondition, ElementNodeConditionKind,
-    InterpolationNode, TagType, TemplateAst, TextNode,
+    AstNodeKind, ChildrenMode, CommentNode, ElementNode, ElementNodeCondition,
+    ElementNodeConditionKind, InterpolationNode, TagType, TemplateAst, TextNode,
 };
 use crate::parser::types::RootNodeTemplate;
-use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
+use crate::template::oxc::types::{OxcNodeData, OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
 use super::binding::BindingResolver;
@@ -187,6 +187,33 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// logic, which remains the sole authority for them — this map is
     /// purely additive, never a second hoist-decision engine.
     hoist_reservations: FxHashMap<usize, usize>,
+    /// `_cache[N]` indices reserved for cacheable inline event handlers and
+    /// the native `v-model` update handler, keyed by element `NodeId` then
+    /// `prop_idx`. Populated once by [`Self::reserve_handler_caches`] in
+    /// `enter_template`, BEFORE `self.cache_index` starts being consumed by
+    /// static-vnode/`v-memo` caching during the main bottom-up walk —
+    /// mirroring official Vue's two-pass model (the main AST transform
+    /// assigns every handler/`v-memo` `context.cache()` slot; the SEPARATE
+    /// `cacheStatic` pass that runs after it assigns static-vnode slots).
+    /// Reservation itself walks in the SAME bottom-up (children-then-self)
+    /// order `leave_element` visits nodes, so relative ordering among
+    /// handlers matches; it does not attempt to interleave with `v-memo`.
+    handler_cache_reservations: FxHashMap<usize, FxHashMap<usize, usize>>,
+    /// `_cache[N]` reserved to hold an element's ENTIRE static children
+    /// array as one group, keyed by the element's own `NodeId`. Populated
+    /// by [`Self::reserve_array_group_caches`] in `enter_template`: an
+    /// element qualifies when EVERY direct child would otherwise be
+    /// individually `_cache[N]`-eligible (official Vue's `cacheStatic`:
+    /// `toCache.length === children.length` groups into one cached array
+    /// spread instead of caching each child separately). A child whose
+    /// parent has a reservation here is looked up via
+    /// `array_grouped_children` and skips its own individual `cache_idx`.
+    array_group_reservations: FxHashMap<usize, usize>,
+    /// The set of child `NodeId`s covered by an `array_group_reservations`
+    /// entry on their parent — these render un-individually-cached (their
+    /// parent's array wrapper covers them) but keep their own `-1 CACHED`
+    /// patch flag, same as the existing slot-context `slot_cached` path.
+    array_grouped_children: FxHashSet<usize>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -202,6 +229,278 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
         }
         false
+    }
+
+    /// True when the single logical root element carries a directive that
+    /// needs `_withDirectives()` wrapping (v-show, native v-model, a custom
+    /// directive) and has no `v-if`/`v-for` of its own. Official Vue emits
+    /// `_withDirectives((_openBlock(), createXBlock(...)), [...])` — the
+    /// `openBlock()` sequence nests INSIDE `_withDirectives`, built by
+    /// `process_element_leave` (see `needs_block_wrapper`). Used by
+    /// `leave_template` to suppress its own outer single-root `_openBlock()`
+    /// wrapper, mirroring the `v-memo` bypass above.
+    fn root_element_has_directives_wrap(&self, root_children: &[NodeId], source: &str) -> bool {
+        for &cid in root_children {
+            if let AstNodeKind::Element(el) = &self.ast.nodes[cid.0].kind {
+                if el.v_for.is_some() || el.v_condition.is_some() {
+                    return false;
+                }
+                let is_component = el.tag_type.is_component();
+                return el.props.iter().any(|p| {
+                    if !p.is_directive {
+                        return false;
+                    }
+                    let dname = &source[p.start as usize..p.name_end as usize];
+                    if dname == "v-model" {
+                        return !is_component;
+                    }
+                    if dname == "v-show" {
+                        return true;
+                    }
+                    !matches!(
+                        dname,
+                        ":" | "v-bind"
+                            | "@"
+                            | "v-on"
+                            | "v-if"
+                            | "v-else-if"
+                            | "v-else"
+                            | "v-for"
+                            | "v-slot"
+                            | "v-once"
+                            | "v-text"
+                            | "v-html"
+                            | "v-cloak"
+                            | "v-memo"
+                            | "v-pre"
+                    ) && dname.starts_with("v-")
+                });
+            }
+        }
+        false
+    }
+
+    /// Walk `ids` bottom-up (children before self, matching `leave_element`'s
+    /// own visitation order) and reserve a `_cache[N]` slot for every
+    /// cacheable inline event handler / native `v-model` update handler
+    /// found, into `self.handler_cache_reservations`. Advances
+    /// `self.cache_index` as it reserves — called once, before the main
+    /// walk, so these reservations occupy the lowest indices (see the field
+    /// doc comment on `handler_cache_reservations`).
+    fn reserve_handler_caches(&mut self, ids: &[NodeId], source: &str) {
+        for &id in ids {
+            let AstNodeKind::Element(el) = &self.ast.nodes[id.0].kind else {
+                continue;
+            };
+            if let Some(children) = el.content.as_ref().map(|c| c.children.as_slice()) {
+                self.reserve_handler_caches(children, source);
+            }
+            let oxc_el = match self.oxc_ast.data.get(id.0) {
+                Some(OxcNodeData::Element(oxc_el)) => Some(oxc_el.as_ref()),
+                _ => None,
+            };
+            let is_component = el.tag_type.is_component();
+            let mut reservations: FxHashMap<usize, usize> = FxHashMap::default();
+            for (prop_idx, prop) in el.props.iter().enumerate() {
+                if !prop.is_directive {
+                    continue;
+                }
+                let dname = &source[prop.start as usize..prop.name_end as usize];
+                let is_on = is_v_on(dname);
+                if is_on && prop.arg_start.is_some() {
+                    let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) else {
+                        continue;
+                    };
+                    let value = &source[vs as usize..ve as usize];
+                    let oxc_exp =
+                        crate::template::code_gen::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                    // Modifier wrapping (`_withModifiers`/`_withKeys`) composes
+                    // around the handler span separately — no current case
+                    // combines it with handler caching, so skip reserving
+                    // when modifiers are present (mirrors the emission-site
+                    // guard in `build_props_object_into`).
+                    if prop.modifiers.is_empty()
+                        && element::is_cacheable_inline_event_handler(value, oxc_exp)
+                    {
+                        let idx = self.cache_index;
+                        self.cache_index += 1;
+                        reservations.insert(prop_idx, idx);
+                    }
+                } else if dname == "v-model" && !is_component {
+                    // Native `v-model` always produces a `$event => (… = $event)`
+                    // update handler — always cacheable.
+                    let idx = self.cache_index;
+                    self.cache_index += 1;
+                    reservations.insert(prop_idx, idx);
+                }
+            }
+            if !reservations.is_empty() {
+                self.handler_cache_reservations.insert(id.0, reservations);
+            }
+        }
+    }
+
+    /// A direct element child that (per the leave-time `cache_idx` logic in
+    /// `leave_element`) would be individually `_cache[N]`-eligible: fully
+    /// static, not a block root, no structural directive, not a component
+    /// (components use slot-level caching instead). A child found via
+    /// `el.content.children` is never itself the single template root, so
+    /// that check does not apply here.
+    fn child_is_group_cacheable(&self, id: NodeId) -> bool {
+        let AstNodeKind::Element(el) = &self.ast.nodes[id.0].kind else {
+            return false;
+        };
+        el.is_fully_static
+            && el.v_condition.is_none()
+            && el.v_for.is_none()
+            && !el.tag_type.is_component()
+    }
+
+    /// Walk `ids` bottom-up (children before self) and, for every element
+    /// whose direct children are ALL individually `_cache[N]`-eligible
+    /// (`child_is_group_cacheable`), reserve ONE `_cache[N]` slot to hold
+    /// the whole children array — official Vue's `cacheStatic`: when
+    /// `toCache.length === children.length`, the node's children are
+    /// grouped into one cached array and spread back
+    /// (`[...(_cache[N] || (_cache[N] = [...]))]`) instead of caching each
+    /// child separately. A mix of static and dynamic/directive children
+    /// disqualifies the whole parent — each cacheable child then falls back
+    /// to its own individual `cache_idx`, unchanged. The parent's OWN
+    /// eligibility (block root, directives, …) does not gate this —
+    /// `static-element.vue`'s root `<div id=… title=…>` IS the block root
+    /// and still groups its one static `<p>` child.
+    fn reserve_array_group_caches(&mut self, ids: &[NodeId], is_root_level: bool) {
+        for &id in ids {
+            let AstNodeKind::Element(el) = &self.ast.nodes[id.0].kind else {
+                continue;
+            };
+            // Slot outlets (`<slot>` fallback content), `<template>`
+            // (`v-slot`/`v-if`/`v-for`), and components all route their
+            // children through entirely separate leave-time functions
+            // (`process_slot_outlet`, `process_template_slot`,
+            // `leave_template_fragment`, `leave_component_with_slots`,
+            // `leave_component_with_default_slot`) that never consult
+            // `array_group_reservations` — each already has its own
+            // pre-existing slot-level cache-grouping mechanism. Reserving
+            // (and thus advancing `self.cache_index`) for their children
+            // here would both dead-reserve an unused slot and desync the
+            // numbering those mechanisms compute independently at leave
+            // time. Do not recurse into them at all.
+            if el.tag_type.is_slot_outlet()
+                || el.tag_type == TagType::Template
+                || el.tag_type.is_component()
+            {
+                continue;
+            }
+            let children = el
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]);
+            self.reserve_array_group_caches(children, false);
+
+            if children.is_empty() {
+                continue;
+            }
+
+            // If `id` itself would be swallowed into an ancestor's single
+            // cache (fully static, not a block root, no structural
+            // directive, not a component — mirrors the leave-time
+            // `parent_is_cached` check in `leave_element`), its children
+            // never reach individual OR grouped caching at all: the
+            // ancestor's one cache already covers the whole subtree bare.
+            let id_is_block_root = el.v_condition.is_some()
+                || el.v_for.is_some()
+                || (is_root_level && self.single_root);
+            let id_swallowed = el.is_fully_static
+                && !id_is_block_root
+                && el.v_condition.is_none()
+                && el.v_for.is_none()
+                && !el.tag_type.is_component();
+            if id_swallowed {
+                continue;
+            }
+
+            let all_eligible = children
+                .iter()
+                .all(|&cid| match &self.ast.nodes[cid.0].kind {
+                    AstNodeKind::Element(_) => self.child_is_group_cacheable(cid),
+                    AstNodeKind::Text(t) => t.is_whitespace_only,
+                    AstNodeKind::Comment(_) | AstNodeKind::Interpolation(_) => false,
+                });
+            let has_element_child = children
+                .iter()
+                .any(|&cid| matches!(&self.ast.nodes[cid.0].kind, AstNodeKind::Element(_)));
+            if !all_eligible || !has_element_child {
+                continue;
+            }
+            let idx = self.cache_index;
+            self.cache_index += 1;
+            self.array_group_reservations.insert(id.0, idx);
+            for &cid in children {
+                if matches!(&self.ast.nodes[cid.0].kind, AstNodeKind::Element(_)) {
+                    self.array_grouped_children.insert(cid.0);
+                }
+            }
+        }
+    }
+
+    /// Reserve a `_cache[N]` slot for each static-only text/interpolation
+    /// run in `children` (array-mode children: `Mixed`/`MultiElement`/
+    /// `SingleElement` — the same run definition `wrap_array_text_runs`
+    /// itself walks), keyed by the run's own start offset. Official Vue
+    /// caches a static text sibling exactly like a static element sibling:
+    /// `_cache[N] || (_cache[N] = _createTextVNode("...", -1 /* CACHED */))`
+    /// (verified against the real compiler — `v-model/checkbox`'s trailing
+    /// " Agree" text beside a directive-wrapped `<input>`).
+    ///
+    /// Skipped entirely when `children_mode` isn't array mode, or when
+    /// EVERY child is already covered by an `array_group_reservations`
+    /// entry on `own_id` (the whole list groups into one shared array cache
+    /// instead — an individually-cached run inside that group would
+    /// double-count `self.cache_index`; the group's own per-item text
+    /// shape is a separate, not-yet-covered gap, left unchanged here).
+    fn reserve_static_text_run_caches(
+        &mut self,
+        own_id: NodeId,
+        children: &[ChildRecord],
+        children_mode: ChildrenMode,
+    ) -> FxHashMap<u32, usize> {
+        let mut reservations = FxHashMap::default();
+        if !self.options.hoist_static
+            || !matches!(
+                children_mode,
+                ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement
+            )
+            || self.array_group_reservations.contains_key(&own_id.0)
+        {
+            return reservations;
+        }
+        let mut i = 0;
+        while i < children.len() {
+            let kind = children[i].kind;
+            if kind == ChildKind::Text || kind == ChildKind::Interpolation {
+                let run_start = i;
+                let mut has_dynamic = kind == ChildKind::Interpolation;
+                i += 1;
+                while i < children.len()
+                    && matches!(children[i].kind, ChildKind::Text | ChildKind::Interpolation)
+                {
+                    if children[i].kind == ChildKind::Interpolation {
+                        has_dynamic = true;
+                    }
+                    i += 1;
+                }
+                if !has_dynamic {
+                    let idx = self.cache_index;
+                    self.cache_index += 1;
+                    reservations.insert(children[run_start].start, idx);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        reservations
     }
 
     pub fn new(
@@ -226,6 +525,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             resolved_components: Vec::new(),
             memo_for_suffixes: FxHashMap::default(),
             hoist_reservations: FxHashMap::default(),
+            handler_cache_reservations: FxHashMap::default(),
+            array_group_reservations: FxHashMap::default(),
+            array_grouped_children: FxHashSet::default(),
         }
     }
 
@@ -278,6 +580,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 None,
                 self.options.force_js,
                 &mut anchors,
+                // No directive props reach here (early return above) — a
+                // handler/`v-model` reservation is structurally impossible.
+                None,
             );
             // Mirrors `can_hoist_props`'s guard set in
             // `element::process_element_leave`, minus
@@ -498,6 +803,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             }
         }
         self.single_root = effective == 1;
+        // Reserve `_cache[N]` handler-caching slots before the main walk
+        // touches `self.cache_index` — see `handler_cache_reservations`'s
+        // doc comment.
+        self.reserve_handler_caches(root_children, source);
+        // Static-array group caching (official `cacheStatic`, a separate
+        // pass) numbers after handler caching (the main-transform pass) —
+        // see both reservation maps' doc comments. `v-memo` caching still
+        // runs interleaved with individual static caching during the main
+        // walk, unchanged; no current corpus case combines it with either
+        // pre-pass, so their exact relative order there is not modeled.
+        self.reserve_array_group_caches(root_children, true);
         // Open tag overwrite is deferred to leave_template where we have
         // full context (children count, v-if status) to emit the correct
         // combined prefix (function signature + return + openBlock).
@@ -592,11 +908,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Inline mode: hoisted constants are MODULE-scope (official emits them
         // in the module preamble, prepended by compileScript) — not inside the
-        // setup closure. Emit them as a file-top prepend on the shared CT; the
-        // orchestrator's import-line prepend lands before them (official
-        // order: imports, hoists, user code).
+        // setup closure. Recorded via `set_module_preamble` (NOT a
+        // position-anchored `prepend_alloc(0, ...)` — see that method's doc
+        // comment: a position-0 prepend here loses the ordering race
+        // against the script codegen's OWN position-0 user-import hoist,
+        // which already ran and baked an opaque chunk by the time this
+        // template codegen pass runs). The orchestrator applies it with
+        // `ct.prepend(...)` before its own import-line prepend, so the
+        // final order is: helper import, hoisted consts, user code
+        // (matching official).
         if self.options.is_inline && !hoisted_preamble.is_empty() {
-            out.prepend_alloc(0, &hoisted_preamble);
+            out.set_module_preamble(&hoisted_preamble);
         }
 
         // Function signature prefix. Official `@vue/compiler-core` emits the
@@ -717,6 +1039,18 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     // owns its openBlock inside the memo factory (emitted by
                     // leave_element), so leave_template must NOT add an outer
                     // `(_openBlock(), …)` wrapper — just `return`.
+                    let mut prefix = String::with_capacity(full_prefix.len() + 8);
+                    prefix.push_str(&full_prefix);
+                    prefix.push_str("return ");
+                    out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    out.overwrite_or_root_suffix(close_start, close_end, "\n}");
+                } else if self.root_element_has_directives_wrap(root_children, source) {
+                    // Directives-wrapped root (v-show, native v-model, a
+                    // custom directive) with no v-if/v-for of its own:
+                    // `process_element_leave` already nests its own
+                    // `(_openBlock(), …)` inside `_withDirectives(…)` — see
+                    // `root_element_has_directives_wrap`'s doc comment.
+                    // leave_template must NOT add a second outer wrapper.
                     let mut prefix = String::with_capacity(full_prefix.len() + 8);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
@@ -1256,11 +1590,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // cache encompasses them, so individual caching is redundant.
         // Also skip individual caching when inside a slot context — slot-level
         // cache grouping handles it instead.
+        // Covered by a parent's `array_group_reservations` entry (this
+        // element's WHOLE sibling group is cached as one array) — never an
+        // individual `cache_idx`, same as the slot-context case below.
+        let array_grouped = self.array_grouped_children.contains(&_id.0);
         let cache_idx = if self.options.hoist_static
             && el.is_fully_static
             && !is_block_root
             && el.v_condition.is_none()
             && el.v_for.is_none()
+            && !array_grouped
             && !self.in_slot_context_stack.last().copied().unwrap_or(false)
         {
             let parent_is_cached = self.ast.nodes[_id.0]
@@ -1310,20 +1649,23 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             && !is_block_root
             && el.v_condition.is_none()
             && el.v_for.is_none()
-            && self.in_slot_context_stack.last().copied().unwrap_or(false)
-            && !self.ast.nodes[_id.0]
-                .parent
-                .and_then(|pid| {
-                    let pnode = &self.ast.nodes[pid.0];
-                    if let AstNodeKind::Element(ref pel) = pnode.kind {
-                        Some(pel.is_fully_static && !pel.tag_type.is_component())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(false);
+            && (array_grouped
+                || (self.in_slot_context_stack.last().copied().unwrap_or(false)
+                    && !self.ast.nodes[_id.0]
+                        .parent
+                        .and_then(|pid| {
+                            let pnode = &self.ast.nodes[pid.0];
+                            if let AstNodeKind::Element(ref pel) = pnode.kind {
+                                Some(pel.is_fully_static && !pel.tag_type.is_component())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(false)));
 
         let pre_reserved_hoist = self.hoist_reservations.remove(&_id.0);
+        let text_run_cache_indices =
+            self.reserve_static_text_run_caches(_id, &children, el.children_mode);
         let record = element::process_element_leave(
             el,
             oxc,
@@ -1343,6 +1685,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             Some(&mut self.resolved_components),
             slot_cached,
             pre_reserved_hoist,
+            self.handler_cache_reservations.get(&_id.0),
+            self.array_group_reservations.get(&_id.0).copied(),
+            &text_run_cache_indices,
         );
         buf.clear();
         self.buf = buf;

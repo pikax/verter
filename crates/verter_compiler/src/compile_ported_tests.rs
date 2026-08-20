@@ -432,7 +432,7 @@ fn test_props_static_style() {
     );
     let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains(r#"style: { color: "red" }"#),
+        template.code.contains(r#"style: { "color": "red" }"#),
         "Should have style prop as object, got:\n{}",
         template.code
     );
@@ -936,7 +936,7 @@ fn test_hoist_multiple_attrs() {
         template.code
     );
     assert!(
-        template.code.contains(r#"style: { color: "red" }"#),
+        template.code.contains(r#"style: { "color": "red" }"#),
         "Should contain style as object, got:\n{}",
         template.code
     );

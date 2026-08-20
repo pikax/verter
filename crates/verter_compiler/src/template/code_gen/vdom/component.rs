@@ -53,13 +53,7 @@ pub(super) fn resolve_component_tag(
 ) -> String {
     // Check exact binding
     if resolver.get(tag_name).is_some() {
-        let prefix = resolver.resolve_prefix(tag_name);
-        let suffix = resolver.resolve_suffix(tag_name);
-        let mut s = String::with_capacity(tag_name.len() + prefix.len() + suffix.len());
-        s.push_str(prefix);
-        s.push_str(tag_name);
-        s.push_str(suffix);
-        return s;
+        return resolver.resolve_asset_ref(tag_name);
     }
 
     // Check dot-notation namespace (e.g., Swiper.Item → resolve "Swiper" + ".Item").
@@ -70,13 +64,7 @@ pub(super) fn resolve_component_tag(
         let member_access = &tag_name[dot_pos..]; // includes the leading dot
 
         if resolver.get(ns).is_some() {
-            let prefix = resolver.resolve_prefix(ns);
-            let suffix = resolver.resolve_suffix(ns);
-            let mut s =
-                String::with_capacity(ns.len() + prefix.len() + suffix.len() + member_access.len());
-            s.push_str(prefix);
-            s.push_str(ns);
-            s.push_str(suffix);
+            let mut s = resolver.resolve_asset_ref(ns);
             s.push_str(member_access);
             return s;
         }
@@ -84,14 +72,7 @@ pub(super) fn resolve_component_tag(
         // Also try PascalCase on the namespace prefix
         let pascal_ns = to_pascal_case(ns);
         if resolver.get(&pascal_ns).is_some() {
-            let prefix = resolver.resolve_prefix(&pascal_ns);
-            let suffix = resolver.resolve_suffix(&pascal_ns);
-            let mut s = String::with_capacity(
-                pascal_ns.len() + prefix.len() + suffix.len() + member_access.len(),
-            );
-            s.push_str(prefix);
-            s.push_str(&pascal_ns);
-            s.push_str(suffix);
+            let mut s = resolver.resolve_asset_ref(&pascal_ns);
             s.push_str(member_access);
             return s;
         }
@@ -100,13 +81,7 @@ pub(super) fn resolve_component_tag(
     // Check PascalCase conversion (for kebab-case tags like <my-header>)
     let pascal = to_pascal_case(tag_name);
     if resolver.get(&pascal).is_some() {
-        let prefix = resolver.resolve_prefix(&pascal);
-        let suffix = resolver.resolve_suffix(&pascal);
-        let mut s = String::with_capacity(pascal.len() + prefix.len() + suffix.len());
-        s.push_str(prefix);
-        s.push_str(&pascal);
-        s.push_str(suffix);
-        return s;
+        return resolver.resolve_asset_ref(&pascal);
     }
 
     // Check for Vue built-in components (Suspense, Teleport, KeepAlive, etc.).
