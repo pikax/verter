@@ -665,8 +665,8 @@ id = "BV2"
 status = "IN_PROGRESS"
 charter_digest = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d1461940"
 context_packet_digest = ""
-base_sha = "ab09d41b4ba1532e5917da4d71e9c05a21401155"
-candidate_sha = ""
+base_sha = "321cf06521a88ada0b45c53dabdd7489c7761d4b"
+candidate_sha = "b64a440a97071ef017957b9ed5d8fc872d2a5793"
 # implementation_candidate_sha/implementation_ref (AMD-013 round 4, FIX 2):
 # BV2 predates this schema and was the live-ledger gap FIX 2 was written to
 # surface, not paper over (AMD-013 §9). Filled against the real, live WIP
@@ -680,7 +680,7 @@ candidate_sha = ""
 # drift as a stale-pin violation (checkImplementationRefBinding), not a
 # silent pass, so a resync is required before the next live validation run
 # if the branch advances again after this pin.
-implementation_candidate_sha = "4b969593b24de8e78f0cda4189d8eba3afd95228"
+implementation_candidate_sha = "b64a440a97071ef017957b9ed5d8fc872d2a5793"
 implementation_ref = "refs/heads/block/bv2"
 candidate_tree = ""
 accepted_sha = ""
