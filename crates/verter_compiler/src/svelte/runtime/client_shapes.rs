@@ -915,8 +915,10 @@ pub(super) fn bind_root_is_writable_target(
 /// write would. NOT reused for the identifier arm: a bare bind of these roots
 /// generally would reassign the binding, which official rejects (the one nominal
 /// exception, a genuine top-level `$derived(...)` accepting an "overridable derived"
-/// bare-Identifier reassignment, never reaches this arm — an earlier, unconditional,
-/// unrelated gate already refuses it; see the note on [`is_writable_member_bind_extra_root`]).
+/// bare-Identifier reassignment, never reaches this arm through the INSTANCE-SCRIPT
+/// declarator form — the rune-position gate refuses that form before classification;
+/// see the note on [`is_writable_member_bind_extra_root`] for the second, template-tag
+/// form of a genuine `$derived(...)` rune that DOES reach this arm).
 ///
 /// The widened extra roots are: an `{#each}` item (`EachSignal` / `EachPlain`), an
 /// `{#each … as {field}}` destructured field (`EachDestructuredField`), a
@@ -954,11 +956,21 @@ pub(super) fn bind_member_root_is_writable_target(
 /// the binding itself, which official rejects; a MEMBER write never does. (A genuine
 /// top-level `$derived(...)` is the one kind where official's bare-Identifier
 /// rejection isn't universal — Svelte 5's "overridable derived" accepts a bare
-/// reassignment — but that construct never reaches the bare-Identifier arm either: an
-/// earlier, unconditional, unrelated gate already refuses ALL `$derived` binds before
-/// classification, so the arm never observes it. The `Derived` kind IS live here for
-/// the OTHER construct that mints it — a component `let:` slot-prop — where official's
-/// bare-Identifier rejection (`constant_binding`) does hold.)
+/// reassignment — but the INSTANCE-SCRIPT declarator form of that construct never
+/// reaches the bare-Identifier arm: `rune_scan.rs::classify_rune_position` refuses
+/// every `$derived` reference in that form before classification. The `Derived` kind
+/// reaches this arm through TWO other, DISTINCT constructs the rune-position gate does
+/// NOT cover: a component `let:` slot-prop (a synthesized `Derived`, not a genuine rune
+/// reference) — where official's bare-Identifier rejection is `constant_binding` — and
+/// a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG (`declaration_tag_lowering.rs` +
+/// `state_prep::classify_block_rune_declarator`), a genuine `$derived(...)` rune
+/// reference that bypasses `rune_scan.rs` because that lowering pushes only the
+/// call's argument span into the template-expression list the rune scan re-walks, not
+/// the `$derived(...)` call span itself — where official's bare-Identifier rejection is
+/// also `constant_binding`, oracle-verified against svelte@5.56.8. Both are exercised
+/// directly: `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` form)
+/// and `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (the
+/// declaration-tag rune form) in `client_tests.rs`.)
 fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {
     matches!(
         kind,

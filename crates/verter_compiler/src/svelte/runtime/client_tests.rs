@@ -7200,13 +7200,18 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
     // The exact same `$.get(root).field` shape already implemented for `AwaitSignal` /
     // `LegacyConstDerived` roots in this classifier.
     //
-    // A top-level `let d = $derived(e)` rune declarator itself is NOT used as the test
-    // vehicle here: every `$derived` reference fails closed at the earlier, unrelated
+    // A top-level `let d = $derived(e)` INSTANCE-SCRIPT rune declarator is NOT used as
+    // the test vehicle here: that form fails closed at the earlier, unrelated
     // rune-position gate (`rune_scan.rs::classify_rune_position` — "`$derived` has NO
-    // supported position … a deferral-ledger follow-up") regardless of this classifier,
-    // so a rune-declarator fixture could never reach — and could never discriminate —
-    // this widening. The `let:` slot-prop construct reaches the SAME `Derived` binding
-    // kind through a path this classifier's caller can actually observe today.
+    // supported position"), so it could never reach — and could never discriminate —
+    // this classifier. The `let:` slot-prop construct reaches the SAME `Derived`
+    // binding kind through a path that gate does not cover. A genuine `$derived(...)`
+    // rune ALSO reaches this classifier through a second, separate path the
+    // rune-position gate does not cover either — a `{let x = $derived(e)}` TEMPLATE
+    // declaration tag (`declaration_tag_lowering.rs::lower_declaration_tag`, reclassified
+    // by `state_prep::classify_block_rune_declarator`); see
+    // `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` below for that
+    // path exercised directly.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item><input bind:value={item.x}/></Child>\n",
     )
@@ -7227,6 +7232,41 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
 }
 
 #[test]
+fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
+    // A GENUINE `$derived(...)` rune reference, reached through the `{let x =
+    // $derived(e)}` TEMPLATE DECLARATION TAG — `declaration_tag_lowering::lower_declaration_tag`
+    // reclassifies the inert declarator via `state_prep::classify_block_rune_declarator`,
+    // which sets `BindingRuntimeKind::Derived` directly; this path never passes through
+    // `rune_scan.rs::classify_rune_position` (`declaration_tag_lowering.rs` pushes only the
+    // call's ARGUMENT span into the template-expression list `push_expr` populates, so the
+    // blanket template-expression rune scan re-parses `item`, never `$derived(item)`, and
+    // the `$derived` identifier is never seen there). So unlike the top-level instance-script
+    // form, this construct DOES reach the Member-bind classifier carrying a real
+    // `$derived(...)` rune, not a `let:`-slot-prop stand-in.
+    //
+    // Oracle-verified against svelte@5.56.8, `runes: true` (`$state` in the same component
+    // forces runes mode): official ACCEPTS `bind:value={doubled.x}` and emits the identical
+    // `$.get(root).field` read/write shape as the `let:` slot-prop and `{@const}` cases:
+    //   $.bind_value(input, () => $.get(doubled).x, ($$value) => $.get(doubled).x = $$value)
+    let js = emit_result(
+        "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}\n{let doubled = $derived(item)}\n<input bind:value={doubled.x}/>\n{/each}\n",
+    )
+    .expect("a member bind rooted at a declaration-tag $derived rune must be accepted");
+    assert!(
+        js.contains(
+            "$.bind_value(input, () => $.get(doubled).x, ($$value) => $.get(doubled).x = $$value)"
+        ),
+        "a member bind on a declaration-tag $derived rune must read/write through $.get(doubled).x:\n{js}"
+    );
+    // NEGATIVE: a bare declaration-tag `$derived`-root identifier bind must still refuse —
+    // the widening applies to the Member arm only, never the Identifier arm.
+    assert_fail_closed(
+        "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}\n{let doubled = $derived(item)}\n<input bind:value={doubled}/>\n{/each}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
 fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     // The COMPONENT-bind sibling of `bind_value_member_of_import_admitted_with_frame`:
     // official ACCEPTS `<Child bind:value={store.x}/>` the same way it accepts
@@ -7238,8 +7278,8 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
     // rune usage at all the component compiles in LEGACY mode instead, whose
     // component-bind codegen has its own separate, pre-existing gap (a missing
-    // `$$legacy: true` props-object marker — out of scope here, see the "Not closed,
-    // disclosed and pinned" section of the BS1 landing record) that would otherwise
+    // `$$legacy: true` props-object marker — out of scope here and disclosed
+    // in this block's landing evidence) that would otherwise
     // ride along unasserted in this test.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
@@ -13807,7 +13847,7 @@ fn root_text_node_region_fails_closed() {
     // A root TEXT-NODE region (a bare reactive interpolation `{count}` as the
     // component root, with no wrapping element) is the official text-first
     // (`$.text()` + `$.next()`) topology — a distinct emission shape that is a
-    // deferral-ledger follow-up. It fails closed rather than emit INVALID JS (an
+    // separately tracked follow-up. It fails closed rather than emit INVALID JS (an
     // undeclared `text` var). RED against the pre-fix tree (which emitted
     // `$.set_text(text, …)` referencing an undeclared `text`).
     assert_fail_closed(
@@ -14235,7 +14275,7 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
 fn destructured_state_object_fails_closed_not_panic() {
     // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
     // Official 5.56.3 supports it (temp + proxy), but full destructured-state
-    // lowering is a deferral-ledger item; a clean fail-closed is correct. RED against
+    // lowering is a separately tracked item; a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
         "<script>let { a } = $state({ a: 1 });</script>\n<p>{a}</p>\n",
@@ -28420,7 +28460,7 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-#[ignore = "known pre-existing gap, owned by a future Svelte each-item destructure slice: a genuinely \
+#[ignore = "known pre-existing gap in Svelte each-item destructuring: a genuinely \
             multi-name each-item pattern (`{ a, b }`) refuses through `pattern_single_binding`'s \
             generic multi-binding arm with a placeholder Span::new(0, 0) instead of the pattern's real \
             span. Closing it needs the same real-span + per-property-read plumbing as \
