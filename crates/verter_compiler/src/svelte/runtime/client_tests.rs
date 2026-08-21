@@ -28468,17 +28468,15 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-#[ignore = "a multi-name each-item pattern (`{ a, b }`) refuses through \
-            `pattern_single_binding`'s generic multi-binding arm carrying a placeholder \
-            Span::new(0, 0) rather than the pattern's real span. Real-span reporting here \
-            requires the per-property-read plumbing ShorthandSingleProperty uses, generalized \
-            to N properties."]
 fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
-    // Document today's actual behavior: a genuinely multi-name destructure (`{ a, b
-    // }`) refuses (correctly — this shape isn't supported), but through
-    // `pattern_single_binding`'s generic multi-binding arm, which carries a
-    // placeholder `Span::new(0, 0)` rather than the pattern's real authored
-    // location — unlike the single-name shapes above, which all carry a real span.
+    // A genuinely multi-name destructure (`{ a, b }`) refuses (correctly — this shape
+    // isn't supported), but through `pattern_single_binding`'s generic multi-binding
+    // arm, which carries a placeholder `Span::new(0, 0)` rather than the pattern's real
+    // authored location — unlike the single-name shapes above, which all carry a real
+    // span. Real-span reporting here would require the per-property-read plumbing
+    // `ShorthandSingleProperty` uses, generalized to N properties; until then this test
+    // pins the placeholder so a future span fix is a deliberate, visible test update
+    // rather than a silent behavior change.
     let source = "<script>\n  let items = $state([{a:1,b:2}]);\n</script>\n{#each items as { a, b }}<li>{a}{b}</li>{/each}\n";
     let err = emit_result(source).expect_err("a multi-name each-item destructure must refuse");
     let ClientCompileError::Unsupported(surface) = &err else {
