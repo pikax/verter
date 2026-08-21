@@ -537,7 +537,7 @@ test("[PS] rev-list subprocess failure", () => {
   const r = runPS(dag, state, "live", [], { env: fakeGitEnv("rev-list") });
   expectCheck(
     PS_FILE,
-    "could not enumerate commits reachable from the configured trunk ref's tip",
+    "could not enumerate commits reachable from the configured trunk ref's live tip",
     r,
   );
 });
@@ -553,10 +553,48 @@ test("[PS] ACCEPTED with a dangling (unreachable) accepted_sha", () => {
   expectCheck(PS_FILE, "is not genuinely landed", r);
 });
 
-test("[PS] merge-base subprocess failure", () => {
+test("[PS] resolvePinnedTrunk merge-base --is-ancestor subprocess failure", () => {
+  // AMD-013 round 6: resolvePinnedTrunk now itself shells out to `git
+  // merge-base --is-ancestor` (the pin-vs-live-tip ancestry check) — this
+  // call runs UNCONDITIONALLY, before checks 3 & 4's own base_sha/
+  // accepted_sha ancestry check ever gets a chance to run, so a blanket
+  // "merge-base" break now surfaces THIS failure first (see the next test
+  // for checks 3 & 4's own merge-base failure, isolated with a targeted
+  // shim that lets this call through).
   const dag = write("dag-git9.toml", DAG1);
+  const state = write("state-git9.toml", header({ current: "A0" }) + block("A0", "LOCKED"));
+  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("merge-base") });
+  expectCheck(PS_FILE, "could not check whether the pinned trunk", r);
+});
+
+test("[PS] base_sha/accepted_sha ancestry merge-base subprocess failure (isolated from resolvePinnedTrunk's own merge-base call)", () => {
+  // A blanket "merge-base" break (fakeGitEnv) now always hits
+  // resolvePinnedTrunk's own ancestor check first (the test above) — this
+  // targeted shim instead fails merge-base ONLY when invoked with SHA_BASE
+  // (checks 3 & 4's base_sha ancestry call), letting resolvePinnedTrunk's
+  // own call (against the default header's SHA/SHA pin/live-tip pair, which
+  // never mentions SHA_BASE) pass through to real git untouched.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-mergebase-targeted-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "merge-base" && args.includes("${SHA_BASE}")) {
+  process.stderr.write("shim: simulated merge-base failure for base_sha ancestry check\\n");
+  process.exit(17);
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
+  const dag = write("dag-git9b.toml", DAG1);
   const state = write(
-    "state-git9.toml",
+    "state-git9b.toml",
     header({ current: "A0" }) +
       acceptedBlock("A0", {
         base_sha: SHA_BASE,
@@ -564,8 +602,11 @@ test("[PS] merge-base subprocess failure", () => {
         landing_equivalence_digest: DIGEST,
       }),
   );
-  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("merge-base") });
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
   expectCheck(PS_FILE, "ancestry against accepted_sha", r);
+  rmSync(shimDir, { recursive: true, force: true });
 });
 
 test("[PS] base_sha is not an ancestor of accepted_sha", () => {
@@ -2433,17 +2474,19 @@ test("[PS] pinned-trunk resolution: repository tip cannot be resolved (broken gi
   );
 });
 
-test("[PS] pinned-trunk resolution: ledger repository.head_sha does not match the live repository HEAD, and the rehearsal itself does not silently proceed", () => {
-  // Finding C: a stale/wrong pinned trunk must fail closed, not be silently
-  // resynced to whatever HEAD happens to be at validation time — AND once
-  // resolvePinnedTrunk returns null, verifyConcurrentLandingSafety must not
-  // silently skip either: it records its OWN distinct violation naming why
-  // nothing below could be rehearsed, rather than reusing the trunk-pin
-  // message or running the git walk anyway.
+test("[PS] pinned-trunk resolution: a pin lagging behind the live trunk tip, but a genuine ancestor of it, is valid rehearsal input (AMD-013 round 6 — staleness alone is not a violation)", () => {
+  // AMD-013 round 6 correction: the ledger this pin lives in is committed TO
+  // the branch it pins, so requiring EQUALITY made the pin stale the instant
+  // the committing commit landed — unfixable by any amount of resyncing.
+  // integration_head_sha is now checked for ANCESTRY, not equality: SHA_BASE
+  // (the pin) is a genuine, real ancestor of SHA (the live "main" tip), so
+  // this must PASS — this is the exact shape (integration_head_sha lagging
+  // one commit behind the live integration branch) that broke the prior
+  // equality check the instant AMD-013 itself landed.
   const dag = write("dag-lo5b.toml", TWO_CHILD_DAG);
   const state = write(
     "state-lo5b.toml",
-    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST, repoSha: SHA_BASE }) +
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST, integrationHeadSha: SHA_BASE }) +
       rootAccepted() +
       "\n" +
       block("A0", "IN_PROGRESS", {
@@ -2461,8 +2504,67 @@ test("[PS] pinned-trunk resolution: ledger repository.head_sha does not match th
       }),
   );
   const r = runPS(dag, state, "live");
-  expectCheck(PS_FILE, "trunk has advanced since the ledger pinned it", r);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] pinned-trunk resolution: a pin that is NOT an ancestor of the live trunk tip fails closed, and the rehearsal itself does not silently proceed", () => {
+  // The mirror case: AMD-013 round 6 replaced the equality check with an
+  // ancestry check, so it must still fail closed for the case that actually
+  // matters — a pin naming a commit the live trunk's history does not
+  // contain at all. SHA_DANGLING is committed on a since-deleted branch off
+  // SHA_BASE, diverging from (never merged into) main's tip SHA — it is
+  // provably NOT an ancestor of SHA. Two concurrently active blocks so this
+  // ALSO exercises verifyConcurrentLandingSafety's own distinct
+  // null-trunk-resolution violation (it must not silently skip once
+  // resolvePinnedTrunk fails, nor reuse the trunk-pin message).
+  const dag = write("dag-trunk-nonanc.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-trunk-nonanc.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST, integrationHeadSha: SHA_DANGLING }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "is not an ancestor of the live tip of the configured integration-trunk ref",
+    r,
+  );
   expectCheck(PS_FILE, "the fixed-landing-order rehearsal cannot run for", r);
+});
+
+test("[PS] accepted_sha reachability resolves against the live integration-trunk tip, not the (possibly-stale) pin", () => {
+  // AMD-013 round 6: the pin may now genuinely lag behind trunk (the test
+  // above). Reachability of a landed accepted_sha must still be checked
+  // against the trunk's LIVE tip, never the lagging pin — a block landed
+  // AFTER the pin was last recorded is reachable from the live tip but NOT
+  // from the stale-but-valid ancestor pin (an ancestor's rev-list never
+  // contains its own descendants). Pin = SHA_BASE (a genuine ancestor of the
+  // live tip SHA); accepted_sha = SHA (the live tip itself, a descendant of
+  // the pin) — reachable from the live tip trivially, NOT reachable from
+  // rev-list SHA_BASE. Using the pin here would wrongly reject this
+  // genuinely landed block.
+  const dag = write("dag-reach-live.toml", DAG1);
+  const state = write(
+    "state-reach-live.toml",
+    header({ current: "A0", integrationHeadSha: SHA_BASE }) +
+      acceptedBlock("A0", { base_sha: SHA_BASE }),
+  );
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
 });
 
 test("[PS] declared base_sha is not an ancestor of its rehearsal candidate (stale base)", () => {
@@ -2499,6 +2601,30 @@ test("[PS] declared base_sha is not an ancestor of its rehearsal candidate (stal
 });
 
 test("[PS] base_sha ancestry check itself failing (broken git merge-base) is reported distinctly", () => {
+  // A blanket "merge-base" break now always hits resolvePinnedTrunk's own
+  // ancestor check first (AMD-013 round 6 — see the dedicated resolvePinnedTrunk
+  // merge-base failure test above), so this uses a targeted shim that fails
+  // merge-base ONLY when invoked with SHA_BASE (the rehearsal's own base_sha
+  // ancestry call), letting resolvePinnedTrunk's own call (against the
+  // default header's SHA/SHA pin/live-tip pair) pass through to real git.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-mergebase-targeted2-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "merge-base" && args.includes("${SHA_BASE}")) {
+  process.stderr.write("shim: simulated merge-base failure for base_sha ancestry check\\n");
+  process.exit(17);
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
   const dag = write("dag-lo7.toml", TWO_CHILD_DAG);
   const state = write(
     "state-lo7.toml",
@@ -2521,8 +2647,11 @@ test("[PS] base_sha ancestry check itself failing (broken git merge-base) is rep
         landing_order: 2,
       }),
   );
-  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("merge-base") });
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
   expectCheck(PS_FILE, "ancestry against its rehearsal candidate", r);
+  rmSync(shimDir, { recursive: true, force: true });
 });
 
 test("[PS] two concurrently active blocks with a real merge conflict are rejected", () => {
@@ -2856,12 +2985,15 @@ test("[PS] trunk pin discriminator: the configured trunk ref (repository.branch)
   rmSync(trunkRepo, { recursive: true, force: true });
 });
 
-test("[PS] trunk pin discriminator: checkout HEAD matching the pin does NOT excuse an actually-stale trunk branch", () => {
-  // The mirror case, closing the discriminator from the other direction:
-  // checkout HEAD is PINNED at the ledger's declared head_sha (what the
-  // rejected checkout-HEAD oracle would have accepted), but the CONFIGURED
-  // trunk branch (main) has genuinely advanced past it. The correct
-  // (branch-ref) oracle must still catch this as trunk drift.
+test("[PS] trunk pin discriminator: a pin behind the live trunk tip on the SAME lineage is not trunk drift (AMD-013 round 6 — ancestry, not equality)", () => {
+  // AMD-013 round 6 superseded the prior "checkout HEAD matching the pin
+  // does NOT excuse an actually-stale trunk branch" discriminator — under
+  // equality, ANY lag behind trunk's live tip failed closed, which is
+  // exactly the defect round 6 fixes (a ledger committed to the branch it
+  // pins can never equal the live tip by the time the pin is read back).
+  // STALE_SHA stays a genuine ancestor of main's new tip after "trunk
+  // advanced" lands on top of it — checkout HEAD position is irrelevant
+  // either way, so this must PASS.
   const trunkRepo = mkdtempSync(join(tmpdir(), "validate-mutation-suite-trunkdisc2-"));
   git(["init", "-q"], trunkRepo);
   git(["symbolic-ref", "HEAD", "refs/heads/main"], trunkRepo);
@@ -2872,20 +3004,13 @@ test("[PS] trunk pin discriminator: checkout HEAD matching the pin does NOT excu
   writeFileSync(join(trunkRepo, "base.txt"), "base\n");
   git(["add", "-A"], trunkRepo);
   git(["commit", "-q", "-m", "base"], trunkRepo);
-  const STALE_SHA = git(["rev-parse", "HEAD"], trunkRepo); // the ledger's stale pin
+  const STALE_SHA = git(["rev-parse", "HEAD"], trunkRepo); // the ledger's lagging pin
 
-  git(["checkout", "-q", "-b", "detached-at-stale-point", STALE_SHA], trunkRepo);
-  // checkout now sits exactly at STALE_SHA — matching the pin the OLD
-  // (checkout-HEAD) oracle would have accepted.
-
-  git(["checkout", "-q", "main"], trunkRepo);
   writeFileSync(join(trunkRepo, "advance.txt"), "advance\n");
   git(["add", "-A"], trunkRepo);
   git(["commit", "-q", "-m", "trunk advanced"], trunkRepo);
-  // main has genuinely moved on; checkout is left on main (past STALE_SHA)
-  // to also prove this isn't merely "HEAD happens to differ" — trunk itself
-  // is provably ahead of the declared pin.
-  git(["branch", "-D", "detached-at-stale-point"], trunkRepo);
+  // main has moved on ONE commit past STALE_SHA, on the SAME lineage —
+  // STALE_SHA remains a real ancestor of main's new tip.
 
   const dag = write("dag-trunkdisc2.toml", DAG1);
   const state = write(
@@ -2893,7 +3018,46 @@ test("[PS] trunk pin discriminator: checkout HEAD matching the pin does NOT excu
     header({ current: "A0", repoSha: STALE_SHA }) + block("A0", "LOCKED"),
   );
   const r = runPS(dag, state, "live", [], { cwd: trunkRepo });
-  expectCheck(PS_FILE, "trunk has advanced since the ledger pinned it", r);
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+  rmSync(trunkRepo, { recursive: true, force: true });
+});
+
+test("[PS] trunk pin discriminator: a pin whose commit was REWRITTEN out of trunk's history fails closed", () => {
+  // The case that actually matters after round 6: not mere lag, but a pin
+  // naming a commit trunk's history no longer contains at all — e.g. an
+  // amend/rebase rewrote the commit the pin named. STALE_SHA is amended
+  // in place, producing a DIFFERENT commit object at the same branch
+  // position; the original STALE_SHA object still exists (git gc has not
+  // run) but is provably no longer an ancestor of the rewritten tip.
+  const trunkRepo = mkdtempSync(join(tmpdir(), "validate-mutation-suite-trunkrewrite-"));
+  git(["init", "-q"], trunkRepo);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"], trunkRepo);
+  git(["config", "user.email", "test@example.invalid"], trunkRepo);
+  git(["config", "user.name", "Test"], trunkRepo);
+  git(["config", "commit.gpgsign", "false"], trunkRepo);
+
+  writeFileSync(join(trunkRepo, "base.txt"), "base\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "-m", "base"], trunkRepo);
+  const STALE_SHA = git(["rev-parse", "HEAD"], trunkRepo); // the ledger's now-rewritten pin
+
+  writeFileSync(join(trunkRepo, "base.txt"), "rewritten\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "--amend", "-m", "rewritten base"], trunkRepo);
+  // main's tip is now a DIFFERENT commit object at the same position;
+  // STALE_SHA is neither an ancestor nor the tip itself.
+
+  const dag = write("dag-trunkrewrite.toml", DAG1);
+  const state = write(
+    "state-trunkrewrite.toml",
+    header({ current: "A0", repoSha: STALE_SHA }) + block("A0", "LOCKED"),
+  );
+  const r = runPS(dag, state, "live", [], { cwd: trunkRepo });
+  expectCheck(
+    PS_FILE,
+    "is not an ancestor of the live tip of the configured integration-trunk ref",
+    r,
+  );
   rmSync(trunkRepo, { recursive: true, force: true });
 });
 

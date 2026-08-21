@@ -1804,7 +1804,7 @@ test("git identity: a real but DANGLING accepted_sha (unreachable from the repos
   assert.match(
     r.err,
     new RegExp(
-      `state block A1 is ACCEPTED with accepted_sha ${SHA_DANGLING} but that commit is not reachable from the configured trunk ref's tip .* — it is not genuinely landed`,
+      `state block A1 is ACCEPTED with accepted_sha ${SHA_DANGLING} but that commit is not reachable from the configured trunk ref's live tip .* — it is not genuinely landed`,
     ),
   );
   assert.doesNotMatch(r.out, /^OK:/);
