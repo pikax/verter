@@ -7258,8 +7258,20 @@ fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
         ),
         "a member bind on a declaration-tag $derived rune must read/write through $.get(doubled).x:\n{js}"
     );
-    // NEGATIVE: a bare declaration-tag `$derived`-root identifier bind must still refuse —
-    // the widening applies to the Member arm only, never the Identifier arm.
+    // KNOWN CONFORMANCE GAP, not parity: official ACCEPTS a bare declaration-tag
+    // `$derived`-root identifier bind (svelte@5.56.8, freshly re-verified) and emits
+    // Svelte 5's "overridable derived" shape:
+    //   $.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))
+    // Verter fails closed here instead — safe (no miscompile), but NOT oracle parity.
+    // A prior version of this test/comment falsely claimed official also refuses
+    // (`constant_binding`), matching Verter's behavior; that claim was never actually
+    // run against the oracle. It has been corrected here after direct reproduction.
+    // Closing the gap needs a provenance discriminator distinguishing this construct's
+    // `Derived` binding from the `let:` slot-prop's `Derived` binding (which DOES
+    // genuinely refuse with `constant_binding` — see
+    // `a_member_bind_rooted_at_a_derived_binding_is_accepted` above) before the
+    // bare-Identifier arm can safely widen for this case alone. Tracked:
+    // `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`.
     assert_fail_closed(
         "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}\n{let doubled = $derived(item)}\n<input bind:value={doubled}/>\n{/each}\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
@@ -7277,10 +7289,8 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     //
     // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
     // rune usage at all the component compiles in LEGACY mode instead, whose
-    // component-bind codegen has its own separate, pre-existing gap (a missing
-    // `$$legacy: true` props-object marker — out of scope here and disclosed
-    // in this block's landing evidence) that would otherwise
-    // ride along unasserted in this test.
+    // component-bind codegen omits the `$$legacy: true` props-object marker, which
+    // would otherwise ride along unasserted in what this test checks.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
     )
@@ -13846,8 +13856,8 @@ fn non_rune_const_local_is_preserved() {
 fn root_text_node_region_fails_closed() {
     // A root TEXT-NODE region (a bare reactive interpolation `{count}` as the
     // component root, with no wrapping element) is the official text-first
-    // (`$.text()` + `$.next()`) topology — a distinct emission shape that is a
-    // separately tracked follow-up. It fails closed rather than emit INVALID JS (an
+    // (`$.text()` + `$.next()`) topology — a distinct emission shape Verter does
+    // not yet produce. It fails closed rather than emit INVALID JS (an
     // undeclared `text` var). RED against the pre-fix tree (which emitted
     // `$.set_text(text, …)` referencing an undeclared `text`).
     assert_fail_closed(
@@ -14274,8 +14284,8 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
 #[test]
 fn destructured_state_object_fails_closed_not_panic() {
     // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
-    // Official 5.56.3 supports it (temp + proxy), but full destructured-state
-    // lowering is a separately tracked item; a clean fail-closed is correct. RED against
+    // Official 5.56.3 supports it (temp + proxy); Verter does not lower
+    // destructured state yet, so a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
         "<script>let { a } = $state({ a: 1 });</script>\n<p>{a}</p>\n",
@@ -28460,12 +28470,11 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-#[ignore = "known pre-existing gap in Svelte each-item destructuring: a genuinely \
-            multi-name each-item pattern (`{ a, b }`) refuses through `pattern_single_binding`'s \
-            generic multi-binding arm with a placeholder Span::new(0, 0) instead of the pattern's real \
-            span. Closing it needs the same real-span + per-property-read plumbing as \
-            ShorthandSingleProperty, generalized to N properties — a materially larger change than a \
-            single-name shape gate."]
+#[ignore = "a multi-name each-item pattern (`{ a, b }`) refuses through \
+            `pattern_single_binding`'s generic multi-binding arm carrying a placeholder \
+            Span::new(0, 0) rather than the pattern's real span. Real-span reporting here \
+            requires the per-property-read plumbing ShorthandSingleProperty uses, generalized \
+            to N properties."]
 fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
     // Document today's actual behavior: a genuinely multi-name destructure (`{ a, b
     // }`) refuses (correctly — this shape isn't supported), but through
