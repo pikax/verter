@@ -7,7 +7,7 @@
 //! local const + shorthand prop, a `slot="x"`-bearing child becomes a NAMED slot
 //! region, and everything else becomes the DEFAULT slot region. Each slot region is its
 //! OWN lexical scope (a child of the component's scope) so its `let:` slot-prop bindings
-//! (lowered as `Derived` so a read emits `$.get`) shadow correctly.
+//! (lowered as `SlotPropDerived` so a read emits `$.get`) shadow correctly.
 
 use super::attr_lowering::{lower_attributes, AttrHost};
 use super::entity_decode::decode_attr_entities;
