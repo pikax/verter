@@ -913,12 +913,12 @@ pub(super) fn bind_root_is_writable_target(
 /// root, plain `item.x = …` otherwise); it never reassigns the binding itself, so it
 /// needs none of the collection-index / import-rebinding redirect a bare identifier
 /// write would. NOT reused for the identifier arm: a bare bind of these roots
-/// generally would reassign the binding, which official rejects (the one nominal
-/// exception, a genuine top-level `$derived(...)` accepting an "overridable derived"
-/// bare-Identifier reassignment, never reaches this arm through the INSTANCE-SCRIPT
-/// declarator form — the rune-position gate refuses that form before classification;
-/// see the note on [`is_writable_member_bind_extra_root`] for the second, template-tag
-/// form of a genuine `$derived(...)` rune that DOES reach this arm).
+/// generally would reassign the binding, which official rejects. `$derived(...)`
+/// is a real exception to that rejection (Svelte 5's "overridable derived" accepts a
+/// bare-Identifier reassignment) but Verter does not implement the acceptance at this
+/// arm for either construct that reaches it — see the note on
+/// [`is_writable_member_bind_extra_root`] for the full account, including the known
+/// conformance gap on the declaration-tag rune form.
 ///
 /// The widened extra roots are: an `{#each}` item (`EachSignal` / `EachPlain`), an
 /// `{#each … as {field}}` destructured field (`EachDestructuredField`), a
@@ -953,22 +953,35 @@ pub(super) fn bind_member_root_is_writable_target(
 /// `{#await}` binding, a `{@const}` derived local, or a `$derived` binding. None of
 /// these reach this predicate as writable at the bare-Identifier arm
 /// (`is_writable_bind_root`) — a bare-identifier bind of any of them would reassign
-/// the binding itself, which official rejects; a MEMBER write never does. (A genuine
-/// top-level `$derived(...)` is the one kind where official's bare-Identifier
-/// rejection isn't universal — Svelte 5's "overridable derived" accepts a bare
-/// reassignment — but the INSTANCE-SCRIPT declarator form of that construct never
-/// reaches the bare-Identifier arm: `rune_scan.rs::classify_rune_position` refuses
-/// every `$derived` reference in that form before classification. The `Derived` kind
-/// reaches this arm through TWO other, DISTINCT constructs the rune-position gate does
-/// NOT cover: a component `let:` slot-prop (a synthesized `Derived`, not a genuine rune
-/// reference) — where official's bare-Identifier rejection is `constant_binding` — and
-/// a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG (`declaration_tag_lowering.rs` +
-/// `state_prep::classify_block_rune_declarator`), a genuine `$derived(...)` rune
-/// reference that bypasses `rune_scan.rs` because that lowering pushes only the
-/// call's argument span into the template-expression list the rune scan re-walks, not
-/// the `$derived(...)` call span itself — where official's bare-Identifier rejection is
-/// also `constant_binding`, oracle-verified against svelte@5.56.8. Both are exercised
-/// directly: `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` form)
+/// the binding itself, which official rejects for most of them; a MEMBER write never
+/// does. `Derived` is the one kind where that rejection is NOT universal: Svelte 5's
+/// "overridable derived" accepts a bare-Identifier reassignment of a GENUINE
+/// `$derived(...)`/`$derived.by(...)` rune reference, emitting the plain
+/// `$.set(name, $$value)` two-way-bind shape. Whether a given `Derived`-kind binding
+/// hits that acceptance or a `constant_binding` refusal depends on WHICH of the two
+/// constructs minted it, and Verter does not yet discriminate between them at this
+/// arm (both stay in the deliberately unwidened bare-Identifier refusal — see the
+/// `constant_binding`-tracking test on `a_member_bind_rooted_at_a_derived_binding_is_accepted`
+/// and the KNOWN-GAP test on `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted`):
+/// a component `let:` slot-prop (a synthesized `Derived`, not a genuine rune reference)
+/// — official's bare-Identifier rejection here IS `constant_binding`, oracle-verified
+/// against svelte@5.56.8 — and a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG
+/// (`declaration_tag_lowering.rs` + `state_prep::classify_block_rune_declarator`), a
+/// genuine `$derived(...)` rune reference that bypasses `rune_scan.rs` because that
+/// lowering pushes only the call's argument span into the template-expression list
+/// the rune scan re-walks, not the `$derived(...)` call span itself — where official
+/// ACCEPTS the bare-Identifier bind (oracle-verified against svelte@5.56.8: emits
+/// `$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))`),
+/// unlike the `let:` case. Verter currently refuses BOTH at this arm — correct for the
+/// `let:` construct, a known conformance gap (tracked, not claimed as parity) for the
+/// declaration-tag rune construct, since nothing here distinguishes the two
+/// constructs' `Derived` bindings from each other. A top-level INSTANCE-SCRIPT
+/// `let d = $derived(e)` declarator form of the same "overridable derived" behavior
+/// never even reaches this arm: `rune_scan.rs::classify_rune_position` refuses every
+/// `$derived` reference in that form before classification, an unrelated pre-existing
+/// gate. See `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`
+/// for the disposition. Both `Derived`-minting constructs are exercised directly:
+/// `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` form)
 /// and `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (the
 /// declaration-tag rune form) in `client_tests.rs`.)
 fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {

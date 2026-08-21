@@ -68,19 +68,37 @@ Svelte compiler (`svelte@5.56.8`), in `crates/verter_compiler/src/svelte/runtime
   span into the template-expression list the rune scan re-walks, never the `$derived(...)` call
   span itself. Oracle-verified (svelte@5.56.8, `runes: true`): official accepts
   `bind:value={doubled.x}` there and emits the identical `$.get(root).field` shape as the `let:`
-  slot-prop case, and rejects the bare-identifier form (`constant_binding`), matching Verter's
-  behavior — no functional defect was found, but the construct was untested and the stated
-  reason for not testing it was wrong. Added a discriminating test,
+  slot-prop case — no functional defect on the MEMBER form, but the construct was untested and
+  the stated reason for not testing it was wrong. Added a discriminating test,
   `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (`client_tests.rs`),
   exercising this path directly; it fails against the pre-fix `Derived` widening and passes
   post-fix. The Member-arm widening itself was ALSO verified and tested through the other
   reachable `Derived`-kind construct — a component `let:` slot-prop (`<Child let:item>`, lowered
   to `const item = $.derived(() => $$slotProps.item)`) — where official's bare-identifier
-  negative control DOES hold (`constant_binding`), same as the declaration-tag rune case. The
-  bare-identifier "overridable-`$derived`" divergence remains folded into the pre-existing
+  negative control DOES hold (`constant_binding`).
+  Second correction (post-landing, independent re-verification against a fresh
+  `npm install svelte@5.56.8`): the text originally landed here ALSO claimed official "rejects
+  the bare-identifier form (`constant_binding`), matching Verter's behavior" for the
+  declaration-tag rune construct specifically. That claim is FALSE and was never actually run
+  against the oracle. Re-run directly: official ACCEPTS a bare `bind:value={doubled}` for this
+  construct and emits Svelte 5's "overridable derived" shape —
+  `$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))` — while
+  Verter still refuses it. This is the SAME bare-identifier "overridable-`$derived`" divergence
+  already named below, now confirmed to occur through a SECOND construct (declaration-tag rune),
+  not only the top-level instance-script declarator form the rune-position gate refuses. The
+  `let:` slot-prop construct's negative control is unaffected — it genuinely refuses
+  (`constant_binding`), re-verified. `client_tests.rs`'s negative assertion on the
+  declaration-tag bare-identifier form is retained (Verter's refusal is safe, just not oracle
+  parity) with its comment corrected to state a KNOWN CONFORMANCE GAP rather than parity. See
+  `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`
+  (DEFER; closing it needs a provenance discriminator between the two constructs' otherwise
+  identical `Derived` binding kind, which the top-level instance-script form's "reaches an
+  existing accept path" hope does not shortcut — that form's bare-bind acceptance does not exist
+  in production code either, since it never reaches the bare-Identifier classifier at all).
+  The bare-identifier "overridable-`$derived`" divergence remains folded into the pre-existing
   `$derived`-rune deferral (owned by the runes-completion vertical) rather than tracked as a new
-  standalone item — that divergence is specific to the top-level instance-script declarator
-  form, which the rune-position gate does still refuse.
+  standalone item, but now covers TWO constructs (top-level instance-script AND declaration-tag),
+  not one.
 
 ## Review arc
 

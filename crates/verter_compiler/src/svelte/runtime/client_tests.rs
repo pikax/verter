@@ -7258,8 +7258,20 @@ fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
         ),
         "a member bind on a declaration-tag $derived rune must read/write through $.get(doubled).x:\n{js}"
     );
-    // NEGATIVE: a bare declaration-tag `$derived`-root identifier bind must still refuse —
-    // the widening applies to the Member arm only, never the Identifier arm.
+    // KNOWN CONFORMANCE GAP, not parity: official ACCEPTS a bare declaration-tag
+    // `$derived`-root identifier bind (svelte@5.56.8, freshly re-verified) and emits
+    // Svelte 5's "overridable derived" shape:
+    //   $.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))
+    // Verter fails closed here instead — safe (no miscompile), but NOT oracle parity.
+    // A prior version of this test/comment falsely claimed official also refuses
+    // (`constant_binding`), matching Verter's behavior; that claim was never actually
+    // run against the oracle. It has been corrected here after direct reproduction.
+    // Closing the gap needs a provenance discriminator distinguishing this construct's
+    // `Derived` binding from the `let:` slot-prop's `Derived` binding (which DOES
+    // genuinely refuse with `constant_binding` — see
+    // `a_member_bind_rooted_at_a_derived_binding_is_accepted` above) before the
+    // bare-Identifier arm can safely widen for this case alone. Tracked:
+    // `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`.
     assert_fail_closed(
         "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}\n{let doubled = $derived(item)}\n<input bind:value={doubled}/>\n{/each}\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
