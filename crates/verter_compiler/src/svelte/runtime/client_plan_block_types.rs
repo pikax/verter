@@ -77,16 +77,37 @@ pub(super) struct ClientEach {
     /// each (emitted as the `$.index` literal).
     pub(super) key: Option<ClientEachKey>,
     /// The item binding param name (`None` for the no-item `{#each {length}}` form).
+    /// A DECOMPOSED item context (`{ id }`) uses the synthesized `$$item` name
+    /// here — see [`Self::destructure`] for the field getter declarations.
     pub(super) item_param: Option<String>,
     /// The index binding param name, emitted ONLY when [`ClientEach::emit_index`] is set.
     pub(super) index_param: Option<String>,
     /// Whether the index render param is emitted (the official `uses_index` rule: the
     /// index is read, OR the item is reassigned / mutated).
     pub(super) emit_index: bool,
+    /// The single-name-DESTRUCTURE item context's per-field getter declarations
+    /// (`None` for a bare-identifier or absent item context). Official routes
+    /// the raw item through the synthesized `$$item` param
+    /// ([`Self::item_param`]) and declares one getter thunk per destructured
+    /// field at the top of the render-callback body.
+    pub(super) destructure: Option<EachDestructuredItem>,
     /// The body region.
     pub(super) body: TemplateScopeId,
     /// The `{:else}` fallback region.
     pub(super) else_body: Option<TemplateScopeId>,
+}
+
+/// A single-name-DESTRUCTURE `{#each}` item context's per-field getter plan:
+/// official declares `let <field> = () => $.get($$item).<field>;` (a reactive
+/// item) or `let <field> = () => $$item.<field>;` (a non-reactive item) at the
+/// top of the render-callback body, for each declared field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EachDestructuredItem {
+    /// The declared field names, in source order.
+    pub(super) fields: Vec<String>,
+    /// Whether the item is reactive (`EACH_ITEM_REACTIVE` set) — the getter
+    /// body wraps in `$.get($$item)` when set, plain `$$item` otherwise.
+    pub(super) item_reactive: bool,
 }
 
 /// The key callback of a keyed `{#each}` — emitted in its OWN callback scope (the key

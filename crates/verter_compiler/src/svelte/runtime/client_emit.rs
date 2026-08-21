@@ -74,8 +74,10 @@ impl<'a> ClientEmitter<'a> {
                     reactive: true,
                     target,
                 } => {
-                    update_bodies.push(EffectBody::Expr(MappedCode::unmapped(
-                        self.emit_reactive_attr(NodeId(target.0), emit, &mut Some(&mut memoizer)),
+                    update_bodies.push(EffectBody::Expr(self.emit_reactive_attr(
+                        NodeId(target.0),
+                        emit,
+                        &mut Some(&mut memoizer),
                     )));
                 }
                 ClientRuntimeOp::SetClass {

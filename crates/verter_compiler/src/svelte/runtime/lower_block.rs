@@ -152,6 +152,20 @@ impl EachReactivityFacts<'_, '_> {
         !self.runes || uses_store || !self.key_is_the_item(item, key)
     }
 
+    /// Whether the each's COLLECTION expression subscribes a `$store` —
+    /// exposed independently of [`Self::each_item_is_reactive`] for the
+    /// official `EACH_ITEM_IMMUTABLE` rule (`runes && !uses_store`).
+    pub(super) fn collection_uses_store(&self, source: ExprId) -> bool {
+        let source_expr = self.expressions.get(source);
+        source_expr.references.iter().any(|reference| {
+            matches!(
+                self.bindings
+                    .resolve_kind(self.scopes, source_expr.scope, &reference.name),
+                Some(BindingRuntimeKind::StoreSubscription)
+            )
+        })
+    }
+
     /// The official `key_is_item` predicate: the each CONTEXT is a bare
     /// identifier pattern, the KEY expression is a bare identifier, and the two
     /// name the same binding.
@@ -167,22 +181,44 @@ impl EachReactivityFacts<'_, '_> {
     /// `(item as T)` are the identifier `item` by the time official reaches the
     /// transform, so they must be `key_is_item` here too.
     fn key_is_the_item(&self, item: Option<PatternId>, key: Option<ExprId>) -> bool {
-        let (Some(item), Some(key)) = (item, key) else {
+        self.key_names_the_pattern(item, key)
+    }
+
+    /// The official `key_is_the_index`-shaped predicate: the each's INDEX
+    /// context is a bare identifier pattern, the KEY expression is a bare
+    /// identifier, and the two name the same binding — the each's OWN index,
+    /// keyed by itself. Symmetric to [`Self::key_is_the_item`], over the
+    /// index pattern instead of the item pattern.
+    ///
+    /// A key that IS the index makes the each UNKEYED for official
+    /// (`metadata.keyed = false`): the custom key callback is dropped in
+    /// favour of the plain `$.index` selector, `EACH_INDEX_REACTIVE` clears,
+    /// and the index reads plainly rather than through `$.get`. Both the
+    /// client-plan keyedness decision and this binding-kind finalizer read
+    /// this SAME predicate, so the two never disagree.
+    pub(super) fn key_is_the_index(&self, index: Option<PatternId>, key: Option<ExprId>) -> bool {
+        self.key_names_the_pattern(index, key)
+    }
+
+    /// Shared core: `pattern` is a bare-identifier context whose sole binding
+    /// is the SAME name as `key`'s (TS-erased) bare-identifier root.
+    fn key_names_the_pattern(&self, pattern: Option<PatternId>, key: Option<ExprId>) -> bool {
+        let (Some(pattern), Some(key)) = (pattern, key) else {
             return false;
         };
-        let pattern = &self.patterns[item.0 as usize];
+        let pattern = &self.patterns[pattern.0 as usize];
         if pattern.shape != PatternShape::BareIdentifier {
             return false;
         }
-        let [item_binding] = pattern.bindings.as_slice() else {
+        let [binding] = pattern.bindings.as_slice() else {
             return false;
         };
-        let item_name = self.bindings.get(*item_binding).name.as_str();
+        let name = self.bindings.get(*binding).name.as_str();
         let key_expr = self.expressions.get(key);
         let Some(key_root) = key_expr.parsed_expression() else {
             return false;
         };
-        super::expr::expr_wrapped_ident(key_root).is_some_and(|key_name| key_name == item_name)
+        super::expr::expr_wrapped_ident(key_root).is_some_and(|key_name| key_name == name)
     }
 }
 
@@ -229,6 +265,43 @@ pub(super) fn finalize_each_item_reactivity(ctx: &mut LoweringCtx, runes: bool) 
     }
 }
 
+/// Demote every `{#each}` INDEX binding whose KEY is the index ITSELF from
+/// `EachSignal` to `PlainLocal`: official makes such an each UNKEYED
+/// (`metadata.keyed = false`), so the index reads plainly rather than through
+/// `$.get`. The client plan reads the SAME [`EachReactivityFacts::key_is_the_index`]
+/// predicate to decide the projected keyedness (`ClientEach::key` / the
+/// `EACH_INDEX_REACTIVE` bit), so the two never disagree.
+pub(super) fn finalize_each_index_reactivity(ctx: &mut LoweringCtx) {
+    let mut demote: Vec<BindingId> = Vec::new();
+    {
+        let facts = EachReactivityFacts {
+            expressions: &ctx.expressions,
+            bindings: &ctx.bindings,
+            scopes: &ctx.scopes,
+            patterns: &ctx.patterns,
+            runes: false,
+        };
+        for node in &ctx.nodes {
+            let IrNode::Block(BlockIr::Each { index, key, .. }) = node else {
+                continue;
+            };
+            if !facts.key_is_the_index(*index, *key) {
+                continue;
+            }
+            let Some(index) = index else {
+                continue;
+            };
+            demote.extend(ctx.patterns[index.0 as usize].bindings.iter().copied());
+        }
+    }
+    for binding in demote {
+        let info = ctx.bindings.get_mut(binding);
+        if info.kind == BindingRuntimeKind::EachSignal {
+            info.kind = BindingRuntimeKind::EachPlain;
+        }
+    }
+}
+
 /// Lower an `{#each}` block. The ITEM binding is declared as a SIGNAL read
 /// (`EachSignal`) in the body scope so a same-name outer signal is shadowed;
 /// [`finalize_each_item_reactivity`] demotes it to `PlainLocal` once the final
@@ -251,9 +324,25 @@ fn lower_each_block(
         .map(|s| ctx.push_expr(s, scope))
         .unwrap_or_else(|| ctx.push_expr(Span::new(0, 0), scope));
     // The body scope binds the item as a signal; the index is reactive ONLY when
-    // the each is keyed (the official `keyed && index` reactivity gate).
+    // the each is keyed (the official `keyed && index` reactivity gate). A
+    // SHORTHAND-SINGLE-PROPERTY item context (`{ id }`) binds its ONE declared
+    // field as a per-field getter-thunk read instead — official routes the raw
+    // item through a synthesized `$$item` param and reads the field through its
+    // own `() => $.get($$item).<field>` thunk. Every OTHER decomposition
+    // (`{ id: foo }`, `[id]`, `{ ...rest }`) also lands `EachDestructuredField`
+    // here — inert, because the client plan (`project_each`) refuses those
+    // shapes before ever projecting a read of the binding; only the SHORTHAND
+    // shape's field binding is actually exercised.
     let body_scope = ctx.scopes.push_scope(Some(scope));
-    let item_pat = item.map(|s| ctx.push_pattern(s, body_scope, BindingRuntimeKind::EachSignal));
+    let item_pat = item.map(|s| {
+        ctx.push_pattern_by_shape(s, body_scope, |shape| {
+            if shape == ir::PatternShape::BareIdentifier {
+                BindingRuntimeKind::EachSignal
+            } else {
+                BindingRuntimeKind::EachDestructuredField
+            }
+        })
+    });
     let index_kind = if key.is_some() {
         BindingRuntimeKind::EachSignal
     } else {

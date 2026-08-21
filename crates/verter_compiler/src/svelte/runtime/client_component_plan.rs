@@ -564,9 +564,17 @@ impl<'a> SupportedClientIr<'a> {
     /// The root is the typed bind-target fact's `root_ident` for an explicit `bind:x={root}`,
     /// or the bind NAME for a shorthand `bind:x` (which binds a same-named local). A
     /// function-pair `{get, set}` target has NO lvalue root (the user owns the get/set), so it
-    /// is validated as supported. A bind to a `$props()` prop, an import, an unbound/free
-    /// target, or a non-lvalue expression fails closed — the component setter is then NEVER
-    /// synthesized from a non-writable root.
+    /// is validated as supported. At the IDENTIFIER arm, a bind to a `$props()` prop, a bare
+    /// import, an unbound/free target, or a non-lvalue expression fails closed — the component
+    /// setter is then NEVER synthesized from a non-writable root.
+    ///
+    /// A MEMBER target additionally routes through the WIDENED policy
+    /// (`bind_member_root_is_writable_target`) — the same one the DOM-bind classifier
+    /// uses: official ACCEPTS `<Child bind:value={item.x} />` inside an `{#each}`, a
+    /// `{#snippet}` param, an each-destructured field, an `{#await}` binding, a `{@const}`
+    /// derived local, or an IMPORT (a plain deep-write through the root's own referenced
+    /// value) while still REFUSING the bare `<Child bind:value={item} />` (which would
+    /// reassign the binding itself), so the Identifier arm stays on the unwidened policy.
     fn component_bind_root_is_writable(
         &self,
         target: &str,
@@ -582,6 +590,11 @@ impl<'a> SupportedClientIr<'a> {
                 return true;
             }
             return match &fact.root_ident {
+                Some(root) if matches!(fact.kind, Some(super::expr::BindTargetKind::Member)) => {
+                    super::client_shapes::bind_member_root_is_writable_target(
+                        bindings, scopes, scope, root,
+                    )
+                }
                 Some(root) => super::client_shapes::bind_root_is_writable_target(
                     bindings, scopes, scope, root,
                 ),

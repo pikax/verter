@@ -444,6 +444,10 @@ impl BindingOccurrenceCollector<'_> {
             // thunk (`$count()` — the `const $count = () => $.store_get(count,
             // '$count', $$stores);` declaration), never `$.get`.
             Some(BindingRuntimeKind::StoreSubscription) => Some(format!("{name}()")),
+            // A single-name-destructure each-item FIELD reads through its own
+            // per-field getter thunk (`let id = () => $.get($$item).id;` —
+            // declared by the each-block emitter), never `$.get`.
+            Some(BindingRuntimeKind::EachDestructuredField) => Some(format!("{name}()")),
             Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp) => {
                 match self.ctx.prop_reads.get(name) {
                     // A PROP-SOURCE member (default-bearing or written — declared
