@@ -112,6 +112,24 @@ let amendmentsDir;
 let SHA_BASE, TREE_BASE;
 let SHA, TREE;
 let SHA_DANGLING;
+// Concurrent-implementation disjointness fixtures (all branched off SHA_BASE,
+// same convention as SHA_DANGLING): CONCURRENT_A/CONCURRENT_B each add their
+// OWN distinct file — a real, git-merge-tree-clean pair. CONCURRENT_CONFLICT_A
+// / CONCURRENT_CONFLICT_B both rewrite the SAME line of the SAME pre-existing
+// file to different content — a real git merge-tree content conflict.
+let CONCURRENT_A, CONCURRENT_B, CONCURRENT_C;
+let CONCURRENT_A_TREE, CONCURRENT_B_TREE, CONCURRENT_C_TREE;
+let CONCURRENT_CONFLICT_A, CONCURRENT_CONFLICT_B;
+// Branch names each CONCURRENT_* sha resolves from — kept live in before()
+// (never deleted) so they double as implementation_ref resolution targets.
+const CONCURRENT_A_REF = "concurrent-a";
+const CONCURRENT_B_REF = "concurrent-b";
+const CONCURRENT_C_REF = "concurrent-c";
+const CONCURRENT_CONFLICT_A_REF = "concurrent-conflict-a";
+const CONCURRENT_CONFLICT_B_REF = "concurrent-conflict-b";
+// A TAG (not a branch) at CONCURRENT_A — round 4, FIX 1 discriminator: a
+// real, resolvable, tip-matching ref that is NOT under refs/heads/.
+const CONCURRENT_A_TAG = "concurrent-a-tag";
 const SHA_NONEXISTENT = "abcdef1234567890abcdef1234567890abcdef12"; // well-formed, never committed
 
 function git(args, cwd) {
@@ -148,6 +166,57 @@ before(() => {
   SHA_DANGLING = git(["rev-parse", "HEAD"], gitRoot);
   git(["checkout", "-q", "main"], gitRoot);
   git(["branch", "-D", "scratch"], gitRoot);
+
+  // These five branches are kept LIVE (never deleted) — AMD-013 FIX 2
+  // requires implementation_candidate_sha to be bound to a resolvable
+  // implementation_ref whose live tip equals the pin exactly, so every
+  // fixture that rehearses an IN_PROGRESS block against one of these SHAs
+  // needs a real ref pointing at it, unlike the deleted-branch convention
+  // SHA_DANGLING uses (that fixture's whole point is to be unreachable).
+  git(["checkout", "-q", "-b", "concurrent-a", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "concurrent-a.txt"), "a\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "concurrent-a"], gitRoot);
+  CONCURRENT_A = git(["rev-parse", "HEAD"], gitRoot);
+  CONCURRENT_A_TREE = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  git(["checkout", "-q", "-b", "concurrent-b", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "concurrent-b.txt"), "b\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "concurrent-b"], gitRoot);
+  CONCURRENT_B = git(["rev-parse", "HEAD"], gitRoot);
+  CONCURRENT_B_TREE = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  git(["checkout", "-q", "-b", "concurrent-c", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "concurrent-c.txt"), "c\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "concurrent-c"], gitRoot);
+  CONCURRENT_C = git(["rev-parse", "HEAD"], gitRoot);
+  CONCURRENT_C_TREE = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  git(["checkout", "-q", "-b", "concurrent-conflict-a", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "base.txt"), "conflict-a\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "concurrent-conflict-a"], gitRoot);
+  CONCURRENT_CONFLICT_A = git(["rev-parse", "HEAD"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  git(["checkout", "-q", "-b", "concurrent-conflict-b", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "base.txt"), "conflict-b\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "concurrent-conflict-b"], gitRoot);
+  CONCURRENT_CONFLICT_B = git(["rev-parse", "HEAD"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  // A real, resolvable TAG (not a branch) at CONCURRENT_A — round 4, FIX 1's
+  // "confirm it is a real ref (refs/heads/...)" requirement: this ref
+  // resolves cleanly via `git rev-parse --verify` and its live tip genuinely
+  // equals CONCURRENT_A, but it is a tag, not a branch, so implementation_ref
+  // must still reject it.
+  git(["tag", CONCURRENT_A_TAG, CONCURRENT_A], gitRoot);
 
   emptyGitRepo = mkdtempSync(join(tmpdir(), "validate-mutation-suite-empty-git-"));
   git(["init", "-q"], emptyGitRepo);
@@ -288,6 +357,8 @@ function block(id, status, overrides = {}) {
     context_packet_digest: "",
     base_sha: "",
     candidate_sha: "",
+    implementation_candidate_sha: "",
+    implementation_ref: "",
     candidate_tree: "",
     accepted_sha: "",
     accepted_tree: "",
@@ -297,6 +368,7 @@ function block(id, status, overrides = {}) {
     stack_id: "",
     stack_snapshot_digest: "",
     stack_layer: 0,
+    landing_order: 0,
     conformance_review: "PENDING",
     conformance_reviewed_sha: "",
     architecture_review: "PENDING",
@@ -364,6 +436,8 @@ function header({
   dagDigest = DAG1_DIGEST,
   extraTop = "",
   orchestration = "",
+  integrationBranch = "main",
+  integrationHeadSha = repoSha,
 }) {
   return `schema = 1
 revision = 11
@@ -387,6 +461,8 @@ head_sha = "${repoSha}"
 head_tree = "${repoSha}"
 dirty = false
 untracked_count = 0
+integration_branch = "${integrationBranch}"
+integration_head_sha = "${integrationHeadSha}"
 ${orchestration}
 `;
 }
@@ -443,18 +519,27 @@ test("[PS] tree field is not the tree of its paired sha", () => {
   expectCheck(PS_FILE, "is not the tree of", r);
 });
 
-test("[PS] repository tip cannot be resolved (zero commits)", () => {
+test("[PS] configured trunk ref cannot be resolved (zero commits) — verifyLiveGitIdentities cannot verify reachability against an unresolved pin", () => {
+  // repository.branch = "main" (the header() default) does not exist as a
+  // real ref in a zero-commit repo, so resolvePinnedTrunk itself fails first
+  // (its own violation, not asserted here); pinnedTrunk is then null when
+  // passed into verifyLiveGitIdentities (round 4, FIX 3), which must record
+  // its OWN distinct violation rather than silently skip reachability.
   const dag = write("dag-git6.toml", DAG1);
   const state = write("state-git6.toml", header({ current: "A0" }) + block("A0", "LOCKED"));
   const r = runPS(dag, state, "live", [], { cwd: emptyGitRepo });
-  expectCheck(PS_FILE, "could not resolve the repository tip", r);
+  expectCheck(PS_FILE, "reachability cannot be checked against an untrustworthy trunk pin", r);
 });
 
 test("[PS] rev-list subprocess failure", () => {
   const dag = write("dag-git7.toml", DAG1);
   const state = write("state-git7.toml", header({ current: "A0" }) + block("A0", "LOCKED"));
   const r = runPS(dag, state, "live", [], { env: fakeGitEnv("rev-list") });
-  expectCheck(PS_FILE, "could not enumerate commits reachable from the repository tip", r);
+  expectCheck(
+    PS_FILE,
+    "could not enumerate commits reachable from the configured trunk ref's tip",
+    r,
+  );
 });
 
 test("[PS] ACCEPTED with a dangling (unreachable) accepted_sha", () => {
@@ -1448,26 +1533,96 @@ test("[PS] a block past LOCKED has no authorization record", () => {
 });
 
 // =====================================================================
-// PROGRAM-STATE — single IN_PROGRESS / current_block binding
+// PROGRAM-STATE — concurrent-implementation ceiling, serialised FINAL
+// certification, current_block binding, and the fixed-landing-order
+// cumulative rehearsal (AMD-013)
+// (MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md,
+// ARCH-RULING-CONCURRENCY-OPERATING-MODEL.md,
+// contracts/stacked-prs.md)
 // =====================================================================
 
-test("[PS] more than one block IN_PROGRESS", () => {
-  const dag = write(
-    "dag-cur1.toml",
-    dagText([dagBlock({ id: "A0", predecessors: [] }), dagBlock({ id: "B0", predecessors: [] })]),
-  );
+// A single-root DAG (R0, ACCEPTED) with N children (each predecessors =
+// [R0]) — satisfies the "exactly one DAG root" / sequencing checks while
+// giving N mutually-independent blocks to hold concurrently active or
+// certifying, so every fixture below isolates the ONE new check it names
+// rather than incidentally tripping the unrelated multi-root violation too.
+function childrenDag(ids) {
+  return dagText([
+    dagBlock({ id: "R0", predecessors: [] }),
+    ...ids.map((id) => dagBlock({ id, predecessors: ["R0"] })),
+  ]);
+}
+function rootAccepted() {
+  return acceptedBlock("R0");
+}
+
+const SIX_CHILD_IDS = ["A0", "B0", "C0", "D0", "E0", "F0"];
+const SIX_CHILD_DAG = childrenDag(SIX_CHILD_IDS);
+const SIX_CHILD_DAG_DIGEST = createHash("sha256").update(SIX_CHILD_DAG).digest("hex");
+
+test("[PS] more than 5 blocks concurrently active (the ratified ceiling)", () => {
+  const dag = write("dag-cur1.toml", SIX_CHILD_DAG);
   const state = write(
     "state-cur1.toml",
-    header({
-      current: "A0",
-      dagDigest: createHash("sha256").update(readFileSync(dag)).digest("hex"),
-    }) +
-      block("A0", "IN_PROGRESS") +
+    header({ current: "A0", dagDigest: SIX_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
       "\n" +
-      block("B0", "IN_PROGRESS"),
+      SIX_CHILD_IDS.map((id) => block(id, "IN_PROGRESS")).join("\n"),
   );
   const r = runPS(dag, state, "live");
-  expectCheck(PS_FILE, "more than one block IN_PROGRESS", r);
+  expectCheck(PS_FILE, "the ratified concurrent-implementation/train ceiling", r);
+});
+
+test("[PS] five IN_PROGRESS plus one ACCEPTANCE_RECOMMENDED is six active trains — over the ceiling (Finding B)", () => {
+  // The exact shape the AMD-013 v3 review flagged: the prior draft capped
+  // ONLY implementing.length, so 5 IN_PROGRESS + 1 ACCEPTANCE_RECOMMENDED
+  // (6 concurrently active blocks) was silently legal. Every block here is
+  // rehearsal-ready (base_sha/candidate identity + landing_order) and
+  // pairwise disjoint so the ceiling violation is isolated from any
+  // rehearsal-input violation.
+  const ids = ["A0", "B0", "C0", "D0", "E0", "F0"];
+  const dag = write("dag-cur1b.toml", childrenDag(ids));
+  const dagDigest = createHash("sha256").update(childrenDag(ids)).digest("hex");
+  const inProgress = (id, order) =>
+    block(id, "IN_PROGRESS", {
+      base_sha: SHA,
+      implementation_candidate_sha: SHA,
+      landing_order: order,
+    });
+  const state = write(
+    "state-cur1b.toml",
+    header({ current: "A0", dagDigest }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", {
+        base_sha: SHA_BASE,
+        candidate_sha: CONCURRENT_A,
+        candidate_tree: CONCURRENT_A_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        conformance_review: "PASS",
+        conformance_reviewed_sha: CONCURRENT_A,
+        architecture_review: "PASS",
+        architecture_reviewed_sha: CONCURRENT_A,
+        adversarial_review: "PASS",
+        adversarial_reviewed_sha: CONCURRENT_A,
+        landing_order: 1,
+      }) +
+      "\n" +
+      inProgress("B0", 2) +
+      "\n" +
+      inProgress("C0", 3) +
+      "\n" +
+      inProgress("D0", 4) +
+      "\n" +
+      inProgress("E0", 5) +
+      "\n" +
+      inProgress("F0", 6),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the ratified concurrent-implementation/train ceiling", r);
+  assert.match(r.err, /counts every concurrently active block regardless of status/);
 });
 
 test("[PS] current_block names no state block", () => {
@@ -1477,23 +1632,1339 @@ test("[PS] current_block names no state block", () => {
   expectCheck(PS_FILE, "names no state block", r);
 });
 
-test("[PS] IN_PROGRESS block disagrees with current_block", () => {
-  const dag = write(
-    "dag-cur3.toml",
-    dagText([dagBlock({ id: "A0", predecessors: [] }), dagBlock({ id: "B0", predecessors: [] })]),
+const TWO_CHILD_DAG = childrenDag(["A0", "B0"]);
+const TWO_CHILD_DAG_DIGEST = createHash("sha256").update(TWO_CHILD_DAG).digest("hex");
+
+// A0 -> A1 chain (both below the ACCEPTED root R0) — the one fixture family
+// below that needs a REAL DAG predecessor edge between two concurrently
+// active blocks (every other fixture in this section uses mutually
+// independent siblings deliberately, per the comment above childrenDag).
+const CHAIN_DAG = dagText([
+  dagBlock({ id: "R0", predecessors: [] }),
+  dagBlock({ id: "A0", predecessors: ["R0"] }),
+  dagBlock({ id: "A1", predecessors: ["A0"] }),
+]);
+const CHAIN_DAG_DIGEST = createHash("sha256").update(CHAIN_DAG).digest("hex");
+
+// A REVIEW/ACCEPTANCE_RECOMMENDED row over an unaccepted DAG predecessor
+// needs the full contingent-stacked-work exception fields (governance.md:6)
+// or the unrelated sequencing violation fires alongside whatever this
+// fixture is actually isolating.
+function stackedOver(id, status, overrides = {}) {
+  return block(id, status, {
+    stack_id: "S1",
+    stack_snapshot_digest: DIGEST,
+    stack_layer: id === "A0" ? 0 : 1,
+    ...overrides,
+  });
+}
+
+test("[PS] more than one block ACCEPTANCE_RECOMMENDED (final certification must serialise to one)", () => {
+  const dag = write("dag-cert1.toml", TWO_CHILD_DAG);
+  const acceptanceRecommended = (overrides) => ({
+    base_sha: SHA,
+    candidate_sha: SHA,
+    candidate_tree: TREE,
+    charter_digest: DIGEST,
+    context_packet_digest: DIGEST,
+    evidence_digest: DIGEST,
+    conformance_review: "PASS",
+    conformance_reviewed_sha: SHA,
+    architecture_review: "PASS",
+    architecture_reviewed_sha: SHA,
+    adversarial_review: "PASS",
+    adversarial_reviewed_sha: SHA,
+    ...overrides,
+  });
+  const state = write(
+    "state-cert1.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", acceptanceRecommended({ landing_order: 1 })) +
+      "\n" +
+      block("B0", "ACCEPTANCE_RECOMMENDED", acceptanceRecommended({ landing_order: 2 })),
   );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "final certification must serialise to exactly one block at a time", r);
+});
+
+test("[PS] ACCEPTANCE_RECOMMENDED block disagrees with current_block", () => {
+  const dag = write("dag-cur3.toml", TWO_CHILD_DAG);
   const state = write(
     "state-cur3.toml",
-    header({
-      current: "B0",
-      dagDigest: createHash("sha256").update(readFileSync(dag)).digest("hex"),
-    }) +
-      block("A0", "IN_PROGRESS") +
+    header({ current: "B0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", {
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        conformance_review: "PASS",
+        conformance_reviewed_sha: SHA,
+        architecture_review: "PASS",
+        architecture_reviewed_sha: SHA,
+        adversarial_review: "PASS",
+        adversarial_reviewed_sha: SHA,
+      }) +
       "\n" +
       block("B0", "LOCKED"),
   );
   const r = runPS(dag, state, "live");
-  expectCheck(PS_FILE, "is IN_PROGRESS but current_block is", r);
+  expectCheck(PS_FILE, "current_block must name the sole block under final certification", r);
+});
+
+const THREE_CHILD_DAG = childrenDag(["A0", "B0", "C0"]);
+const THREE_CHILD_DAG_DIGEST = createHash("sha256").update(THREE_CHILD_DAG).digest("hex");
+
+test("[PS] current_block not among the concurrently active blocks (nothing ACCEPTANCE_RECOMMENDED)", () => {
+  const dag = write("dag-cur4.toml", THREE_CHILD_DAG);
+  const state = write(
+    "state-cur4.toml",
+    header({ current: "C0", dagDigest: THREE_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // A0 REVIEW (not ACCEPTANCE_RECOMMENDED) proves REVIEW is itself a
+      // legal current_block target under the new model — the prior draft's
+      // model would have treated A0 as "certifying" here instead.
+      block("A0", "REVIEW", {
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS") +
+      "\n" +
+      block("C0", "LOCKED"),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "is not one of the concurrently active (IN_PROGRESS/REVIEW) blocks", r);
+});
+
+// -- Fixed-landing-order cumulative rehearsal (verifyConcurrentLandingSafety)
+
+test("[PS] concurrently active IN_PROGRESS block missing a well-formed implementation_candidate_sha", () => {
+  const dag = write("dag-disj1.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj1.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", { landing_order: 2 }), // no implementation_candidate_sha
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "every IN_PROGRESS block must bind a real rehearsal identity, whether or not another block is concurrently active",
+    r,
+  );
+});
+
+test("[PS] concurrently active REVIEW block missing a well-formed candidate_sha (rehearsal-specific check, distinct from the unconditional IN_PROGRESS check above)", () => {
+  const dag = write("dag-disj1b.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj1b.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      // A REVIEW row with NO candidate_sha at all — EVIDENCE_BOUND (elsewhere
+      // in main()) already reports its own violation for this, but the
+      // rehearsal's own candidate-identity check (verifyConcurrentLandingSafety,
+      // the non-IN_PROGRESS branch) is a SEPARATE call site and must ALSO fire,
+      // independently of the IN_PROGRESS-specific check exercised above.
+      block("B0", "REVIEW", { landing_order: 2 }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "cannot be established without a real candidate identity for every concurrently active block",
+    r,
+  );
+});
+
+test("[PS] IN_PROGRESS block's implementation_ref is not a well-formed ref name (Finding E, second bullet — closed)", () => {
+  const dag = write("dag-implref1.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-implref1.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: "", // missing — the default, unbound declaration
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "implementation_candidate_sha must be bound to a resolvable live ref", r);
+});
+
+test("[PS] IN_PROGRESS block's implementation_ref does not resolve to a real commit", () => {
+  const dag = write("dag-implref2.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-implref2.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: "no-such-branch-anywhere",
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "could not be resolved (git rev-parse --verify)", r);
+});
+
+test("[PS] IN_PROGRESS block's implementation_ref resolves, but its live tip does not match the declared implementation_candidate_sha (stale pin)", () => {
+  // Finding E, second bullet, closed: implementation_ref is a REAL, live ref
+  // (concurrent-b) — it resolves fine — but the ledger declares
+  // implementation_candidate_sha as a DIFFERENT real commit (concurrent-a).
+  // A validator that only checked "does implementation_ref resolve to
+  // SOMETHING" (rather than requiring it to equal the pin exactly) would
+  // wrongly pass this.
+  const dag = write("dag-implref3.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-implref3.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A, // stale — the ref has moved on
+        implementation_ref: CONCURRENT_B_REF, // live tip is CONCURRENT_B, not CONCURRENT_A
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_C,
+        implementation_ref: CONCURRENT_C_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the pin does not match the live ref's current tip", r);
+});
+
+// -- Round 4, FIX 1: implementation_ref must be an actual, normalized branch
+// ref — never a raw object id or the HEAD pseudoref, both of which
+// trivially "resolve" (to themselves, or to wherever this worktree happens
+// to be checked out) no matter how stale implementation_candidate_sha
+// really is, and never any other rev-parse-able object (e.g. a tag) that
+// isn't a branch.
+
+test("[PS] implementation_ref is rejected when it is a raw 40-char object id, even though it trivially 'resolves' to itself (round 4, FIX 1)", () => {
+  const dag = write("dag-implref-oid.toml", DAG1);
+  const state = write(
+    "state-implref-oid.toml",
+    header({ current: "A0" }) +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: SHA, // a raw OID, self-matching under the pre-fix defect
+        base_sha: SHA_BASE,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "is a raw object id or the literal HEAD pseudoref, not an actual branch ref",
+    r,
+  );
+});
+
+test("[PS] implementation_ref is rejected when it is the literal HEAD pseudoref, even though it trivially resolves wherever this worktree is checked out (round 4, FIX 1)", () => {
+  const dag = write("dag-implref-head.toml", DAG1);
+  const state = write(
+    "state-implref-head.toml",
+    header({ current: "A0" }) +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA, // gitRoot's checked-out tip — HEAD resolves here too
+        implementation_ref: "HEAD",
+        base_sha: SHA_BASE,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "is a raw object id or the literal HEAD pseudoref, not an actual branch ref",
+    r,
+  );
+});
+
+test("[PS] implementation_ref that resolves to a real, tip-matching commit but is NOT a branch (a TAG) is still rejected (round 4, FIX 1)", () => {
+  const dag = write("dag-implref-tag.toml", DAG1);
+  const state = write(
+    "state-implref-tag.toml",
+    header({ current: "A0" }) +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_TAG, // real ref, resolves, tip matches — but a tag, not a branch
+        base_sha: SHA_BASE,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "implementation_ref must name an actual refs/heads/... branch, never any other rev-parse-able object or pseudoref",
+    r,
+  );
+});
+
+// -- Round 4, FIX 2: the implementation_ref/implementation_candidate_sha
+// binding must be checked for a SOLE IN_PROGRESS block — never gated on
+// verifyConcurrentLandingSafety's own active.length > 1 rehearsal, which the
+// ordinary, overwhelmingly common single-IN_PROGRESS ledger never satisfies.
+
+test("[PS] implementation_ref/implementation_candidate_sha binding is checked even with exactly ONE active IN_PROGRESS block (round 4, FIX 2 scoping discriminator)", () => {
+  const dag = write("dag-implref-solo.toml", DAG1);
+  const state = write(
+    "state-implref-solo.toml",
+    header({ current: "A0" }) +
+      block("A0", "IN_PROGRESS", { implementation_ref: "no-such-branch-anywhere-solo" }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "every IN_PROGRESS block must bind a real rehearsal identity, whether or not another block is concurrently active",
+    r,
+  );
+});
+
+// -- Round 4 mutation-kill discriminators. Each empirically PROVES its test
+// actually discriminates (not merely asserted): apply the exact rejected
+// mutation to a SCRATCH COPY of validate-program-state.mjs, run the same
+// fixture against the mutated copy and observe it WRONGLY passes (the bug
+// this fix closed is back), then run the real, unmutated PS_FILE against the
+// identical fixture and observe it correctly fails.
+
+// The scratch copy is written INTO scripts/ (alongside PS_FILE) rather than
+// a mkdtemp scratch dir — validate-program-state.mjs imports
+// ./lib/rev11-toml.mjs and ./lib/stack-window-lib.mjs by relative path, so a
+// copy dropped anywhere else fails to resolve those imports at runtime (a
+// setup failure, not a discriminating result). A unique per-call filename,
+// removed in the caller's `finally`, keeps this test-only and non-committed.
+let scratchCounter = 0;
+function scratchMutate(mutate, label) {
+  const original = readFileSync(PS_FILE, "utf8");
+  const mutated = applied(original, mutate(original), label);
+  const scratchPath = join(
+    HERE,
+    `.mutation-scratch-${process.pid}-${scratchCounter++}.validate-program-state.mjs`,
+  );
+  writeFileSync(scratchPath, mutated, "utf8");
+  return scratchPath;
+}
+
+function runScratch(scratchPath, dagPath, statePath, mode) {
+  const res = spawnSync(
+    process.execPath,
+    [scratchPath, "--dag", dagPath, "--state", statePath, "--mode", mode, "--no-authority"],
+    { encoding: "utf8", cwd: gitRoot },
+  );
+  return { status: res.status, out: res.stdout ?? "", err: res.stderr ?? "" };
+}
+
+test("[PS] mutation-kill: reintroducing raw-OID/HEAD acceptance for implementation_ref is caught by the round-4 FIX-1 test", () => {
+  const scratchPath = scratchMutate(
+    (src) => src.replace('if (ref === "HEAD" || SHA_RE.test(ref)) {', "if (false) {"),
+    "neutralize the HEAD/raw-OID rejection",
+  );
+  try {
+    const dag = write("dag-mutkill-oid.toml", DAG1);
+    const state = write(
+      "state-mutkill-oid.toml",
+      header({ current: "A0" }) +
+        block("A0", "IN_PROGRESS", {
+          implementation_candidate_sha: SHA,
+          implementation_ref: "HEAD",
+          base_sha: SHA_BASE,
+        }),
+    );
+    const mutatedResult = runScratch(scratchPath, dag, state, "live");
+    assert.equal(
+      mutatedResult.status,
+      0,
+      `expected the MUTATED (bug-reintroducing) validator to wrongly PASS, got:\n${mutatedResult.err}\n${mutatedResult.out}`,
+    );
+    const realResult = runPS(dag, state, "live");
+    expectCheck(
+      PS_FILE,
+      "is a raw object id or the literal HEAD pseudoref, not an actual branch ref",
+      realResult,
+    );
+  } finally {
+    rmSync(scratchPath, { force: true });
+  }
+});
+
+test("[PS] mutation-kill: reintroducing the active.length < 2 scoping gate silently un-checks a sole IN_PROGRESS block's implementation_ref, caught by the round-4 FIX-2 test", () => {
+  const scratchPath = scratchMutate(
+    (src) =>
+      src.replace(
+        "const implementationRefResults = verifyImplementationRefFields(stateById, v);",
+        "const implementationRefResults = new Map();",
+      ),
+    "neutralize the unconditional implementation_ref field check",
+  );
+  try {
+    const dag = write("dag-mutkill-scope.toml", DAG1);
+    const state = write(
+      "state-mutkill-scope.toml",
+      header({ current: "A0" }) +
+        block("A0", "IN_PROGRESS", { implementation_ref: "no-such-branch-anywhere-mutkill" }),
+    );
+    const mutatedResult = runScratch(scratchPath, dag, state, "live");
+    assert.equal(
+      mutatedResult.status,
+      0,
+      `expected the MUTATED (scoping-regressed) validator to wrongly PASS a lone unchecked IN_PROGRESS block, got:\n${mutatedResult.err}\n${mutatedResult.out}`,
+    );
+    const realResult = runPS(dag, state, "live");
+    expectCheck(
+      PS_FILE,
+      "every IN_PROGRESS block must bind a real rehearsal identity, whether or not another block is concurrently active",
+      realResult,
+    );
+  } finally {
+    rmSync(scratchPath, { force: true });
+  }
+});
+
+test("[PS] landing_order is not a positive integer", () => {
+  const dag = write("dag-lo1.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo1.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      // landing_order 0 is the block()/template default — the "not
+      // participating" value, invalid the moment >1 block is active.
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 0,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "is not a positive integer", r);
+});
+
+test("[PS] entry-lock identity: repository.branch is not a well-formed branch name", () => {
+  // AMD-013 round 5: repository.branch/head_sha are now the IMMUTABLE A0
+  // entry-lock identity (verifyEntryLockIdentity), never the trunk-pin
+  // oracle (that is repository.integration_branch/integration_head_sha,
+  // covered separately below). Runs UNCONDITIONALLY, on a single-block
+  // ledger — no rehearsal in play at all — to demonstrate it is not gated
+  // on concurrency.
+  const dag = write("dag-trunk0.toml", DAG1);
+  const base = header({ current: "A0" }) + block("A0", "LOCKED");
+  const mutated = applied(
+    base,
+    base.replace(/branch = "main"/, 'branch = ""'),
+    "empty repository.branch",
+  );
+  const state = write("state-trunk0.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the immutable A0 entry-lock branch", r);
+});
+
+test("[PS] entry-lock identity: repository.head_sha is not a resolved 40-char lowercase git object id", () => {
+  const dag = write("dag-trunk1.toml", TWO_CHILD_DAG);
+  const base =
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+    rootAccepted() +
+    "\n" +
+    block("A0", "IN_PROGRESS", {
+      implementation_candidate_sha: CONCURRENT_A,
+      implementation_ref: CONCURRENT_A_REF,
+      base_sha: SHA_BASE,
+      landing_order: 1,
+    }) +
+    "\n" +
+    block("B0", "IN_PROGRESS", {
+      implementation_candidate_sha: CONCURRENT_B,
+      implementation_ref: CONCURRENT_B_REF,
+      base_sha: SHA_BASE,
+      landing_order: 2,
+    });
+  const mutated = applied(
+    base,
+    base.replace(/head_sha = "[0-9a-f]{40}"/, 'head_sha = "not-a-real-sha"'),
+    "malform repository.head_sha",
+  );
+  const state = write("state-trunk1.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the immutable A0 entry-lock checkout SHA", r);
+});
+
+test("[PS] entry-lock identity: repository.head_sha resolved but does not equal entry_checkout_sha (drift)", () => {
+  // A well-formed but WRONG head_sha — the entry-lock identity has drifted
+  // from its own entry_checkout_sha record. Distinct violation from the
+  // malformed-shape case above (that one never reaches the equality check).
+  const dag = write("dag-trunk1b.toml", DAG1);
+  const base = header({ current: "A0" }) + block("A0", "LOCKED");
+  const mutated = applied(
+    base,
+    base.replace(/head_sha = "[0-9a-f]{40}"/, `head_sha = "${SHA_BASE}"`),
+    "drift repository.head_sha away from entry_checkout_sha",
+  );
+  const state = write("state-trunk1b.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "the immutable A0 entry-lock SHA has drifted from its own entry-checkout record",
+    r,
+  );
+});
+
+test("[PS] entry-lock identity: repository.head_tree is not a resolved 40-char lowercase tree object id", () => {
+  const dag = write("dag-trunk1c.toml", DAG1);
+  const base = header({ current: "A0" }) + block("A0", "LOCKED");
+  const mutated = applied(
+    base,
+    base.replace(/head_tree = "[0-9a-f]{40}"/, 'head_tree = "not-a-real-sha"'),
+    "malform repository.head_tree",
+  );
+  const state = write("state-trunk1c.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the immutable A0 entry-lock checkout TREE", r);
+});
+
+test("[PS] entry-lock identity: repository.head_tree resolved but does not equal entry_checkout_tree (drift)", () => {
+  const dag = write("dag-trunk1d.toml", DAG1);
+  const base = header({ current: "A0" }) + block("A0", "LOCKED");
+  const mutated = applied(
+    base,
+    base.replace(/head_tree = "[0-9a-f]{40}"/, `head_tree = "${SHA_BASE}"`),
+    "drift repository.head_tree away from entry_checkout_tree",
+  );
+  const state = write("state-trunk1d.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "the immutable A0 entry-lock TREE has drifted from its own entry-checkout record",
+    r,
+  );
+});
+
+test("[PS] pinned-trunk resolution: repository.integration_branch is not a well-formed branch name", () => {
+  // Trunk-pin resolution (resolvePinnedTrunk) runs UNCONDITIONALLY on every
+  // live-mode validation, sourced from integration_branch/integration_head_sha
+  // (AMD-013 round 5) — distinct from, and never satisfied by, the
+  // entry-lock repository.branch/head_sha pair covered above. Proven here
+  // with a SINGLE-block ledger — no rehearsal in play at all — to
+  // demonstrate it is not gated on concurrency.
+  const dag = write("dag-trunk0i.toml", DAG1);
+  const base = header({ current: "A0" }) + block("A0", "LOCKED");
+  const mutated = applied(
+    base,
+    base.replace(/integration_branch = "main"/, 'integration_branch = ""'),
+    "empty repository.integration_branch",
+  );
+  const state = write("state-trunk0i.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the ledger must name the EXPLICIT configured integration-trunk ref", r);
+});
+
+test("[PS] pinned-trunk resolution: repository.integration_head_sha is not a resolved 40-char lowercase git object id", () => {
+  // Trunk-pin resolution runs unconditionally now (see the test above); this
+  // fixture still uses two concurrently active blocks so the SAME state also
+  // exercises the fixed-landing-order rehearsal's own consumption of the
+  // (failed-to-resolve) pin, one call site down.
+  const dag = write("dag-trunk1i.toml", TWO_CHILD_DAG);
+  const base =
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+    rootAccepted() +
+    "\n" +
+    block("A0", "IN_PROGRESS", {
+      implementation_candidate_sha: CONCURRENT_A,
+      implementation_ref: CONCURRENT_A_REF,
+      base_sha: SHA_BASE,
+      landing_order: 1,
+    }) +
+    "\n" +
+    block("B0", "IN_PROGRESS", {
+      implementation_candidate_sha: CONCURRENT_B,
+      implementation_ref: CONCURRENT_B_REF,
+      base_sha: SHA_BASE,
+      landing_order: 2,
+    });
+  const mutated = applied(
+    base,
+    base.replace(
+      /integration_head_sha = "[0-9a-f]{40}"/,
+      'integration_head_sha = "not-a-real-sha"',
+    ),
+    "malform repository.integration_head_sha",
+  );
+  const state = write("state-trunk1i.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the ledger must PIN the integration-trunk identity", r);
+});
+
+test("[PS] concurrently active block missing base_sha (candidate present, base absent)", () => {
+  const dag = write("dag-basemiss.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-basemiss.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // A0 has a well-formed candidate but NO base_sha — isolates the
+      // base_sha-missing check (Finding D) from the candidate-missing check
+      // above it, which this fixture does not trip.
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the fixed-landing-order rehearsal replays each block's own base_sha", r);
+});
+
+test("[PS] landing_order violates same-stack layer ordering (Finding E)", () => {
+  const dag = write("dag-stacklo.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-stacklo.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // A0/B0 are true DAG siblings (both children of R0, no predecessor
+      // edge between them) sharing stack S1 — isolates the stack-layer
+      // check from the DAG-predecessor-order check above it, which this
+      // fixture does not trip.
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        stack_id: "S1",
+        stack_layer: 0,
+        landing_order: 2, // wrong — the lower stack_layer must land first
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        stack_id: "S1",
+        stack_layer: 1,
+        landing_order: 1,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "a lower stack layer must land before a higher layer in the same stack", r);
+});
+
+test("[PS] duplicate landing_order among concurrently active blocks", () => {
+  const dag = write("dag-lo2.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo2.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "the fixed landing order must be an unambiguous total order", r);
+});
+
+test("[PS] ACCEPTANCE_RECOMMENDED block is not first in the fixed landing order", () => {
+  const dag = write("dag-lo3.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo3.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", {
+        base_sha: SHA,
+        candidate_sha: CONCURRENT_A,
+        candidate_tree: CONCURRENT_A_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        conformance_review: "PASS",
+        conformance_reviewed_sha: CONCURRENT_A,
+        architecture_review: "PASS",
+        architecture_reviewed_sha: CONCURRENT_A,
+        adversarial_review: "PASS",
+        adversarial_reviewed_sha: CONCURRENT_A,
+        landing_order: 2, // wrong — must be the minimum
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "the block under final certification must be first in the fixed landing order",
+    r,
+  );
+});
+
+test("[PS] predecessor landing_order not before its concurrently active dependent", () => {
+  const dag = write("dag-lo4.toml", CHAIN_DAG);
+  const state = write(
+    "state-lo4.toml",
+    header({ current: "A0", dagDigest: CHAIN_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      stackedOver("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2, // wrong — A0 is A1's predecessor, must be lower
+      }) +
+      "\n" +
+      stackedOver("A1", "REVIEW", {
+        base_sha: SHA,
+        candidate_sha: SHA,
+        candidate_tree: TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "a predecessor must land before its dependent in the fixed landing order",
+    r,
+  );
+});
+
+test("[PS] pinned-trunk resolution: repository tip cannot be resolved (broken git rev-parse)", () => {
+  // The trunk pin (resolvePinnedTrunk, Finding C) resolves BEFORE the
+  // rehearsal walk ever runs — a broken `git rev-parse HEAD` fails the pin
+  // itself, not the (now internal-rev-parse-free) rehearsal walk.
+  const dag = write("dag-lo5.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo5.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("rev-parse") });
+  expectCheck(
+    PS_FILE,
+    "to revalidate the ledger's pinned trunk repository.integration_head_sha",
+    r,
+  );
+});
+
+test("[PS] pinned-trunk resolution: ledger repository.head_sha does not match the live repository HEAD, and the rehearsal itself does not silently proceed", () => {
+  // Finding C: a stale/wrong pinned trunk must fail closed, not be silently
+  // resynced to whatever HEAD happens to be at validation time — AND once
+  // resolvePinnedTrunk returns null, verifyConcurrentLandingSafety must not
+  // silently skip either: it records its OWN distinct violation naming why
+  // nothing below could be rehearsed, rather than reusing the trunk-pin
+  // message or running the git walk anyway.
+  const dag = write("dag-lo5b.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo5b.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST, repoSha: SHA_BASE }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "trunk has advanced since the ledger pinned it", r);
+  expectCheck(PS_FILE, "the fixed-landing-order rehearsal cannot run for", r);
+});
+
+test("[PS] declared base_sha is not an ancestor of its rehearsal candidate (stale base)", () => {
+  const dag = write("dag-lo6.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo6.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // SHA and CONCURRENT_A are SIBLINGS off SHA_BASE (see the before()
+      // fixture setup) — SHA is a real commit, but not CONCURRENT_A's
+      // ancestor. A restack cascade "the Nth block restacks N-1 times" that
+      // silently kept a stale declared base is exactly this shape.
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "the declared delta cannot be trusted for the fixed-landing-order rehearsal",
+    r,
+  );
+});
+
+test("[PS] base_sha ancestry check itself failing (broken git merge-base) is reported distinctly", () => {
+  const dag = write("dag-lo7.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo7.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // SHA_BASE genuinely IS an ancestor of CONCURRENT_A — this isolates
+      // the subprocess-failure branch from the stale-base violation above.
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("merge-base") });
+  expectCheck(PS_FILE, "ancestry against its rehearsal candidate", r);
+});
+
+test("[PS] two concurrently active blocks with a real merge conflict are rejected", () => {
+  const dag = write("dag-disj2.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj2.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_CONFLICT_A,
+        implementation_ref: CONCURRENT_CONFLICT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_CONFLICT_B,
+        implementation_ref: CONCURRENT_CONFLICT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "reports real content conflicts", r);
+});
+
+test("[PS] two concurrently active blocks that are genuinely disjoint, in fixed landing order, PASS", () => {
+  const dag = write("dag-disj3.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj3.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] a certifying (ACCEPTANCE_RECOMMENDED) block plus an IN_PROGRESS block, disjoint and correctly ordered, PASS", () => {
+  // Directly answers "cover the certifying block too": the sole
+  // ACCEPTANCE_RECOMMENDED block's OWN candidate_sha is rehearsed here,
+  // first in the fixed landing order, against real trunk — not silently
+  // excluded the way the prior draft's `implementing`-only rehearsal did.
+  const dag = write("dag-disj-cert.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj-cert.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", {
+        base_sha: SHA_BASE,
+        candidate_sha: CONCURRENT_A,
+        candidate_tree: CONCURRENT_A_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        conformance_review: "PASS",
+        conformance_reviewed_sha: CONCURRENT_A,
+        architecture_review: "PASS",
+        architecture_reviewed_sha: CONCURRENT_A,
+        adversarial_review: "PASS",
+        adversarial_reviewed_sha: CONCURRENT_A,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] two concurrently active REVIEW blocks alongside one ACCEPTANCE_RECOMMENDED block PASS (REVIEW is not capped at one)", () => {
+  // The exact shape contracts/stacked-prs.md:100 requires and the prior
+  // (rejected) draft's combined REVIEW+ACCEPTANCE_RECOMMENDED cap of 1 made
+  // impossible: several green REVIEW layers plus the one currently eligible
+  // ACCEPTANCE_RECOMMENDED landing block, all concurrently active — REVIEW
+  // cardinality here is 2, disproving the rejected draft's cap outright.
+  const ids = ["A0", "B0", "C0"];
+  const dag = write("dag-review-uncapped.toml", childrenDag(ids));
+  const dagDigest = createHash("sha256").update(childrenDag(ids)).digest("hex");
+  const state = write(
+    "state-review-uncapped.toml",
+    header({ current: "A0", dagDigest }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "ACCEPTANCE_RECOMMENDED", {
+        base_sha: SHA_BASE,
+        candidate_sha: CONCURRENT_A,
+        candidate_tree: CONCURRENT_A_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        conformance_review: "PASS",
+        conformance_reviewed_sha: CONCURRENT_A,
+        architecture_review: "PASS",
+        architecture_reviewed_sha: CONCURRENT_A,
+        adversarial_review: "PASS",
+        adversarial_reviewed_sha: CONCURRENT_A,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: CONCURRENT_B,
+        candidate_tree: CONCURRENT_B_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n" +
+      block("C0", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: CONCURRENT_C,
+        candidate_tree: CONCURRENT_C_TREE,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 3,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] the rehearsal replays each block's OWN declared base_sha, not an auto-derived merge-base (Finding A/D discriminator)", () => {
+  // A regression-shaped discriminator, not just a positive-path assertion:
+  // proves --merge-base is actually HONORED by the git merge-tree call, not
+  // silently ignored in favor of git's own ancestry search. Dedicated repo
+  // (not the shared gitRoot) so its own history shape is exact:
+  //   DISC_ROOT -> DISC_TRUNK (main's tip, the trunk pin) -> DISC_CAND
+  //     (A0's rehearsal candidate; DISC_TRUNK is its REAL immediate parent)
+  // A0 DECLARES base_sha = DISC_ROOT — a real ancestor of DISC_CAND (passes
+  // the ancestor check) but NOT its immediate parent. Replaying A0's delta
+  // from the DECLARED base (base.txt "root"->"candidate-version") onto
+  // trunk's OWN change from that SAME declared base (base.txt
+  // "root"->"trunk-version") is a genuine same-line conflict. A validator
+  // that (bug) let git auto-derive the merge-base instead of honoring
+  // --merge-base would instead compute merge-base(DISC_TRUNK, DISC_CAND) =
+  // DISC_TRUNK itself (DISC_CAND's real parent) and see a clean, no-op
+  // merge — wrongly PASSING a base_sha that does not actually describe
+  // A0's delta.
+  const discRoot = mkdtempSync(join(tmpdir(), "validate-mutation-suite-disc-"));
+  git(["init", "-q"], discRoot);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"], discRoot);
+  git(["config", "user.email", "test@example.invalid"], discRoot);
+  git(["config", "user.name", "Test"], discRoot);
+  git(["config", "commit.gpgsign", "false"], discRoot);
+
+  writeFileSync(join(discRoot, "base.txt"), "root\n");
+  git(["add", "-A"], discRoot);
+  git(["commit", "-q", "-m", "root"], discRoot);
+  const DISC_ROOT = git(["rev-parse", "HEAD"], discRoot);
+
+  writeFileSync(join(discRoot, "base.txt"), "trunk-version\n");
+  git(["add", "-A"], discRoot);
+  git(["commit", "-q", "-m", "trunk"], discRoot);
+  const DISC_TRUNK = git(["rev-parse", "HEAD"], discRoot); // main stays here — the trunk pin
+  const DISC_TRUNK_TREE = git(["rev-parse", "HEAD^{tree}"], discRoot);
+
+  // Candidate commit made on its own branch off DISC_TRUNK; unlike
+  // SHA_DANGLING's deliberately-deleted convention, this branch is KEPT
+  // LIVE (AMD-013 FIX 2 — implementation_ref must resolve to it). main is
+  // left at DISC_TRUNK.
+  const DISC_CAND_REF = "disc-candidate";
+  const DISC_TRUNK_REF = "main";
+  git(["checkout", "-q", "-b", DISC_CAND_REF, DISC_TRUNK], discRoot);
+  writeFileSync(join(discRoot, "base.txt"), "candidate-version\n");
+  git(["add", "-A"], discRoot);
+  git(["commit", "-q", "-m", "candidate"], discRoot);
+  const DISC_CAND = git(["rev-parse", "HEAD"], discRoot);
+  git(["checkout", "-q", "main"], discRoot);
+
+  const acceptedR0 = block("R0", "ACCEPTED", {
+    entry_lock_digest: DIGEST,
+    charter_digest: DIGEST,
+    context_packet_digest: DIGEST,
+    base_sha: DISC_ROOT,
+    candidate_sha: DISC_TRUNK,
+    candidate_tree: DISC_TRUNK_TREE,
+    accepted_sha: DISC_TRUNK,
+    accepted_tree: DISC_TRUNK_TREE,
+    landing_equivalence_digest: DIGEST,
+    evidence_digest: DIGEST,
+    conformance_review: "PASS",
+    conformance_reviewed_sha: DISC_TRUNK,
+    architecture_review: "PASS",
+    architecture_reviewed_sha: DISC_TRUNK,
+    adversarial_review: "PASS",
+    adversarial_reviewed_sha: DISC_TRUNK,
+    maintainer_decision: "ACCEPTED",
+  });
+
+  const dag = write("dag-discriminator.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-discriminator.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST, repoSha: DISC_TRUNK }) +
+      acceptedR0 +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: DISC_CAND,
+        implementation_ref: DISC_CAND_REF,
+        base_sha: DISC_ROOT, // stale declared base — NOT A0's real immediate parent
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: DISC_TRUNK,
+        implementation_ref: DISC_TRUNK_REF,
+        base_sha: DISC_TRUNK,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], { cwd: discRoot });
+  expectCheck(PS_FILE, "reports real content conflicts", r);
+  rmSync(discRoot, { recursive: true, force: true });
+});
+
+test("[PS] cumulative landing rehearsal itself failing (broken git merge-tree) is reported distinctly", () => {
+  const dag = write("dag-disj4.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj4.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("merge-tree") });
+  expectCheck(PS_FILE, "cumulative landing rehearsal could not be checked", r);
+});
+
+test("[PS] cumulative landing rehearsal cannot synthesise a rehearsal commit (broken git commit-tree)", () => {
+  const dag = write("dag-disj5.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-disj5.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], { env: fakeGitEnv("commit-tree") });
+  expectCheck(PS_FILE, "could not synthesise a rehearsal commit", r);
+});
+
+test("[PS] trunk pin discriminator: the configured trunk ref (repository.branch), not checkout HEAD, is the oracle (round-2 fix)", () => {
+  // Direct reproduction of the exact shape that surfaced the round-2 defect:
+  // a worktree whose checkout HEAD sits on a DIFFERENT ref than the
+  // ledger-declared trunk branch, while the pin correctly names trunk's own
+  // live tip. A validator that (bug, round-1 fix) compared against checkout
+  // HEAD instead of the configured branch would wrongly report trunk drift
+  // here and FAIL — this fixture is discriminating: it PASSES under the
+  // correct (branch-ref) oracle and would FAIL under the rejected
+  // (checkout-HEAD) one, with nothing else in the ledger able to produce
+  // that difference (single-block ledger, no rehearsal in play at all).
+  const trunkRepo = mkdtempSync(join(tmpdir(), "validate-mutation-suite-trunkdisc-"));
+  git(["init", "-q"], trunkRepo);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"], trunkRepo);
+  git(["config", "user.email", "test@example.invalid"], trunkRepo);
+  git(["config", "user.name", "Test"], trunkRepo);
+  git(["config", "commit.gpgsign", "false"], trunkRepo);
+
+  writeFileSync(join(trunkRepo, "base.txt"), "base\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "-m", "base"], trunkRepo);
+  const TRUNK_SHA = git(["rev-parse", "HEAD"], trunkRepo); // main stays here — the correct pin
+
+  // A checkout position AHEAD of trunk on its own branch — exactly a
+  // feature-branch worktree, or a review checkout, sitting somewhere other
+  // than trunk while trunk itself has not moved.
+  git(["checkout", "-q", "-b", "feature", TRUNK_SHA], trunkRepo);
+  writeFileSync(join(trunkRepo, "feature.txt"), "feature\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "-m", "feature work"], trunkRepo);
+  // HEAD now resolves to the feature-branch commit, NOT TRUNK_SHA — checkout
+  // is deliberately left here, never switched back to main.
+
+  const dag = write("dag-trunkdisc.toml", DAG1);
+  const state = write(
+    "state-trunkdisc.toml",
+    header({ current: "A0", repoSha: TRUNK_SHA }) + block("A0", "LOCKED"),
+  );
+  const r = runPS(dag, state, "live", [], { cwd: trunkRepo });
+  assert.equal(
+    r.status,
+    0,
+    `expected PASS (pin matches trunk's own tip even though checkout HEAD sits elsewhere), got:\n${r.err}\n${r.out}`,
+  );
+  rmSync(trunkRepo, { recursive: true, force: true });
+});
+
+test("[PS] trunk pin discriminator: checkout HEAD matching the pin does NOT excuse an actually-stale trunk branch", () => {
+  // The mirror case, closing the discriminator from the other direction:
+  // checkout HEAD is PINNED at the ledger's declared head_sha (what the
+  // rejected checkout-HEAD oracle would have accepted), but the CONFIGURED
+  // trunk branch (main) has genuinely advanced past it. The correct
+  // (branch-ref) oracle must still catch this as trunk drift.
+  const trunkRepo = mkdtempSync(join(tmpdir(), "validate-mutation-suite-trunkdisc2-"));
+  git(["init", "-q"], trunkRepo);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"], trunkRepo);
+  git(["config", "user.email", "test@example.invalid"], trunkRepo);
+  git(["config", "user.name", "Test"], trunkRepo);
+  git(["config", "commit.gpgsign", "false"], trunkRepo);
+
+  writeFileSync(join(trunkRepo, "base.txt"), "base\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "-m", "base"], trunkRepo);
+  const STALE_SHA = git(["rev-parse", "HEAD"], trunkRepo); // the ledger's stale pin
+
+  git(["checkout", "-q", "-b", "detached-at-stale-point", STALE_SHA], trunkRepo);
+  // checkout now sits exactly at STALE_SHA — matching the pin the OLD
+  // (checkout-HEAD) oracle would have accepted.
+
+  git(["checkout", "-q", "main"], trunkRepo);
+  writeFileSync(join(trunkRepo, "advance.txt"), "advance\n");
+  git(["add", "-A"], trunkRepo);
+  git(["commit", "-q", "-m", "trunk advanced"], trunkRepo);
+  // main has genuinely moved on; checkout is left on main (past STALE_SHA)
+  // to also prove this isn't merely "HEAD happens to differ" — trunk itself
+  // is provably ahead of the declared pin.
+  git(["branch", "-D", "detached-at-stale-point"], trunkRepo);
+
+  const dag = write("dag-trunkdisc2.toml", DAG1);
+  const state = write(
+    "state-trunkdisc2.toml",
+    header({ current: "A0", repoSha: STALE_SHA }) + block("A0", "LOCKED"),
+  );
+  const r = runPS(dag, state, "live", [], { cwd: trunkRepo });
+  expectCheck(PS_FILE, "trunk has advanced since the ledger pinned it", r);
+  rmSync(trunkRepo, { recursive: true, force: true });
+});
+
+test("[PS] rehearsal single-parent-commit discriminator: git commit-tree is invoked with exactly one -p per step", () => {
+  // A dedicated shim (distinct from fakeGitEnv, which only breaks a whole
+  // subcommand) that intercepts every real `commit-tree` invocation and
+  // FAILS LOUDLY the moment it observes anything other than EXACTLY one
+  // `-p` flag — the single-parent-commit invariant Finding A requires (a
+  // second parent silently restores the two-parent MERGE COMMIT semantics
+  // round 2 rejected). Running the real, unmutated validator through this
+  // shim and asserting a clean PASS is the discriminator: it empirically
+  // proves every commit-tree call in the current rehearsal is single-parent
+  // (would FAIL the instant that regresses to two parents), not merely that
+  // the source reads that way today.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-pcount-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "commit-tree") {
+  const pCount = args.filter((a) => a === "-p").length;
+  if (pCount !== 1) {
+    process.stderr.write(
+      "shim: commit-tree invoked with " + pCount + " -p flag(s), expected exactly 1\\n",
+    );
+    process.exit(42);
+  }
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
+  const dag = write("dag-pcount.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-pcount.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
+  assert.equal(
+    r.status,
+    0,
+    `expected the rehearsal to pass with exactly one -p per commit-tree call, got:\n${r.err}\n${r.out}`,
+  );
+  assert.doesNotMatch(
+    r.err,
+    /shim: commit-tree invoked with/,
+    "the single-parent shim fired — commit-tree was invoked with something other than exactly one -p",
+  );
+  rmSync(shimDir, { recursive: true, force: true });
 });
 
 // =====================================================================
@@ -1653,6 +3124,105 @@ test("[PS] evidence_digest content does not match the resolved artifact", () => 
   );
   const r = runPS(dag, state, "live");
   expectCheck(PS_FILE, "does not match the SHA-256 of ${artifact}", r);
+  rmSync(evRoot, { recursive: true, force: true });
+});
+
+// =====================================================================
+// PROGRAM-STATE — entry-lock RECORD content binding
+// (verifyEntryLockRecordBinding, AMD-013 ratification correction 1)
+//
+// verifyEntryLockIdentity (covered above) only cross-checks repository.
+// branch/head_sha/head_tree/entry_checkout_sha/entry_checkout_tree against
+// EACH OTHER — every one an equally mutable field on the SAME in-memory
+// ledger. verifyEntryLockRecordBinding additionally binds them to the DAG
+// root's digest-bound entry-lock.toml RECORD, a separate file the same edit
+// cannot also rewrite. The coordinated-mutation test below is the actual
+// discriminator this correction was written to close: it rewrites all five
+// fields IN LOCKSTEP to a different, but still internally self-consistent,
+// checkout identity — exactly the shape that passed verifyEntryLockIdentity
+// alone (64/0) before this correction.
+// =====================================================================
+
+test("[PS] entry_lock_digest does not match the SHA-256 of the resolved entry-lock record", () => {
+  const evRoot = mkdtempSync(join(tmpdir(), "validate-mutation-suite-entrylock1-"));
+  mkdirSync(join(evRoot, "A0"), { recursive: true });
+  writeFileSync(
+    join(evRoot, "A0", "entry-lock.toml"),
+    `[repository]\nbranch = "main"\nentry_checkout_sha = "${SHA}"\nentry_checkout_tree = "${SHA}"\n`,
+  );
+  const dag = write("dag-entrylock1.toml", DAG1);
+  const state = write(
+    "state-entrylock1.toml",
+    header({
+      current: "A0",
+      repoSha: SHA,
+      orchestration: `\n[orchestration]\nevidence_root = "${evRoot}"\n`,
+    }) + block("A0", "LOCKED", { entry_lock_digest: DIGEST2 }), // wrong digest, real record exists
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "does not match the SHA-256 of ${artifactPath}", r);
+  rmSync(evRoot, { recursive: true, force: true });
+});
+
+test("[PS] resolved entry-lock record is not valid TOML", () => {
+  const evRoot = mkdtempSync(join(tmpdir(), "validate-mutation-suite-entrylock2-"));
+  mkdirSync(join(evRoot, "A0"), { recursive: true });
+  const badToml = "this is not [ valid toml\n";
+  writeFileSync(join(evRoot, "A0", "entry-lock.toml"), badToml);
+  const badTomlDigest = createHash("sha256").update(badToml).digest("hex");
+  const dag = write("dag-entrylock2.toml", DAG1);
+  const state = write(
+    "state-entrylock2.toml",
+    header({
+      current: "A0",
+      repoSha: SHA,
+      orchestration: `\n[orchestration]\nevidence_root = "${evRoot}"\n`,
+    }) + block("A0", "LOCKED", { entry_lock_digest: badTomlDigest }), // digest matches — bytes don't parse
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "entry-lock record ${artifactPath} is not valid TOML", r);
+  rmSync(evRoot, { recursive: true, force: true });
+});
+
+test("[PS] coordinated rewrite of all five entry-lock identity fields still fails against the digest-bound record", () => {
+  // The exact attack this correction closes: rewrite repository.branch,
+  // repository.head_sha, repository.head_tree, entry_checkout_sha, and
+  // entry_checkout_tree IN LOCKSTEP to a different but still mutually
+  // self-consistent checkout — verifyEntryLockIdentity's own cross-checks
+  // (each field against the OTHERS) all still pass, since none of them
+  // change relative to each other. Only the binding against the separate,
+  // digest-pinned entry-lock.toml record — which the mutation does not and
+  // cannot also rewrite — catches it.
+  const evRoot = mkdtempSync(join(tmpdir(), "validate-mutation-suite-entrylock3-"));
+  mkdirSync(join(evRoot, "A0"), { recursive: true });
+  const recordBytes = `[repository]\nbranch = "main"\nentry_checkout_sha = "${SHA}"\nentry_checkout_tree = "${SHA}"\n`;
+  writeFileSync(join(evRoot, "A0", "entry-lock.toml"), recordBytes);
+  const entryLockDigest = createHash("sha256").update(recordBytes).digest("hex");
+
+  const dag = write("dag-entrylock3.toml", DAG1);
+  const base =
+    header({
+      current: "A0",
+      repoSha: SHA,
+      orchestration: `\n[orchestration]\nevidence_root = "${evRoot}"\n`,
+    }) + block("A0", "LOCKED", { entry_lock_digest: entryLockDigest });
+  const mutated = applied(
+    base,
+    base
+      .replace(/branch = "main"/, 'branch = "other-branch"')
+      .replace(/entry_checkout_sha = "[0-9a-f]{40}"/, `entry_checkout_sha = "${SHA_BASE}"`)
+      .replace(/entry_checkout_tree = "[0-9a-f]{40}"/, `entry_checkout_tree = "${SHA_BASE}"`)
+      .replace(/head_sha = "[0-9a-f]{40}"/, `head_sha = "${SHA_BASE}"`)
+      .replace(/head_tree = "[0-9a-f]{40}"/, `head_tree = "${SHA_BASE}"`),
+    "coordinated rewrite of branch/head_sha/head_tree/entry_checkout_sha/entry_checkout_tree to a different, self-consistent checkout",
+  );
+  const state = write("state-entrylock3.toml", mutated);
+  const r = runPS(dag, state, "live");
+  expectCheck(
+    PS_FILE,
+    "the immutable A0 entry lock must match its own digest-bound record, not merely its own other, equally mutable, ledger fields",
+    r,
+  );
   rmSync(evRoot, { recursive: true, force: true });
 });
 

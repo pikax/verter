@@ -97,7 +97,7 @@ function resolveEvidenceArtifact(root, id) {
 
 // Rule constants, each derived from the program tree.
 
-// templates/program-state.template.toml:44-45 — the declared block-status enum.
+// templates/program-state.template.toml:50-51 — the declared block-status enum.
 const BLOCK_STATUS_ENUM = new Set([
   "LOCKED",
   "READY",
@@ -112,7 +112,7 @@ const BLOCK_STATUS_ENUM = new Set([
   "PRIVATE_CHECKPOINT",
 ]);
 
-// templates/program-state.template.toml:46 — the declared review-result enum.
+// templates/program-state.template.toml:52 — the declared review-result enum.
 const REVIEW_ENUM = new Set([
   "NOT_REQUIRED",
   "PENDING",
@@ -160,6 +160,13 @@ const STACK_EXCEPTION_STATUSES = new Set(["READY", "IN_PROGRESS", "REVIEW"]);
 
 const SHA_RE = /^[0-9a-f]{40}$/; // full lowercase git object id
 const DIGEST_RE = /^[0-9a-f]{64}$/; // lowercase SHA-256
+// A conservative, safe-enough branch/ref-name shape: must start and end with
+// an alphanumeric character (rules out a leading "-", which `git rev-parse`
+// could otherwise misparse as an option) and contain only characters legal
+// in a git ref component. Not full `git check-ref-format` compliance — git
+// itself is the authority on whether the resolved ref actually exists; this
+// only guards the shell-out from a hostile/malformed value.
+const REF_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/;
 
 // Shared "**Status:**" prose-paragraph classification. This is the ONE place
 // a document's own text is read for its ratification state — used by the
@@ -273,7 +280,7 @@ function batchCatFileCheck(cwd, specs) {
   return map;
 }
 
-function verifyLiveGitIdentities(stateById, v) {
+function verifyLiveGitIdentities(stateById, v, pinnedTrunk) {
   const cwd = process.cwd();
   const probe = runGit(["rev-parse", "--is-inside-work-tree"], cwd);
   if (probe.status !== 0 || (probe.stdout ?? "").trim() !== "true") {
@@ -290,6 +297,7 @@ function verifyLiveGitIdentities(stateById, v) {
   const SHA_FIELDS = [
     "base_sha",
     "candidate_sha",
+    "implementation_candidate_sha",
     "accepted_sha",
     ...Object.values(REVIEWED_SHA_FIELDS),
   ];
@@ -359,25 +367,32 @@ function verifyLiveGitIdentities(stateById, v) {
   }
 
   // Checks 3 & 4 are ACCEPTED-only: accepted_sha must be genuinely landed
-  // (reachable from the repository tip — never a dangling or since-rewritten
-  // commit), and base_sha must be its ancestor.
-  const tipRes = runGit(["rev-parse", "HEAD"], cwd);
-  if (tipRes.status !== 0) {
+  // (reachable from the CONFIGURED TRUNK REF's live tip — never checkout
+  // HEAD, which routinely differs from the ledger-declared trunk in an
+  // ordinary worktree, e.g. a feature-branch checkout or a review worktree,
+  // for reasons that have nothing to do with whether accepted_sha actually
+  // landed. This is the SAME defect class Finding G fixed for the trunk-pin
+  // check itself (resolvePinnedTrunk) — a second call site that sampled
+  // checkout HEAD instead of the ledger's own named trunk, found and closed
+  // in round 4 (FIX 3). pinnedTrunk is resolved once, by resolvePinnedTrunk,
+  // before this function runs; a null pin means that check already recorded
+  // its own violation, so accepted_sha reachability cannot be established
+  // against an untrustworthy trunk pin either.
+  if (pinnedTrunk === null) {
     v(
-      `live mode could not resolve the repository tip (git rev-parse HEAD) to verify accepted_sha landing: ${gitFailureReason(tipRes)}`,
+      `accepted_sha landing/reachability cannot be verified — the ledger's pinned integration trunk (repository.integration_head_sha) failed to resolve or revalidate against the live repository (see the trunk-pin violation above); reachability cannot be checked against an untrustworthy trunk pin`,
     );
     return;
   }
-  const tip = tipRes.stdout.trim();
-  const revListRes = runGit(["rev-list", tip], cwd);
+  const revListRes = runGit(["rev-list", pinnedTrunk], cwd);
   if (revListRes.status !== 0) {
     v(
-      `live mode could not enumerate commits reachable from the repository tip ${tip} (git rev-list) to verify accepted_sha landing: ${gitFailureReason(revListRes)}`,
+      `live mode could not enumerate commits reachable from the configured trunk ref's tip ${pinnedTrunk} (git rev-list) to verify accepted_sha landing: ${gitFailureReason(revListRes)}`,
     );
     return;
   }
   const reachableFromTip = new Set(revListRes.stdout.split("\n").filter((l) => l !== ""));
-  reachableFromTip.add(tip);
+  reachableFromTip.add(pinnedTrunk);
 
   for (const [id, b] of stateById) {
     if (b.status !== "ACCEPTED") continue;
@@ -385,7 +400,7 @@ function verifyLiveGitIdentities(stateById, v) {
       const info = resolved.get(b.accepted_sha);
       if (info && info.type === "commit" && !reachableFromTip.has(b.accepted_sha)) {
         v(
-          `state block ${id} is ACCEPTED with accepted_sha ${b.accepted_sha} but that commit is not reachable from the repository tip ${tip} — it is not genuinely landed (a dangling or since-rewritten commit is not sufficient evidence of acceptance)`,
+          `state block ${id} is ACCEPTED with accepted_sha ${b.accepted_sha} but that commit is not reachable from the configured trunk ref's tip ${pinnedTrunk} — it is not genuinely landed (a dangling or since-rewritten commit is not sufficient evidence of acceptance)`,
         );
       }
     }
@@ -405,6 +420,637 @@ function verifyLiveGitIdentities(stateById, v) {
         }
       }
     }
+  }
+}
+
+// Is `ancestorId` a (direct or transitive) predecessor of `id` in the DAG?
+// Small active sets only (bounded by MAX_CONCURRENT_IMPLEMENTATION), so a
+// plain DFS over program-dag.toml's `predecessors` edges is cheap and needs
+// no memoisation.
+function isTransitivePredecessor(dagById, ancestorId, id) {
+  const seen = new Set();
+  const stack = [...(dagById.get(id)?.predecessors ?? [])];
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (p === ancestorId) return true;
+    if (seen.has(p)) continue;
+    seen.add(p);
+    stack.push(...(dagById.get(p)?.predecessors ?? []));
+  }
+  return false;
+}
+
+// Resolves and revalidates the ledger's PINNED INTEGRATION-TRUNK identity
+// (state.repository.integration_head_sha) against the LIVE TIP OF THE
+// CONFIGURED INTEGRATION REF (repository.integration_branch, resolved as
+// refs/heads/<integration_branch>) — never checkout HEAD, and never
+// repository.branch/head_sha.
+//
+// AMD-013 round 5 (the entry-lock-vs-integration-trunk correction):
+// repository.branch/head_sha are the IMMUTABLE A0 entry-lock checkout
+// (baseline-lock.md §2; cross-checked against entry_checkout_sha/tree by
+// verifyEntryLockIdentity below) — they name where the program's authority
+// package was checked out ONCE, at entry, and never move again. Round 4
+// pointed this same resolution machinery at THOSE fields, which is why FIX 3
+// (below, and in verifyLiveGitIdentities) discovered every post-entry
+// ACCEPTED block's accepted_sha unreachable from repository.branch's tip:
+// the entry-lock branch is not, and was never meant to be, the operational
+// trunk every landing/rehearsal replays against — this program lands onto
+// its own long-lived integration branch, which advances with every accepted
+// block, while the entry-lock pin correctly never does. `integration_branch`
+// / `integration_head_sha` are new, MUTABLE per-validation-run fields naming
+// that real, moving trunk explicitly, so this resolution (and everything
+// downstream of it — accepted_sha reachability, the fixed-landing-order
+// rehearsal) is never again silently aimed at the wrong ref. repository.
+// branch/head_sha keep their exact prior meaning and are UNTOUCHED by this
+// split (see verifyEntryLockIdentity) — this is an added pair of fields, not
+// a redefinition of the existing ones.
+//
+// AMD-013 v3 review (Finding C) named the ORIGINAL defect this whole
+// resolution shape answers: an ambient `git rev-parse HEAD` sampled at
+// validation time — trunk could advance between two validator runs with
+// nothing in the ledger recording (or re-checking) which trunk was actually
+// rehearsed against. The FIRST fix for that (comparing against checkout HEAD
+// instead) was itself wrong: HEAD names only where THIS WORKTREE happens to
+// be checked out, which routinely differs from the ledger-declared trunk
+// branch (a review worktree on a feature branch, a detached-HEAD CI
+// checkout) — that mismatch is not trunk drift, and gating the whole check
+// on "more than one block active" was papering over comparing against the
+// wrong ref, not a genuine staleness exemption. repository.integration_branch
+// — the ledger's own explicit, named integration-trunk ref — is the correct
+// oracle, and once the oracle is right there is no reason to run this only
+// sometimes: it runs on EVERY live-mode validation.
+// Returns the pinned SHA on success; on any failure (malformed/absent
+// integration_branch or integration_head_sha, a git failure, or a live
+// branch tip that has moved past the ledger's pin) records a violation and
+// returns null — callers must not fall back to an un-pinned ambient HEAD,
+// and must not fall back to the entry-lock repository.branch/head_sha pair.
+function resolvePinnedTrunk(state, cwd, v) {
+  const repo = state.repository && typeof state.repository === "object" ? state.repository : {};
+  if (!(typeof repo.integration_branch === "string" && REF_NAME_RE.test(repo.integration_branch))) {
+    v(
+      `live state repository.integration_branch ${JSON.stringify(repo.integration_branch ?? "")} is not a well-formed branch name — the ledger must name the EXPLICIT configured integration-trunk ref the pinned repository.integration_head_sha is validated against (distinct from the immutable entry-lock repository.branch), not let the validator fall back to sampling checkout HEAD`,
+    );
+    return null;
+  }
+  if (!(typeof repo.integration_head_sha === "string" && SHA_RE.test(repo.integration_head_sha))) {
+    v(
+      `live state repository.integration_head_sha ${JSON.stringify(repo.integration_head_sha ?? "")} is not a resolved 40-char lowercase git object id — the ledger must PIN the integration-trunk identity every rehearsal replays against, not let the validator sample an ambient git rev-parse HEAD at run time`,
+    );
+    return null;
+  }
+  const trunkRef = `refs/heads/${repo.integration_branch}`;
+  const tipRes = runGit(["rev-parse", "--verify", trunkRef], cwd);
+  if (tipRes.status !== 0) {
+    v(
+      `live mode could not resolve the configured integration-trunk ref ${trunkRef} (git rev-parse --verify, repository.integration_branch = ${JSON.stringify(repo.integration_branch)}) to revalidate the ledger's pinned trunk repository.integration_head_sha ${repo.integration_head_sha}: ${gitFailureReason(tipRes)}`,
+    );
+    return null;
+  }
+  const liveTrunkTip = tipRes.stdout.trim();
+  if (liveTrunkTip !== repo.integration_head_sha) {
+    v(
+      `live state repository.integration_head_sha ${repo.integration_head_sha} does not match the live tip of the configured integration-trunk ref ${trunkRef} (${liveTrunkTip}) — the integration trunk has advanced since the ledger pinned it, and a pinned trunk that has silently gone stale must be resynced before it is trustworthy rehearsal input, not rehearsed against a moving target`,
+    );
+    return null;
+  }
+  return repo.integration_head_sha;
+}
+
+// Validates the IMMUTABLE A0 entry-lock identity (repository.branch/
+// head_sha/head_tree, contracts/baseline-lock.md §2) — distinct from, and
+// never a substitute for, resolvePinnedTrunk's mutable integration-trunk
+// pin above. repository.branch/head_sha/head_tree are bound ONCE, at A0, to
+// the program's entry checkout — they must never move again, so this check
+// re-verifies exactly that: well-formed, AND byte-equal to the top-level
+// entry_checkout_sha/entry_checkout_tree the A0 entry-lock record itself
+// binds. A divergence here means repository.branch/head_sha/head_tree were
+// edited after entry — the exact drift baseline-lock.md's immutability
+// promise forbids — never a live git resolution (the entry-lock branch may
+// no longer even exist as a live ref by the time this runs; that is
+// expected and is not itself a violation). Live mode only, matching every
+// other identity check in this file — a template ledger's fields are
+// unresolved placeholders with no promise to cross-check.
+function verifyEntryLockIdentity(state, v) {
+  const repo = state.repository && typeof state.repository === "object" ? state.repository : {};
+  if (!(typeof repo.branch === "string" && REF_NAME_RE.test(repo.branch))) {
+    v(
+      `live state repository.branch ${JSON.stringify(repo.branch ?? "")} is not a well-formed branch name — the immutable A0 entry-lock branch (contracts/baseline-lock.md §2) must stay a well-formed ref name`,
+    );
+  }
+  const shaOk = typeof repo.head_sha === "string" && SHA_RE.test(repo.head_sha);
+  if (!shaOk) {
+    v(
+      `live state repository.head_sha ${JSON.stringify(repo.head_sha ?? "")} is not a resolved 40-char lowercase git object id — the immutable A0 entry-lock checkout SHA (contracts/baseline-lock.md §2) must stay pinned`,
+    );
+  } else if (repo.head_sha !== state.entry_checkout_sha) {
+    v(
+      `live state repository.head_sha ${repo.head_sha} does not equal the top-level entry_checkout_sha ${JSON.stringify(state.entry_checkout_sha ?? "")} — the immutable A0 entry-lock SHA has drifted from its own entry-checkout record (contracts/baseline-lock.md §2); repository.branch/head_sha never move after entry, unlike repository.integration_branch/integration_head_sha`,
+    );
+  }
+  const treeOk = typeof repo.head_tree === "string" && SHA_RE.test(repo.head_tree);
+  if (!treeOk) {
+    v(
+      `live state repository.head_tree ${JSON.stringify(repo.head_tree ?? "")} is not a resolved 40-char lowercase tree object id — the immutable A0 entry-lock checkout TREE (contracts/baseline-lock.md §2) must stay pinned`,
+    );
+  } else if (repo.head_tree !== state.entry_checkout_tree) {
+    v(
+      `live state repository.head_tree ${repo.head_tree} does not equal the top-level entry_checkout_tree ${JSON.stringify(state.entry_checkout_tree ?? "")} — the immutable A0 entry-lock TREE has drifted from its own entry-checkout record (contracts/baseline-lock.md §2)`,
+    );
+  }
+}
+
+// Content-verifies the digest-bound A0 entry-lock record (contracts/
+// baseline-lock.md §2) against repository.branch/head_sha/head_tree and the
+// top-level entry_checkout_sha/entry_checkout_tree — closing the "immutable
+// by convention, not by check" gap in verifyEntryLockIdentity above.
+// verifyEntryLockIdentity only cross-checks those five fields AGAINST EACH
+// OTHER — every one of them an equally mutable field on the SAME in-memory
+// ledger, so a single coordinated edit that rewrites all five consistently
+// (e.g. to a different branch/checkout entirely) passes that check cleanly.
+// This binds them instead to something the ledger cannot also rewrite in the
+// same edit: the DAG root block's OWN entry_lock_digest, already required
+// to be a real SHA-256 (see the entry_lock_digest gate above), is here
+// content-verified — exactly like the evidence_digest binding above — against
+// a real `<root>/<id>/entry-lock.toml` file resolved under a declared
+// evidence root, and that file's own `[repository]` table (branch,
+// entry_checkout_sha, entry_checkout_tree) is required to equal the ledger's
+// repository.branch/head_sha/head_tree and entry_checkout_sha/tree exactly.
+// A rewrite of the in-memory fields alone cannot also rewrite the separately-
+// hashed, digest-pinned file this now cross-checks against.
+//
+// Deliberately narrower than the evidence_digest binding above: it looks
+// only for the exact filename `entry-lock.toml` (never the evidence_digest
+// candidate-name list), and an entry-lock.toml that fails to RESOLVE under
+// any declared root is a silent skip, not a violation — entry_lock_digest's
+// existing shape-only posture for a fixture/ledger that never wrote this
+// specific artifact. A RESOLVED record that fails to match — wrong bytes, or
+// bytes that hash correctly but disagree with the ledger's own repository/
+// entry_checkout fields — is always a violation.
+function verifyEntryLockRecordBinding(state, dagRoots, stateById, resolvedRoots, v) {
+  if (dagRoots.length !== 1 || resolvedRoots.length === 0) return;
+  const rootId = dagRoots[0];
+  const b = stateById.get(rootId);
+  if (!b || !(typeof b.entry_lock_digest === "string" && DIGEST_RE.test(b.entry_lock_digest))) {
+    return;
+  }
+  let artifactPath = null;
+  for (const root of resolvedRoots) {
+    const candidate = join(root, rootId, "entry-lock.toml");
+    let isFile = false;
+    try {
+      isFile = statSync(candidate).isFile();
+    } catch {
+      // missing — try the next root
+    }
+    if (isFile) {
+      artifactPath = candidate;
+      break;
+    }
+  }
+  if (artifactPath === null) return; // nothing resolved under any declared root — silent skip
+
+  const bytes = readFileSync(artifactPath);
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (actual !== b.entry_lock_digest) {
+    v(
+      `state block ${rootId} entry_lock_digest ${b.entry_lock_digest} does not match the SHA-256 of ${artifactPath} (${actual})`,
+    );
+    return; // do not cross-check field contents against bytes that already fail their own digest
+  }
+
+  let parsed;
+  try {
+    parsed = parseToml(bytes.toString("utf8"));
+  } catch (err) {
+    v(`state block ${rootId} entry-lock record ${artifactPath} is not valid TOML: ${err.message}`);
+    return;
+  }
+  const recordRepo =
+    parsed.repository && typeof parsed.repository === "object" ? parsed.repository : {};
+  const repo = state.repository && typeof state.repository === "object" ? state.repository : {};
+  const checks = [
+    ["repository.branch", repo.branch, "repository.branch", recordRepo.branch],
+    [
+      "repository.head_sha",
+      repo.head_sha,
+      "repository.entry_checkout_sha",
+      recordRepo.entry_checkout_sha,
+    ],
+    [
+      "repository.head_tree",
+      repo.head_tree,
+      "repository.entry_checkout_tree",
+      recordRepo.entry_checkout_tree,
+    ],
+    [
+      "entry_checkout_sha",
+      state.entry_checkout_sha,
+      "repository.entry_checkout_sha",
+      recordRepo.entry_checkout_sha,
+    ],
+    [
+      "entry_checkout_tree",
+      state.entry_checkout_tree,
+      "repository.entry_checkout_tree",
+      recordRepo.entry_checkout_tree,
+    ],
+  ];
+  for (const [ledgerField, ledgerVal, recordField, recordVal] of checks) {
+    if (ledgerVal !== recordVal) {
+      v(
+        `live state ${ledgerField} ${JSON.stringify(ledgerVal ?? "")} does not equal ${recordField} ${JSON.stringify(recordVal ?? "")} in the digest-bound entry-lock record ${artifactPath} — the immutable A0 entry lock must match its own digest-bound record, not merely its own other, equally mutable, ledger fields`,
+      );
+    }
+  }
+}
+
+// Fixed-landing-order cumulative rehearsal for every concurrently ACTIVE
+// block (IN_PROGRESS ∪ REVIEW ∪ ACCEPTANCE_RECOMMENDED — see the
+// concurrent-implementation-ceiling comment block above for why REVIEW is
+// active). Runs only when more than one block is concurrently active — a
+// single active block has nothing to land against but real trunk, which the
+// ordinary git-identity checks already cover. Live mode only (needs real git
+// objects); template-mode candidate fields carry no promise of naming real
+// commits.
+//
+// AMD-013 v3 review (Finding A): this program does not land by MERGING —
+// every landing here is a rebase-or-squash onto trunk followed by a
+// fast-forward (contracts/stacked-prs.md §9 lists only "Bottom-up" and
+// "Atomic final only" as legal landing modes, and its own accepted_sha/tree
+// commentary names "a reviewed rebase, squash, merge commit, or merge-queue
+// base advance" as the shapes accepted_sha may take — never a landing-time
+// two-parent merge of the candidate against trunk). A prior draft of this
+// rehearsal used `git merge-tree --write-tree` followed by a TWO-parent
+// `git commit-tree` — modeling a MERGE COMMIT. That (a) synthesises
+// candidate ancestry no squash/rebase/cherry-pick landing ever creates, and
+// (b) let each step's merge-base be whatever git's own commit-graph search
+// found between that synthetic two-parent commit and the next candidate —
+// NOT the block's own declared base_sha, so a wrong or stale declared base
+// was checked for ancestry and then silently ignored by the rehearsal
+// itself (Finding D).
+//
+// This rehearsal instead REPLAYS each block's own delta — the diff from its
+// declared base_sha to its rehearsal candidate — onto the cumulative result
+// of every prior block, the exact operation `git rebase --onto`/`git
+// cherry-pick` perform (a three-way merge whose base is the commit's OWN
+// original parent, not whatever an ancestry search finds between two
+// unrelated trees): `git merge-tree --write-tree --merge-base=<base_sha>
+// <cumulative> <candidate>`. `--merge-base` (git >= 2.38) pins the
+// three-way merge's base tree explicitly — the declared base_sha IS the
+// delta basis, not a value that is merely ancestry-checked and then
+// ignored. Each clean step synthesises a real, unreferenced,
+// worktree-untouched SINGLE-PARENT commit via `git commit-tree <tree> -p
+// <cumulative>` — modeling the single-parent commit a rebase/squash
+// landing actually produces, never a merge commit — so the next step's
+// replay sees genuine linear ancestry.
+//
+//   1. requires every concurrently active block to declare a positive,
+//      pairwise-distinct `landing_order` (MAINTAINER-RULING-CONCURRENCY-
+//      CEILING-AND-ROSTER.md: "a fixed landing order"; ARCH-RULING-
+//      CONCURRENCY-OPERATING-MODEL.md: "a declared order") — with no
+//      trustworthy order, nothing below can be rehearsed, so this step
+//      alone determines whether rehearsal proceeds at all;
+//   2. requires the sole ACCEPTANCE_RECOMMENDED block, when one exists, to
+//      be FIRST in that order — contracts/stacked-prs.md's "LAND_READY ...
+//      the one currently eligible landing block is ACCEPTANCE_RECOMMENDED";
+//   3. requires landing_order to respect every DAG predecessor edge between
+//      two concurrently active blocks, AND every same-stack layer ordering
+//      (Finding E): where two concurrently active blocks share the same
+//      non-empty stack_id and both carry an integer stack_layer, the lower
+//      stack_layer must carry the lower landing_order — the same
+//      bottom-up-lands-first rule contracts/stacked-prs.md §9 states for a
+//      LANDABLE stack, cross-checked here rather than left unbound;
+//   4. requires every concurrently active block to declare a well-formed
+//      base_sha that is a real ancestor of its rehearsal candidate (`git
+//      merge-base --is-ancestor`) — base_sha is no longer optional/
+//      decorative for IN_PROGRESS: it is the explicit basis the delta is
+//      computed from (Finding D), so a block with no trustworthy base has
+//      nothing to replay;
+//   5. resolves the ledger's PINNED trunk (resolvePinnedTrunk, Finding C —
+//      never an ambient `git rev-parse HEAD` sampled here) and walks the
+//      fixed order, at each step replaying that block's OWN
+//      base_sha..candidate delta onto the cumulative result of every prior
+//      block via the explicit-merge-base call above, then folding it into a
+//      single-parent commit. Exit 0 at every step is a clean cumulative
+//      landing; a conflict or rehearsal failure at any step stops the walk
+//      there — nothing past an unrehearsable step can be vouched for.
+//
+// The rehearsal identity per block is candidate_sha for REVIEW/
+// ACCEPTANCE_RECOMMENDED (contracts/stacked-prs.md:140 — "the exact
+// cumulative candidate reviewers inspected"; once a PASS mandate binds to
+// it, REVIEWED_SHA_FIELDS' own check already fences it against silent
+// drift) and the SEPARATE implementation_candidate_sha for IN_PROGRESS (a
+// block with no review yet has no "exact reviewed candidate" to preserve;
+// giving its evolving WIP tip its own field, rather than overloading
+// candidate_sha, keeps candidate_sha's documented meaning intact for every
+// status that actually carries one).
+//
+// A concurrently active block missing a well-formed rehearsal identity or
+// base_sha, or a non-positive/duplicate/order-violating landing_order, or
+// an unresolved/stale pinned trunk, cannot be rehearsed at all: the
+// no-conflict condition must be established before concurrency is granted,
+// not assumed absent evidence, so each is its own violation and the git
+// walk is skipped entirely for the whole active set (a partially-
+// trustworthy order proves nothing about the untrustworthy part).
+//
+// One named, unresolved limit remains (recorded, not hidden — see AMD-013
+// §8): a single stack window legally holding up to six open REVIEW layers
+// at once (A6, contracts/stacked-prs.md §4) could, on its own, approach or
+// exceed the program-wide active-block ceiling this file also enforces (see
+// that check's own comment) — this rehearsal counts ACTIVE BLOCKS, not
+// orchestrator/train identity, a coarser, deliberately conservative proxy
+// for "concurrent claude-max trains" absent a ledger field naming the
+// latter directly. The previously-named second limit (Finding E, second
+// bullet — implementation_candidate_sha was a trusted, unverifiable
+// declaration) is CLOSED: implementation_ref binds the pin to a real, live
+// git ref, and the rehearsal REQUIRES that ref's resolved tip to equal the
+// pin exactly, so a stale pin is now a violation, not a silent trust.
+//
+// Round 4, FIX 1 + FIX 2: validates the implementation_ref/
+// implementation_candidate_sha trust boundary for ONE IN_PROGRESS block.
+// Runs UNCONDITIONALLY over every IN_PROGRESS block (see
+// verifyImplementationRefFields below) rather than only when
+// verifyConcurrentLandingSafety's rehearsal is in play — the prior scoping
+// to `active.length > 1` meant an ordinary single-IN_PROGRESS ledger (the
+// live ledger's own current shape) validated NEITHER field at all, the same
+// conditional-scoping mistake Finding G made for the trunk pin. Returns the
+// validated implementation_candidate_sha on success, or null on any failure
+// (a violation has already been recorded, exactly once, here).
+function checkImplementationRefBinding(id, b, cwd, v) {
+  const cand = b.implementation_candidate_sha;
+  if (typeof cand !== "string" || !SHA_RE.test(cand)) {
+    v(
+      `block ${id} is IN_PROGRESS but implementation_candidate_sha is not a resolved 40-char lowercase git object id: ${JSON.stringify(cand ?? "")} — every IN_PROGRESS block must bind a real rehearsal identity, whether or not another block is concurrently active alongside it`,
+    );
+    return null;
+  }
+  const ref = b.implementation_ref;
+  if (typeof ref !== "string" || !REF_NAME_RE.test(ref)) {
+    v(
+      `block ${id} is IN_PROGRESS but implementation_ref ${JSON.stringify(ref ?? "")} is not a well-formed ref name — implementation_candidate_sha must be bound to a resolvable live ref, not trusted as a bare declaration`,
+    );
+    return null;
+  }
+  // FIX 1: a raw 40-char object id and the literal HEAD pseudoref both
+  // satisfy REF_NAME_RE's shape check AND resolve cleanly via `git rev-parse
+  // --verify` — a raw OID resolves to itself, and HEAD resolves to wherever
+  // THIS worktree happens to be checked out — so neither can ever expose a
+  // stale pin no matter how far implementation_candidate_sha has drifted
+  // from the block's real WIP branch. Reject both explicitly, before any
+  // git call, rather than relying on a downstream resolution check to catch
+  // them incidentally (it would not: both resolve just fine).
+  if (ref === "HEAD" || SHA_RE.test(ref)) {
+    v(
+      `block ${id} implementation_ref ${JSON.stringify(ref)} is a raw object id or the literal HEAD pseudoref, not an actual branch ref — either always "resolves" (to itself, or to wherever this worktree happens to be checked out) regardless of how stale implementation_candidate_sha is, so implementation_ref must name a real, independently-resolvable branch (e.g. refs/heads/<branch>), never any rev-parse-able object or pseudoref`,
+    );
+    return null;
+  }
+  const refRes = runGit(["rev-parse", "--verify", ref], cwd);
+  if (refRes.status !== 0) {
+    v(
+      `block ${id} implementation_ref ${JSON.stringify(ref)} could not be resolved (git rev-parse --verify): ${gitFailureReason(refRes)} — implementation_candidate_sha cannot be bound to a ref that does not resolve to a real commit`,
+    );
+    return null;
+  }
+  // FIX 1: confirms the resolved object is a REAL branch (refs/heads/...),
+  // not some other rev-parse-able spec the shape check and the explicit
+  // HEAD/raw-OID rejection above don't already exclude (e.g. a tag).
+  const symRes = runGit(["rev-parse", "--symbolic-full-name", ref], cwd);
+  const fullRef = symRes.status === 0 ? symRes.stdout.trim() : "";
+  // Computed OUTSIDE the v(...) template literal, never nested inside it: a
+  // backtick-delimited template literal nested inside another one defeats
+  // the mutation suite's textual check-inventory extraction (CALLEE_RE stops
+  // at the first unescaped backtick), which would silently truncate this
+  // check out of existence for coverage purposes.
+  const symDetail = symRes.status !== 0 ? `: ${gitFailureReason(symRes)}` : "";
+  if (symRes.status !== 0 || !fullRef.startsWith("refs/heads/")) {
+    v(
+      `block ${id} implementation_ref ${JSON.stringify(ref)} does not resolve to a real branch (git rev-parse --symbolic-full-name reports ${JSON.stringify(fullRef)}${symDetail}) — implementation_ref must name an actual refs/heads/... branch, never any other rev-parse-able object or pseudoref`,
+    );
+    return null;
+  }
+  const liveRefTip = refRes.stdout.trim();
+  if (liveRefTip !== cand) {
+    v(
+      `block ${id} implementation_ref ${JSON.stringify(ref)} resolves to ${liveRefTip}, but the declared implementation_candidate_sha is ${cand} — the pin does not match the live ref's current tip; a stale pin is not verifiable rehearsal input`,
+    );
+    return null;
+  }
+  return cand;
+}
+
+// FIX 2: runs checkImplementationRefBinding over EVERY IN_PROGRESS block,
+// unconditionally — never gated on how many blocks are concurrently active.
+// Returns a Map id -> validated implementation_candidate_sha (or null for a
+// block that failed validation; the violation was already recorded above),
+// consumed by verifyConcurrentLandingSafety below so the rehearsal reuses
+// this result rather than re-running (and re-reporting) the same checks a
+// second time when >1 block is concurrently active.
+function verifyImplementationRefFields(stateById, v) {
+  const cwd = process.cwd();
+  const results = new Map();
+  for (const [id, b] of stateById) {
+    if (b.status !== "IN_PROGRESS") continue;
+    results.set(id, checkImplementationRefBinding(id, b, cwd, v));
+  }
+  return results;
+}
+
+function verifyConcurrentLandingSafety(
+  active,
+  dagById,
+  state,
+  v,
+  pinnedTrunk,
+  implementationRefResults,
+) {
+  if (active.length < 2) return;
+  const cwd = process.cwd();
+  // Trunk-pin resolution (resolvePinnedTrunk, Finding C) now runs
+  // UNCONDITIONALLY on every live-mode validation (see the call site in
+  // main()) — it is no longer resolved in here. A null pin means the caller
+  // already recorded the specific trunk-pin violation; this function records
+  // its OWN, distinct violation naming why the rehearsal itself cannot run,
+  // rather than silently skipping.
+  if (pinnedTrunk === null) {
+    v(
+      `the fixed-landing-order rehearsal cannot run for ${active.length} concurrently active block(s) — the ledger's pinned integration trunk (repository.integration_head_sha) failed to resolve or revalidate against the live repository (see the trunk-pin violation above); nothing here can be rehearsed against an untrustworthy trunk pin`,
+    );
+    return;
+  }
+  let structurallyValid = true;
+  const entries = [];
+  for (const b of active) {
+    // Round 4, FIX 1 + FIX 2: an IN_PROGRESS entry's rehearsal identity
+    // (implementation_candidate_sha) and its implementation_ref binding were
+    // already fully validated, UNCONDITIONALLY, by verifyImplementationRefFields
+    // (called once from main() before this function runs) — reuse that result
+    // rather than re-running (and, worse, re-reporting under different wording)
+    // the same checks a second time here. A `null` entry means a violation was
+    // already recorded there; this function must not emit a second one for the
+    // same underlying cause.
+    let cand;
+    if (b.status === "IN_PROGRESS") {
+      cand = implementationRefResults.get(b.id);
+      if (cand === null || cand === undefined) {
+        structurallyValid = false;
+        continue;
+      }
+    } else {
+      cand = b.candidate_sha;
+      if (typeof cand !== "string" || !SHA_RE.test(cand)) {
+        v(
+          `block ${b.id} is concurrently active (${b.status}) alongside ${active.length - 1} other block(s) but candidate_sha is not a resolved 40-char lowercase git object id: ${JSON.stringify(cand ?? "")} — the fixed-landing-order rehearsal (contracts/stacked-prs.md, MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md) cannot be established without a real candidate identity for every concurrently active block`,
+        );
+        structurallyValid = false;
+        continue;
+      }
+    }
+    if (typeof b.base_sha !== "string" || !SHA_RE.test(b.base_sha)) {
+      v(
+        `block ${b.id} is concurrently active (${b.status}) alongside ${active.length - 1} other block(s) but base_sha is not a resolved 40-char lowercase git object id: ${JSON.stringify(b.base_sha ?? "")} — the fixed-landing-order rehearsal replays each block's own base_sha..candidate delta (AMD-013 v3), so a well-formed base is required for every concurrently active block, not merely checked when one happens to be present`,
+      );
+      structurallyValid = false;
+      continue;
+    }
+    if (!Number.isInteger(b.landing_order) || b.landing_order < 1) {
+      v(
+        `block ${b.id} is concurrently active alongside ${active.length - 1} other block(s) but landing_order ${JSON.stringify(b.landing_order ?? "")} is not a positive integer — every concurrently active block must declare a fixed landing_order (MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md: "a fixed landing order")`,
+      );
+      structurallyValid = false;
+      continue;
+    }
+    entries.push({
+      id: b.id,
+      status: b.status,
+      candidate: cand,
+      base: b.base_sha,
+      order: b.landing_order,
+      stackId: typeof b.stack_id === "string" ? b.stack_id.trim() : "",
+      stackLayer: b.stack_layer,
+    });
+  }
+
+  const byOrder = new Map();
+  for (const e of entries) {
+    if (!byOrder.has(e.order)) byOrder.set(e.order, []);
+    byOrder.get(e.order).push(e.id);
+  }
+  for (const [order, ids] of byOrder) {
+    if (ids.length > 1) {
+      v(
+        `landing_order ${order} is shared by concurrently active blocks [${ids.join(", ")}] — the fixed landing order must be an unambiguous total order over every concurrently active block`,
+      );
+      structurallyValid = false;
+    }
+  }
+
+  if (entries.length > 0) {
+    const minOrder = Math.min(...entries.map((e) => e.order));
+    for (const e of entries) {
+      if (e.status === "ACCEPTANCE_RECOMMENDED" && e.order !== minOrder) {
+        v(
+          `block ${e.id} is ACCEPTANCE_RECOMMENDED — the currently eligible landing block (contracts/stacked-prs.md) — but landing_order ${e.order} is not the minimum among concurrently active blocks: the block under final certification must be first in the fixed landing order`,
+        );
+        structurallyValid = false;
+      }
+    }
+  }
+
+  for (const a of entries) {
+    for (const b of entries) {
+      if (a.id === b.id) continue;
+      if (isTransitivePredecessor(dagById, a.id, b.id) && !(a.order < b.order)) {
+        v(
+          `block ${a.id} is a predecessor of concurrently active block ${b.id} (program-dag.toml) but landing_order ${a.order} is not before ${b.order} — a predecessor must land before its dependent in the fixed landing order`,
+        );
+        structurallyValid = false;
+      }
+      // Finding E: landing_order must also respect intra-stack layer order
+      // — contracts/stacked-prs.md §9's bottom-up-lands-first rule — for
+      // two concurrently active blocks sharing the same stack, independent
+      // of whether a DAG predecessor edge exists between them (a stack's
+      // private sublayers need not be DAG predecessors of one another).
+      if (
+        a.stackId !== "" &&
+        a.stackId === b.stackId &&
+        Number.isInteger(a.stackLayer) &&
+        Number.isInteger(b.stackLayer) &&
+        a.stackLayer < b.stackLayer &&
+        !(a.order < b.order)
+      ) {
+        v(
+          `block ${a.id} (stack ${a.stackId}, stack_layer ${a.stackLayer}) is a lower stack layer than concurrently active same-stack block ${b.id} (stack_layer ${b.stackLayer}) but landing_order ${a.order} is not before ${b.order} — a lower stack layer must land before a higher layer in the same stack (contracts/stacked-prs.md §9, bottom-up landing)`,
+        );
+        structurallyValid = false;
+      }
+    }
+  }
+
+  // A structurally invalid order/identity set cannot be rehearsed — nothing
+  // below is meaningful without a trustworthy order to walk.
+  if (!structurallyValid) return;
+
+  entries.sort((x, y) => x.order - y.order);
+
+  let cumulative = pinnedTrunk;
+
+  for (const e of entries) {
+    const anc = runGit(["merge-base", "--is-ancestor", e.base, e.candidate], cwd);
+    if (anc.status !== 0 && anc.status !== 1) {
+      v(
+        `block ${e.id} base_sha ${e.base} ancestry against its rehearsal candidate ${e.candidate} could not be checked: ${gitFailureReason(anc)}`,
+      );
+      return;
+    }
+    if (anc.status === 1) {
+      v(
+        `block ${e.id} declared base_sha ${e.base} is not an ancestor of its rehearsal candidate ${e.candidate} — the declared delta cannot be trusted for the fixed-landing-order rehearsal`,
+      );
+      return;
+    }
+    // No --quiet: --quiet "allows merge-tree ... to avoid writing most
+    // objects created by merges" and suppresses the toplevel-tree-OID
+    // output entirely on a clean merge — this rehearsal needs that OID to
+    // synthesise the next step's cumulative commit, so it always requests
+    // full output. --merge-base=<base> pins the three-way merge's base tree
+    // to the block's OWN declared base_sha — replaying its delta onto
+    // cumulative, rather than letting git's ancestry search pick a
+    // merge-base between the synthetic cumulative commit and the candidate
+    // (Finding A/D).
+    const merge = runGit(
+      ["merge-tree", "--write-tree", `--merge-base=${e.base}`, cumulative, e.candidate],
+      cwd,
+    );
+    if (merge.status === 1) {
+      v(
+        `block ${e.id} (landing_order ${e.order}) does not land cleanly onto the cumulative result of every prior block in the fixed landing order — replaying its base_sha ${e.base}..${e.candidate} delta via git merge-tree --write-tree --merge-base=${e.base} against ${cumulative} reports real content conflicts (contracts/stacked-prs.md, MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md)`,
+      );
+      return;
+    }
+    if (merge.status !== 0) {
+      v(
+        `block ${e.id} (landing_order ${e.order}) cumulative landing rehearsal could not be checked — git merge-tree --write-tree --merge-base=${e.base} between ${cumulative} and ${e.candidate} failed: ${gitFailureReason(merge)}`,
+      );
+      return;
+    }
+    const tree = merge.stdout.trim().split("\n")[0];
+    // ONE parent only (cumulative) — this synthesises the SINGLE-PARENT
+    // commit a rebase/squash landing actually produces, never a two-parent
+    // merge commit (Finding A): the block's own delta replayed on top of
+    // trunk-so-far, not a merge of two histories.
+    const commit = runGit(
+      ["commit-tree", tree, "-p", cumulative, "-m", `landing rehearsal: ${e.id}`],
+      cwd,
+    );
+    if (commit.status !== 0) {
+      v(
+        `block ${e.id} (landing_order ${e.order}) cumulative landing rehearsal could not synthesise a rehearsal commit — git commit-tree failed: ${gitFailureReason(commit)}`,
+      );
+      return;
+    }
+    cumulative = commit.stdout.trim();
   }
 }
 
@@ -637,11 +1283,11 @@ function main() {
       v(`state block ${id} has no status`);
       continue;
     }
-    // templates/program-state.template.toml:44-45 — closed status enum.
+    // templates/program-state.template.toml:50-51 — closed status enum.
     if (!BLOCK_STATUS_ENUM.has(b.status)) {
       v(`state block ${id} has status ${JSON.stringify(b.status)} outside the declared enum`);
     }
-    // templates/program-state.template.toml:46 — closed review enum.
+    // templates/program-state.template.toml:52 — closed review enum.
     for (const field of REVIEW_FIELDS) {
       if (field in b && !REVIEW_ENUM.has(b[field])) {
         v(
@@ -1089,29 +1735,110 @@ function main() {
     }
   }
 
-  // -- Single IN_PROGRESS block, bound to current_block
-  // templates/program-state.template.toml:18 declares `current_block`; the
-  // orchestrator executes "only the next legal bounded block"
-  // (ORCHESTRATOR.md:15), so at most one block is IN_PROGRESS and it must be
-  // the declared current block.
-  // Fail-closed: one IN_PROGRESS block at a time (ORCHESTRATOR.md:15), even
-  // though stacked-prs.md:39 and max_active_workers = 3 would allow more.
-  // A stacked/parallel regime must relax this check under review, not ad hoc.
+  // -- Concurrent implementation ceiling + serialised FINAL certification
+  //
+  // MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md: "up to 5 concurrent
+  // blocks/trains on claude-max" — a maintainer-ratified relaxation of the
+  // single-IN_PROGRESS-at-a-time gate this check previously enforced
+  // unconditionally (that check's own former comment said a parallel regime
+  // "must relax this check under review, not ad hoc" — this IS that
+  // reviewed relaxation). The ceiling is a permission, not an instruction:
+  // it does not by itself establish that any given set of concurrent
+  // blocks is conflict-free (see verifyConcurrentLandingSafety below).
+  //
+  // ARCH-RULING-CONCURRENCY-OPERATING-MODEL.md: "Allow up to five disjoint
+  // blocks in IMPLEMENTATION and targeted testing; SERIALISE final
+  // certification" — because the gate cascade under concurrent
+  // certification is quadratic while "implementation and review
+  // iteration ... dominates wall-clock" (that ruling groups REVIEW's
+  // iterative revise/re-review cycle with implementation, in the PARALLEL
+  // bucket, not the serialised one). So the ledger's THREE statuses split
+  // into three concurrency CLASSES for the purpose of the per-status rules
+  // below (current_block binding, ACCEPTANCE_RECOMMENDED-first ordering),
+  // but the numeric ceiling itself (Finding B, AMD-013 v3 review) is a
+  // SINGLE program-wide cap over the whole active set, not per-class:
+  //   - IN_PROGRESS         — implementation;
+  //   - REVIEW               — review iteration — contracts/stacked-prs.md
+  //                           §4's per-stack open-layer limit and §3.3's
+  //                           cross-stack ownership-disjointness rule bound
+  //                           how many blocks may sit in REVIEW WITHIN one
+  //                           stack or across independent windows, but
+  //                           neither is a program-wide numeric cap
+  //                           equivalent to the maintainer ruling's flat
+  //                           ceiling — so REVIEW blocks are NOT exempt from
+  //                           the active-set ceiling below; contracts/
+  //                           stacked-prs.md:100 ("Green upper LANDABLE
+  //                           layers remain REVIEW, not accepted in
+  //                           advance") establishes that REVIEW is not
+  //                           capped at ONE the way ACCEPTANCE_RECOMMENDED
+  //                           is, not that it is uncapped altogether;
+  //   - ACCEPTANCE_RECOMMENDED — FINAL certification: "freeze it once, run
+  //                           ONE full gate, obtain ONE impact-bounded
+  //                           mandate re-attestation" — capped at exactly
+  //                           one block, program-wide, matching
+  //                           contracts/stacked-prs.md's own "LAND_READY
+  //                           means ... the one currently eligible landing
+  //                           block is ACCEPTANCE_RECOMMENDED", AND counted
+  //                           within the same active-set ceiling as every
+  //                           other concurrently active block (Finding B —
+  //                           it is one of the "concurrent blocks/trains",
+  //                           not a permitted 6th slot beyond them).
+  //
+  // current_block names the sole ACCEPTANCE_RECOMMENDED block when one
+  // exists ("current_block ... names the certifying block" — certifying
+  // now means ACCEPTANCE_RECOMMENDED specifically, the "currently eligible
+  // landing block", not REVIEW's parallel iteration). With nothing
+  // ACCEPTANCE_RECOMMENDED, current_block instead names any concurrently
+  // ACTIVE block (IN_PROGRESS or REVIEW) — the single-active-block serial
+  // case (still legal; every cap here is a ceiling, not a floor) satisfies
+  // this trivially.
+  const MAX_CONCURRENT_IMPLEMENTATION = 5;
+  const FINAL_CERTIFICATION_STATUSES = new Set(["ACCEPTANCE_RECOMMENDED"]);
+  const ACTIVE_STATUSES = new Set(["IN_PROGRESS", "REVIEW", "ACCEPTANCE_RECOMMENDED"]);
+  const certifying = [...stateById.values()].filter((b) =>
+    FINAL_CERTIFICATION_STATUSES.has(b.status),
+  );
+  const active = [...stateById.values()].filter((b) => ACTIVE_STATUSES.has(b.status));
   {
-    const inProgress = [...stateById.values()].filter((b) => b.status === "IN_PROGRESS");
-    if (inProgress.length > 1) {
-      v(`more than one block IN_PROGRESS: [${inProgress.map((b) => b.id).join(", ")}]`);
+    // Finding B (AMD-013 v3 review): the prior draft capped ONLY
+    // `implementing.length` (IN_PROGRESS), so 5 IN_PROGRESS blocks plus 1
+    // ACCEPTANCE_RECOMMENDED block was silently legal — six concurrently
+    // active trains against a ruling whose own words are "up to 5
+    // concurrent blocks/trains", not "up to 5 IN_PROGRESS plus 1 more".
+    // This check now caps the WHOLE active set (IN_PROGRESS ∪ REVIEW ∪
+    // ACCEPTANCE_RECOMMENDED) regardless of which status a given block
+    // holds — see the comment block above for why neither
+    // contracts/stacked-prs.md §4 nor §3.3 substitutes for a program-wide
+    // cap. This is a conservative, block-counting proxy for "concurrent
+    // claude-max trains" (a single stack window legally holding up to six
+    // open REVIEW layers, A6, could on its own approach or exceed this
+    // ceiling — a named, unresolved tension recorded in AMD-013 §8, not
+    // silently swept under).
+    if (active.length > MAX_CONCURRENT_IMPLEMENTATION) {
+      v(
+        `more than ${MAX_CONCURRENT_IMPLEMENTATION} blocks concurrently active (IN_PROGRESS/REVIEW/ACCEPTANCE_RECOMMENDED) — the ratified concurrent-implementation/train ceiling (MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md: "up to 5 concurrent blocks/trains") counts every concurrently active block regardless of status, not merely IN_PROGRESS: [${active.map((b) => b.id).join(", ")}]`,
+      );
+    }
+    if (certifying.length > 1) {
+      v(
+        `more than one block ACCEPTANCE_RECOMMENDED (final certification must serialise to exactly one block at a time, ARCH-RULING-CONCURRENCY-OPERATING-MODEL.md): [${certifying.map((b) => b.id).join(", ")}]`,
+      );
     }
     if (typeof state.current_block === "string" && state.current_block !== "") {
       if (!stateById.has(state.current_block)) {
         v(`current_block ${JSON.stringify(state.current_block)} names no state block`);
-      }
-      for (const b of inProgress) {
-        if (b.id !== state.current_block) {
-          v(
-            `block ${b.id} is IN_PROGRESS but current_block is ${JSON.stringify(state.current_block)}`,
-          );
+      } else if (certifying.length > 0) {
+        for (const b of certifying) {
+          if (b.id !== state.current_block) {
+            v(
+              `block ${b.id} is ACCEPTANCE_RECOMMENDED (certifying) but current_block is ${JSON.stringify(state.current_block)} — current_block must name the sole block under final certification (ARCH-RULING-CONCURRENCY-OPERATING-MODEL.md)`,
+            );
+          }
         }
+      } else if (active.length > 0 && !active.some((b) => b.id === state.current_block)) {
+        v(
+          `current_block ${JSON.stringify(state.current_block)} is not one of the concurrently active (IN_PROGRESS/REVIEW) blocks [${active.map((b) => b.id).join(", ")}] and no block is ACCEPTANCE_RECOMMENDED`,
+        );
       }
     } else {
       v("state is missing top-level current_block");
@@ -1149,7 +1876,7 @@ function main() {
 
     // Identity shape: candidate_sha/tree etc. are "exact ... SHA/tree"
     // identities (governance.md:251 attaches approval to one exact candidate
-    // SHA and tree; templates/program-state.template.toml:47-50). A SHA/tree
+    // SHA and tree; templates/program-state.template.toml:63-66). A SHA/tree
     // field is a full 40-char lowercase git object id or empty; a digest
     // field is a 64-char lowercase SHA-256 or empty.
     const scanShapes = (obj, prefix) => {
@@ -1221,8 +1948,13 @@ function main() {
         declaredRoots = [{ raw: val, field: "evidence_root" }];
       }
     }
+    // Hoisted out of the block below (rather than declared `const` inside
+    // it) so the entry-lock content-binding check further down — a SEPARATE
+    // artifact from any evidence_digest artifact — can reuse the same
+    // resolved roots without re-parsing orchestration.evidence_root(s) or
+    // re-emitting its unresolvable-root violations a second time.
+    let resolvedRoots = [];
     if (declaredRoots !== null && declaredRoots.length > 0) {
-      const resolvedRoots = [];
       for (const { raw, field } of declaredRoots) {
         if (typeof raw !== "string" || raw === "") {
           v(`live state orchestration.${field} is not a non-empty string: ${JSON.stringify(raw)}`);
@@ -1487,9 +2219,53 @@ function main() {
       }
     }
 
+    // -- Immutable entry-lock identity (verifyEntryLockIdentity, AMD-013
+    // round 5): repository.branch/head_sha/head_tree, cross-checked against
+    // entry_checkout_sha/entry_checkout_tree. Runs UNCONDITIONALLY, before
+    // trunk resolution, and independently of it — this is the A0 entry
+    // binding, never the operational trunk oracle below.
+    verifyEntryLockIdentity(state, v);
+
+    // -- Entry-lock RECORD content binding (verifyEntryLockRecordBinding,
+    // AMD-013 ratification correction 1): the check above cross-checks
+    // repository.branch/head_sha/head_tree/entry_checkout_sha/
+    // entry_checkout_tree only against EACH OTHER — a coordinated rewrite of
+    // all five stays internally consistent and passes. This additionally
+    // binds them to the DAG root's digest-bound entry-lock.toml record,
+    // which the same in-memory edit cannot also rewrite. Reuses the
+    // resolvedRoots already resolved for the evidence_digest binding above.
+    verifyEntryLockRecordBinding(state, dagRoots, stateById, resolvedRoots, v);
+
+    // -- Pinned INTEGRATION-trunk resolution (resolvePinnedTrunk, Finding C,
+    // corrected per the second AMD-013 review round, RE-TARGETED at round 5
+    // from repository.branch/head_sha — the immutable entry lock — onto the
+    // new repository.integration_branch/integration_head_sha pair): runs
+    // UNCONDITIONALLY on every live-mode validation, not only when more than
+    // one block is concurrently active. The original conditional scoping was
+    // justified by comparing against checkout HEAD, which legitimately
+    // drifts from trunk in an ordinary worktree; now that the oracle is the
+    // CONFIGURED integration ref (repository.integration_branch) rather than
+    // checkout HEAD — or the immutable entry-lock branch — there is no
+    // remaining reason to skip this on an ordinary single-active-block run.
+    const pinnedTrunk = resolvePinnedTrunk(state, process.cwd(), v);
+
+    // -- implementation_ref/implementation_candidate_sha binding (round 4,
+    // FIX 2 — see verifyImplementationRefFields above): runs UNCONDITIONALLY
+    // over every IN_PROGRESS block, regardless of how many blocks are
+    // concurrently active. Its result is reused by
+    // verifyConcurrentLandingSafety below rather than re-checked there.
+    const implementationRefResults = verifyImplementationRefFields(stateById, v);
+
+    // -- Fixed-landing-order cumulative rehearsal (see the block comment
+    // above verifyConcurrentLandingSafety for what this proves and why); it
+    // consumes the trunk pin and the implementation_ref results resolved
+    // above rather than re-resolving either.
+    verifyConcurrentLandingSafety(active, dagById, state, v, pinnedTrunk, implementationRefResults);
+
     // -- Git identity verification (see the block comment above
-    // verifyLiveGitIdentities for what this proves and why).
-    verifyLiveGitIdentities(stateById, v);
+    // verifyLiveGitIdentities for what this proves and why). Consumes the
+    // same pinned trunk (round 4, FIX 3) rather than sampling checkout HEAD.
+    verifyLiveGitIdentities(stateById, v, pinnedTrunk);
   }
 
   // -- Non-vacuous work

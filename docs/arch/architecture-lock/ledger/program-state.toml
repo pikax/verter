@@ -23,11 +23,22 @@ current_block = "BV2"
 
 [repository]
 remote = "https://github.com/pikax/verter"
+# branch/head_sha/head_tree = the immutable A0 entry-lock checkout identity
+# (contracts/baseline-lock.md §2) — equal to entry_checkout_sha/tree above,
+# never advanced. See templates/program-state.template.toml for why this is
+# no longer the operational trunk oracle (AMD-013 round 5).
 branch = "main"
 head_sha = "9af553dd262f82ac2f66e4ebf0a0faa70bc7aec0"
 head_tree = "3cf111cf5665586b7d8fdfd520f01cfee3bf8108"
 dirty = false
 untracked_count = 0
+# integration_branch/integration_head_sha = the mutable operational-trunk
+# pin (AMD-013 round 5) — this program's own long-lived integration branch,
+# which every accepted block actually lands on. Revalidated live against
+# refs/heads/program/architecture-lock's tip on every live-mode run; update
+# whenever that branch advances.
+integration_branch = "program/architecture-lock"
+integration_head_sha = "ad0f15ed04cc40c50d8d137fd63f4dad5b945bc7"
 
 [orchestration]
 maintainer = "Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub: pikax)"
@@ -656,6 +667,21 @@ charter_digest = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d14619
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+# implementation_candidate_sha/implementation_ref (AMD-013 round 4, FIX 2):
+# BV2 predates this schema and was the live-ledger gap FIX 2 was written to
+# surface, not paper over (AMD-013 §9). Filled against the real, live WIP
+# worktree for this block (git worktree list: /Users/carlosrodrigues/Documents/dev/verter-bv2,
+# refs/heads/block/bv2) rather than left empty or backfilled with a decoy
+# value — the branch's history (e.g. 4bfb9b15d, "eliminate VDOM/SSR
+# root-prefix duplicate-ownership panic") matches this row's own
+# charter/notes. This branch is a REAL, actively-advancing WIP ref (verified
+# to have moved mid-round when this pin was resolved) — both fields must be
+# kept in lockstep with its current live tip; the validator treats any
+# drift as a stale-pin violation (checkImplementationRefBinding), not a
+# silent pass, so a resync is required before the next live validation run
+# if the branch advances again after this pin.
+implementation_candidate_sha = "306314d7a442f57a4e321d004c0f91b7d8ba2e2c"
+implementation_ref = "refs/heads/block/bv2"
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -664,6 +690,11 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+# landing_order = 1: BV2 is currently the sole concurrently active block
+# (IN_PROGRESS ∪ REVIEW ∪ ACCEPTANCE_RECOMMENDED has cardinality 1), so any
+# positive value is trivially the minimum/only order; set to 1 rather than
+# left at the schema default 0 (non-positive, itself a violation).
+landing_order = 1
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"

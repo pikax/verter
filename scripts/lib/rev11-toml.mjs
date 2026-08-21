@@ -6,11 +6,15 @@
 // prevent.
 //
 // Supported shapes (the full set used by program-dag.toml,
-// templates/program-state.template.toml, and
-// templates/stack-window.template.toml): full-line comments, `[table]`,
-// `[[array-of-tables]]`, and `key = value` where value is a basic
-// double-quoted string (no escapes), a single-line array of basic strings,
-// an integer, or a boolean. A trailing `# comment` after a value is allowed.
+// templates/program-state.template.toml,
+// templates/stack-window.template.toml, and the evidence-root entry-lock
+// records verifyEntryLockRecordBinding reads): full-line comments,
+// `[table]`, `[[array-of-tables]]`, and `key = value` where value is a basic
+// double-quoted string (no escapes), an array of basic strings — single-line
+// or spanning multiple lines (brackets balanced across lines, a single
+// trailing comma before the closing bracket permitted, mirroring
+// validate-performance-gates.mjs's own multi-line-array join) — an integer,
+// or a boolean. A trailing `# comment` after a value is allowed.
 // Everything else fails loudly with the file/line.
 
 export class TomlError extends Error {}
@@ -52,9 +56,12 @@ export function parseToml(text, label) {
       return body;
     }
     if (s.startsWith("[")) {
-      // Single-line array of basic strings (e.g. predecessors = ["A0", "A1"]).
+      // Array of basic strings (e.g. predecessors = ["A0", "A1"]), already
+      // joined onto one string by the caller when it spanned multiple raw
+      // lines (see the multi-line-array join in the main loop below) — this
+      // still parses a genuinely single-line array unchanged.
       const end = s.lastIndexOf("]");
-      if (end === -1) fail(lineNo, "unterminated array (multi-line arrays unsupported)");
+      if (end === -1) fail(lineNo, "unterminated array (no closing bracket found)");
       const rest = s.slice(end + 1).trim();
       if (rest !== "") {
         if (!rest.startsWith("#")) {
@@ -67,9 +74,35 @@ export function parseToml(text, label) {
           );
         }
       }
-      const inner = s.slice(1, end).trim();
+      let inner = s.slice(1, end).trim();
       if (inner === "") return [];
-      return inner.split(",").map((piece) => {
+      // A single trailing comma before the closing bracket is legal TOML
+      // (and the common shape a hand-authored multi-line array actually
+      // takes) — strip exactly one, so it does not read as an empty final
+      // element. An interior empty element (a genuine `, ,`) still fails.
+      if (inner.endsWith(",")) inner = inner.slice(0, -1).trim();
+      if (inner === "") return [];
+      // Split on commas OUTSIDE quoted strings only — a naive inner.split(",")
+      // would fragment a real array element whose own string content
+      // contains a comma (e.g. a prose note: "PR #98 (DRAFT, main <- ...)").
+      // No escape support in this dialect (checked below), so a bare `"`
+      // toggling quote state is unambiguous.
+      const pieces = [];
+      {
+        let cur = "";
+        let inQuotes = false;
+        for (const ch of inner) {
+          if (ch === '"') inQuotes = !inQuotes;
+          if (ch === "," && !inQuotes) {
+            pieces.push(cur);
+            cur = "";
+            continue;
+          }
+          cur += ch;
+        }
+        pieces.push(cur);
+      }
+      return pieces.map((piece) => {
         const p = piece.trim();
         if (p === "") fail(lineNo, "empty array element");
         if (!(p.startsWith('"') && p.endsWith('"') && p.length >= 2)) {
@@ -124,7 +157,30 @@ export function parseToml(text, label) {
     if ((m = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line))) {
       const key = m[1];
       if (key in current) fail(lineNo, `duplicate key ${JSON.stringify(key)}`);
-      current[key] = parseValue(m[2], lineNo);
+      let valueText = m[2];
+      // Multi-line array: the value opens a bracket this line does not
+      // close — keep consuming raw lines, tracking bracket depth (mirrors
+      // validate-performance-gates.mjs's own multi-line-array join), until
+      // the brackets balance, then hand the joined text to parseValue as if
+      // it had all been on one line. A value that never balances runs off
+      // the end of the file and fails loudly via parseValue's own
+      // unterminated-array check.
+      if (valueText.trim().startsWith("[")) {
+        let depth = 0;
+        const consume = (chunk) => {
+          for (const ch of chunk) {
+            if (ch === "[") depth += 1;
+            else if (ch === "]") depth -= 1;
+          }
+        };
+        consume(valueText);
+        while (depth > 0 && i + 1 < lines.length) {
+          i += 1;
+          valueText += "\n" + lines[i];
+          consume(lines[i]);
+        }
+      }
+      current[key] = parseValue(valueText, lineNo);
       continue;
     }
     fail(lineNo, `unrecognized line: ${JSON.stringify(line)}`);
