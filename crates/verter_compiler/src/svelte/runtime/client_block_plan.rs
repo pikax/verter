@@ -512,7 +512,11 @@ impl<'a> SupportedClientIr<'a> {
     }
 
     /// The single declared binding of an optional pattern, or `None` for an absent
-    /// pattern. A multi-name (destructuring) pattern fails closed.
+    /// pattern. A multi-name (destructuring) pattern fails closed, carrying the
+    /// pattern's own authored span when the pattern was interned WITH a backing
+    /// span (every syntactic pattern is); a pattern interned from already-parsed
+    /// names with no backing span ([`PatternShape::Unobserved`]) falls back to
+    /// `Span::new(0, 0)` — there is no real span to report.
     fn pattern_single_binding(
         &self,
         pattern: Option<PatternId>,
@@ -524,7 +528,11 @@ impl<'a> SupportedClientIr<'a> {
             [binding] => Ok(Some(*binding)),
             _ => Err(UnsupportedSvelteRuntimeSurface::Block {
                 construct: "destructuring-binding",
-                span: verter_span::Span::new(0, 0),
+                span: self
+                    .ir
+                    .pattern(pattern)
+                    .span
+                    .unwrap_or(verter_span::Span::new(0, 0)),
             }),
         }
     }
