@@ -64,8 +64,20 @@ pub enum BindingRuntimeKind {
     /// A `$.state($.proxy(…))` value: an object/array `$state` that is reassigned
     /// (the binding itself is reactive).
     StateProxy,
-    /// A `$derived` / `$derived.by` memo.
+    /// A `$derived` / `$derived.by` memo — a GENUINE rune reference (a top-level or
+    /// declaration-tag `$derived(...)` declarator). Reads are signals (`$.get`); a
+    /// bare-Identifier `bind:` reassigns it directly (`$.set`, Svelte 5's "overridable
+    /// derived"). Distinct from [`Self::SlotPropDerived`], which shares the read shape
+    /// but not the bare-Identifier bind acceptance.
     Derived,
+    /// A component `let:` slot-prop local (`const item = $.derived(() =>
+    /// $$slotProps.item)`, minted by `lower_slot_region`). Reads are signals (`$.get`),
+    /// identical to [`Self::Derived`] — but official REJECTS a bare-Identifier `bind:`
+    /// of a slot prop (`constant_binding`), unlike a genuine `$derived(...)` rune, so
+    /// this kind is kept distinct at the bare-Identifier bind-writability gate
+    /// (`is_writable_bind_root`) while staying identical everywhere else (a MEMBER bind
+    /// root, a signal read, a reactive dependency).
+    SlotPropDerived,
     /// A `$props()` destructured prop.
     Prop,
     /// A `$bindable()` prop.
@@ -166,6 +178,7 @@ pub(super) fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
         BindingRuntimeKind::StateSignal { .. }
             | BindingRuntimeKind::StateProxy
             | BindingRuntimeKind::Derived
+            | BindingRuntimeKind::SlotPropDerived
             | BindingRuntimeKind::EachSignal
             | BindingRuntimeKind::AwaitSignal
             | BindingRuntimeKind::LegacyConstDerived

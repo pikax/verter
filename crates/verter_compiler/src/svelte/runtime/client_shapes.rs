@@ -694,7 +694,10 @@ pub(super) fn classify_bind_shape(
 /// scan):
 ///
 /// - a CLEAN (non-TS-wrapped) bare-identifier target whose binding is a reactive
-///   `$state` signal (`$.set(name, $$value)`) OR a PLAIN local (`name = $$value`);
+///   `$state` signal (`$.set(name, $$value)`), a PLAIN local (`name = $$value`), OR a
+///   GENUINE `$derived(...)` rune reference (`$.set(name, $$value)` — Svelte 5's
+///   "overridable derived"; a `let:` slot-prop local is NOT admitted here — see
+///   [`is_writable_bind_root`]);
 /// - a CLEAN member target (`o.x` / `a[i]`) whose ROOT identifier is a reactive
 ///   `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x = $$value`), an
 ///   IMPORT (`x.k = $$value` — official accepts a member of an import with the
@@ -774,9 +777,10 @@ fn classify_dom_value_bind(
     };
     match fact.kind {
         // A bare-identifier target: accepted when its binding is a reactive `$state`
-        // signal (setter `$.set(name, $$value)`) OR a PLAIN local (setter `name =
-        // $$value`). A `$props()` / `$bindable` / `$derived` / import root needs a
-        // divergent official protocol and fails closed (the locked-down boundaries).
+        // signal or a genuine `$derived(...)` rune (setter `$.set(name, $$value)`) OR
+        // a PLAIN local (setter `name = $$value`). A `$props()` / `$bindable` /
+        // `SlotPropDerived` / import root needs a divergent official protocol and
+        // fails closed (the locked-down boundaries).
         Some(BindTargetKind::Identifier) => {
             // The identifier ROOT comes from the typed bind-target fact (`root_ident`), NOT
             // `source.trim()` — so a parenthesized identifier (`bind:value={(v)}`) resolves
@@ -869,17 +873,18 @@ fn classify_dom_value_bind(
 }
 
 /// Whether a bind target's ROOT binding is a WRITABLE target-lvalue root — a reactive
-/// `$state` signal (the setter writes via `$.set` / `$.get(obj).x = …`) OR a PLAIN
-/// local (the setter assigns directly: `name = $$value` / `o.x = $$value`). These are
-/// the two roots whose plain-assignment setter is byte-correct against official.
+/// `$state` signal (the setter writes via `$.set` / `$.get(obj).x = …`), a PLAIN
+/// local (the setter assigns directly: `name = $$value` / `o.x = $$value`), or a
+/// GENUINE `$derived(...)`/`$derived.by(...)` rune reference (Svelte 5's "overridable
+/// derived": the setter is `$.set(name, $$value)`, the same signal-setter shape a
+/// `$state` root gets — no separate codegen arm).
 ///
-/// A `$props()` / `$bindable` / `$derived` root is NOT writable here as a CONSERVATIVE
-/// boundary: a `$props()` / `$bindable` write IS a divergent protocol (a `$.prop`
-/// flag-7 accessor). A `$derived`-rooted MEMBER write IS modelled — see
-/// [`bind_member_root_is_writable_target`] — a genuine top-level `$derived(...)`
-/// bare-Identifier bind never reaches either predicate regardless (an unconditional,
-/// unrelated earlier gate refuses it — see `rune_scan.rs`'s handling of
-/// `$derived`/`$effect`), so this arm never observes that case in practice. An IMPORT root
+/// A `$props()` / `$bindable` root is NOT writable here as a CONSERVATIVE boundary: a
+/// `$props()` / `$bindable` write IS a divergent protocol (a `$.prop` flag-7
+/// accessor). A `SlotPropDerived` root (a component `let:` slot-prop local) is
+/// likewise NOT writable here — official REJECTS a bare-Identifier bind of a slot prop
+/// (`constant_binding`) even though it shares `Derived`'s read shape; only a genuine
+/// `Derived` rune reference reaches this arm's acceptance. An IMPORT root
 /// (`ComponentImport` / `ImportedValue`) is NOT writable BY
 /// DESIGN, not as a deferral: ES import bindings are not reassignable, and official
 /// REJECTS the bare bind (`constant_binding`) and the reassignment
@@ -912,20 +917,18 @@ pub(super) fn bind_root_is_writable_target(
 /// value in place (through its normal read form — `$.get(item).x = …` for a reactive
 /// root, plain `item.x = …` otherwise); it never reassigns the binding itself, so it
 /// needs none of the collection-index / import-rebinding redirect a bare identifier
-/// write would. NOT reused for the identifier arm: a bare bind of these roots
-/// generally would reassign the binding, which official rejects. `$derived(...)`
-/// is a real exception to that rejection (Svelte 5's "overridable derived" accepts a
-/// bare-Identifier reassignment) but Verter does not implement the acceptance at this
-/// arm for either construct that reaches it — see the note on
-/// [`is_writable_member_bind_extra_root`] for the full account, including the known
-/// conformance gap on the declaration-tag rune form.
+/// write would. NOT reused for the identifier arm: a bare bind of most of these roots
+/// would reassign the binding, which official rejects; `Derived` is the one root
+/// admitted at BOTH arms (member here, bare-Identifier at
+/// [`is_writable_bind_root`]) because a genuine `$derived(...)` rune reference is
+/// reassignable — `SlotPropDerived` stays member-only, since a `let:` slot prop is not.
 ///
 /// The widened extra roots are: an `{#each}` item (`EachSignal` / `EachPlain`), an
 /// `{#each … as {field}}` destructured field (`EachDestructuredField`), a
 /// `{#snippet}` parameter (`SnippetParam`), an `{#await … then x}` / `{:catch e}`
-/// binding (`AwaitSignal`), a `{@const}` derived local (`LegacyConstDerived`), and a
-/// `$derived` binding (`Derived` — a genuine `$derived(...)`/`$derived.by(...)` rune
-/// declarator, or the same kind minted for a component `let:` slot-prop).
+/// binding (`AwaitSignal`), a `{@const}` derived local (`LegacyConstDerived`), a
+/// genuine `$derived(...)`/`$derived.by(...)` rune reference (`Derived`), and a
+/// component `let:` slot-prop local (`SlotPropDerived`).
 ///
 /// SHARED by both the element DOM-bind classifier and the component-bind
 /// projection's MEMBER arm (`component_bind_root_is_writable`): official draws no
@@ -950,40 +953,31 @@ pub(super) fn bind_member_root_is_writable_target(
 /// Whether a binding kind is one of the READ-ORIENTED kinds that is writable ONLY as
 /// the root of a MEMBER bind target (see [`bind_member_root_is_writable_target`]): an
 /// `{#each}` item, an each-destructured field, a `{#snippet}` parameter, an
-/// `{#await}` binding, a `{@const}` derived local, or a `$derived` binding. None of
-/// these reach this predicate as writable at the bare-Identifier arm
-/// (`is_writable_bind_root`) — a bare-identifier bind of any of them would reassign
-/// the binding itself, which official rejects for most of them; a MEMBER write never
-/// does. `Derived` is the one kind where that rejection is NOT universal: Svelte 5's
-/// "overridable derived" accepts a bare-Identifier reassignment of a GENUINE
-/// `$derived(...)`/`$derived.by(...)` rune reference, emitting the plain
-/// `$.set(name, $$value)` two-way-bind shape. Whether a given `Derived`-kind binding
-/// hits that acceptance or a `constant_binding` refusal depends on WHICH of the two
-/// constructs minted it, and Verter does not yet discriminate between them at this
-/// arm (both stay in the deliberately unwidened bare-Identifier refusal — see the
-/// `constant_binding`-tracking test on `a_member_bind_rooted_at_a_derived_binding_is_accepted`
-/// and the KNOWN-GAP test on `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted`):
-/// a component `let:` slot-prop (a synthesized `Derived`, not a genuine rune reference)
-/// — official's bare-Identifier rejection here IS `constant_binding`, oracle-verified
-/// against svelte@5.56.8 — and a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG
-/// (`declaration_tag_lowering.rs` + `state_prep::classify_block_rune_declarator`), a
-/// genuine `$derived(...)` rune reference that bypasses `rune_scan.rs` because that
-/// lowering pushes only the call's argument span into the template-expression list
-/// the rune scan re-walks, not the `$derived(...)` call span itself — where official
-/// ACCEPTS the bare-Identifier bind (oracle-verified against svelte@5.56.8: emits
-/// `$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))`),
-/// unlike the `let:` case. Verter currently refuses BOTH at this arm — correct for the
-/// `let:` construct, a known conformance gap (tracked, not claimed as parity) for the
-/// declaration-tag rune construct, since nothing here distinguishes the two
-/// constructs' `Derived` bindings from each other. A top-level INSTANCE-SCRIPT
-/// `let d = $derived(e)` declarator form of the same "overridable derived" behavior
-/// never even reaches this arm: `rune_scan.rs::classify_rune_position` refuses every
-/// `$derived` reference in that form before classification, an unrelated pre-existing
-/// gate. See `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`
-/// for the disposition. Both `Derived`-minting constructs are exercised directly:
-/// `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` form)
-/// and `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (the
-/// declaration-tag rune form) in `client_tests.rs`.)
+/// `{#await}` binding, a `{@const}` derived local, a genuine `$derived` rune
+/// reference, or a `let:` slot-prop local. None of these reach this predicate as
+/// writable at the bare-Identifier arm (`is_writable_bind_root`) EXCEPT `Derived` — a
+/// bare-Identifier bind of the others would reassign the binding itself, which
+/// official rejects; a MEMBER write never does.
+///
+/// `Derived` vs `SlotPropDerived` diverge at the bare-Identifier arm specifically:
+/// Svelte 5's "overridable derived" accepts a bare-Identifier reassignment of a
+/// GENUINE `$derived(...)`/`$derived.by(...)` rune reference — either a top-level
+/// instance-script declarator or a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG
+/// (`declaration_tag_lowering.rs` + `state_prep::classify_block_rune_declarator`,
+/// which sets `BindingRuntimeKind::Derived` directly) — emitting the plain
+/// `$.set(name, $$value)` two-way-bind shape (oracle-verified against svelte@5.56.8:
+/// `$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))`).
+/// A component `let:` slot-prop local (`lower_component.rs::lower_slot_region`, which
+/// mints the distinct `BindingRuntimeKind::SlotPropDerived`) shares `Derived`'s read
+/// shape but official REJECTS its bare-Identifier bind (`constant_binding`,
+/// oracle-verified against svelte@5.56.8) — so `SlotPropDerived` stays out of
+/// [`is_writable_bind_root`] while both kinds stay in this MEMBER-arm predicate.
+/// Both constructs are exercised directly:
+/// `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` slot-prop form,
+/// member accepted / bare-Identifier refused) and
+/// `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (the
+/// declaration-tag rune form, member AND bare-Identifier both accepted) in
+/// `client_tests.rs`.
 fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {
     matches!(
         kind,
@@ -994,14 +988,17 @@ fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {
             | BindingRuntimeKind::AwaitSignal
             | BindingRuntimeKind::LegacyConstDerived
             | BindingRuntimeKind::Derived
+            | BindingRuntimeKind::SlotPropDerived
     )
 }
 
 /// Whether a binding kind is an ASSIGNMENT-VALID bind root — the kinds a two-way `bind:`
 /// may legally write: a `$state` SIGNAL (`$.set(name, $$value)`), a `$.state($.proxy)`
 /// reassignable proxy (`$.get(o).x = $$value`), a bare `$.proxy` (a `BareProxy` member
-/// deep-mutation `o.x = $$value` — plain, never a reassignment of the proxy itself), or a
-/// PLAIN local (`name = $$value`). The read-oriented signal kinds — `$derived`, an
+/// deep-mutation `o.x = $$value` — plain, never a reassignment of the proxy itself), a
+/// PLAIN local (`name = $$value`), or a GENUINE `$derived(...)` rune reference
+/// (`$.set(name, $$value)` — Svelte 5's "overridable derived"). The remaining
+/// read-oriented signal kinds — a `let:` slot-prop local (`SlotPropDerived`), an
 /// `{#each}` item, an each-destructured field, a `{#snippet}` parameter, an `{#await}`
 /// binding, and a `{@const}` derived — are READABLE but are NOT assignment targets at
 /// this (bare-Identifier) arm, so they are EXCLUDED here; a MEMBER write rooted at ANY
@@ -1015,7 +1012,7 @@ fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {
 /// enables the plain-member setter (`o.x = $$value`) official emits for a never-reassigned
 /// object `$state`, without ever emitting a plain reassignment of a bare proxy.
 ///
-/// This is deliberately limited to assignment-valid roots. Read-only derived,
+/// This is deliberately limited to assignment-valid roots. Read-only `SlotPropDerived`,
 /// each, await, and declaration-tag bindings are not writable merely because
 /// their values can be consumed by template expressions.
 fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
@@ -1029,6 +1026,13 @@ fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
             // sets the cell (`$.set(v, $$value)`); a member bind writes through
             // the deep-mutation wrap (`$.mutate(o, $.get(o).x = $$value)`).
             | BindingRuntimeKind::MutableSource
+            // A GENUINE `$derived(...)` rune reference (never a `let:` slot-prop
+            // stand-in — that mints the distinct `SlotPropDerived` kind, which is
+            // NOT listed here): Svelte 5's "overridable derived" accepts a
+            // bare-Identifier reassignment (`$.set(name, $$value)`, emitted by
+            // `is_signal_kind`'s existing signal-setter arm — no new codegen
+            // needed).
+            | BindingRuntimeKind::Derived
     )
 }
 

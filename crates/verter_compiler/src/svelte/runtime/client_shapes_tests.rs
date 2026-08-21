@@ -188,19 +188,20 @@ fn env_with_root_kind(kind: BindingRuntimeKind) -> (BindingTable, ScopeGraph, Sc
 
 #[test]
 fn bind_root_writability_admits_only_assignment_valid_kinds() {
-    // The WRITE decision (`bind_root_is_writable_target`) must admit ONLY the
+    // The WRITE decision (`bind_root_is_writable_target`) must admit the
     // assignment-valid roots — a `$state` SIGNAL, a `$.state($.proxy)` reassignable
-    // proxy, and a PLAIN local — and must EXCLUDE the read-oriented signal kinds a
-    // bind cannot legally reassign: `$derived`, an `{#each}` item, an `{#await}`
-    // binding, and a `{@const}` derived. RED before the fix: the write decision reused
-    // the read-oriented `is_signal_binding`, which admits `Derived` / `EachSignal` /
-    // `AwaitSignal` / `LegacyConstDerived` — so a read-only root was wrongly treated as
-    // writable.
+    // proxy, a PLAIN local, and a GENUINE `$derived(...)` rune reference (Svelte 5's
+    // "overridable derived" — `$.set(name, $$value)`) — and must EXCLUDE the
+    // read-oriented signal kinds a bind cannot legally reassign: a `let:` slot-prop
+    // local (`SlotPropDerived`, which shares `Derived`'s read shape but not official's
+    // bare-Identifier reassignment acceptance), an `{#each}` item, an `{#await}`
+    // binding, and a `{@const}` derived.
     for kind in [
         BindingRuntimeKind::StateSignal { raw: false },
         BindingRuntimeKind::StateSignal { raw: true },
         BindingRuntimeKind::StateProxy,
         BindingRuntimeKind::PlainLocal,
+        BindingRuntimeKind::Derived,
     ] {
         let (bindings, scopes, root) = env_with_root_kind(kind);
         assert!(
@@ -209,7 +210,7 @@ fn bind_root_writability_admits_only_assignment_valid_kinds() {
         );
     }
     for kind in [
-        BindingRuntimeKind::Derived,
+        BindingRuntimeKind::SlotPropDerived,
         BindingRuntimeKind::EachSignal,
         BindingRuntimeKind::AwaitSignal,
         BindingRuntimeKind::LegacyConstDerived,
@@ -238,10 +239,13 @@ fn bind_root_writability_admits_only_assignment_valid_kinds() {
 
 #[test]
 fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
-    // The writable predicate admits EXACTLY the assignment-valid kinds (a `$state`
-    // signal, a reassignable proxy, a plain local) and EXCLUDES read-only
-    // `Derived` / `EachSignal` / `AwaitSignal` / `LegacyConstDerived` roots.
-    // A value being readable does not make it a valid bind write target.
+    // The writable predicate admits the assignment-valid kinds (a `$state` signal, a
+    // reassignable proxy, a plain local, a GENUINE `$derived(...)` rune reference) and
+    // EXCLUDES read-only `SlotPropDerived` / `EachSignal` / `AwaitSignal` /
+    // `LegacyConstDerived` roots. A value being readable does not make it a valid bind
+    // write target — `Derived` is admitted specifically because Svelte 5's
+    // "overridable derived" makes a genuine rune reference reassignable, unlike the
+    // other read-oriented kinds (including the read-alike `SlotPropDerived`).
     assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
         raw: false
     }));
@@ -252,14 +256,13 @@ fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
     // A `BareProxy` is writable at a MEMBER bind target (`o.x = $$value` plain).
     assert!(is_writable_bind_root(BindingRuntimeKind::BareProxy));
     assert!(is_writable_bind_root(BindingRuntimeKind::PlainLocal));
-    assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
+    assert!(is_writable_bind_root(BindingRuntimeKind::Derived));
+    assert!(!is_writable_bind_root(BindingRuntimeKind::SlotPropDerived));
     assert!(!is_writable_bind_root(BindingRuntimeKind::EachSignal));
     assert!(!is_writable_bind_root(BindingRuntimeKind::AwaitSignal));
     assert!(!is_writable_bind_root(
         BindingRuntimeKind::LegacyConstDerived
     ));
-    // A derived value is readable by expressions but not a writable bind root.
-    assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
     // IMPORT kinds are NON-writable roots by design (non-reassignable ES import
     // bindings; official `constant_binding` / `constant_assignment` rejects) —
     // BOTH the component-default and the general imported-value kind.

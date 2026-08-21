@@ -7190,12 +7190,13 @@ fn a_member_bind_rooted_at_a_legacy_const_derived_binding_is_accepted() {
 
 #[test]
 fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
-    // A member bind rooted at a `Derived` binding is a plain deep-write through the
-    // derived's own referenced value — official ACCEPTS `bind:value={item.x}` where
+    // A member bind rooted at a `SlotPropDerived` binding is a plain deep-write through
+    // the derived's own referenced value — official ACCEPTS `bind:value={item.x}` where
     // `item` is a component `let:` slot-prop (lowered to `const item =
-    // $.derived(() => $$slotProps.item)`, the SAME `BindingRuntimeKind::Derived` kind
-    // a genuine `$derived(...)` rune declarator would carry — oracle-verified against
-    // svelte@5.56.8, `runes: true`):
+    // $.derived(() => $$slotProps.item)`, `BindingRuntimeKind::SlotPropDerived` — the
+    // same signal-read shape as a genuine `$derived(...)` rune declarator's `Derived`
+    // kind, but a distinct kind at the bare-Identifier bind-writability gate —
+    // oracle-verified against svelte@5.56.8, `runes: true`):
     //   $.bind_value(input, () => $.get(item).x, ($$value) => $.get(item).x = $$value)
     // The exact same `$.get(root).field` shape already implemented for `AwaitSignal` /
     // `LegacyConstDerived` roots in this classifier.
@@ -7204,12 +7205,12 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
     // the test vehicle here: that form fails closed at the earlier, unrelated
     // rune-position gate (`rune_scan.rs::classify_rune_position` — "`$derived` has NO
     // supported position"), so it could never reach — and could never discriminate —
-    // this classifier. The `let:` slot-prop construct reaches the SAME `Derived`
-    // binding kind through a path that gate does not cover. A genuine `$derived(...)`
-    // rune ALSO reaches this classifier through a second, separate path the
-    // rune-position gate does not cover either — a `{let x = $derived(e)}` TEMPLATE
-    // declaration tag (`declaration_tag_lowering.rs::lower_declaration_tag`, reclassified
-    // by `state_prep::classify_block_rune_declarator`); see
+    // this classifier. The `let:` slot-prop construct reaches this classifier through a
+    // path that gate does not cover. A genuine `$derived(...)` rune ALSO reaches this
+    // classifier through a second, separate path the rune-position gate does not cover
+    // either — a `{let x = $derived(e)}` TEMPLATE declaration tag
+    // (`declaration_tag_lowering.rs::lower_declaration_tag`, reclassified by
+    // `state_prep::classify_block_rune_declarator`); see
     // `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` below for that
     // path exercised directly.
     let js = emit_result(
@@ -7222,9 +7223,11 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
         ),
         "a member bind on a derived binding must read/write through $.get(item).x:\n{js}"
     );
-    // NEGATIVE: a bare `Derived`-root identifier bind must still refuse — official
-    // REJECTS `bind:value={item}` here (`constant_binding`, oracle-verified); the
-    // widening applies to the Member arm only, never the Identifier arm.
+    // NEGATIVE: a bare `SlotPropDerived`-root identifier bind must still refuse —
+    // official REJECTS `bind:value={item}` here (`constant_binding`, oracle-verified);
+    // the widening applies to the Member arm only, never the Identifier arm, and a
+    // `let:` slot-prop never mints the genuine-rune `Derived` kind that IS admitted at
+    // the Identifier arm (see `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted`).
     assert_fail_closed(
         "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item><input bind:value={item}/></Child>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
@@ -7258,23 +7261,19 @@ fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
         ),
         "a member bind on a declaration-tag $derived rune must read/write through $.get(doubled).x:\n{js}"
     );
-    // KNOWN CONFORMANCE GAP, not parity: official ACCEPTS a bare declaration-tag
-    // `$derived`-root identifier bind (svelte@5.56.8, freshly re-verified) and emits
-    // Svelte 5's "overridable derived" shape:
+    // POSITIVE: official also ACCEPTS a bare declaration-tag `$derived`-root identifier
+    // bind (svelte@5.56.8) and emits Svelte 5's "overridable derived" shape:
     //   $.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))
-    // Verter fails closed here instead — safe (no miscompile), but NOT oracle parity.
-    // A prior version of this test/comment falsely claimed official also refuses
-    // (`constant_binding`), matching Verter's behavior; that claim was never actually
-    // run against the oracle. It has been corrected here after direct reproduction.
-    // Closing the gap needs a provenance discriminator distinguishing this construct's
-    // `Derived` binding from the `let:` slot-prop's `Derived` binding (which DOES
-    // genuinely refuse with `constant_binding` — see
-    // `a_member_bind_rooted_at_a_derived_binding_is_accepted` above) before the
-    // bare-Identifier arm can safely widen for this case alone. Tracked:
-    // `docs/arch/refactor/rev11/evidence/BS1/debt-BS1-001-declaration-tag-derived-bare-bind.md`.
-    assert_fail_closed(
+    // This is the genuine-rune `Derived` kind, distinct from the `let:` slot-prop's
+    // `SlotPropDerived` kind (which stays refused here — see
+    // `a_member_bind_rooted_at_a_derived_binding_is_accepted` above).
+    let js = emit_result(
         "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}\n{let doubled = $derived(item)}\n<input bind:value={doubled}/>\n{/each}\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    )
+    .expect("a bare-Identifier bind rooted at a declaration-tag $derived rune must be accepted");
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))"),
+        "a bare-Identifier bind on a declaration-tag $derived rune must read/write through $.get(doubled) / $.set(doubled, …):\n{js}"
     );
 }
 

@@ -539,6 +539,7 @@ impl<'a> SupportedClientIr<'a> {
                 | BindingRuntimeKind::BareProxy
                 | BindingRuntimeKind::StateProxy
                 | BindingRuntimeKind::Derived
+                | BindingRuntimeKind::SlotPropDerived
                 | BindingRuntimeKind::EachSignal
                 | BindingRuntimeKind::EachPlain
                 | BindingRuntimeKind::EachDestructuredField
