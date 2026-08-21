@@ -28468,15 +28468,11 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
+fn a_multi_name_each_item_destructure_refuses_with_its_real_authored_span() {
     // A genuinely multi-name destructure (`{ a, b }`) refuses (correctly — this shape
-    // isn't supported), but through `pattern_single_binding`'s generic multi-binding
-    // arm, which carries a placeholder `Span::new(0, 0)` rather than the pattern's real
-    // authored location — unlike the single-name shapes above, which all carry a real
-    // span. Real-span reporting here would require the per-property-read plumbing
-    // `ShorthandSingleProperty` uses, generalized to N properties; until then this test
-    // pins the placeholder so a future span fix is a deliberate, visible test update
-    // rather than a silent behavior change.
+    // isn't supported), through `pattern_single_binding`'s generic multi-binding arm.
+    // That arm carries the pattern's own real authored span — every syntactic pattern
+    // is interned WITH a backing span — matching the single-name shapes pinned above.
     let source = "<script>\n  let items = $state([{a:1,b:2}]);\n</script>\n{#each items as { a, b }}<li>{a}{b}</li>{/each}\n";
     let err = emit_result(source).expect_err("a multi-name each-item destructure must refuse");
     let ClientCompileError::Unsupported(surface) = &err else {
@@ -28486,11 +28482,16 @@ fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
         panic!("expected a Block refusal, got {surface:?}");
     };
     assert_eq!(*construct, "destructuring-binding");
+    let pattern_start = source
+        .find("{ a, b }")
+        .expect("source contains the pattern");
     assert_eq!(
         (span.start, span.end),
-        (0, 0),
-        "pins the CURRENT placeholder-span behavior — this breaks the moment the \
-         refusal starts carrying the pattern's real span:\n{source}"
+        (
+            pattern_start as u32,
+            (pattern_start + "{ a, b }".len()) as u32
+        ),
+        "the refusal must carry the pattern's REAL authored span, not a placeholder:\n{source}"
     );
 }
 
