@@ -88,8 +88,35 @@ would not collapse the workspace into one process.
 
 ## Caveats that bind step 6
 
-- The clippy `disallowed-macros` path for `std::debug_assert` **must be proven
-  against this project's toolchain** before the configuration is relied upon.
+- ~~The clippy `disallowed-macros` path for `std::debug_assert` must be proven
+  against this project's toolchain before the configuration is relied upon.~~
+  **RESOLVED 2026-08-21, measured on the pinned toolchain 1.97.1** (scratch
+  crate, real `cargo clippy`):
+  - `disallowed-macros = [{ path = "std::debug_assert", ... }]` FIRES.
+  - It catches the bare `debug_assert!`, the `std::debug_assert!` and the
+    `core::debug_assert!` spellings — `core::` resolves to the same path, so
+    NO separate `core::` entry is required.
+  - **It does NOT catch `debug_assert_eq!` or `debug_assert_ne!`.** Those are
+    distinct macro paths and need their own entries. Verified in both
+    directions: with only `std::debug_assert` listed, a `debug_assert_eq!` call
+    produced no disallowed-macro warning; with all three listed, all three
+    fired. The required configuration is therefore:
+
+    ```toml
+    disallowed-macros = [
+      { path = "std::debug_assert",    reason = "use a precomputed bool" },
+      { path = "std::debug_assert_eq", reason = "use a precomputed bool" },
+      { path = "std::debug_assert_ne", reason = "use a precomputed bool" },
+    ]
+    ```
+
+  - Live scope on trunk, production crates only (`crates/*/src/`):
+    `debug_assert!` 210, `debug_assert_eq!` 63, `debug_assert_ne!` 1 — 274
+    total, of which 37 carry a call expression inside the assertion and need
+    individual audit for semantic work. A one-entry policy would have left the
+    63 `debug_assert_eq!` uses completely unguarded, and they carry the same
+    hazard: `debug_assert_eq!(session.commit_state(), Ok(()))` vanishes whole
+    in shipped builds.
 - Before switching the full suite to `no-debug-assertions`, establish that the
   invariants debug assertions currently exercise are covered by EXPLICIT tests.
   Otherwise a false or broken debug assertion lands unnoticed and makes debug
