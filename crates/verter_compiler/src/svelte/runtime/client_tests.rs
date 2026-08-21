@@ -7277,9 +7277,8 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     //
     // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
     // rune usage at all the component compiles in LEGACY mode instead, whose
-    // component-bind codegen has its own separate, pre-existing gap (a missing
-    // `$$legacy: true` props-object marker, unrelated to
-    // what this test asserts) that would otherwise ride along unasserted here.
+    // component-bind codegen omits the `$$legacy: true` props-object marker, which
+    // would otherwise ride along unasserted in what this test checks.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
     )
@@ -28459,12 +28458,11 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-#[ignore = "known pre-existing gap in Svelte each-item destructuring: a genuinely \
-            multi-name each-item pattern (`{ a, b }`) refuses through `pattern_single_binding`'s \
-            generic multi-binding arm with a placeholder Span::new(0, 0) instead of the pattern's real \
-            span. Closing it needs the same real-span + per-property-read plumbing as \
-            ShorthandSingleProperty, generalized to N properties — a materially larger change than a \
-            single-name shape gate."]
+#[ignore = "a multi-name each-item pattern (`{ a, b }`) refuses through \
+            `pattern_single_binding`'s generic multi-binding arm carrying a placeholder \
+            Span::new(0, 0) rather than the pattern's real span. Real-span reporting here \
+            requires the per-property-read plumbing ShorthandSingleProperty uses, generalized \
+            to N properties."]
 fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
     // Document today's actual behavior: a genuinely multi-name destructure (`{ a, b
     // }`) refuses (correctly — this shape isn't supported), but through
