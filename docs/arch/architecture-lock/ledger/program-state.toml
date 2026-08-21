@@ -680,7 +680,7 @@ candidate_sha = ""
 # drift as a stale-pin violation (checkImplementationRefBinding), not a
 # silent pass, so a resync is required before the next live validation run
 # if the branch advances again after this pin.
-implementation_candidate_sha = "306314d7a442f57a4e321d004c0f91b7d8ba2e2c"
+implementation_candidate_sha = "6d1a86a151703f0630d7e804154c5a9ea03b6d57"
 implementation_ref = "refs/heads/block/bv2"
 candidate_tree = ""
 accepted_sha = ""
@@ -1438,8 +1438,8 @@ id = "J1"
 status = "IN_PROGRESS"
 charter_digest = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
 context_packet_digest = ""
-base_sha = "9531d625fc2cbf02a2de76feb31f5f519fd8de6c"
-implementation_candidate_sha = "75930dcfc5638d32d081354810f5d3c879f7cadc"
+base_sha = "5f68515ba82efaa53d71a5facc78529d0e10db8d"
+implementation_candidate_sha = "f08b0275bdf27813a27df4e73cb17eb5b69420b5"
 implementation_ref = "refs/heads/block/j1"
 landing_order = 2
 candidate_sha = ""
