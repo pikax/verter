@@ -5,3 +5,9 @@ packages:
   - "packages/verter-mcp/npm/*"
   - "packages/verter-tsc/npm/*"
   - "docs"
+
+onlyBuiltDependencies:
+  - "@swc/core"
+  - "@vscode/vsce-sign"
+  - esbuild
+  - keytar
