@@ -280,7 +280,7 @@ function batchCatFileCheck(cwd, specs) {
   return map;
 }
 
-function verifyLiveGitIdentities(stateById, v, pinnedTrunk) {
+function verifyLiveGitIdentities(stateById, v, trunkResolution) {
   const cwd = process.cwd();
   const probe = runGit(["rev-parse", "--is-inside-work-tree"], cwd);
   if (probe.status !== 0 || (probe.stdout ?? "").trim() !== "true") {
@@ -374,25 +374,35 @@ function verifyLiveGitIdentities(stateById, v, pinnedTrunk) {
   // landed. This is the SAME defect class Finding G fixed for the trunk-pin
   // check itself (resolvePinnedTrunk) — a second call site that sampled
   // checkout HEAD instead of the ledger's own named trunk, found and closed
-  // in round 4 (FIX 3). pinnedTrunk is resolved once, by resolvePinnedTrunk,
-  // before this function runs; a null pin means that check already recorded
-  // its own violation, so accepted_sha reachability cannot be established
-  // against an untrustworthy trunk pin either.
-  if (pinnedTrunk === null) {
+  // in round 4 (FIX 3). trunkResolution is resolved once, by
+  // resolvePinnedTrunk, before this function runs; a null result means that
+  // check already recorded its own violation, so accepted_sha reachability
+  // cannot be established against an untrustworthy trunk pin either.
+  //
+  // AMD-013 round 6: reachability resolves against trunkResolution.liveTip —
+  // the trunk's LIVE tip — never trunkResolution.pin. The pin is now only
+  // ancestor-checked, so it may genuinely lag behind trunk (round 6's whole
+  // point); a block landed after the pin was recorded is reachable from the
+  // live tip but NOT from a stale-but-valid ancestor pin (an ancestor's
+  // rev-list never contains its own descendants). Using the pin here would
+  // wrongly reject a genuinely landed block the instant the pin lagged by
+  // even one commit.
+  if (trunkResolution === null) {
     v(
       `accepted_sha landing/reachability cannot be verified — the ledger's pinned integration trunk (repository.integration_head_sha) failed to resolve or revalidate against the live repository (see the trunk-pin violation above); reachability cannot be checked against an untrustworthy trunk pin`,
     );
     return;
   }
-  const revListRes = runGit(["rev-list", pinnedTrunk], cwd);
+  const liveTip = trunkResolution.liveTip;
+  const revListRes = runGit(["rev-list", liveTip], cwd);
   if (revListRes.status !== 0) {
     v(
-      `live mode could not enumerate commits reachable from the configured trunk ref's tip ${pinnedTrunk} (git rev-list) to verify accepted_sha landing: ${gitFailureReason(revListRes)}`,
+      `live mode could not enumerate commits reachable from the configured trunk ref's live tip ${liveTip} (git rev-list) to verify accepted_sha landing: ${gitFailureReason(revListRes)}`,
     );
     return;
   }
   const reachableFromTip = new Set(revListRes.stdout.split("\n").filter((l) => l !== ""));
-  reachableFromTip.add(pinnedTrunk);
+  reachableFromTip.add(liveTip);
 
   for (const [id, b] of stateById) {
     if (b.status !== "ACCEPTED") continue;
@@ -400,7 +410,7 @@ function verifyLiveGitIdentities(stateById, v, pinnedTrunk) {
       const info = resolved.get(b.accepted_sha);
       if (info && info.type === "commit" && !reachableFromTip.has(b.accepted_sha)) {
         v(
-          `state block ${id} is ACCEPTED with accepted_sha ${b.accepted_sha} but that commit is not reachable from the configured trunk ref's tip ${pinnedTrunk} — it is not genuinely landed (a dangling or since-rewritten commit is not sufficient evidence of acceptance)`,
+          `state block ${id} is ACCEPTED with accepted_sha ${b.accepted_sha} but that commit is not reachable from the configured trunk ref's live tip ${liveTip} — it is not genuinely landed (a dangling or since-rewritten commit is not sufficient evidence of acceptance)`,
         );
       }
     }
@@ -440,11 +450,50 @@ function isTransitivePredecessor(dagById, ancestorId, id) {
   return false;
 }
 
-// Resolves and revalidates the ledger's PINNED INTEGRATION-TRUNK identity
+// Resolves the ledger's PINNED INTEGRATION-TRUNK identity
 // (state.repository.integration_head_sha) against the LIVE TIP OF THE
 // CONFIGURED INTEGRATION REF (repository.integration_branch, resolved as
 // refs/heads/<integration_branch>) — never checkout HEAD, and never
 // repository.branch/head_sha.
+//
+// AMD-013 round 6 (the equality-pin self-reference correction): the ledger
+// this pin lives in is itself committed TO the integration branch it pins.
+// Setting integration_head_sha to the live tip and committing that change
+// makes the commit the new tip — the pin is stale the instant it exists, and
+// resyncing after every commit produces another commit that is again stale.
+// Equality cannot converge for a self-referential pin; this is intrinsic to
+// where the ledger lives, not a resync-discipline gap (see AMD-013's "Round
+// 6 correction" section for the full argument). Requiring equality only made
+// the concurrency ceiling this ledger ratifies permanently unusable.
+//
+// The pin's job is narrowed to what an equality check could never give it
+// anyway: a DETERMINISTIC, reproducible REHEARSAL BASE for the fixed-
+// landing-order replay (verifyConcurrentLandingSafety) — not a freshness
+// claim. Ancestry is the correct relation for that job: replaying a delta
+// onto any ancestor of the live trunk is reproducible regardless of how many
+// commits trunk has since gained, so the pin is valid whenever it resolves
+// to a real commit that is an ancestor of (or equal to — self-ancestry holds)
+// the live tip. A pin that is NOT an ancestor — a rewritten or foreign SHA —
+// still fails closed: that is the case that actually indicates the pin is
+// untrustworthy, unlike mere staleness.
+//
+// Freshness is deliberately NOT enforced here by any bound (e.g. "at most N
+// commits behind") — the live tip already flows separately into every
+// reachability check that cares whether something is genuinely landed
+// (verifyLiveGitIdentities resolves against the live tip, not this pin; see
+// its own comment). An arbitrarily stale-but-ancestor pin cannot mask a
+// missing landing; it can only make the rehearsal's replay base older than
+// necessary, which is safe. If a future need arises to bound staleness for
+// some other reason, that is a distinct, explicit check to add — not a
+// reason to fold freshness back into this identity/ancestry oracle.
+//
+// Returns { pin, liveTip } on success — `pin` is the validated ancestor
+// identity callers use as the rehearsal replay base; `liveTip` is the live
+// trunk tip callers use for reachability. On any failure (malformed/absent
+// integration_branch or integration_head_sha, a git failure, or a pin that
+// is not an ancestor of the live tip) records a violation and returns null —
+// callers must not fall back to an un-pinned ambient HEAD, and must not fall
+// back to the entry-lock repository.branch/head_sha pair.
 //
 // AMD-013 round 5 (the entry-lock-vs-integration-trunk correction):
 // repository.branch/head_sha are the IMMUTABLE A0 entry-lock checkout
@@ -480,11 +529,6 @@ function isTransitivePredecessor(dagById, ancestorId, id) {
 // — the ledger's own explicit, named integration-trunk ref — is the correct
 // oracle, and once the oracle is right there is no reason to run this only
 // sometimes: it runs on EVERY live-mode validation.
-// Returns the pinned SHA on success; on any failure (malformed/absent
-// integration_branch or integration_head_sha, a git failure, or a live
-// branch tip that has moved past the ledger's pin) records a violation and
-// returns null — callers must not fall back to an un-pinned ambient HEAD,
-// and must not fall back to the entry-lock repository.branch/head_sha pair.
 function resolvePinnedTrunk(state, cwd, v) {
   const repo = state.repository && typeof state.repository === "object" ? state.repository : {};
   if (!(typeof repo.integration_branch === "string" && REF_NAME_RE.test(repo.integration_branch))) {
@@ -508,13 +552,29 @@ function resolvePinnedTrunk(state, cwd, v) {
     return null;
   }
   const liveTrunkTip = tipRes.stdout.trim();
-  if (liveTrunkTip !== repo.integration_head_sha) {
+  // AMD-013 round 6: ancestry, not equality — see the block comment above.
+  // Both sides must resolve to real commits for `--is-ancestor` to answer
+  // meaningfully; the pin's own well-formedness was already checked above,
+  // and trunkRef's tip was just resolved, so a non-zero/non-one exit here is
+  // a genuine git failure (e.g. the pin names an object that does not exist
+  // in this repository), not an ancestry answer.
+  const ancRes = runGit(
+    ["merge-base", "--is-ancestor", repo.integration_head_sha, liveTrunkTip],
+    cwd,
+  );
+  if (ancRes.status !== 0 && ancRes.status !== 1) {
     v(
-      `live state repository.integration_head_sha ${repo.integration_head_sha} does not match the live tip of the configured integration-trunk ref ${trunkRef} (${liveTrunkTip}) — the integration trunk has advanced since the ledger pinned it, and a pinned trunk that has silently gone stale must be resynced before it is trustworthy rehearsal input, not rehearsed against a moving target`,
+      `live mode could not check whether the pinned trunk repository.integration_head_sha ${repo.integration_head_sha} is an ancestor of the configured integration-trunk ref's live tip ${liveTrunkTip} (git merge-base --is-ancestor): ${gitFailureReason(ancRes)}`,
     );
     return null;
   }
-  return repo.integration_head_sha;
+  if (ancRes.status === 1) {
+    v(
+      `live state repository.integration_head_sha ${repo.integration_head_sha} is not an ancestor of the live tip of the configured integration-trunk ref ${trunkRef} (${liveTrunkTip}) — a lagging-but-genuinely-ancestral pin is valid rehearsal input (see AMD-013's round 6 correction), but this pin names a rewritten or foreign commit that the live trunk's history does not contain, so it cannot be trusted as a rehearsal base`,
+    );
+    return null;
+  }
+  return { pin: repo.integration_head_sha, liveTip: liveTrunkTip };
 }
 
 // Validates the IMMUTABLE A0 entry-lock identity (repository.branch/
@@ -862,23 +922,30 @@ function verifyConcurrentLandingSafety(
   dagById,
   state,
   v,
-  pinnedTrunk,
+  trunkResolution,
   implementationRefResults,
 ) {
   if (active.length < 2) return;
   const cwd = process.cwd();
   // Trunk-pin resolution (resolvePinnedTrunk, Finding C) now runs
   // UNCONDITIONALLY on every live-mode validation (see the call site in
-  // main()) — it is no longer resolved in here. A null pin means the caller
-  // already recorded the specific trunk-pin violation; this function records
-  // its OWN, distinct violation naming why the rehearsal itself cannot run,
-  // rather than silently skipping.
-  if (pinnedTrunk === null) {
+  // main()) — it is no longer resolved in here. A null result means the
+  // caller already recorded the specific trunk-pin violation; this function
+  // records its OWN, distinct violation naming why the rehearsal itself
+  // cannot run, rather than silently skipping.
+  if (trunkResolution === null) {
     v(
       `the fixed-landing-order rehearsal cannot run for ${active.length} concurrently active block(s) — the ledger's pinned integration trunk (repository.integration_head_sha) failed to resolve or revalidate against the live repository (see the trunk-pin violation above); nothing here can be rehearsed against an untrustworthy trunk pin`,
     );
     return;
   }
+  // AMD-013 round 6: the rehearsal replays onto trunkResolution.pin — the
+  // validated ANCESTOR identity, not the live tip. The pin's whole purpose
+  // is a deterministic, reproducible replay base (see resolvePinnedTrunk's
+  // comment); using the live tip here instead would make the rehearsal's
+  // outcome depend on how many unrelated commits trunk has gained since the
+  // ledger was last edited, which is not what this replay is proving.
+  const pinnedTrunk = trunkResolution.pin;
   let structurallyValid = true;
   const entries = [];
   for (const b of active) {
@@ -2247,7 +2314,11 @@ function main() {
     // CONFIGURED integration ref (repository.integration_branch) rather than
     // checkout HEAD — or the immutable entry-lock branch — there is no
     // remaining reason to skip this on an ordinary single-active-block run.
-    const pinnedTrunk = resolvePinnedTrunk(state, process.cwd(), v);
+    // AMD-013 round 6: returns { pin, liveTip } (pin ancestor-checked
+    // against liveTip) rather than a single equality-checked SHA — see
+    // resolvePinnedTrunk's comment for why equality cannot hold for a pin
+    // committed to the branch it pins.
+    const trunkResolution = resolvePinnedTrunk(state, process.cwd(), v);
 
     // -- implementation_ref/implementation_candidate_sha binding (round 4,
     // FIX 2 — see verifyImplementationRefFields above): runs UNCONDITIONALLY
@@ -2258,14 +2329,23 @@ function main() {
 
     // -- Fixed-landing-order cumulative rehearsal (see the block comment
     // above verifyConcurrentLandingSafety for what this proves and why); it
-    // consumes the trunk pin and the implementation_ref results resolved
-    // above rather than re-resolving either.
-    verifyConcurrentLandingSafety(active, dagById, state, v, pinnedTrunk, implementationRefResults);
+    // consumes the trunk resolution (replaying onto its .pin) and the
+    // implementation_ref results resolved above rather than re-resolving
+    // either.
+    verifyConcurrentLandingSafety(
+      active,
+      dagById,
+      state,
+      v,
+      trunkResolution,
+      implementationRefResults,
+    );
 
     // -- Git identity verification (see the block comment above
     // verifyLiveGitIdentities for what this proves and why). Consumes the
-    // same pinned trunk (round 4, FIX 3) rather than sampling checkout HEAD.
-    verifyLiveGitIdentities(stateById, v, pinnedTrunk);
+    // same trunk resolution (round 4, FIX 3), reachability against its
+    // .liveTip, rather than sampling checkout HEAD.
+    verifyLiveGitIdentities(stateById, v, trunkResolution);
   }
 
   // -- Non-vacuous work
