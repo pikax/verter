@@ -2,7 +2,10 @@
 
 **Status:** RATIFIED WITH CORRECTIONS, 2026-08-21. The codex architect ratified
 this amendment subject to two corrections (§11); both were applied in this
-revision before landing.
+revision before landing. A third, post-landing correction (round 6 — the
+equality-pin self-reference defect the landing commit itself exposed) is
+recorded under §11's "Round 6 correction" subsection; the amendment stays
+RATIFIED.
 
 **Prepared against:** local `feat/concurrent-blocks` commit
 `cd15a31b7a3c087dcca67f105434a823e49c55f1`, tree
@@ -235,6 +238,19 @@ Every `file:line` citation below was read directly on that tree.
     are left as historical record, not rewritten.
   Both corrections applied; no further review round follows (document review
   on this program is capped, and this amendment has had its round).
+- Round 6 correction (post-landing, this revision) — the ratified equality
+  pin (`resolvePinnedTrunk`: `repository.integration_head_sha` must EQUAL the
+  live tip of `refs/heads/<repository.integration_branch>`) failed live
+  validation the moment the landing commit (`2e878b6a5`) itself advanced the
+  branch past the pin it recorded — a self-reference intrinsic to a ledger
+  committed to the branch it pins, unfixable by any amount of resyncing.
+  Corrected to ANCESTRY: the pin must be a real ancestor of the live tip
+  (`git merge-base --is-ancestor`), not equal to it; `accepted_sha`
+  reachability resolves against the live tip directly, never the pin. See §3
+  item 2, §6, §9's round-6 update, and §11's "Round 6 correction" subsection
+  for the full argument, verification, and disposition. Not a new review
+  round (document review on this program is capped, and applying a
+  ratification-blind-spot correction is not reopening the design) — see §11.
 
 **Amends on ratification:** two files —
 [`../../../../../scripts/validate-program-state.mjs`](../../../../../scripts/validate-program-state.mjs)
@@ -425,22 +441,31 @@ objects):
    `refs/heads/<repository.integration_branch>` (`git rev-parse --verify`) —
    requiring both `repository.integration_branch` to be a well-formed branch
    name and `repository.integration_head_sha` to be a well-formed git object
-   id equal to that ref's live resolved tip. `repository.branch`/`head_sha`/
-   `head_tree` keep their entry-lock meaning, unchanged, and are validated
-   separately by `verifyEntryLockIdentity` (cross-checked against the
-   top-level `entry_checkout_sha`/`entry_checkout_tree`) and, as of this
-   ratification's correction 1, `verifyEntryLockRecordBinding` (additionally
-   content-bound to the DAG root's digest-bound `entry-lock.toml` record, so a
-   coordinated rewrite of all five entry-lock fields together — self-
-   consistent, but no longer matching that separately-hashed record — is
-   caught rather than passing on internal consistency alone). A mismatch
-   (the integration trunk has advanced since the ledger was last written) is
-   a violation, never a silent resync, and the rehearsal does not run at all
-   until the ledger is resynced. Because the oracle is the correct one, this
-   check runs UNCONDITIONALLY on every live-mode validation — not scoped to
-   `active.length > 1` — since there is no remaining reason to skip it on an
-   ordinary single-active-block run (§9 reverifies the live ledger passes
-   this unconditionally).
+   id that is a real ANCESTOR of that ref's live resolved tip (`git
+   merge-base --is-ancestor`; self-ancestry — the pin equalling the live tip
+   exactly — also satisfies this). This is a round-6 correction (see the
+   revision-history entry below): the ledger this pin lives in is committed
+   TO the branch it pins, so the ORIGINAL equality requirement made the pin
+   stale the instant the committing commit landed, and no amount of resyncing
+   could converge. `repository.branch`/`head_sha`/`head_tree` keep their
+   entry-lock meaning, unchanged, and are validated separately by
+   `verifyEntryLockIdentity` (cross-checked against the top-level
+   `entry_checkout_sha`/`entry_checkout_tree`) and, as of this ratification's
+   correction 1, `verifyEntryLockRecordBinding` (additionally content-bound to
+   the DAG root's digest-bound `entry-lock.toml` record, so a coordinated
+   rewrite of all five entry-lock fields together — self-consistent, but no
+   longer matching that separately-hashed record — is caught rather than
+   passing on internal consistency alone). A pin that is NOT an ancestor at
+   all (a rewritten or foreign commit) is a violation, never a silent resync,
+   and the rehearsal does not run at all until the ledger is resynced onto a
+   real ancestor; a pin that lags behind the live tip but IS a genuine
+   ancestor is valid rehearsal input — the pin's job is a deterministic
+   replay base, not a freshness claim, and reachability checks (below) always
+   resolve against the trunk's LIVE tip regardless of how far the pin lags.
+   Because the oracle is the correct one, this check runs UNCONDITIONALLY on
+   every live-mode validation — not scoped to `active.length > 1` — since
+   there is no remaining reason to skip it on an ordinary single-active-block
+   run (§9 reverifies the live ledger passes this unconditionally).
 3. **The rehearsal replays each block's OWN delta, not a merge (Finding
    A/D).** Starting from the pinned trunk, the walk proceeds in
    `landing_order`; at each step:
@@ -577,14 +602,19 @@ active/certifying block":
   `base_sha` ancestor check is scoped to the active-set rehearsal, is now
   UNCONDITIONAL there rather than "checked only when present" (Finding D),
   and does not extend the `ACCEPTED`-only check) — but what "reachable from
-  trunk" resolves AGAINST has been corrected twice since the pre-amendment
-  validator, which sampled checkout `HEAD`: round 4 (FIX 3) re-pointed it at
-  the ledger-pinned trunk, and round 5 (FIX 5) re-targeted that pin from the
-  immutable A0 entry-lock pair (`repository.branch`/`head_sha`) onto the
-  mutable operational-trunk pair, `repository.integration_branch`/
-  `integration_head_sha` — the SAME pin §3 item 2's rehearsal trunk uses (see
-  `resolvePinnedTrunk`, consumed by both `verifyConcurrentLandingSafety` and
-  `verifyLiveGitIdentities`).
+  trunk" resolves AGAINST has been corrected three times since the
+  pre-amendment validator, which sampled checkout `HEAD`: round 4 (FIX 3)
+  re-pointed it at the ledger-pinned trunk, round 5 (FIX 5) re-targeted that
+  pin from the immutable A0 entry-lock pair (`repository.branch`/`head_sha`)
+  onto the mutable operational-trunk pair, `repository.integration_branch`/
+  `integration_head_sha`, and round 6 (see the revision-history entry below)
+  split what each of the two consumers resolves against: `resolvePinnedTrunk`
+  now validates the pin by ANCESTRY (a real ancestor of the live tip, not
+  equal to it), while `verifyLiveGitIdentities`'s `accepted_sha` reachability
+  check resolves against the trunk's LIVE tip directly, never the pin — a
+  block landed after the pin was last recorded is not wrongly rejected merely
+  because the pin has since lagged (see `resolvePinnedTrunk`, consumed by
+  both `verifyConcurrentLandingSafety` and `verifyLiveGitIdentities`).
 - The amendment-authority gate, entry-lock binding, evidence-digest binding,
   block-authorization registry — all untouched; none of them key off
   cardinality of `IN_PROGRESS`/`REVIEW`/`ACCEPTANCE_RECOMMENDED`.
@@ -870,6 +900,65 @@ summary and would silently break a future edit to this code:
   `git commit-tree <tree> -p <cumulative>` has only one `-p`, so that
   specific failure mode no longer applies — moot, not silently dropped.)
 
+**Round 6 update (post-landing correction) — the above is superseded, not
+deleted (kept as the exact historical record of what round 5 found and
+fixed).** This amendment landed as commit `2e878b6a5` and its ledger update
+IMMEDIATELY failed live validation on the very next run — a self-reference
+round 5 did not anticipate: `program-state.toml` is committed TO
+`program/architecture-lock`, the branch its own `integration_head_sha` pins,
+so landing the commit containing the pin necessarily advances the branch's
+live tip PAST the pin the moment the commit exists. Requiring the pin to
+EQUAL the live tip (round 5's `resolvePinnedTrunk`) made this specific ledger
+permanently unable to pass its own validator — no amount of resyncing
+converges, because every resync commit is itself a further advance.
+
+The fix narrows what the pin is asked to prove. Equality was never load-
+bearing for the rehearsal's actual job — a deterministic, reproducible replay
+base for the fixed-landing-order walk (§3 item 3) — ancestry is: replaying
+onto any real ancestor of the live trunk reproduces the same result
+regardless of how many further commits trunk has gained. `resolvePinnedTrunk`
+now requires `repository.integration_head_sha` to be a real ancestor of (or
+equal to — self-ancestry holds) the live tip of
+`refs/heads/<repository.integration_branch>` (`git merge-base --is-ancestor`,
+not `!==` on the two resolved SHAs); a pin that is NOT an ancestor at all — a
+rewritten or foreign commit, the case that actually indicates the pin is
+untrustworthy — still fails closed. No staleness bound is added: freshness
+beyond ancestry was never this pin's job, and an arbitrarily-lagging-but-valid
+pin cannot mask a missing landing, because `verifyLiveGitIdentities`'s
+`accepted_sha` reachability check is split out to resolve against the trunk's
+LIVE tip directly (never the pin) — a block landed after the pin was last
+recorded is reachable from the live tip even though it is not reachable from
+a lagging pin's own history.
+
+Verified against the CURRENT tree (not the prepared-against tree, since this
+is a post-landing correction on a still-advancing trunk): the third command
+above passes —
+
+```
+OK: program-state.toml (docs/arch/architecture-lock/ledger/program-state.toml) — validated 64 blocks (non-zero work asserted) against docs/arch/refactor/rev11/program-dag.toml in mode live
+```
+
+— on a tree where `integration_head_sha` (`ad0f15ed0…`) is several commits
+behind the live `program/architecture-lock` tip, the exact shape that failed
+under round 5's equality check. Two mutation-kill proofs (red under the
+mutation, green restored, both against the real tracked files, not a scratch
+copy): (1) `integration_head_sha` set to a real but non-ancestor commit (an
+orphan `git commit-tree` object, unreachable from trunk by construction)
+fails closed with the new "is not an ancestor of the live tip" violation;
+restoring the real pin passes. (2) `resolvePinnedTrunk` reverted in place to
+the round-5 equality check (`liveTip !== pin`), run against the CURRENT real
+ledger (not a fixture), fails with round 5's exact "does not match the live
+tip" violation — proving the equality check is genuinely broken on the tree
+that exists today, not merely theoretically; restoring the ancestry check
+passes. Test suites: 70/70 in `validate-program-state.test.mjs`, 176/176 in
+`validate-mutation-suite.test.mjs` (retargeted trunk-pin fixtures at the
+ancestry relation — a lagging-but-ancestral pin now PASSES where round 5
+required it to fail; a non-ancestor pin still fails closed; two merge-base-
+breaking tests isolated with a SHA-scoped shim, since `resolvePinnedTrunk`'s
+own unconditional merge-base call now runs before either of their original
+call sites), 30/30 in `validate-stack-window.test.mjs`, 276/276 run together,
+including the mutation suite's completeness assertion.
+
 ## 10. Alternatives considered
 
 1. **A new `IMPLEMENTATION`/`CERTIFYING` status pair, replacing `IN_PROGRESS`/
@@ -1017,3 +1106,28 @@ landed as described in "Amends on ratification" below, together with this
 revision's own additions: `verifyEntryLockRecordBinding` plus its three-test
 coverage in `scripts/validate-mutation-suite.test.mjs`, and the necessary
 multi-line-array/quote-aware-split fix in `scripts/lib/rev11-toml.mjs`.
+
+### Round 6 correction (post-landing, 2026-08-21)
+
+This amendment landed as commit `2e878b6a5` and its own ledger update FAILED
+live validation on the very next run: `repository.integration_head_sha`
+`does not match the live tip` — the ratified equality pin, applied to a
+ledger that is itself committed to the branch it pins, was stale the instant
+the landing commit existed. This was not foreseeable at ratification time
+without running the validator against the post-landing tree — a check
+ratification does not perform — so it is applied here as a correction rather
+than reopened as a new design question; the amendment stays RATIFIED.
+
+**Disposition: ADOPT-NOW.** The relation `resolvePinnedTrunk` checks changes
+from equality to ancestry (`git merge-base --is-ancestor`,
+`repository.integration_head_sha` a real ancestor of the live tip of
+`refs/heads/<repository.integration_branch>`, not `!==` on the two resolved
+SHAs); `verifyLiveGitIdentities`'s `accepted_sha` reachability check is split
+to resolve against the trunk's live tip directly, never the (now possibly-
+lagging) pin. No staleness bound is added — see §3 item 2 and §9's round-6
+update for the full argument and verification detail. Both mutation-kill
+proofs (a non-ancestor pin; the equality check reverted in place) are run
+against the real tracked files and the real live ledger, not scratch copies
+or fixtures alone. Test suites: 70/70 `validate-program-state.test.mjs`,
+276/276 combined with `validate-mutation-suite.test.mjs` and
+`validate-stack-window.test.mjs`.

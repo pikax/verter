@@ -42,22 +42,32 @@ head_tree = "REQUIRED_TREE_OID"
 dirty = false
 untracked_count = 0
 # integration_branch/integration_head_sha are the PINNED, MUTABLE
-# operational-trunk identity (AMD-013 v3, re-targeted round 5): EVERY
-# live-mode validation run (unconditionally, not only when more than one
-# block is concurrently ACTIVE) revalidates integration_head_sha against the
-# LIVE TIP OF THE CONFIGURED INTEGRATION REF (refs/heads/<integration_branch>
-# above), not checkout HEAD, and not the immutable entry-lock branch/head_sha
-# pair above — a worktree may legitimately be checked out somewhere other
-# than the integration trunk (a feature branch, a review worktree), so
-# checkout position is not the trunk pin's oracle, and the entry-lock branch
-# never advances past its one entry checkout. accepted_sha
-# landed/reachability (verifyLiveGitIdentities) is checked against THIS pin.
-# When more than one block is concurrently ACTIVE, the fixed-landing-order
-# rehearsal (scripts/validate-program-state.mjs, verifyConcurrentLandingSafety)
-# additionally replays against this same resolved pin. A mismatch
-# (integration_branch has advanced past this value since it was last written)
-# is a violation, never a silent resync. Update this field whenever the
-# integration branch actually advances.
+# operational-trunk identity (AMD-013 v3, re-targeted round 5, ANCESTRY not
+# equality since round 6): EVERY live-mode validation run (unconditionally,
+# not only when more than one block is concurrently ACTIVE) revalidates
+# integration_head_sha against the LIVE TIP OF THE CONFIGURED INTEGRATION REF
+# (refs/heads/<integration_branch> above), not checkout HEAD, and not the
+# immutable entry-lock branch/head_sha pair above — a worktree may
+# legitimately be checked out somewhere other than the integration trunk (a
+# feature branch, a review worktree), so checkout position is not the trunk
+# pin's oracle, and the entry-lock branch never advances past its one entry
+# checkout.
+#
+# integration_head_sha must be a real ANCESTOR of that live tip (git
+# merge-base --is-ancestor), not equal to it (AMD-013 round 6): this file is
+# itself committed to the branch it pins, so landing the commit that records
+# this value necessarily advances the branch past it — equality would make
+# the pin stale the instant it exists, and no amount of resyncing converges.
+# A lagging-but-genuinely-ancestral value is valid; a rewritten or foreign
+# SHA that is NOT an ancestor at all still fails closed. When more than one
+# block is concurrently ACTIVE, the fixed-landing-order rehearsal
+# (scripts/validate-program-state.mjs, verifyConcurrentLandingSafety) replays
+# onto this pin as its deterministic base. accepted_sha landed/reachability
+# (verifyLiveGitIdentities) is checked against the trunk's LIVE tip directly,
+# NOT against this pin — a block landed after this value was last recorded
+# is still correctly found reachable. Update this field when convenient
+# (e.g. alongside other ledger edits); staleness alone is not a violation as
+# long as the value remains a genuine ancestor of the live trunk.
 integration_branch = "REQUIRED_INTEGRATION_BRANCH"
 integration_head_sha = "REQUIRED_INTEGRATION_FULL_SHA"
 
