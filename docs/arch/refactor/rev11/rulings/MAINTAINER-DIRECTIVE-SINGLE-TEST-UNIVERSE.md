@@ -24,8 +24,13 @@ The decision:
 2. **Do not keep Surface 3** as a 15,578-test replay or as a second
    whole-workspace archive.
 3. **Keep one full workspace build and one full nextest run.**
-4. **Add explicit shared-process lifecycle tests to that normal universe** —
-   not to a separate surface.
+4. **Add explicit shared-process lifecycle tests to that normal universe.**
+   The suite still exists as a file (e.g.
+   `verter_session/tests/shared_process_contract.rs`); what changes is that it
+   is executed as part of the ONE full run, not as its own surface with its own
+   archive. nextest runs it as one isolated process, and the operations INSIDE
+   that test share the process — deliberate, deterministic shared-process
+   coverage without replaying the whole `verter_session` universe.
 5. **Retain only a small alternate-profile compile/runtime guard**, and only
    until semantic dependence on `debug_assertions` and implicit overflow
    behaviour has been structurally eliminated.
@@ -34,16 +39,65 @@ The decision:
 
 ## What this changes from ONE-BUILD-ONE-RUN
 
-That directive replaced Surface 2 with a dedicated
-`verter_session/tests/shared_process_contract.rs` target. This directive puts
-those lifecycle tests in the **normal universe** instead. The content is the
-same — create/use/drop/recreate, multiple projects in one process, cache and
+That directive positioned the shared-process contract as a dedicated surface.
+This directive keeps the focused suite but folds its execution into the
+**normal universe** — one archive, one run. The content is the same — create/use/drop/recreate, multiple projects in one process, cache and
 registry invalidation, scheduler shutdown and restart, environment restoration,
 `OnceLock` and singleton lifecycle, failure then recovery, repeated
 initialization under different configurations — but it is not a separate
 surface with its own archive.
 
 It also settles Surface 3 explicitly: the second whole-workspace archive goes.
+
+## Why Surface 2 was weak (retained rationale)
+
+Surface 2 caused no extra build — it executed the SAME archive Surface 1 built,
+so removing it reduces test time, not compile time. Its failure class is real
+(nextest's process-per-test model hides process-global contamination), but the
+implementation was weak: it reran every `verter_session` test including
+unrelated ones; detection depended on incidental ordering and concurrency; a
+leak could be masked by another test resetting the state; unrelated tests turned
+flaky merely by sharing a process; and source scanners, fixture inventories and
+compiler goldens gain nothing from shared-process execution.
+
+The focused suite covers: create -> use -> drop -> recreate; multiple projects in
+one process; cache and registry invalidation; scheduler shutdown and restart;
+environment restoration; `OnceLock`/singleton/process-global lifecycle; failure
+then successful recovery; repeated initialization under different configurations.
+
+## The Surface 3 replacement, concretely
+
+Two narrowly scoped mechanisms replace the 15,578-test replay:
+
+1. **Compile validation** — `cargo check --workspace --all-targets --profile
+   no-debug-assertions`. Catches items wrongly hidden behind
+   `cfg(debug_assertions)`, cross-crate APIs that vanish in shipped config, and
+   targets that only compile in debug. **Where the real release LSP, N-API or
+   WASM artifact builds already compile that same configuration, their success
+   SATISFIES this requirement** rather than compiling the graph again inside
+   `gate.mjs`.
+2. **A small `verter_shipped_cfg_contract` target** run under
+   `no-debug-assertions` — dozens of tests at most, covering only behaviour that
+   can differ by debug assertions, overflow-check configuration, conditional
+   compilation on debug state, or a previously observed shipped-cfg regression.
+
+nextest remains the primary runner: process-per-test gives deterministic
+isolation, independent timeouts and better failure containment. Running
+`cargo test` once would still produce separate executables per test target — it
+would not collapse the workspace into one process.
+
+## Caveats that bind step 6
+
+- The clippy `disallowed-macros` path for `std::debug_assert` **must be proven
+  against this project's toolchain** before the configuration is relied upon.
+- Before switching the full suite to `no-debug-assertions`, establish that the
+  invariants debug assertions currently exercise are covered by EXPLICIT tests.
+  Otherwise a false or broken debug assertion lands unnoticed and makes debug
+  builds unusable.
+- The gate-integrity ledger records that the current surfaces lack independent
+  inventory parity and that Surface 2 can accept a ZERO-test suite — which is
+  itself an argument for explicit, independently enumerated contracts over broad
+  reruns.
 
 ## What does NOT change
 
