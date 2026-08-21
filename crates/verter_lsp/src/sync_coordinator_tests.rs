@@ -1692,6 +1692,24 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
     provider.clear_calls();
     provider.hang_diagnostics();
 
+    // Deterministic completion signal for "the background provider pull
+    // reached `get_diagnostics`" — a single `yield_now()` only proves the
+    // publish task got ONE scheduler turn, which is not the same claim
+    // under multi-threaded contention (the spawned task may land on a
+    // busy worker and need more than one turn to reach the provider
+    // call). `set_on_query` fires synchronously from inside
+    // `MockTypeProvider::get_diagnostics`, after the call is recorded and
+    // before the hang takes effect, so awaiting this channel (bounded by
+    // a timeout, never a sleep/retry loop) is the real event instead of a
+    // scheduling guess.
+    let (query_tx, query_rx) = tokio::sync::oneshot::channel();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            let _ = query_tx.send(());
+        }),
+    );
+
     let client_slot = Arc::new(std::sync::Mutex::new(None));
     let client_slot_for_service = Arc::clone(&client_slot);
     let (mut service, mut socket) = LspService::new(move |client| {
@@ -1745,7 +1763,10 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
         params.diagnostics
     );
 
-    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(1), query_rx)
+        .await
+        .expect("the provider pull must still start in the background")
+        .expect("the query callback channel must not drop before firing");
     assert!(
         provider
             .calls()
