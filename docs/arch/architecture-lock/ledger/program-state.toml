@@ -1433,7 +1433,7 @@ notes = ""
 [[block]]
 id = "J1"
 status = "LOCKED"
-charter_digest = ""
+charter_digest = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
