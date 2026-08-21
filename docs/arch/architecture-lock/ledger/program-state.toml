@@ -670,7 +670,7 @@ candidate_sha = ""
 # implementation_candidate_sha/implementation_ref (AMD-013 round 4, FIX 2):
 # BV2 predates this schema and was the live-ledger gap FIX 2 was written to
 # surface, not paper over (AMD-013 §9). Filled against the real, live WIP
-# worktree for this block (git worktree list: /Users/carlosrodrigues/Documents/dev/verter-bv2,
+# worktree for this block (git worktree list: <MACHINE_ROOT>/verter-bv2,
 # refs/heads/block/bv2) rather than left empty or backfilled with a decoy
 # value — the branch's history (e.g. 4bfb9b15d, "eliminate VDOM/SSR
 # root-prefix duplicate-ownership panic") matches this row's own
