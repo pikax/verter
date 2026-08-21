@@ -1214,3 +1214,241 @@ fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
         "a private class-param member must NOT leak as a slot binding; got {binding_names:?}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// (Runtime-object macros) `resolve_vue_macro_surface` must report REAL
+// members for a runtime-object `defineExpose({...})` / `defineProps({...})`
+// — never a memberless (`None`) surface. `mac.is_type_based == false` for
+// these forms; before the fix the executor bailed unconditionally on that
+// guard for every macro kind.
+// ---------------------------------------------------------------------------
+
+const VUE_RUNTIME_EXPOSE: &str = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+function bump() { count.value++ }
+defineExpose({ count, bump })
+</script>
+"#;
+
+#[test]
+fn runtime_object_define_expose_publishes_real_members_not_a_memberless_surface() {
+    const FILE: &str = "/w/RuntimeExpose.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_RUNTIME_EXPOSE);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineExpose);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("a runtime-object defineExpose({...}) must resolve a macro surface, not None");
+
+    let mut names: Vec<Arc<str>> = surface
+        .surface
+        .members
+        .iter()
+        .filter_map(|m| m.published_name())
+        .collect();
+    names.sort_unstable();
+
+    // POSITIVE: both runtime-object members surface by name.
+    assert_eq!(
+        names.iter().map(|n| n.as_ref()).collect::<Vec<_>>(),
+        vec!["bump", "count"],
+        "runtime-object defineExpose members must publish by name, got: {names:?}"
+    );
+    // NEGATIVE (discriminating): a stub fix could satisfy `is_some()` with an
+    // empty surface — assert the member LIST is non-empty explicitly.
+    assert!(
+        !surface.surface.members.is_empty(),
+        "runtime-object defineExpose must NOT publish a memberless surface"
+    );
+}
+
+const VUE_RUNTIME_PROPS: &str = r#"<script setup lang="ts">
+defineProps({ title: String, count: Number })
+</script>
+"#;
+
+#[test]
+fn runtime_object_define_props_publishes_real_members_not_a_memberless_surface() {
+    const FILE: &str = "/w/RuntimeProps.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_RUNTIME_PROPS);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("a runtime-object defineProps({...}) must resolve a macro surface, not None");
+
+    let mut names: Vec<Arc<str>> = surface
+        .surface
+        .members
+        .iter()
+        .filter_map(|m| m.published_name())
+        .collect();
+    names.sort_unstable();
+
+    assert_eq!(
+        names.iter().map(|n| n.as_ref()).collect::<Vec<_>>(),
+        vec!["count", "title"],
+        "runtime-object defineProps members must publish by name, got: {names:?}"
+    );
+    assert!(
+        !surface.surface.members.is_empty(),
+        "runtime-object defineProps must NOT publish a memberless surface"
+    );
+}
+
+#[test]
+fn runtime_object_define_expose_empty_call_still_returns_none() {
+    // Regression control: `defineExpose()` with NO object argument at all has
+    // no members to synthesize a surface from — the "no surface" `None`
+    // outcome is still correct there (distinct from the memberless-surface
+    // defect, which was about a runtime object literal WITH members).
+    const FILE: &str = "/w/RuntimeExposeEmpty.vue";
+    let host = make_host();
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+defineExpose()
+</script>
+"#,
+    );
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineExpose);
+    assert!(
+        host.resolve_vue_macro_surface(&request).is_none(),
+        "a bare defineExpose() with no members has genuinely nothing to surface"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Route-level proof: a runtime-object macro's member presence must also
+// publish through the AUDITED public wire entry
+// (`resolve_framework_surface_with_audit`), not just the internal
+// `resolve_vue_macro_surface` the tests above exercise directly. This is the
+// SOLE audited wire entry for `GRAPH_OPERATION_FRAMEWORK_SURFACES`
+// (`CLAUDE.md` → "Framework Adapter Substrate"); today `verter_napi` /
+// `verter_wasm` are its only wired production callers — `verter_lsp` has no
+// framework-surface / typeinfo-graph request handler at all, so there is no
+// separate LSP route to prove this through without inventing one.
+// ---------------------------------------------------------------------------
+
+fn vue_surface_members_via_audited_entry(
+    host: &VerterHost,
+    canonical_id: &str,
+    kind: verter_protocol::typeinfo::graph::FrameworkSurfaceKind,
+) -> Vec<String> {
+    use verter_protocol::typeinfo::graph as wire;
+    use verter_protocol::verter::v1::{
+        type_info_graph_request as wire_request, type_info_graph_response,
+    };
+
+    let envelope = wire::TypeInfoGraphRequest {
+        schema_version: 3,
+        operation: wire::Operation::FrameworkSurfaces as i32,
+        payload: Some(wire_request::Payload::FrameworkSurface(
+            wire::FrameworkSurfaceRequest {
+                selector: Some(wire::ComponentSelector {
+                    canonical_id: canonical_id.to_string(),
+                    export_name: String::new(),
+                    has_export_name: false,
+                    framework_adapter_id: "vue".to_string(),
+                }),
+                context: Some(wire::ProjectionReductionContext {
+                    mode: wire::ProjectionMode::Expanded as i32,
+                    demand: wire::ReductionDemand::Published as i32,
+                }),
+                closure: Some(wire::ClosurePolicy {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_closure_policy::Kind::OneLevel(
+                            wire::ClosureOneLevel {},
+                        ),
+                    ),
+                }),
+                display_policy: Some(wire::DisplayPolicy {
+                    qualification: wire::DisplayQualification::Qualified as i32,
+                    branding: wire::DisplayBranding::On as i32,
+                    budgets: Some(wire::DisplayBudgets {
+                        max_string_length: 4096,
+                        max_depth: 16,
+                    }),
+                }),
+                include_provenance: false,
+                include_diagnostics: false,
+                include_projection: vec![],
+                schema_version: 3,
+            },
+        )),
+    };
+
+    let result = host.resolve_framework_surface_with_audit(envelope);
+    let response = result
+        .as_result()
+        .unwrap_or_else(|err| panic!("audited framework-surface request must succeed: {err:?}"));
+    let payload = match &response.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
+        other => panic!("expected a framework_surface response arm, got: {other:?}"),
+    };
+    let strings: Vec<String> = payload
+        .graph
+        .as_ref()
+        .and_then(|graph| graph.strings.as_ref())
+        .map(|table| table.entries.clone())
+        .unwrap_or_default();
+    let mut names: Vec<String> = payload
+        .surfaces
+        .iter()
+        .find(|surface| surface.kind == kind as i32)
+        .map(|surface| {
+            surface
+                .members
+                .iter()
+                .filter_map(|member| strings.get(member.name_id as usize).cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn runtime_object_define_expose_publishes_real_members_through_the_audited_entry() {
+    const FILE: &str = "/w/RuntimeExposeAudited.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_RUNTIME_EXPOSE);
+
+    let names = vue_surface_members_via_audited_entry(
+        &host,
+        FILE,
+        verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Expose,
+    );
+
+    // POSITIVE: the audited public wire entry publishes the same real
+    // members the internal resolver does.
+    assert_eq!(
+        names, vec!["bump".to_string(), "count".to_string()],
+        "runtime-object defineExpose members must publish by name through the audited entry, got: {names:?}"
+    );
+}
+
+#[test]
+fn runtime_object_define_props_publishes_real_members_through_the_audited_entry() {
+    const FILE: &str = "/w/RuntimePropsAudited.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_RUNTIME_PROPS);
+
+    let names = vue_surface_members_via_audited_entry(
+        &host,
+        FILE,
+        verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Props,
+    );
+
+    // POSITIVE: the audited public wire entry publishes the same real
+    // members the internal resolver does.
+    assert_eq!(
+        names, vec!["count".to_string(), "title".to_string()],
+        "runtime-object defineProps members must publish by name through the audited entry, got: {names:?}"
+    );
+}

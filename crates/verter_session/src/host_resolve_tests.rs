@@ -13,7 +13,8 @@ use crate::{
 };
 use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
 use verter_macro_dto::{
-    MacroAnchor, MacroTscBundle, MacroTscOutcome, MacroTscProjection, TscPublicPropsProjection,
+    MacroAnchor, MacroTscBundle, MacroTscOutcome, MacroTscProjection, TscExposeMemberType,
+    TscPublicPropsProjection,
 };
 
 fn strict_host() -> VerterHost {
@@ -7744,5 +7745,295 @@ defineSlots<{ header(props: { title: string; count: number }): any }>()
         host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &stale),
         None,
         "a stale/unresolvable carrier fails closed — the caller keeps the refusal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Declaration-fidelity blast radius: real host-driven end-to-end proof, not
+// hand-injected DTOs. Every test below drives a real `VerterHost` over real
+// SFC source through the actual production route
+// (`produce_vue_macro_codegen_with_ctx` for the session-side TSC producer
+// row, `get_public_api_with_mode` for the compiled PublicApi/Declaration
+// output) — never a hand-built `MacroTscBundle`/`MacroTscInput::Authoritative`
+// injected directly into the compiler.
+// ---------------------------------------------------------------------------
+
+fn vue_ref_computed_fixture(host: &VerterHost) {
+    upsert_non_sfc(
+        host,
+        "/workspace/node_modules/vue/index.d.ts",
+        r#"
+export interface Ref<T> { value: T }
+export interface ComputedRef<T> { readonly value: T }
+export declare function ref<T>(value: T): Ref<T>
+export declare function computed<T>(getter: () => T): ComputedRef<T>
+"#,
+    );
+}
+
+fn wire_vue_import(host: &VerterHost, canonical_id: &str) {
+    host.set_import_dependencies(
+        canonical_id,
+        vec![crate::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+}
+
+/// The session-side TSC producer row for one `defineExpose` member, produced
+/// through the SAME real route (`produce_vue_macro_codegen_with_ctx`) the
+/// production virtual-file pipeline calls — never a hand-built DTO.
+fn tsc_expose_member_type(
+    host: &VerterHost,
+    canonical_id: &str,
+    member_name: &str,
+) -> TscExposeMemberType {
+    let output = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        host.produce_vue_macro_codegen_with_ctx(
+            ctx,
+            canonical_id,
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+        )
+    });
+    let bundle = output
+        .tsc
+        .unwrap_or_else(|| panic!("expected a TSC bundle for {canonical_id}"));
+    let entry = bundle
+        .entries
+        .first()
+        .unwrap_or_else(|| panic!("expected one macro TSC entry for {canonical_id}"));
+    let MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) = &entry.outcome else {
+        panic!(
+            "expected a complete expose projection for {canonical_id}, got: {:?}",
+            entry.outcome
+        );
+    };
+    expose
+        .members
+        .iter()
+        .find(|member| member.name == member_name)
+        .unwrap_or_else(|| panic!("member `{member_name}` must be published for {canonical_id}"))
+        .member_type
+        .clone()
+}
+
+#[test]
+fn expose_untyped_ref_call_resolves_real_type_through_tsc_public_and_declaration_routes() {
+    // The ruling's canonical shape (`const count = ref(0)`, no authored
+    // annotation) resolved through the REAL production route end to end,
+    // not a hand-injected `MacroTscBundle`.
+    let host = strict_host();
+    vue_ref_computed_fixture(&host);
+    const FILE: &str = "/workspace/src/Comp.vue";
+    upsert_vue(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    wire_vue_import(&host, FILE);
+
+    // Route 1: the session-side TSC producer row.
+    let tsc_member = tsc_expose_member_type(&host, FILE, "count");
+    let TscExposeMemberType::Resolved(tsc_text) = &tsc_member else {
+        panic!(
+            "untyped `ref(0)` must resolve through the real production route, got: {tsc_member:?}"
+        );
+    };
+    assert!(
+        !tsc_text.as_str().contains("unknown"),
+        "the real inferred type must not fall back to unknown, got: {tsc_text:?}"
+    );
+
+    // Route 2: PublicApi mode — the setup body is emitted here, so this
+    // route resolves the exposed binding via `typeof count` at the real
+    // downstream tsc consumer rather than through this producer's DTO;
+    // assert it still compiles the expected member and does not regress.
+    let public = public_api_code_with_mode(&host, FILE, PublicApiMode::Public);
+    assert!(
+        public.contains("count: typeof count"),
+        "public mode must keep resolving exposed bindings via typeof, got: {public}"
+    );
+
+    // Route 3: Declaration mode — the setup body is OMITTED here, so this
+    // route consumes THIS producer's resolved DTO type directly.
+    let decl = public_api_code_with_mode(&host, FILE, PublicApiMode::Declaration);
+    let expected_member = format!("count: {}", tsc_text.as_str().trim());
+    assert!(
+        decl.contains(&expected_member),
+        "declaration mode must splice the exact real resolved type, expected `{expected_member}` in: {decl}"
+    );
+    assert!(
+        !decl.contains("count: unknown"),
+        "declaration mode must NOT fall back to unknown once resolution succeeded, got: {decl}"
+    );
+}
+
+#[test]
+fn expose_typed_ref_call_resolves_real_type_through_tsc_public_and_declaration_routes() {
+    // Same shape, but with an authored `: Ref<number>` annotation — the
+    // TYPED cross of the same real-route proof.
+    let host = strict_host();
+    vue_ref_computed_fixture(&host);
+    const FILE: &str = "/workspace/src/Comp.vue";
+    upsert_vue(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import { ref, Ref } from 'vue'
+const count: Ref<number> = ref(0)
+defineExpose({ count })
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    wire_vue_import(&host, FILE);
+
+    let tsc_member = tsc_expose_member_type(&host, FILE, "count");
+    let TscExposeMemberType::Resolved(tsc_text) = &tsc_member else {
+        panic!(
+            "a typed `ref(0)` const must resolve through the real production route, got: {tsc_member:?}"
+        );
+    };
+    assert!(
+        !tsc_text.as_str().contains("unknown"),
+        "the real resolved type must not fall back to unknown, got: {tsc_text:?}"
+    );
+
+    let decl = public_api_code_with_mode(&host, FILE, PublicApiMode::Declaration);
+    let expected_member = format!("count: {}", tsc_text.as_str().trim());
+    assert!(
+        decl.contains(&expected_member),
+        "declaration mode must splice the exact real resolved type, expected `{expected_member}` in: {decl}"
+    );
+}
+
+#[test]
+fn expose_untyped_computed_call_never_leaks_compat_sentinel_through_tsc_public_and_declaration_routes(
+) {
+    // The exact real-`computed()` reproduction of the leaked-sentinel
+    // regression: whatever the real resolution outcome is (a real type OR
+    // an honest degradation), the internal compat-projection sentinel must
+    // never appear in ANY of the three real production routes.
+    let host = strict_host();
+    vue_ref_computed_fixture(&host);
+    const FILE: &str = "/workspace/src/Comp.vue";
+    upsert_vue(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+const count = ref(0)
+const doubled = computed(() => count.value * 2)
+defineExpose({ doubled })
+</script>
+<template><div>{{ doubled }}</div></template>"#,
+    );
+    wire_vue_import(&host, FILE);
+
+    let tsc_member = tsc_expose_member_type(&host, FILE, "doubled");
+    if let TscExposeMemberType::Resolved(text) = &tsc_member {
+        assert!(
+            !text.as_str().contains("semanticMiss"),
+            "the resolved computed() member must never leak the internal compat sentinel, got: {text:?}"
+        );
+    }
+
+    let public = public_api_code_with_mode(&host, FILE, PublicApiMode::Public);
+    assert!(
+        !public.contains("semanticMiss"),
+        "public mode output must never leak the internal compat sentinel, got: {public}"
+    );
+
+    let decl = public_api_code_with_mode(&host, FILE, PublicApiMode::Declaration);
+    assert!(
+        !decl.contains("semanticMiss"),
+        "declaration mode output must never leak the internal compat sentinel, got: {decl}"
+    );
+}
+
+#[test]
+fn expose_untyped_function_resolves_real_signature_through_tsc_public_and_declaration_routes() {
+    // Fully untyped: no parameter annotation, no return annotation. The
+    // param's real type genuinely IS `any` (nothing in the syntax gives it
+    // a narrower type) — that is the correct answer here, not a fallback —
+    // while the return type is the RESULT of real inference (`number`),
+    // which the syntax-only fallback could never recover at all (it
+    // rendered the whole callable as `(step: any) => any`).
+    let host = strict_host();
+    const FILE: &str = "/workspace/src/Comp.vue";
+    upsert_vue(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+function bump(step) {
+  return 3
+}
+defineExpose({ bump })
+</script>
+<template><div>{{ bump }}</div></template>"#,
+    );
+
+    let tsc_member = tsc_expose_member_type(&host, FILE, "bump");
+    let TscExposeMemberType::Resolved(tsc_text) = &tsc_member else {
+        panic!(
+            "an untyped function must resolve its real inferred signature through the real production route, got: {tsc_member:?}"
+        );
+    };
+    assert_eq!(
+        tsc_text.as_str().trim(),
+        "(step: any) => number",
+        "the real inferred return type must be resolved (not `any`), got: {tsc_text:?}"
+    );
+
+    let decl = public_api_code_with_mode(&host, FILE, PublicApiMode::Declaration);
+    let expected_member = format!("bump: {}", tsc_text.as_str().trim());
+    assert!(
+        decl.contains(&expected_member),
+        "declaration mode must splice the exact real resolved signature, expected `{expected_member}` in: {decl}"
+    );
+    assert!(
+        !decl.contains("bump: (step: any) => any") && !decl.contains("bump: (step?: any) => any"),
+        "declaration mode must NOT fall back to the untyped any-shape once resolution succeeded, got: {decl}"
+    );
+}
+
+#[test]
+fn expose_typed_function_resolves_real_signature_through_tsc_public_and_declaration_routes() {
+    let host = strict_host();
+    const FILE: &str = "/workspace/src/Comp.vue";
+    upsert_vue(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+function bump(step: number): boolean {
+  return step > 0
+}
+defineExpose({ bump })
+</script>
+<template><div>{{ bump }}</div></template>"#,
+    );
+
+    let tsc_member = tsc_expose_member_type(&host, FILE, "bump");
+    let TscExposeMemberType::Resolved(tsc_text) = &tsc_member else {
+        panic!(
+            "a typed function must resolve through the real production route, got: {tsc_member:?}"
+        );
+    };
+    assert!(
+        tsc_text.as_str().contains("number") && tsc_text.as_str().contains("boolean"),
+        "the real signature must carry both authored types, got: {tsc_text:?}"
+    );
+
+    let decl = public_api_code_with_mode(&host, FILE, PublicApiMode::Declaration);
+    let expected_member = format!("bump: {}", tsc_text.as_str().trim());
+    assert!(
+        decl.contains(&expected_member),
+        "declaration mode must splice the exact real resolved signature, expected `{expected_member}` in: {decl}"
     );
 }

@@ -158,6 +158,7 @@ pub fn process_setup_statement<'a>(
                         kind: DeclarationKind::Class,
                         is_ref_like: false,
                         callable: None,
+                        type_annotation_span: None,
                     }));
                 }
             }
@@ -421,6 +422,10 @@ fn process_variable_declaration<'a>(
                     .init
                     .as_ref()
                     .and_then(callable_shape_of_initializer),
+                declarator
+                    .type_annotation
+                    .as_ref()
+                    .map(|annotation| Span::from(annotation.type_annotation.span())),
                 items,
             );
         }
@@ -457,7 +462,11 @@ fn process_function_declaration<'a>(
                 name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like: false,
-                callable: Some(callable_shape(&func.params)),
+                callable: Some(callable_shape(&func.params, func.return_type.as_deref())),
+                // A `function` declaration's own binding has no `: T` position
+                // of its own (it has no initializer to annotate) — its type
+                // comes entirely through `callable` above.
+                type_annotation_span: None,
             }));
         }
     }
@@ -1406,11 +1415,13 @@ fn extract_property_key<'a>(
 }
 
 /// Collect declarations from a binding pattern
+#[allow(clippy::too_many_arguments)]
 fn collect_declarations_from_pattern<'a>(
     pattern: &BindingPattern<'a>,
     kind: DeclarationKind,
     is_ref_like: bool,
     callable: Option<CallableShape<'a>>,
+    type_annotation_span: Option<Span>,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
     match pattern {
@@ -1422,28 +1433,38 @@ fn collect_declarations_from_pattern<'a>(
                 kind,
                 is_ref_like,
                 callable,
+                type_annotation_span,
             }));
         }
         BindingPattern::ObjectPattern(obj) => {
-            // Destructured bindings are never ref-like
+            // Destructured bindings are never ref-like, and a destructuring
+            // pattern's own `: T` annotation has no single sub-binding
+            // position — it does not apply to any one destructured name.
             for prop in &obj.properties {
-                collect_declarations_from_pattern(&prop.value, kind, false, None, items);
+                collect_declarations_from_pattern(&prop.value, kind, false, None, None, items);
             }
             if let Some(rest) = &obj.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, None, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, None, None, items);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             // Destructured bindings are never ref-like
             for elem in arr.elements.iter().flatten() {
-                collect_declarations_from_pattern(elem, kind, false, None, items);
+                collect_declarations_from_pattern(elem, kind, false, None, None, items);
             }
             if let Some(rest) = &arr.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, None, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, None, None, items);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            collect_declarations_from_pattern(&assign.left, kind, is_ref_like, callable, items);
+            collect_declarations_from_pattern(
+                &assign.left,
+                kind,
+                is_ref_like,
+                callable,
+                type_annotation_span,
+                items,
+            );
         }
     }
 }
@@ -1838,7 +1859,10 @@ fn collect_instance_access_usage(
 /// (`render_callable_shape`), which marks only a trailing run of optional
 /// parameters. Losing the fact here instead would erase optionality from the
 /// `(a = 1, b = 2)` case, where it is expressible and useful.
-fn callable_shape<'a>(params: &FormalParameters<'a>) -> CallableShape<'a> {
+fn callable_shape<'a>(
+    params: &FormalParameters<'a>,
+    return_type: Option<&TSTypeAnnotation<'a>>,
+) -> CallableShape<'a> {
     CallableShape {
         params: params
             .items
@@ -1849,9 +1873,15 @@ fn callable_shape<'a>(params: &FormalParameters<'a>) -> CallableShape<'a> {
                     _ => None,
                 },
                 optional: param.optional || param.initializer.is_some(),
+                type_span: param
+                    .type_annotation
+                    .as_ref()
+                    .map(|annotation| Span::from(annotation.type_annotation.span())),
             })
             .collect(),
         has_rest: params.rest.is_some(),
+        return_type_span: return_type
+            .map(|annotation| Span::from(annotation.type_annotation.span())),
     }
 }
 
@@ -1864,8 +1894,12 @@ fn callable_shape<'a>(params: &FormalParameters<'a>) -> CallableShape<'a> {
 /// shape and yields `None`.
 fn callable_shape_of_initializer<'a>(init: &Expression<'a>) -> Option<CallableShape<'a>> {
     match init {
-        Expression::ArrowFunctionExpression(arrow) => Some(callable_shape(&arrow.params)),
-        Expression::FunctionExpression(func) => Some(callable_shape(&func.params)),
+        Expression::ArrowFunctionExpression(arrow) => {
+            Some(callable_shape(&arrow.params, arrow.return_type.as_deref()))
+        }
+        Expression::FunctionExpression(func) => {
+            Some(callable_shape(&func.params, func.return_type.as_deref()))
+        }
         _ => None,
     }
 }

@@ -42,10 +42,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_macro_dto::{
     MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason, MacroTscBundle,
     MacroTscOutcome, MacroTscProjection, SynthesizedRowKind, TscBindingUsage,
-    TscDeclarationFailureReason, TscInferredClassMember, TscInferredClassTypePosition,
-    TscOwnerValueDependency, TscPublicPropsProjection, TscRetainedValueCarrier,
-    TscScopeRequirements, TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason,
-    UnsupportedReason,
+    TscDeclarationFailureReason, TscExposeMemberType, TscInferredClassMember,
+    TscInferredClassTypePosition, TscOwnerValueDependency, TscPublicPropsProjection,
+    TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
+    TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 use verter_type_expr::facts::TypeDependencyPathFact;
 
@@ -1462,6 +1462,19 @@ struct TscMacroState {
     semantic_slots: Vec<TscSemanticSlot>,
     /// Owner-qualified values referenced directly by macro type arguments.
     direct_owner_value_dependencies: Vec<(u32, TscOwnerValueDependency)>,
+
+    /// Top-level compiler syntax index of a runtime-object
+    /// `defineExpose({ ... })` call, when one is present. `defineExpose`
+    /// only ever has ONE call per SFC, so this is a single optional slot
+    /// rather than a `Vec` — unlike [`Self::semantic_slots`], it is a
+    /// BEST-EFFORT correlation key, not a mandatory authoritative demand:
+    /// `apply_tsc_bundle` enriches matching `state.expose_entries` when the
+    /// bundle carries a matching row and otherwise leaves the syntax-derived
+    /// fallback [`process_expose`] already computed untouched. A caller that
+    /// asserts [`MacroTscInput::NotRequired`] for a file with only a
+    /// runtime-object `defineExpose` (no type-based codegen macro) keeps
+    /// working exactly as before this field existed.
+    expose_syntax_index: Option<u32>,
 }
 
 impl TscMacroState {
@@ -3651,6 +3664,16 @@ fn build_macro_state<'a>(
                 object_arg,
                 ..
             } => {
+                // Best-effort correlation for the runtime-object form only —
+                // the type-argument form stays fully compiler-local (see
+                // `process_expose`) and never correlates with a bundle row.
+                if type_params.is_none()
+                    && object_arg
+                        .as_ref()
+                        .is_some_and(|obj| !obj.properties.is_empty())
+                {
+                    state.expose_syntax_index = Some(current_syntax_index);
+                }
                 process_expose(
                     type_params.as_ref(),
                     object_arg.as_ref(),
@@ -3804,6 +3827,7 @@ fn apply_tsc_bundle(
             }
         }
     }
+    apply_expose_bundle_entry(state, bundle)?;
     for entry in &bundle.entries {
         if state
             .semantic_slots
@@ -3812,11 +3836,64 @@ fn apply_tsc_bundle(
         {
             continue;
         }
+        if state.expose_syntax_index == Some(entry.syntax_index) {
+            continue;
+        }
         return Err(TscGenerationError::UnexpectedEntry {
             subject: TscFailureSubject::macro_syntax(entry.syntax_index),
         });
     }
     Ok(())
+}
+
+/// Best-effort enrichment of a runtime-object `defineExpose`'s syntax-only
+/// `declaration_fallback` entries with the DTO's authoritative resolved
+/// types, when the bundle carries a row for it.
+///
+/// UNLIKE [`apply_scope_requirements`]'s callers above, this is not gated by
+/// a mandatory [`TscSemanticSlot`]: a runtime-object `defineExpose` has no
+/// macro type argument, so it never participated in the strict
+/// slot/`MissingEntry`/`DuplicateEntry` demand contract the type-based roles
+/// use, and it must not start requiring one now — a caller that asserts
+/// [`MacroTscInput::NotRequired`] for a file with only a runtime-object
+/// `defineExpose` keeps working exactly as it did before this producer
+/// existed (`build_macro_state` never sets `expose_syntax_index` unless the
+/// runtime-object form is present, and `MacroTscInput::NotRequired`'s own
+/// early return never reaches this function). A `Partial`/`Unresolved`/
+/// `Unsupported`/`Invalid` outcome, a missing entry, or a per-member
+/// `Unavailable` row all leave [`ExposeEntry::declaration_fallback`]
+/// untouched — the honest syntax-derived answer [`process_expose`] already
+/// computed, never overwritten with a fabricated success.
+fn apply_expose_bundle_entry(
+    state: &mut TscMacroState,
+    bundle: &MacroTscBundle,
+) -> Result<(), TscGenerationError> {
+    let Some(expose_syntax_index) = state.expose_syntax_index else {
+        return Ok(());
+    };
+    let Some(entry) = bundle
+        .entries
+        .iter()
+        .find(|entry| entry.syntax_index == expose_syntax_index)
+    else {
+        return Ok(());
+    };
+    let MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) = &entry.outcome else {
+        return Ok(());
+    };
+    for member in &expose.members {
+        let TscExposeMemberType::Resolved(text) = &member.member_type else {
+            continue;
+        };
+        if let Some(target) = state
+            .expose_entries
+            .iter_mut()
+            .find(|entry| entry.name == member.name)
+        {
+            target.declaration_fallback = Some(text.as_str().to_string());
+        }
+    }
+    apply_scope_requirements(state, &expose.scope, expose_syntax_index)
 }
 
 fn validate_no_tsc_slots(input: MacroTscInput<'_>) -> Result<(), TscGenerationError> {
@@ -4419,13 +4496,18 @@ fn process_slots(
 /// Render a syntactic call shape as a declaration-legal function type.
 ///
 /// The parameters are the AUTHORED ones — their names (so a consumer's
-/// signature help reads like the source) and their arity — each typed `any`,
-/// which is precisely what TypeScript itself gives an unannotated JavaScript
-/// parameter. The return type is `any` for the same reason: nothing here
-/// inspects a body, and a project that is not checking its JavaScript has
-/// already said `any` is the answer. What this buys over `unknown` is that the
-/// member can be CALLED at all.
-fn render_callable_shape(shape: &CallableShape<'_>) -> String {
+/// signature help reads like the source) and their arity. A parameter or
+/// return position that carries an AUTHORED TypeScript type annotation
+/// (`CallableParam::type_span` / `CallableShape::return_type_span`) renders
+/// that annotation's text VERBATIM — the same "copy the span the parser
+/// already sliced" pattern this module already uses for macro type
+/// parameters (`process_expose`/`process_slots`), never a re-inferred type.
+/// An untyped position falls back to `any`, which is precisely what
+/// TypeScript itself gives an unannotated JavaScript parameter/return:
+/// nothing here inspects a function body, and a project that is not
+/// checking its JavaScript has already said `any` is the answer. What this
+/// buys over `unknown` is that the member can be CALLED at all.
+fn render_callable_shape(shape: &CallableShape<'_>, content_str: &str) -> String {
     // `?` is legal only on a TRAILING run of parameters: TypeScript rejects a
     // required parameter after an optional one (TS1016). JavaScript has no such
     // rule — `function focus(target = 0, mode) {}` is fine, and a caller reaches
@@ -4458,7 +4540,8 @@ fn render_callable_shape(shape: &CallableShape<'_>) -> String {
         if index >= trailing_optional_from {
             rendered.push('?');
         }
-        rendered.push_str(": any");
+        rendered.push_str(": ");
+        rendered.push_str(&slice_type_span_or(param.type_span, content_str, "any"));
     }
     if shape.has_rest {
         if !shape.params.is_empty() {
@@ -4466,8 +4549,24 @@ fn render_callable_shape(shape: &CallableShape<'_>) -> String {
         }
         rendered.push_str("...rest: any[]");
     }
-    rendered.push_str(") => any");
+    rendered.push_str(") => ");
+    rendered.push_str(&slice_type_span_or(
+        shape.return_type_span,
+        content_str,
+        "any",
+    ));
     rendered
+}
+
+/// Slice an authored type-annotation span verbatim from `content_str`, or
+/// fall back to `default` when there is no authored annotation to recover.
+fn slice_type_span_or(span: Option<Span>, content_str: &str, default: &str) -> String {
+    match span {
+        Some(span) => content_str[span.start as usize..span.end as usize]
+            .trim()
+            .to_string(),
+        None => default.to_string(),
+    }
 }
 
 /// The declaration-legal type for an exposed member whose setup body will NOT
@@ -4486,19 +4585,39 @@ fn render_callable_shape(shape: &CallableShape<'_>) -> String {
 /// `child.focus(1, 2)` both type-check against a one-parameter method — a
 /// method's arity is exactly what a consumer needs checked, and inventing a
 /// variadic one is a quieter wrong answer than `unknown`.
+///
+/// A THIRD source beyond the call shape: the setup DECLARATION's own
+/// AUTHORED type annotation (`const count: Ref<number> = ref(0)` →
+/// `ScriptDeclaration::type_annotation_span`). A call-initialized value with
+/// no callable shape (it is not a function) still has a real,
+/// declaration-legal type when the author wrote one explicitly — that text
+/// is copied verbatim, exactly like the callable-shape param/return spans
+/// above. An UNTYPED call-initialized value (`const count = ref(0)`) has
+/// nothing authored to recover — its type is the RESULT of inference this
+/// producer does not perform — so it stays `None` and the caller falls back
+/// to `unknown`.
 fn expose_declaration_fallback(
     property_callable: Option<&CallableShape<'_>>,
     typeof_target: Option<&str>,
     items: &[ScriptItem<'_>],
+    content_str: &str,
 ) -> Option<String> {
     if let Some(shape) = property_callable {
-        return Some(render_callable_shape(shape));
+        return Some(render_callable_shape(shape, content_str));
     }
     let target = typeof_target?;
     items.iter().find_map(|item| match item {
-        ScriptItem::Declaration(decl) if decl.name == Some(target) => {
-            decl.callable.as_ref().map(render_callable_shape)
-        }
+        ScriptItem::Declaration(decl) if decl.name == Some(target) => decl
+            .callable
+            .as_ref()
+            .map(|shape| render_callable_shape(shape, content_str))
+            .or_else(|| {
+                decl.type_annotation_span.map(|span| {
+                    content_str[span.start as usize..span.end as usize]
+                        .trim()
+                        .to_string()
+                })
+            }),
         _ => None,
     })
 }
@@ -4541,6 +4660,7 @@ fn process_expose(
                 prop.callable.as_ref(),
                 typeof_target.as_deref(),
                 items,
+                content_str,
             );
             state.expose_entries.push(ExposeEntry {
                 name: prop.name.to_string(),

@@ -17,7 +17,8 @@ use verter_macro_dto::{
     ModelRuntimeShape, OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
     RuntimeConstructor, RuntimeEmit, RuntimeProp, RuntimePropType, SynthesizedRowKind,
     TscBindingUsage, TscDeclarationFailureReason, TscDependencyDeclaration, TscEmitRow,
-    TscEmitsProjection, TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
+    TscEmitsProjection, TscExposeMemberRow, TscExposeMemberType, TscExposeProjection,
+    TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
     TscOwnerValueDependency, TscPropRow, TscPropsProjection, TscPublicPropsProjection,
     TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
@@ -38,7 +39,7 @@ use crate::resolver_core::{
 use crate::semantic_query::{
     BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext,
+    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext, ValueRootKey,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
@@ -488,6 +489,27 @@ impl ProjectionFailure {
             }
         }
     }
+
+    /// Per-member `defineExpose` runtime-object degradation reason. There is
+    /// no per-member `Partial`/`Invalid` row in [`TscDeclarationFailureReason`]
+    /// — a mid-resolution partial (budget exhaustion, cancellation) reports
+    /// as an honest `Unresolved` degradation rather than inventing a new
+    /// taxonomy row for one caller, and `Invalid` (a root-shape rejection
+    /// that has no meaning for a single value binding) folds to the same
+    /// `Unsupported(SemanticConstruct)` catch-all [`Self::member`] already
+    /// uses.
+    fn expose_declaration_reason(self) -> TscDeclarationFailureReason {
+        match self {
+            Self::Partial(_) => {
+                TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDependency)
+            }
+            Self::Unresolved(reason) => TscDeclarationFailureReason::Unresolved(reason),
+            Self::Unsupported(reason) => TscDeclarationFailureReason::Unsupported(reason),
+            Self::Invalid(_) => {
+                TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct)
+            }
+        }
+    }
 }
 
 struct ProducerState {
@@ -580,6 +602,24 @@ fn terminal_partial_vue_macro_codegen_output(
         .map(|analysis| analysis.macros.as_slice())
     {
         for (payload_index, mac) in macros.iter().enumerate() {
+            // Runtime-object `defineExpose` never has a runtime shape (see
+            // `is_codegen_macro`), so it advertises a TSC-only Partial row
+            // here, matching the compute path's own syntax_index so
+            // `apply_tsc_bundle`'s bundle-vs-advertised-entries accounting
+            // stays consistent across the cancelled/terminal-partial lane.
+            if mac.kind == AnalyzedMacroKind::DefineExpose
+                && !mac.is_type_based
+                && !mac.expose_fields.is_empty()
+            {
+                if demand.wants_tsc() {
+                    tsc_entries.push(MacroTscEntry {
+                        syntax_index: top_level_syntax_index(macros, payload_index),
+                        macro_index: macro_index(payload_index),
+                        outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
+                    });
+                }
+                continue;
+            }
             if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
                 continue;
             }
@@ -842,6 +882,42 @@ impl VerterHost {
         let dispatch = ProjectSemanticDispatch::new(ctx);
 
         for (payload_index, mac) in macros.iter().enumerate() {
+            // Runtime-object `defineExpose({ ... })`: never a runtime shape
+            // (see `is_codegen_macro`'s doc comment), no macro type argument
+            // to resolve a payload from, so this is a dedicated TSC-only lane
+            // rather than a fourth arm bolted onto the payload/runtime flow
+            // Props/Emits/Model share. The type-argument form
+            // (`defineExpose<T>()`, `mac.is_type_based`) is unchanged: the
+            // compiler still splices it verbatim from authored syntax.
+            if mac.kind == AnalyzedMacroKind::DefineExpose
+                && !mac.is_type_based
+                && !mac.expose_fields.is_empty()
+            {
+                if demand.wants_tsc() {
+                    let syntax_index = top_level_syntax_index(macros, payload_index);
+                    let macro_index = macro_index(payload_index);
+                    let macro_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+                    let outcome = self.project_expose_runtime_object(
+                        ctx,
+                        &dispatch,
+                        mac,
+                        payload_index,
+                        owner_canonical,
+                        &tsc_scope_inventory,
+                        &mut state.counters,
+                    );
+                    let macro_completeness =
+                        crate::request_context::current_cold_compute_completeness();
+                    macro_scope.discard();
+                    crate::request_context::fold_result_completeness(macro_completeness);
+                    state.tsc_entries.push(MacroTscEntry {
+                        syntax_index,
+                        macro_index,
+                        outcome,
+                    });
+                }
+                continue;
+            }
             if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
                 continue;
             }
@@ -1253,6 +1329,136 @@ impl VerterHost {
             }
             _ => unreachable!("codegen macro filter is exhaustive"),
         }
+    }
+
+    /// TSC projection for a runtime-object `defineExpose({ ... })` macro —
+    /// the ONLY expose form this producer projects. The type-argument form
+    /// (`defineExpose<T>()`) is spliced verbatim by the compiler from
+    /// authored syntax and never reaches this producer (`DefineExpose` is
+    /// deliberately absent from [`is_codegen_macro`]: it has no runtime
+    /// `props`/`emits` shape, so it never enters the shared
+    /// payload/runtime-projection flow those roles share).
+    ///
+    /// Each member with a structurally captured [`AnalyzedExposeField::referenced_binding`]
+    /// resolves through the SAME shared `TypeOf` query every other
+    /// value-typeof consumer uses (`ProjectSemanticDispatch::typeof_key_for`)
+    /// — never a second resolver, never text-based inference. A member with
+    /// no capturable binding (a method, a non-identifier value expression)
+    /// or whose `TypeOf` resolution genuinely misses reports a typed
+    /// [`TscExposeMemberType::Unavailable`] row instead of a silent
+    /// `unknown` masquerading as success; the compiler falls back to its own
+    /// authored-syntax-derived type (or `unknown`) for that member exactly
+    /// as it did before this producer existed.
+    fn project_expose_runtime_object(
+        &self,
+        ctx: &dyn ResolverContext,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        mac: &AnalyzedMacro,
+        payload_index: usize,
+        owner_canonical: &str,
+        scope_inventory: &TscScopeInventory<'_>,
+        counters: &mut VueMacroCodegenCounters,
+    ) -> MacroTscOutcome {
+        let mut members = Vec::with_capacity(mac.expose_fields.len());
+        let mut ref_names: FxHashSet<String> = FxHashSet::default();
+        for field in &mac.expose_fields {
+            let member_type = match &field.referenced_binding {
+                Some(binding_name) => {
+                    let key = dispatch.typeof_key_for(
+                        ValueRootKey {
+                            scope: ScopeId::file(Arc::from(owner_canonical), mac.owner),
+                            name: Arc::from(binding_name.as_str()),
+                        },
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    );
+                    let read = dispatch.execute_read(key);
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(node) | QueryResult::Recursive(node) => {
+                            let context =
+                                ProjectionReductionContext::published(ProjectionMode::Expanded);
+                            let reduced = dispatch.reduce_output_node_with_context(node, context);
+                            if reduced.result_is_partial() {
+                                crate::request_context::mark_request_result_partial();
+                            }
+                            match render_tsc_node(ctx, reduced.node_id(), counters) {
+                                Ok(text)
+                                    if crate::semantic_query::compat_spelling::text_embeds_unmaterialized_sentinel(
+                                        text.as_str(),
+                                    ) =>
+                                {
+                                    // `render_tsc_node` returned `Ok`, but the
+                                    // rendered text itself carries a leaked
+                                    // compat-projection sentinel: a NESTED
+                                    // resolver degradation inside a
+                                    // structurally-materialized instantiated
+                                    // type (e.g. a generic function's
+                                    // closure-inferred type parameter, as in
+                                    // `computed(() => ...)`, or an unmodeled
+                                    // flow-return position for an untyped
+                                    // function) does not always bubble up
+                                    // through the shared raise pipeline as an
+                                    // `Err` — it can be baked into the
+                                    // returned text instead. This producer
+                                    // must never publish a leaked sentinel as
+                                    // if it were a real declaration type, so
+                                    // it degrades to the same honest
+                                    // `Unavailable` outcome the `Err` arm
+                                    // below already produces for a
+                                    // fully-failed resolution.
+                                    TscExposeMemberType::Unavailable(
+                                        TscDeclarationFailureReason::Unresolved(
+                                            UnresolvedReason::MissingDeclaration,
+                                        ),
+                                    )
+                                }
+                                Ok(text) => {
+                                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
+                                        ctx,
+                                        reduced.node_id(),
+                                        &mut ref_names,
+                                    );
+                                    TscExposeMemberType::Resolved(text)
+                                }
+                                Err(failure) => TscExposeMemberType::Unavailable(
+                                    failure.expose_declaration_reason(),
+                                ),
+                            }
+                        }
+                        QueryResult::Error(_) => TscExposeMemberType::Unavailable(
+                            TscDeclarationFailureReason::Unresolved(
+                                UnresolvedReason::MissingDeclaration,
+                            ),
+                        ),
+                    }
+                }
+                None => TscExposeMemberType::Unavailable(TscDeclarationFailureReason::Unsupported(
+                    UnsupportedReason::SemanticConstruct,
+                )),
+            };
+            members.push(TscExposeMemberRow {
+                name: field.name.clone(),
+                member_type,
+                anchor: expose_member_anchor(mac, payload_index, &field.name),
+            });
+        }
+        let type_references: Vec<String> = ref_names.into_iter().collect();
+        let scope = match tsc_scope_requirements_for(
+            mac.owner,
+            None,
+            &type_references,
+            scope_inventory,
+            ctx,
+            dispatch,
+            owner_canonical,
+        ) {
+            Ok(scope) => scope,
+            Err(failure) => return failure.tsc(),
+        };
+        MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+            members,
+            scope,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -33,10 +33,39 @@ pub(super) fn tsc_scope_requirements(
     dispatch: &ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
-    let macro_owner = tsc_script_owner(mac.owner)?;
+    tsc_scope_requirements_for(
+        mac.owner,
+        Some(mac.span),
+        &mac.type_references,
+        inventory,
+        ctx,
+        dispatch,
+        owner_canonical,
+    )
+}
+
+/// Same computation as [`tsc_scope_requirements`], parameterized on an
+/// explicit type-reference-head name list instead of a macro's own
+/// `type_references`. The runtime-object `defineExpose` projection has no
+/// macro type argument to read names from — its names come from
+/// [`crate::resolver_core::component_meta_registry::collect_node_ref_names`]
+/// over each member's RESOLVED `TypeOf` node instead. `macro_span` is
+/// `None` for that caller: there is no macro type-argument span to join
+/// `macro_type_deps` rows against, so that lookup is skipped rather than
+/// matching a span that does not describe this demand.
+pub(super) fn tsc_scope_requirements_for(
+    owner: verter_type_expr::TopLevelOwnerId,
+    macro_span: Option<verter_span::Span>,
+    type_references: &[String],
+    inventory: &TscScopeInventory<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+) -> Result<TscScopeRequirements, ProjectionFailure> {
+    let macro_owner = tsc_script_owner(owner)?;
     let mut required_imports = BTreeMap::new();
     let mut roots = Vec::new();
-    for name in &mac.type_references {
+    for name in type_references {
         match visible_type_binding(inventory, macro_owner, name)? {
             Some(VisibleTypeBinding::Import(owner)) => {
                 required_imports.insert((owner, name.clone()), TscBindingUsage::TypePosition);
@@ -45,28 +74,30 @@ pub(super) fn tsc_scope_requirements(
             None => {}
         }
     }
-    for dependency in inventory
-        .analysis
-        .macro_type_deps
-        .iter()
-        .filter(|dependency| dependency.macro_span == mac.span)
-        .filter(|dependency| dependency.usage.is_value_query())
-    {
-        let Some(owner) = visible_import_owner(
-            inventory,
-            macro_owner,
-            &dependency.type_name,
-            Some(&dependency.import_source),
-        )?
-        else {
-            continue;
-        };
-        if let Some(usage) = required_imports.get_mut(&(owner, dependency.type_name.clone())) {
-            *usage = TscBindingUsage::ValueQuery;
+    if let Some(macro_span) = macro_span {
+        for dependency in inventory
+            .analysis
+            .macro_type_deps
+            .iter()
+            .filter(|dependency| dependency.macro_span == macro_span)
+            .filter(|dependency| dependency.usage.is_value_query())
+        {
+            let Some(owner) = visible_import_owner(
+                inventory,
+                macro_owner,
+                &dependency.type_name,
+                Some(&dependency.import_source),
+            )?
+            else {
+                continue;
+            };
+            if let Some(usage) = required_imports.get_mut(&(owner, dependency.type_name.clone())) {
+                *usage = TscBindingUsage::ValueQuery;
+            }
         }
     }
     let mut direct_owner_value_dependencies = Vec::new();
-    for name in &mac.type_references {
+    for name in type_references {
         if visible_import_owner(inventory, macro_owner, name, None)?.is_some() {
             continue;
         }

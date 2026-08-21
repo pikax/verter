@@ -374,6 +374,40 @@ pub enum MacroTscProjection {
     Props(TscPropsProjection),
     Emits(TscEmitsProjection),
     Model(TscModelProjection),
+    /// Runtime-object `defineExpose({ ... })` only. The type-argument form
+    /// (`defineExpose<T>()`) is spliced verbatim by the compiler from
+    /// authored syntax and never produces this projection.
+    Expose(TscExposeProjection),
+}
+
+/// Closed runtime-object `defineExpose` TSC projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscExposeProjection {
+    /// One row per runtime-object member, in authored declaration order.
+    pub members: Vec<TscExposeMemberRow>,
+    /// Typed scope requirements referenced by resolved member type text.
+    pub scope: TscScopeRequirements,
+}
+
+/// One runtime-object `defineExpose` member row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscExposeMemberRow {
+    pub name: String,
+    pub member_type: TscExposeMemberType,
+    pub anchor: MacroAnchor,
+}
+
+/// Per-member resolution outcome. `Unavailable` is a genuine typed
+/// degradation — not the member's real type and not a disguised success —
+/// so the consumer falls back to its own authored-syntax-derived type
+/// (call shape / annotation) when one exists, and to an explicit `unknown`
+/// only when nothing at all is recoverable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscExposeMemberType {
+    /// The member's real inferred/resolved type, ready to splice verbatim.
+    Resolved(TscSpliceText),
+    /// Resolution was genuinely unavailable for this member.
+    Unavailable(TscDeclarationFailureReason),
 }
 
 /// Closed `defineProps` TSC projection.

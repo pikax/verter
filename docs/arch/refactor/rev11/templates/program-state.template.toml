@@ -15,15 +15,61 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
+# current_block names the sole block under FINAL CERTIFICATION (status
+# ACCEPTANCE_RECOMMENDED — at most one, program-wide, at a time) when one
+# exists; with nothing ACCEPTANCE_RECOMMENDED, it names any one concurrently
+# ACTIVE (IN_PROGRESS or REVIEW) block instead. See the Status comment below
+# and scripts/validate-program-state.mjs's concurrent-implementation-ceiling /
+# serialised-final-certification check.
 current_block = "A0"
 
 [repository]
 remote = "REQUIRED_REMOTE"
+# branch/head_sha/head_tree are the IMMUTABLE A0 entry-lock checkout
+# identity (contracts/baseline-lock.md §2) — bound ONCE, at entry, and never
+# moved again. verifyEntryLockIdentity (scripts/validate-program-state.mjs)
+# re-verifies these are well-formed AND byte-equal to the top-level
+# entry_checkout_sha/entry_checkout_tree above, on every live-mode run. This
+# is NOT the operational trunk oracle — see integration_branch/
+# integration_head_sha below for that (AMD-013 round 5: an earlier revision
+# of this validator pointed the trunk-pin/rehearsal machinery at THIS pair,
+# which is why every post-entry ACCEPTED block's accepted_sha came back
+# "unreachable" the first time that oracle was corrected off checkout HEAD —
+# the entry-lock branch was never meant to be the moving integration trunk).
 branch = "REQUIRED_BRANCH"
 head_sha = "REQUIRED_FULL_SHA"
 head_tree = "REQUIRED_TREE_OID"
 dirty = false
 untracked_count = 0
+# integration_branch/integration_head_sha are the PINNED, MUTABLE
+# operational-trunk identity (AMD-013 v3, re-targeted round 5, ANCESTRY not
+# equality since round 6): EVERY live-mode validation run (unconditionally,
+# not only when more than one block is concurrently ACTIVE) revalidates
+# integration_head_sha against the LIVE TIP OF THE CONFIGURED INTEGRATION REF
+# (refs/heads/<integration_branch> above), not checkout HEAD, and not the
+# immutable entry-lock branch/head_sha pair above — a worktree may
+# legitimately be checked out somewhere other than the integration trunk (a
+# feature branch, a review worktree), so checkout position is not the trunk
+# pin's oracle, and the entry-lock branch never advances past its one entry
+# checkout.
+#
+# integration_head_sha must be a real ANCESTOR of that live tip (git
+# merge-base --is-ancestor), not equal to it (AMD-013 round 6): this file is
+# itself committed to the branch it pins, so landing the commit that records
+# this value necessarily advances the branch past it — equality would make
+# the pin stale the instant it exists, and no amount of resyncing converges.
+# A lagging-but-genuinely-ancestral value is valid; a rewritten or foreign
+# SHA that is NOT an ancestor at all still fails closed. When more than one
+# block is concurrently ACTIVE, the fixed-landing-order rehearsal
+# (scripts/validate-program-state.mjs, verifyConcurrentLandingSafety) replays
+# onto this pin as its deterministic base. accepted_sha landed/reachability
+# (verifyLiveGitIdentities) is checked against the trunk's LIVE tip directly,
+# NOT against this pin — a block landed after this value was last recorded
+# is still correctly found reachable. Update this field when convenient
+# (e.g. alongside other ledger edits); staleness alone is not a violation as
+# long as the value remains a genuine ancestor of the live trunk.
+integration_branch = "REQUIRED_INTEGRATION_BRANCH"
+integration_head_sha = "REQUIRED_INTEGRATION_FULL_SHA"
 
 [orchestration]
 maintainer = "REQUIRED_MAINTAINER"
@@ -44,7 +90,88 @@ evidence_root = "REQUIRED_REPOSITORY_RELATIVE_PATH"
 # Status: LOCKED | READY | IN_PROGRESS | REVIEW | ACCEPTANCE_RECOMMENDED | ACCEPTED |
 #         BLOCKED | RESCOPE_REQUIRED | ABORTED | SUPERSEDED | PRIVATE_CHECKPOINT
 # Reviews: NOT_REQUIRED | PENDING | PASS | BLOCKING | NOT_PROVEN | INVALIDATED
+# Concurrency (MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md,
+# ARCH-RULING-CONCURRENCY-OPERATING-MODEL.md; AMD-013 v3): three concurrency
+# CLASSES for the per-status rules below, but ONE program-wide numeric
+# ceiling over the whole active set — not a per-class cap.
+#   - IN_PROGRESS (implementation).
+#   - REVIEW (review iteration) — contracts/stacked-prs.md's per-stack layer
+#     limit and cross-stack ownership disjointness bound REVIEW cardinality
+#     WITHIN a stack or across independent windows, but neither is a
+#     program-wide numeric cap; REVIEW blocks are NOT exempt from the
+#     active-set ceiling below. Several blocks may still legally sit in
+#     REVIEW at once (contracts/stacked-prs.md:100 — green upper LANDABLE
+#     layers stay REVIEW, not accepted in advance) — that just isn't
+#     "uncapped", it shares the same ceiling as everything else active.
+#   - ACCEPTANCE_RECOMMENDED (final certification) — capped at exactly ONE
+#     block, program-wide, at a time ("freeze once, run ONE full gate, obtain
+#     ONE mandate re-attestation"), AND counted within the SAME active-set
+#     ceiling as every other concurrently active block (it is one of the
+#     ruling's "concurrent blocks/trains", not a permitted 6th slot beyond
+#     up to 5 IN_PROGRESS). current_block names this block when one exists;
+#     with none ACCEPTANCE_RECOMMENDED, it names any one concurrently ACTIVE
+#     (IN_PROGRESS/REVIEW) block instead.
+# The active-set ceiling: no more than 5 blocks may be concurrently ACTIVE
+# (IN_PROGRESS ∪ REVIEW ∪ ACCEPTANCE_RECOMMENDED) at once, program-wide,
+# regardless of which of the three statuses a given block holds
+# (MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md: "up to 5 concurrent
+# blocks/trains"). This is a block-counting proxy for "concurrent claude-max
+# trains" — a single stack window legally holding up to six open REVIEW
+# layers (A6, contracts/stacked-prs.md §4) could on its own approach or
+# exceed it; a named, unresolved tension (AMD-013 §8), not silently swept.
+# Whenever more than one block is concurrently ACTIVE, every such block must
+# carry: a positive, mutually distinct landing_order (the sole
+# ACCEPTANCE_RECOMMENDED block, if any, must hold the minimum); and a
+# well-formed base_sha that is a real ancestor of its rehearsal candidate.
+# scripts/validate-program-state.mjs then REPLAYS each block's own
+# base_sha..candidate delta onto the cumulative result of every prior block
+# in the fixed order — the trunk pin is `repository.integration_head_sha`,
+# resolved and revalidated EVERY live-mode run (unconditionally, not only
+# when more than one block is active) against the LIVE TIP OF THE CONFIGURED
+# INTEGRATION-TRUNK REF (`refs/heads/<repository.integration_branch>`) — never
+# checkout `HEAD`, and never the SEPARATE, IMMUTABLE A0 entry-lock pair
+# `repository.branch`/`head_sha` above (AMD-013 round 5 — see the
+# `[repository]` section comment above for why those two pairs are not
+# interchangeable) — via `git merge-tree --write-tree --merge-base=<base_sha>`
+# followed by a SINGLE-parent `git commit-tree` (modeling the rebase/squash
+# landing this program actually performs, never a merge commit). The
+# rehearsal identity is candidate_sha for REVIEW/ACCEPTANCE_RECOMMENDED and
+# implementation_candidate_sha (a SEPARATE field — see below) for
+# IN_PROGRESS.
 # candidate_sha/tree = exact reviewed cumulative candidate.
+# implementation_candidate_sha = the IN_PROGRESS block's current WIP tip. Kept
+# separate from candidate_sha, which stays "the exact candidate reviewers
+# inspected" (contracts/stacked-prs.md:140) — an IN_PROGRESS block has no
+# reviewed candidate yet, so it must not overload that field. This pin is
+# bound to a resolvable fact, not merely trusted: implementation_ref (below)
+# must name a real, live git ref whose current resolved tip has this SHA as a
+# real ANCESTOR (AMD-013 round 7 — not equality; an IN_PROGRESS block's WIP
+# branch commits every few minutes, so requiring exact equality means the
+# ledger is valid only in the instant between a resync commit and the
+# branch's next commit — a continuously failing relation, not an
+# intermittent staleness gap, the same self-outrunning defect round 6 fixed
+# for the integration-trunk pin one level up). A pin naming a commit the live
+# ref's history does NOT contain — a foreign or rewritten SHA — is still a
+# validator violation; ordinary forward progress on the WIP branch is not.
+# implementation_candidate_sha/implementation_ref are REQUIRED, unconditionally,
+# for EVERY IN_PROGRESS block in live mode (AMD-013 round 4, FIX 2) — not only
+# when another block happens to be concurrently ACTIVE; the fixed-landing-order
+# rehearsal above additionally consumes this same, already-validated pin
+# whenever more than one block is concurrently ACTIVE.
+# implementation_ref = a git ref (a branch name or a full `refs/...` ref,
+# resolved via `git rev-parse --verify`, REQUIRED to resolve to a
+# `refs/heads/...` branch — never a raw object id, the literal `HEAD`, or a
+# tag) naming the IN_PROGRESS block's live WIP branch. Required for every
+# IN_PROGRESS block, unconditionally, alongside implementation_candidate_sha
+# above; the validator resolves it and REQUIRES implementation_candidate_sha
+# to be a real ancestor of the resolved tip (round 7), closing the
+# previously-unverifiable "is this pin genuinely on the block's actual WIP
+# branch" trust boundary without demanding a freshness the branch's own
+# commit cadence can never sustain.
+# landing_order = this block's position in the fixed landing order among
+# concurrently active blocks (0 when not concurrently active with any other
+# block — no ordering obligation). Must additionally respect same-stack
+# stack_layer order when two concurrently active blocks share a stack_id.
 # accepted_sha/tree = actual landed commit and full repository tree; they may differ
 # from the reviewed candidate after a base advance. landing_equivalence_digest binds
 # both base/candidate/accepted identities and exact candidate-delta/post-landing proof.
@@ -69,6 +196,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -77,6 +206,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -94,6 +224,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -102,6 +234,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -119,6 +252,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -127,6 +262,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -144,6 +280,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -152,6 +290,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -169,6 +308,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -177,6 +318,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -194,6 +336,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -202,6 +346,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -219,6 +364,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -227,6 +374,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -244,6 +392,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -252,6 +402,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -269,6 +420,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -277,6 +430,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -294,6 +448,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -302,6 +458,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -319,6 +476,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -327,6 +486,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -344,6 +504,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -352,6 +514,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -369,6 +532,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -377,6 +542,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -394,6 +560,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -402,6 +570,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -419,6 +588,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -427,6 +598,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -444,6 +616,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -452,6 +626,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -469,6 +644,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -477,6 +654,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -494,6 +672,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -502,6 +682,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -519,6 +700,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -527,6 +710,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -544,6 +728,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -552,6 +738,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -569,6 +756,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -577,6 +766,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -594,6 +784,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -602,6 +794,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -619,6 +812,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -627,6 +822,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -644,6 +840,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -652,6 +850,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -669,6 +868,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -677,6 +878,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -694,6 +896,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -702,6 +906,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -719,6 +924,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -727,6 +934,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -744,6 +952,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -752,6 +962,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -769,6 +980,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -777,6 +990,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -794,6 +1008,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -802,6 +1018,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -819,6 +1036,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -827,6 +1046,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -844,6 +1064,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -852,6 +1074,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -869,6 +1092,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -877,6 +1102,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -894,6 +1120,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -902,6 +1130,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -919,6 +1148,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -927,6 +1158,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -944,6 +1176,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -952,6 +1186,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -969,6 +1204,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -977,6 +1214,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -994,6 +1232,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1002,6 +1242,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1019,6 +1260,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1027,6 +1270,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1044,6 +1288,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1052,6 +1298,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1069,6 +1316,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1077,6 +1326,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1094,6 +1344,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1102,6 +1354,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1119,6 +1372,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1127,6 +1382,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1144,6 +1400,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1152,6 +1410,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1169,6 +1428,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1177,6 +1438,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1194,6 +1456,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1202,6 +1466,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1219,6 +1484,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1227,6 +1494,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1244,6 +1512,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1252,6 +1522,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1269,6 +1540,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1277,6 +1550,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1294,6 +1568,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1302,6 +1578,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1319,6 +1596,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1327,6 +1606,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1344,6 +1624,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1352,6 +1634,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1369,6 +1652,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1377,6 +1662,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1394,6 +1680,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1402,6 +1690,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1419,6 +1708,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1427,6 +1718,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1444,6 +1736,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1452,6 +1746,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1469,6 +1764,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1477,6 +1774,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1494,6 +1792,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1502,6 +1802,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1519,6 +1820,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1527,6 +1830,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1544,6 +1848,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1552,6 +1858,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1569,6 +1876,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1577,6 +1886,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"
@@ -1594,6 +1904,8 @@ charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
 candidate_sha = ""
+implementation_candidate_sha = ""
+implementation_ref = ""
 candidate_tree = ""
 accepted_sha = ""
 accepted_tree = ""
@@ -1602,6 +1914,7 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
+landing_order = 0
 conformance_review = "PENDING"
 conformance_reviewed_sha = ""
 architecture_review = "PENDING"

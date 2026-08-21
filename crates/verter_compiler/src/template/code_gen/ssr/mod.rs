@@ -177,6 +177,20 @@ pub struct SsrCodeGen<'ast, 'alloc> {
     /// Whether the template uses the `_temp0` variable pattern for root v-model
     /// on native elements. When true, `let _temp0\n` is emitted in the preamble.
     temp_var_needed: bool,
+    /// Disabled-comment removal spans (`comments: false`) not yet resolved
+    /// into an overwrite. `visit_comment` records here instead of emitting
+    /// its own `segmented_overwrites` deletion directly — `leave_template`
+    /// is the sole root-header owner: once it knows the exact ranges it is
+    /// about to claim (the `effective_count == 0` whole-template segmented
+    /// replacement, and the nonempty-root open/close-tag segmented claims),
+    /// it absorbs every pending entry wholly contained by a claimed range
+    /// and, at the end of the function, emits an ordinary (non-segmented)
+    /// deletion overwrite for whatever is left unclaimed. This mirrors the
+    /// VDOM root-prefix repair, backend-locally: it eliminates the
+    /// two-producers-one-range conflict within the `segmented_overwrites`
+    /// channel that panicked for a comment-only (zero-effective-root)
+    /// template.
+    pending_disabled_comment_removals: Vec<(u32, u32)>,
 }
 
 impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
@@ -218,7 +232,18 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             v_slot_scope_depth: 0,
             scoped_slot_entered: Vec::new(),
             temp_var_needed: false,
+            pending_disabled_comment_removals: Vec::new(),
         }
+    }
+
+    /// Absorb every pending disabled-comment removal wholly contained by
+    /// `[start, end)` — the range's own claimed synthetic content already
+    /// elides those source bytes, so no separate overwrite is needed for
+    /// them. Called by `leave_template` at each header-range claim, with
+    /// exactly the same range that claim uses.
+    fn absorb_pending_comment_removals(&mut self, start: u32, end: u32) {
+        self.pending_disabled_comment_removals
+            .retain(|&(cs, ce)| !(cs >= start && ce <= end));
     }
 
     // ── Scope ID helpers ─────────────────────────────────────────
@@ -4288,6 +4313,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
 
         if effective_count == 0 {
             // Empty template
+            self.absorb_pending_comment_removals(root.tag_open.start, close_end);
             out.overwrite_segmented(
                 root.tag_open.start,
                 close_end,
@@ -4297,6 +4323,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             );
             out.prepend_static(close_end, "}");
         } else {
+            self.absorb_pending_comment_removals(root.tag_open.start, root.tag_open.end);
             out.overwrite_segmented(
                 root.tag_open.start,
                 root.tag_open.end,
@@ -4304,6 +4331,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 &[],
                 SegmentedOverwriteAuthority::new(),
             );
+            self.absorb_pending_comment_removals(close_start, close_end);
             out.overwrite_segmented(
                 close_start,
                 close_end,
@@ -4311,6 +4339,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 &[],
                 SegmentedOverwriteAuthority::new(),
             );
+        }
+
+        // Any disabled-comment removal not absorbed by a claimed header
+        // range above (interior/trailing, or a nonempty-root leading
+        // comment — which sits after `tag_open.end` and so is never
+        // contained by the narrow open-tag claim) still needs its ordinary
+        // deletion — this reproduces the removal behavior a direct
+        // overwrite always had for those comments, just resolved here
+        // instead of at comment-visit time.
+        for (start, end) in self.pending_disabled_comment_removals.drain(..) {
+            out.overwrite(start, end, "");
         }
     }
 
@@ -6528,13 +6567,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
         out: &mut CodeGenOutput<'alloc>,
     ) {
         if !self.options.comments {
-            out.overwrite_segmented(
-                comment.start,
-                comment.end,
-                "",
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            // Record the removal as a fact — do NOT queue an overwrite here.
+            // `leave_template` is the sole root-header owner deciding whether
+            // this span is absorbed by a claimed range or left for an
+            // ordinary deletion. See `pending_disabled_comment_removals`'s
+            // doc comment for why (the former direct `overwrite_segmented`
+            // here collided with the `effective_count == 0` branch's own
+            // whole-template segmented replacement).
+            self.pending_disabled_comment_removals
+                .push((comment.start, comment.end));
             return;
         }
 

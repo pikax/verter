@@ -35,6 +35,13 @@ let notGitDir; // plain directory, never `git init`-ed
 let SHA_BASE, TREE_BASE;
 let SHA, TREE; // the repo's tip commit + its real tree (replaces the old fake constant)
 let SHA_DANGLING, TREE_DANGLING;
+// A real commit off SHA_BASE, distinct from SHA/SHA_DANGLING, kept live on
+// its OWN branch (never deleted) so it can serve as an implementation_ref
+// resolution target (AMD-013 FIX 2 — implementation_candidate_sha bound to
+// a resolvable live ref). Unlike SHA_DANGLING (deliberately unreachable
+// from any ref), this fixture's whole point is to BE ref-reachable.
+const WIP_A0_BRANCH = "wip-a0";
+let WIP_A0_SHA;
 const SHA_NONEXISTENT = "abcdef1234567890abcdef1234567890abcdef12"; // well-formed, never committed
 
 function git(args, cwd, input) {
@@ -75,6 +82,15 @@ before(() => {
   TREE_DANGLING = git(["rev-parse", "HEAD^{tree}"], gitRoot);
   git(["checkout", "-q", "main"], gitRoot);
   git(["branch", "-D", "scratch"], gitRoot);
+
+  // WIP_A0_BRANCH: a real commit off SHA_BASE, kept live on its own branch
+  // (never deleted) — an implementation_ref resolution target.
+  git(["checkout", "-q", "-b", WIP_A0_BRANCH, SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "wip-a0.txt"), "wip-a0\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "wip-a0"], gitRoot);
+  WIP_A0_SHA = git(["rev-parse", "HEAD"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
 });
 
 // Amendment authority gate fixtures. The validator resolves
@@ -195,6 +211,8 @@ function block(id, status, overrides = {}) {
     context_packet_digest: "",
     base_sha: "",
     candidate_sha: "",
+    implementation_candidate_sha: "",
+    implementation_ref: "",
     candidate_tree: "",
     accepted_sha: "",
     accepted_tree: "",
@@ -203,6 +221,7 @@ function block(id, status, overrides = {}) {
     stack_id: "",
     stack_snapshot_digest: "",
     stack_layer: 0,
+    landing_order: 0,
     conformance_review: "PENDING",
     conformance_reviewed_sha: "",
     architecture_review: "PENDING",
@@ -272,7 +291,16 @@ function checkpointBlock(id, overrides = {}) {
   });
 }
 
-function header({ status, current, repoSha, dagDigest = DAG_DIGEST, evidenceRoot, evidenceRoots }) {
+function header({
+  status,
+  current,
+  repoSha,
+  dagDigest = DAG_DIGEST,
+  evidenceRoot,
+  evidenceRoots,
+  integrationBranch = "main",
+  integrationHeadSha = repoSha,
+}) {
   let orchestration = "";
   if (evidenceRoots !== undefined) {
     const list = evidenceRoots.map((r) => `"${r}"`).join(", ");
@@ -308,6 +336,8 @@ head_sha = "${repoSha}"
 head_tree = "${repoSha}"
 dirty = false
 untracked_count = 0
+integration_branch = "${integrationBranch}"
+integration_head_sha = "${integrationHeadSha}"
 ${orchestration}`;
 }
 
@@ -351,7 +381,10 @@ test("live mode: fully-resolved state with a legal ACCEPTED predecessor and IN_P
     header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
       acceptedBlock("A0") +
       "\n" +
-      block("A1", "IN_PROGRESS") +
+      block("A1", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: "main",
+      }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -746,20 +779,37 @@ test("live mode: a non-ACTIVE top-level status is rejected", () => {
 test("stacked-work exception: a fully-ESTABLISHED same-snapshot stack passes", () => {
   const dag = write("dag-stack-ok.toml", DAG);
   // The legal stacked shape: A1 REVIEW above IN_PROGRESS A0, same non-empty
-  // stack_id, identical well-formed snapshot digest, strictly increasing layers.
+  // stack_id, identical well-formed snapshot digest, strictly increasing
+  // layers. Both are concurrently ACTIVE (2 blocks), so the fixed-landing-
+  // order rehearsal (AMD-013) also runs: A0 (predecessor) gets the lower
+  // landing_order, A1 (dependent) the higher one, per program-dag.toml's
+  // A0->A1 predecessor edge. A0's rehearsal candidate is WIP_A0_SHA (a real
+  // commit distinct from SHA, so the cumulative walk's two rehearsal steps
+  // get two distinct parents at every git commit-tree call — reusing SHA
+  // for both would hand commit-tree a duplicate parent), bound to the live
+  // WIP_A0_BRANCH ref (AMD-013 FIX 2 — implementation_ref must resolve to
+  // exactly this pin). current_block names A1 — one of the concurrently
+  // active blocks — since nothing here is ACCEPTANCE_RECOMMENDED
+  // (current_block is unconstrained to a SPECIFIC active block in that
+  // case; any member of the active set satisfies it).
   const state = write(
     "state-stack-ok.toml",
-    header({ status: "ACTIVE", current: "A0", repoSha: SHA }) +
+    header({ status: "ACTIVE", current: "A1", repoSha: SHA }) +
       block("A0", "IN_PROGRESS", {
         stack_id: "S1",
         stack_snapshot_digest: DIGEST,
         stack_layer: 0,
+        implementation_candidate_sha: WIP_A0_SHA,
+        implementation_ref: WIP_A0_BRANCH,
+        base_sha: SHA_BASE,
+        landing_order: 1,
       }) +
       "\n" +
       block("A1", "REVIEW", {
         stack_id: "S1",
         stack_snapshot_digest: DIGEST,
         stack_layer: 1,
+        landing_order: 2,
         base_sha: SHA,
         candidate_sha: SHA,
         candidate_tree: TREE,
@@ -1360,7 +1410,10 @@ test("live mode: an evidence_digest that matches the bound landing-record artifa
     header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
       acceptedBlock("A0", { evidence_digest: digest }) +
       "\n" +
-      block("A1", "IN_PROGRESS") +
+      block("A1", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: "main",
+      }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -1382,7 +1435,10 @@ test("multiple evidence roots: a block's artifact resolves from the second decla
     header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoots: [rootA, rootB] }) +
       acceptedBlock("A0", { evidence_digest: digest }) +
       "\n" +
-      block("A1", "IN_PROGRESS") +
+      block("A1", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: "main",
+      }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -1522,7 +1578,10 @@ test("extended artifact convention: root-level sibling <id>-summary.md (not nest
     header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
       acceptedBlock("A0", { evidence_digest: digest }) +
       "\n" +
-      block("A1", "IN_PROGRESS") +
+      block("A1", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: "main",
+      }) +
       "\n" +
       block("A2", "LOCKED"),
   );
@@ -1570,7 +1629,10 @@ for (const [label, filename] of [
       header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
         acceptedBlock("A0", { evidence_digest: digest }) +
         "\n" +
-        block("A1", "IN_PROGRESS") +
+        block("A1", "IN_PROGRESS", {
+          implementation_candidate_sha: SHA,
+          implementation_ref: "main",
+        }) +
         "\n" +
         block("A2", "LOCKED"),
     );
@@ -1630,7 +1692,10 @@ test("extended artifact convention: one nested match (<root>/<id>/*/landing-reco
     header({ status: "ACTIVE", current: "A1", repoSha: SHA, evidenceRoot }) +
       acceptedBlock("A0", { evidence_digest: a0Digest }) +
       "\n" +
-      block("A1", "IN_PROGRESS") +
+      block("A1", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA,
+        implementation_ref: "main",
+      }) +
       "\n" +
       // LOCKED (not ACCEPTED): keeps this test isolated to the evidence-digest
       // content-binding check, which runs over every well-formed evidence_digest
@@ -1739,7 +1804,7 @@ test("git identity: a real but DANGLING accepted_sha (unreachable from the repos
   assert.match(
     r.err,
     new RegExp(
-      `state block A1 is ACCEPTED with accepted_sha ${SHA_DANGLING} but that commit is not reachable from the repository tip .* — it is not genuinely landed`,
+      `state block A1 is ACCEPTED with accepted_sha ${SHA_DANGLING} but that commit is not reachable from the configured trunk ref's live tip .* — it is not genuinely landed`,
     ),
   );
   assert.doesNotMatch(r.out, /^OK:/);

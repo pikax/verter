@@ -38,3 +38,4 @@ mod svelte_parser_recovery_routes_through_strict_facts;
 mod svelte_parser_strictness_fails_closed;
 mod svelte_refuse_by_default_guards;
 mod svelte_runtime_whitespace_entity_guards;
+mod vdom_ssr_root_prefix_comment_absorption;
