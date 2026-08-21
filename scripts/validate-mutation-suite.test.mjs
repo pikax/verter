@@ -1892,13 +1892,17 @@ test("[PS] IN_PROGRESS block's implementation_ref does not resolve to a real com
   expectCheck(PS_FILE, "could not be resolved (git rev-parse --verify)", r);
 });
 
-test("[PS] IN_PROGRESS block's implementation_ref resolves, but its live tip does not match the declared implementation_candidate_sha (stale pin)", () => {
-  // Finding E, second bullet, closed: implementation_ref is a REAL, live ref
-  // (concurrent-b) — it resolves fine — but the ledger declares
-  // implementation_candidate_sha as a DIFFERENT real commit (concurrent-a).
-  // A validator that only checked "does implementation_ref resolve to
-  // SOMETHING" (rather than requiring it to equal the pin exactly) would
-  // wrongly pass this.
+test("[PS] IN_PROGRESS block's implementation_ref resolves, but implementation_candidate_sha is a FOREIGN commit not in its history (round 7 — ancestry, not equality)", () => {
+  // AMD-013 round 7: implementation_candidate_sha need only be an ANCESTOR
+  // of implementation_ref's live tip, not equal to it (see the paired PASS
+  // test below for the genuine-lag-is-fine case this correction exists for).
+  // This fixture proves the relaxation still fails closed for the case that
+  // actually matters: implementation_ref (concurrent-b) resolves fine, but
+  // the declared implementation_candidate_sha (concurrent-a) is a SIBLING
+  // commit branched independently off SHA_BASE — not an ancestor of
+  // concurrent-b's tip at all, foreign history, not mere staleness. A
+  // validator that only checked "does implementation_ref resolve to
+  // SOMETHING" would wrongly pass this.
   const dag = write("dag-implref3.toml", TWO_CHILD_DAG);
   const state = write(
     "state-implref3.toml",
@@ -1906,7 +1910,7 @@ test("[PS] IN_PROGRESS block's implementation_ref resolves, but its live tip doe
       rootAccepted() +
       "\n" +
       block("A0", "IN_PROGRESS", {
-        implementation_candidate_sha: CONCURRENT_A, // stale — the ref has moved on
+        implementation_candidate_sha: CONCURRENT_A, // foreign — not concurrent-b's ancestor
         implementation_ref: CONCURRENT_B_REF, // live tip is CONCURRENT_B, not CONCURRENT_A
         base_sha: SHA_BASE,
         landing_order: 1,
@@ -1920,7 +1924,83 @@ test("[PS] IN_PROGRESS block's implementation_ref resolves, but its live tip doe
       }),
   );
   const r = runPS(dag, state, "live");
-  expectCheck(PS_FILE, "the pin does not match the live ref's current tip", r);
+  expectCheck(PS_FILE, "is not an ancestor of implementation_ref", r);
+});
+
+test("[PS] IN_PROGRESS block's implementation_candidate_sha lags behind implementation_ref's live tip but is a genuine ancestor of it — valid rehearsal input (AMD-013 round 7)", () => {
+  // The exact shape that broke the live BV2 ledger: an actively-implementing
+  // block commits every few minutes, so a pin recorded moments ago is
+  // already behind the ref's live tip by the time this validator runs.
+  // SHA_BASE (the pin) is CONCURRENT_A's real parent commit — a genuine
+  // ancestor of concurrent-a's live tip, not a foreign SHA — so this must
+  // PASS under the round-7 ancestry relation exactly as the prior equality
+  // check would have wrongly rejected it.
+  const dag = write("dag-implref3b.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-implref3b.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: SHA_BASE, // lagging — concurrent-a has since moved on
+        implementation_ref: CONCURRENT_A_REF, // live tip is CONCURRENT_A, a descendant of SHA_BASE
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass, got:\n${r.err}\n${r.out}`);
+});
+
+test("[PS] checkImplementationRefBinding merge-base --is-ancestor subprocess failure", () => {
+  // Isolated with a targeted shim (same discipline as the base_sha/
+  // accepted_sha ancestry subprocess-failure test above): a blanket
+  // "merge-base" break would hit resolvePinnedTrunk's own ancestor call
+  // first (its pin/live-tip pair here is SHA/SHA — self-ancestry — so that
+  // call itself would not normally fail, but a blanket break intercepts
+  // every merge-base invocation regardless). This shim fails merge-base only
+  // when invoked with CONCURRENT_A (the implementation_candidate_sha this
+  // fixture declares), letting resolvePinnedTrunk's own SHA/SHA call through
+  // to real git untouched.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-implref-mergebase-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "merge-base" && args.includes("${CONCURRENT_A}")) {
+  process.stderr.write("shim: simulated merge-base failure for implementation_ref ancestry check\\n");
+  process.exit(17);
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
+  const dag = write("dag-implref-mb.toml", DAG1);
+  const state = write(
+    "state-implref-mb.toml",
+    header({ current: "A0" }) +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
+  expectCheck(PS_FILE, "ancestry against implementation_candidate_sha", r);
+  rmSync(shimDir, { recursive: true, force: true });
 });
 
 // -- Round 4, FIX 1: implementation_ref must be an actual, normalized branch
