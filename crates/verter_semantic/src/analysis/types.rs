@@ -1566,6 +1566,19 @@ pub struct AnalyzedExposeField {
     /// `payload.is_some() <=> type_expr_scope.is_some()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_expr_scope: Option<TypeExprScope>,
+    /// The local binding this runtime-object member's value expression names,
+    /// captured STRUCTURALLY from the OXC `Identifier` node — never sliced
+    /// from source text or guessed from a name pattern. `Some` for a
+    /// shorthand member (`{ foo }`, whose OXC value node is itself an
+    /// `Identifier` naming `foo`) or an explicit non-method member whose
+    /// value is a bare identifier (`{ myVal: val }` → `"val"`). `None` for a
+    /// method (`focus() {}`), a non-identifier value expression, or a field
+    /// normalized from a `defineExpose<T>()` type-argument surface (whose
+    /// type comes from `payload`/`type_expr_scope` instead). Consumers
+    /// resolve this name's real type through the shared `TypeOf` dispatch;
+    /// this field never carries a type itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_binding: Option<String>,
     /// JSDoc description from the leading `/** ... */` block on the field
     /// key, captured at extraction exactly like runtime prop fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]

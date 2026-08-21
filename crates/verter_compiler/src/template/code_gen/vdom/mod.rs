@@ -214,6 +214,18 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// parent's array wrapper covers them) but keep their own `-1 CACHED`
     /// patch flag, same as the existing slot-context `slot_cached` path.
     array_grouped_children: FxHashSet<usize>,
+    /// Disabled-comment removal spans (`comments: false`) not yet resolved
+    /// into an overwrite. `visit_comment` records here instead of writing
+    /// directly — `leave_template` is the sole root-prefix/suffix owner:
+    /// once it knows the exact header ranges it is about to claim, it
+    /// absorbs every pending entry wholly contained by a claimed range (the
+    /// range's own synthetic content already elides those bytes) and, at
+    /// the end of the function, emits an ordinary deletion overwrite for
+    /// whatever is left unclaimed (interior/trailing comments). This is
+    /// what eliminates the two-producers-one-range conflict between the
+    /// `overwrites` and `segmented_overwrites` channels — see the VDOM
+    /// root-prefix repair.
+    pending_disabled_comment_removals: Vec<(u32, u32)>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -528,7 +540,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             handler_cache_reservations: FxHashMap::default(),
             array_group_reservations: FxHashMap::default(),
             array_grouped_children: FxHashSet::default(),
+            pending_disabled_comment_removals: Vec::new(),
         }
+    }
+
+    /// Absorb every pending disabled-comment removal wholly contained by
+    /// `[start, end)` — the range's own claimed synthetic content already
+    /// elides those source bytes, so no separate overwrite is needed for
+    /// them. Called by `leave_template` at each root-prefix/suffix claim,
+    /// with exactly the same range that claim uses.
+    fn absorb_pending_comment_removals(&mut self, start: u32, end: u32) {
+        self.pending_disabled_comment_removals
+            .retain(|&(cs, ce)| !(cs >= start && ce <= end));
     }
 
     /// Reserve a document-pre-order `_hoisted_N` slot for `id`'s own props
@@ -1005,6 +1028,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 let mut buf = String::with_capacity(full_prefix.len() + 16);
                 buf.push_str(&full_prefix);
                 buf.push_str("return null\n}");
+                self.absorb_pending_comment_removals(tag_open.start, close_end);
                 out.overwrite_or_root_prefix(tag_open.start, close_end, &buf);
             }
             1 => {
@@ -1018,6 +1042,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 32);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
+                    self.absorb_pending_comment_removals(tag_open.start, child.start);
                     out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
 
                     // Emit the v-if condition prefix with per-segment source mapping.
@@ -1033,6 +1058,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                         }
                     }
 
+                    self.absorb_pending_comment_removals(close_start, close_end);
                     out.overwrite_or_root_suffix(close_start, close_end, "\n}");
                 } else if self.root_element_has_v_memo(root_children, source) {
                     // v-memo root: `_withMemo(..., () => (_openBlock(), …))`
@@ -1042,7 +1068,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 8);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
+                    self.absorb_pending_comment_removals(tag_open.start, child.start);
                     out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    self.absorb_pending_comment_removals(close_start, close_end);
                     out.overwrite_or_root_suffix(close_start, close_end, "\n}");
                 } else if self.root_element_has_directives_wrap(root_children, source) {
                     // Directives-wrapped root (v-show, native v-model, a
@@ -1054,7 +1082,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 8);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
+                    self.absorb_pending_comment_removals(tag_open.start, child.start);
                     out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    self.absorb_pending_comment_removals(close_start, close_end);
                     out.overwrite_or_root_suffix(close_start, close_end, "\n}");
                 } else {
                     // Single root — block root with _openBlock + _createElementBlock
@@ -1069,6 +1099,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     // construction above); the inline case emits
                     // `hoisted_preamble` through a SEPARATE module-scope
                     // prepend instead, so its anchors do not apply here.
+                    self.absorb_pending_comment_removals(tag_open.start, child.start);
                     if !self.options.is_inline && !hoisted_preamble_anchors.is_empty() {
                         out.overwrite_or_root_prefix_segmented(
                             tag_open.start,
@@ -1080,6 +1111,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     } else {
                         out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
                     }
+                    self.absorb_pending_comment_removals(close_start, close_end);
                     out.overwrite_or_root_suffix(close_start, close_end, ")\n}");
                 }
             }
@@ -1093,6 +1125,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 let mut prefix = String::with_capacity(full_prefix.len() + 80);
                 prefix.push_str(&full_prefix);
                 prefix.push_str("return (_openBlock(), _createElementBlock(_Fragment, null, [");
+                self.absorb_pending_comment_removals(tag_open.start, children[0].start);
                 out.overwrite_or_root_prefix(tag_open.start, children[0].start, &prefix);
 
                 // Delegate to wrap_array_text_runs for separators AND text
@@ -1143,8 +1176,20 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 close_buf.push_str("\n], ");
                 close_buf.push_str(flag_str);
                 close_buf.push_str("))\n}");
+                self.absorb_pending_comment_removals(close_start, close_end);
                 out.overwrite_or_root_suffix(close_start, close_end, &close_buf);
             }
+        }
+
+        // Any disabled-comment removal not absorbed by a claimed
+        // root-prefix/suffix range above (interior or trailing, outside
+        // every claim) still needs its ordinary deletion — this reproduces
+        // today's plain-overwrite removal behavior for those comments,
+        // just resolved here instead of at comment-visit time. `overwrites`
+        // is sorted by start before it flushes (see `CodeGenOutput::apply_to`),
+        // so pushing these after every other `overwrites` entry is safe.
+        for (start, end) in self.pending_disabled_comment_removals.drain(..) {
+            out.overwrite(start, end, "");
         }
     }
 
@@ -1760,9 +1805,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             out.overwrite(comment_node.start, comment_node.end, "");
             return;
         }
-        // Apply comment overwrites (or removal if disabled).
+        // Apply comment overwrites (or record the removal fact if disabled).
         // Child classification is handled by build_child_records from the AST.
-        let _ = comment::process_comment(comment_node, source, self.options.comments, out);
+        match comment::process_comment(comment_node, source, self.options.comments, out) {
+            comment::CommentOutcome::Kept => {}
+            comment::CommentOutcome::Dropped { start, end } => {
+                self.pending_disabled_comment_removals.push((start, end));
+            }
+        }
     }
 }
 

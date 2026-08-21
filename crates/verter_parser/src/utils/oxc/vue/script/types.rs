@@ -132,6 +132,13 @@ pub struct CallableParam<'a> {
     /// Whether a caller may omit it — a default initializer (`step = 1`) or an
     /// explicit `?`.
     pub optional: bool,
+    /// Span of the parameter's AUTHORED TypeScript type annotation (the `T`
+    /// after `:`), when present. `None` for an untyped JavaScript parameter —
+    /// there is nothing authored to recover, so the renderer falls back to
+    /// `any`. Never inferred: this is the exact same "copy the authored
+    /// annotation text" pattern already used for macro type parameters
+    /// (`MacroTypeParams::type_span`), not a second type resolver.
+    pub type_span: Option<Span>,
 }
 
 /// The call shape of a binding, recovered from the AUTHORED function node.
@@ -153,6 +160,10 @@ pub struct CallableShape<'a> {
     pub params: Vec<CallableParam<'a>>,
     /// Whether a rest parameter (`...args`) follows them.
     pub has_rest: bool,
+    /// Span of the AUTHORED TypeScript return-type annotation (the `T` after
+    /// `):`), when present. `None` for an untyped JavaScript function — the
+    /// renderer falls back to `any`, exactly as for an untyped parameter.
+    pub return_type_span: Option<Span>,
 }
 
 /// Declaration item (variable, function, class)
@@ -174,6 +185,13 @@ pub struct ScriptDeclaration<'a> {
     /// function expression. `None` for everything else, INCLUDING a
     /// destructured binding (which has no single initializer of its own).
     pub callable: Option<CallableShape<'a>>,
+    /// Span of the declarator's OWN authored TypeScript type annotation
+    /// (`const count: Ref<number> = ref(0)` → the span of `Ref<number>`).
+    /// `None` when the declarator has no explicit annotation (its type, if
+    /// any, is the result of inference this parser does not perform) or for
+    /// a declaration kind with no declarator annotation position (function /
+    /// class / destructured binding).
+    pub type_annotation_span: Option<Span>,
 }
 
 /// Kind of TypeScript-only declaration

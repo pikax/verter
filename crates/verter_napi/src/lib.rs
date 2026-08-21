@@ -3997,4 +3997,157 @@ defineProps<{ value: Unsafe }>()
             })
         ));
     }
+
+    /// Route-level proof: a runtime-object macro's real member presence
+    /// must publish through the SOLE audited wire entry for
+    /// `GRAPH_OPERATION_FRAMEWORK_SURFACES`
+    /// (`resolve_framework_surface_with_audit`, `CLAUDE.md` → "Framework
+    /// Adapter Substrate"), exercised through the FULL encode → NAPI call →
+    /// decode round-trip a real JS caller drives — not just the internal
+    /// `resolve_vue_macro_surface`/direct-host-call route.
+    ///
+    /// `verter_lsp` has no framework-surface / typeinfo-graph request
+    /// handler at all today (confirmed by inspection — no reference to
+    /// `resolve_framework_surface_with_audit`, `FrameworkSurfacePayload`, or
+    /// `GRAPH_OPERATION_FRAMEWORK_SURFACES` anywhere under
+    /// `crates/verter_lsp/src/`), so there is no SEPARATE LSP route to prove
+    /// this through without inventing a new LSP wire surface. This crate
+    /// (`verter_napi`) is the audited entry's actual currently-wired
+    /// production consumer (alongside `verter_wasm`), so the wire
+    /// round-trip proof lives here instead, for BOTH runtime-object macro
+    /// forms below.
+    fn runtime_object_members_via_napi_wire_round_trip(
+        canonical_id: &str,
+        source: &str,
+        kind: verter_protocol::typeinfo::graph::FrameworkSurfaceKind,
+    ) -> Vec<String> {
+        use prost::Message;
+        use verter_protocol::typeinfo::graph as wire;
+        use verter_protocol::verter::v1::{
+            type_info_graph_request as wire_request, type_info_graph_response,
+        };
+
+        let napi_host = NapiVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(canonical_id.to_string()),
+                input_id: canonical_id.to_string(),
+                source: std::sync::Arc::from(source),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("Vue fixture must upsert");
+
+        let envelope = wire::TypeInfoGraphRequest {
+            schema_version: 3,
+            operation: wire::Operation::FrameworkSurfaces as i32,
+            payload: Some(wire_request::Payload::FrameworkSurface(
+                wire::FrameworkSurfaceRequest {
+                    selector: Some(wire::ComponentSelector {
+                        canonical_id: canonical_id.to_string(),
+                        export_name: String::new(),
+                        has_export_name: false,
+                        framework_adapter_id: "vue".to_string(),
+                    }),
+                    context: Some(wire::ProjectionReductionContext {
+                        mode: wire::ProjectionMode::Expanded as i32,
+                        demand: wire::ReductionDemand::Published as i32,
+                    }),
+                    closure: Some(wire::ClosurePolicy {
+                        kind: Some(
+                            verter_protocol::verter::v1::graph_closure_policy::Kind::OneLevel(
+                                wire::ClosureOneLevel {},
+                            ),
+                        ),
+                    }),
+                    display_policy: Some(wire::DisplayPolicy {
+                        qualification: wire::DisplayQualification::Qualified as i32,
+                        branding: wire::DisplayBranding::On as i32,
+                        budgets: Some(wire::DisplayBudgets {
+                            max_string_length: 4096,
+                            max_depth: 16,
+                        }),
+                    }),
+                    include_provenance: false,
+                    include_diagnostics: false,
+                    include_projection: vec![],
+                    schema_version: 3,
+                },
+            )),
+        };
+        let request_buf = Buffer::from(envelope.encode_to_vec());
+
+        let result = napi_host
+            .resolve_framework_surface_with_audit(request_buf)
+            .expect("the NAPI wire adapter must decode/dispatch/encode successfully");
+
+        let response = wire::TypeInfoGraphResponse::decode(result.response.as_ref())
+            .expect("response must be a valid protobuf TypeInfoGraphResponse");
+        let payload = match &response.kind {
+            Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
+            other => panic!("expected a framework_surface response arm, got: {other:?}"),
+        };
+        let strings: Vec<String> = payload
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.strings.as_ref())
+            .map(|table| table.entries.clone())
+            .unwrap_or_default();
+        let mut names: Vec<String> = payload
+            .surfaces
+            .iter()
+            .find(|surface| surface.kind == kind as i32)
+            .map(|surface| {
+                surface
+                    .members
+                    .iter()
+                    .filter_map(|member| strings.get(member.name_id as usize).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn resolve_framework_surface_with_audit_publishes_real_runtime_object_expose_members() {
+        let names = runtime_object_members_via_napi_wire_round_trip(
+            "/w/RuntimeExposeNapi.vue",
+            "<script setup lang=\"ts\">\n\
+             import { ref } from 'vue'\n\
+             const count = ref(0)\n\
+             function bump() { count.value++ }\n\
+             defineExpose({ count, bump })\n\
+             </script>\n",
+            verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Expose,
+        );
+
+        assert_eq!(
+            names,
+            vec!["bump".to_string(), "count".to_string()],
+            "runtime-object defineExpose members must publish through the NAPI wire round-trip, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_framework_surface_with_audit_publishes_real_runtime_object_props_members() {
+        let names = runtime_object_members_via_napi_wire_round_trip(
+            "/w/RuntimePropsNapi.vue",
+            "<script setup lang=\"ts\">\n\
+             defineProps({ title: String, count: Number })\n\
+             </script>\n",
+            verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Props,
+        );
+
+        assert_eq!(
+            names,
+            vec!["count".to_string(), "title".to_string()],
+            "runtime-object defineProps members must publish through the NAPI wire round-trip, got: {names:?}"
+        );
+    }
 }

@@ -532,7 +532,17 @@ impl VerterHost {
             .indexed;
         let mac = indexed.snapshot.macros.get(request.macro_index)?;
         if !mac.is_type_based {
-            return None;
+            // A runtime-object `defineExpose({...})` / `defineProps({...})`
+            // has no type argument to lower, but the analyzer already
+            // captured its member names (`mac.expose_fields` /
+            // `mac.prop_fields` are populated for BOTH type-based and
+            // runtime macro forms). Synthesize a one-level surface directly
+            // from those already-typed facts instead of reporting an empty
+            // surface for every runtime-declared macro. See
+            // `runtime_object_macro_surface` for the structural (not
+            // name-string) kind dispatch and the honest-unknown member
+            // value policy.
+            return self.runtime_object_macro_surface(ctx, request, mac);
         }
 
         // `defineModel` does NOT carry a props OBJECT type argument — its type
@@ -659,6 +669,125 @@ impl VerterHost {
         })
     }
 
+    /// Synthesize a one-level [`VueMacroSurface`] for a RUNTIME-OBJECT
+    /// `defineExpose({...})` / `defineProps({...})` — `mac.is_type_based ==
+    /// false`, so there is no type argument for the shared dispatch to lower.
+    ///
+    /// The member NAMES are structural, already-typed analyzer facts
+    /// (`mac.expose_fields` / `mac.prop_fields`, populated for both
+    /// type-based AND runtime macro forms — see their doc comments on
+    /// [`verter_semantic::analysis::types::AnalyzedMacro`]), never a
+    /// name-string heuristic. Each member's own type is not re-derived here
+    /// (a runtime object literal's member value is an arbitrary expression —
+    /// resolving its real type is the same "typeof a value binding" demand
+    /// the shared dispatch already serves for AUTHORED `typeof x` type
+    /// positions elsewhere, out of scope for this structural member-presence
+    /// repair): every member publishes as `unknown`, the same honest
+    /// "nothing here re-derives a value's type" policy this producer's
+    /// sibling (`tsc/script.rs`'s declaration-output `defineExpose`
+    /// fallback) already applies to a call-initialized value with no
+    /// authored annotation. The point this closes is the EMPTY surface
+    /// defect: a runtime-declared macro must publish its real members, not
+    /// zero members.
+    ///
+    /// Only `DefineExpose` / `DefineProps` are handled — the two runtime
+    /// object forms the ruling names. Every other non-type-based macro kind
+    /// (`DefineEmits`, `DefineSlots`, `DefineOptions`, the `WithDefaults`
+    /// outer macro) keeps the prior `None` — unchanged, out of this repair's
+    /// scope.
+    fn runtime_object_macro_surface(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        request: &VueMacroSurfaceRequest,
+        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+    ) -> Option<VueMacroSurface> {
+        use crate::semantic_query::{
+            AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SurfaceEntry, SurfaceMember,
+            SurfaceView,
+        };
+
+        let declaration_origin = Some(Arc::clone(&request.owner_canonical));
+        let mut entries: Vec<SurfaceEntry> = Vec::new();
+        match request.macro_kind {
+            AnalyzedMacroKind::DefineExpose => {
+                for field in &mac.expose_fields {
+                    entries.push(SurfaceEntry::Member(SurfaceMember {
+                        key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                        // The exposed value's real type is not re-derived
+                        // here (see the doc comment above) — `unknown` is
+                        // the honest placeholder, never a fabricated shape.
+                        value: unknown_member_value_node(ctx),
+                        optional: false,
+                        readonly: false,
+                        method_kind: None,
+                        has_implementation_body: false,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        spans: verter_type_expr::MemberSpans::name_only(
+                            field.span.unwrap_or(verter_span::Span::new(0, 0)),
+                        ),
+                        declaration_origin: declaration_origin.clone(),
+                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: MergeRoleStamp::NEUTRAL,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    }));
+                }
+            }
+            AnalyzedMacroKind::DefineProps => {
+                for field in &mac.prop_fields {
+                    entries.push(SurfaceEntry::Member(SurfaceMember {
+                        key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                        value: unknown_member_value_node(ctx),
+                        optional: field.is_optional,
+                        readonly: false,
+                        method_kind: None,
+                        has_implementation_body: false,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        spans: verter_type_expr::MemberSpans::name_only(field.span),
+                        declaration_origin: declaration_origin.clone(),
+                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: MergeRoleStamp::NEUTRAL,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    }));
+                }
+            }
+            // Every other non-type-based macro kind keeps the prior `None`
+            // — out of this repair's scope (`DefineEmits`/`DefineSlots`
+            // runtime-object forms and the `WithDefaults` outer macro are
+            // not named by the ruling this fix implements).
+            _ => return None,
+        }
+        if entries.is_empty() {
+            // A bare `defineExpose()` / an object-less `defineProps()` call
+            // has genuinely nothing to surface — `None` stays correct there,
+            // distinct from the "has members but they were dropped" defect.
+            return None;
+        }
+
+        let base = ctx.project_type_store().semantic_graph().intern_node(
+            crate::semantic_query::SemanticNodeData::Object(SurfaceView::from_entries(
+                entries, None, false,
+            )),
+        );
+        let dispatch = ctx.dispatch();
+        let surface = self.project_shallow_surface_from_base(
+            ctx,
+            &dispatch,
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
+        )?;
+        Some(VueMacroSurface {
+            surface,
+            macro_kind: request.macro_kind,
+            owner_canonical: Arc::clone(&request.owner_canonical),
+            macro_index: request.macro_index,
+            macro_call_span: mac.span,
+            level: request.level,
+            unresolved_surface_arms: Vec::new(),
+        })
+    }
+
     /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
     /// ([`MacroSurfaceDtos`]), consulting the host-owned framework-surface store
     /// first.
@@ -688,6 +817,21 @@ impl VerterHost {
         // this bare-host entry has no request-result completeness to fold.
         vue_macro_dtos_with_ctx(&host_ctx, request).dtos
     }
+}
+
+/// Intern (or reuse the interned) `unknown` primitive node — the honest
+/// placeholder value for a runtime-object macro member whose real type is
+/// not re-derived by [`VerterHost::runtime_object_macro_surface`]. Content-
+/// addressed like every other `intern_node` call: repeated calls across
+/// members / requests collapse onto the same node.
+fn unknown_member_value_node(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+) -> crate::semantic_query::SemanticNodeId {
+    ctx.project_type_store().semantic_graph().intern_node(
+        crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Unknown,
+        ),
+    )
 }
 
 /// Navigate an authored type-payload REF to its one-level object

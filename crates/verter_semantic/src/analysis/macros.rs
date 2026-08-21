@@ -3511,11 +3511,26 @@ fn extract_expose_fields(
                     _ => None,
                 };
                 let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
+                // Structural: read the OXC value node directly, never slice
+                // source text or pattern-match a name. Shorthand (`{ foo }`)
+                // and explicit-identifier (`{ myVal: val }`) members both
+                // carry an `Expression::Identifier` value node in OXC — a
+                // method (`p.method`) or any other expression shape yields
+                // `None`, the honest "nothing structurally recoverable" case.
+                let referenced_binding = if p.method {
+                    None
+                } else {
+                    match &p.value {
+                        Expression::Identifier(ident) => Some(ident.name.to_string()),
+                        _ => None,
+                    }
+                };
                 key_name.map(|name| AnalyzedExposeField {
                     name,
                     span: Some(p.key.span().into()),
                     payload: None,
                     type_expr_scope: None,
+                    referenced_binding,
                     description,
                     tags,
                 })

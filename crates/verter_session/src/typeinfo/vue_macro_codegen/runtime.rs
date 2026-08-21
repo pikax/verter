@@ -543,6 +543,35 @@ pub(super) fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &st
     }
 }
 
+/// Anchor for one runtime-object `defineExpose({ ... })` member, keyed by
+/// its authored source-order position among the macro's own `expose_fields`
+/// — the same authored-member-ordinal scheme [`member_anchor`] uses for
+/// `defineProps`.
+pub(super) fn expose_member_anchor(
+    mac: &AnalyzedMacro,
+    payload_index: usize,
+    name: &str,
+) -> MacroAnchor {
+    let Some(ordinal) = mac
+        .expose_fields
+        .iter()
+        .filter(|field| {
+            field
+                .span
+                .is_some_and(|span| span_is_owned_by_macro(span, mac.span))
+        })
+        .position(|field| field.name == name)
+    else {
+        return MacroAnchor::MacroArgument {
+            macro_index: macro_index(payload_index),
+        };
+    };
+    MacroAnchor::Authored {
+        macro_index: macro_index(payload_index),
+        member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
+    }
+}
+
 pub(super) fn authored_emit_anchor(
     mac: &AnalyzedMacro,
     payload_index: usize,

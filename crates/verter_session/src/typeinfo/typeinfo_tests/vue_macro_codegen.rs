@@ -17,6 +17,11 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 #[path = "vue_macro_codegen_part2.rs"]
 mod part2;
 
+// Runtime-object `defineExpose` per-member `TypeOf` resolution tests — split
+// into their own sibling child module (same reasoning as `part2`).
+#[path = "vue_macro_codegen_expose.rs"]
+mod expose;
+
 fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {

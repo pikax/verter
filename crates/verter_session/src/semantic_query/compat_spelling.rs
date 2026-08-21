@@ -86,3 +86,74 @@ pub(crate) fn spells_legacy_sentinel_family(raw: &str) -> bool {
         || raw.starts_with(ALIAS_CYCLE_PREFIX);
     is_exact || is_prefixed
 }
+
+// ---------------------------------------------------------------------------
+// Embedded-occurrence leaked-sentinel screen
+// ---------------------------------------------------------------------------
+
+/// Every raw spelling in the UNMATERIALIZED-sentinel class: the exact
+/// [`QueryError`](crate::semantic_query::QueryError) variants
+/// `query_error_is_unmaterialized_sentinel`
+/// (`crate::project_semantic_dispatch::raise_sentinel`) classifies as a
+/// genuine degradation rather than a deliberately-materialised placeholder.
+/// This list mirrors that predicate's `true` arm exactly — keep the two in
+/// sync on any `QueryError` variant change. Deliberately EXCLUDES the
+/// materialised-placeholder family (`RaiseMiss`, `TypeParamCycle`,
+/// `RecursiveRef`, `ValueDomainMismatch`, `DeclPlaceholder`, `Other`) — those
+/// are legitimate, by-design content the fold intentionally produces inside
+/// an otherwise-complete materialized tree, never a leak.
+const UNMATERIALIZED_SENTINEL_EXACT: &[&str] = &[
+    SEMANTIC_MISS,
+    CANCELLED,
+    SEMANTIC_ALIAS_CYCLE,
+    OPEN_SURFACE,
+    SEMANTIC_OBJECT_SURFACE,
+    UNMODELED_POSITION,
+    SEMANTIC_SURFACE_MEMBER,
+];
+
+/// Parameterised-prefix counterpart of [`UNMATERIALIZED_SENTINEL_EXACT`] —
+/// same class, same sync obligation.
+const UNMATERIALIZED_SENTINEL_PREFIX: &[&str] = &[
+    UNSUPPORTED_INTRINSIC_PREFIX,
+    BUDGET_EXCEEDED_SENTINEL_PREFIX,
+    UNSTABLE_STATE_PREFIX,
+    ALIAS_CYCLE_PREFIX,
+];
+
+/// Whether `text` — a rendered TSC/declaration display string — carries a
+/// STANDALONE-TOKEN occurrence of a reserved compat-projection sentinel from
+/// the unmaterialized-sentinel family: a genuine resolver degradation (a
+/// nested `QueryError::Miss`, `UnmodeledPosition`, `BudgetExceeded`, …) that
+/// a caller failed to bubble up as an `Err` and instead baked into the
+/// returned text as literal sentinel content.
+///
+/// NOT a general classifier: no raw spelling is ever read as resolver
+/// control flow. This is a narrow safety screen for a producer boundary that
+/// must never publish a leaked internal sentinel as if it were a real type —
+/// the caller degrades to its own honest failure outcome instead.
+///
+/// Matches only a standalone identifier-like token, never a substring of a
+/// longer identifier, so a real user type that happens to contain a
+/// fragment of a sentinel spelling as part of a longer name is never
+/// misclassified — see each call site for the accepted residual risk of a
+/// real type or member named EXACTLY one of these reserved spellings.
+pub(crate) fn text_embeds_unmaterialized_sentinel(text: &str) -> bool {
+    let is_ident_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+    let bytes = text.as_bytes();
+    let boundary_before = |start: usize| {
+        start
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_none_or(|&byte| !is_ident_byte(byte))
+    };
+    UNMATERIALIZED_SENTINEL_EXACT.iter().any(|sentinel| {
+        text.match_indices(sentinel).any(|(start, matched)| {
+            let end = start + matched.len();
+            boundary_before(start) && bytes.get(end).is_none_or(|&byte| !is_ident_byte(byte))
+        })
+    }) || UNMATERIALIZED_SENTINEL_PREFIX.iter().any(|prefix| {
+        text.match_indices(prefix)
+            .any(|(start, _)| boundary_before(start))
+    })
+}

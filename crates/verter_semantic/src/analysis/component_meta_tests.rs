@@ -3210,6 +3210,7 @@ fn extracts_exposed_from_define_expose() {
             span: Some(verter_span::Span::new(0, 5)),
             payload: None,
             type_expr_scope: None,
+            referenced_binding: None,
             description: None,
             tags: Vec::new(),
         }],

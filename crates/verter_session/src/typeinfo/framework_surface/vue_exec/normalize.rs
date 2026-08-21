@@ -426,6 +426,7 @@ pub(crate) fn exposed_from_typeinfo_surface(
                     span: None,
                     payload: None,
                     type_expr_scope: None,
+                    referenced_binding: None,
                     description,
                     tags,
                 },

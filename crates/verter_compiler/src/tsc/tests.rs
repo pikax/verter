@@ -7,7 +7,8 @@ use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason,
     MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, SynthesizedRowKind,
     TscBindingUsage, TscDeclarationFailureReason, TscDependencyDeclaration, TscEmitRow,
-    TscEmitsProjection, TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
+    TscEmitsProjection, TscExposeMemberRow, TscExposeMemberType, TscExposeProjection,
+    TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
     TscOwnerValueDependency, TscPropRow, TscPropsProjection, TscPublicPropsProjection,
     TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
@@ -5724,6 +5725,325 @@ defineExpose({ counter, reset })
     assert!(
         decl.contains("counter") && decl.contains("reset"),
         "declaration surfaces both exposed members, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_typed_function_recovers_authored_param_and_return_types() {
+    // A `function` declaration authored WITH explicit TypeScript parameter and
+    // return type annotations must publish those REAL authored types in the
+    // declaration-only expose tail, not the untyped `(step: any) => any` shape.
+    let sfc = r#"<script setup lang="ts">
+function bump(step: number): boolean {
+  return step > 0
+}
+defineExpose({ bump })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        decl.contains("bump: (step: number) => boolean"),
+        "declaration must recover the authored param/return types, got:\n{decl}"
+    );
+    // NEGATIVE: the untyped shape-only fallback must not appear for a typed
+    // declaration — that would be silently discarding the authored types.
+    assert!(
+        !decl.contains("bump: (step: any) => any") && !decl.contains("bump: (step?: any) => any"),
+        "declaration must NOT fall back to the untyped any-shape for a typed function, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_untyped_function_still_falls_back_to_any_shape() {
+    // Regression control: an UNTYPED function declaration has no authored
+    // types to recover, so it must keep rendering the existing any-shaped
+    // callable fallback unchanged.
+    let sfc = r#"<script setup lang="ts">
+function bump(step) {
+  return step
+}
+defineExpose({ bump })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        decl.contains("bump: (step: any) => any"),
+        "untyped function must still render the any-shaped fallback, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_typed_call_initialized_const_recovers_authored_type() {
+    // A call-initialized `const` (`ref(0)`) that ALSO carries an explicit
+    // authored type annotation (`: Ref<number>`) must publish that REAL
+    // authored type in the declaration-only expose tail, not `unknown`.
+    let sfc = r#"<script setup lang="ts">
+import { ref, Ref } from 'vue'
+const counter: Ref<number> = ref(0)
+defineExpose({ counter })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        decl.contains("counter: Ref<number>"),
+        "declaration must recover the authored variable type, got:\n{decl}"
+    );
+    // NEGATIVE: the untyped fallback must not appear when a real authored
+    // type is available.
+    assert!(
+        !decl.contains("counter: unknown"),
+        "declaration must NOT fall back to unknown when the const has an authored type, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_untyped_call_initialized_const_falls_back_to_unknown_without_a_bundle() {
+    // Regression control, NARROWED scope: with NO session backing this call
+    // (`MacroTscInput::NotRequired` — no TypeInfo producer ever ran, so
+    // there is no resolved-type row to consume at all), the untyped
+    // call-initialized const has nothing to recover from and must keep
+    // rendering `unknown` unchanged. This is DISTINCT from "resolution was
+    // attempted and genuinely missed" — see
+    // `declaration_mode_expose_runtime_object_unavailable_member_falls_back_to_syntax_derived_type`
+    // below for that case, and the `_resolves_authoritative_*` tests for the
+    // upgrade path this control does NOT exercise.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const counter = ref(0)
+defineExpose({ counter })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        decl.contains("counter: unknown"),
+        "untyped call-initialized const must still fall back to unknown with no bundle, got:\n{decl}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-object `defineExpose` now resolves per-member REAL types through
+// the shared TypeInfo `TypeOf` dispatch (`MacroTscProjection::Expose`) when
+// an authoritative bundle backs the call, instead of only ever recovering an
+// authored-syntax shape. These tests drive `apply_tsc_bundle`'s consumption
+// of that DTO row directly via a hand-built bundle — the session-side
+// resolution that PRODUCES such a row (real `TypeOf` queries against a live
+// `VerterHost`) is proven separately in
+// `verter_session::typeinfo::typeinfo_tests::vue_macro_codegen`.
+// ---------------------------------------------------------------------------
+
+fn expose_bundle_resolved(name: &str, resolved_text: &str) -> MacroTscBundle {
+    expose_bundle_with_scope(
+        name,
+        TscExposeMemberType::Resolved(TscSpliceText::new(resolved_text)),
+        TscScopeRequirements::default(),
+    )
+}
+
+fn expose_bundle_with_scope(
+    name: &str,
+    member_type: TscExposeMemberType,
+    scope: TscScopeRequirements,
+) -> MacroTscBundle {
+    MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: name.to_owned(),
+                    member_type,
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+                scope,
+            })),
+        }],
+    }
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_const_resolves_authoritative_type() {
+    // The ruling's canonical example: `const count = ref(0)` (untyped —
+    // nothing authored to recover) now renders the REAL resolved type when
+    // an authoritative bundle backs the call, not `unknown`.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_resolved("count", "Ref<number>");
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("count: Ref<number>"),
+        "declaration must splice the authoritative resolved type, got:\n{decl}"
+    );
+    // NEGATIVE: the old untyped fallback must not survive once a real
+    // resolved type is authoritative.
+    assert!(
+        !decl.contains("count: unknown"),
+        "declaration must NOT fall back to unknown once resolution succeeded, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_computed_resolves_authoritative_type() {
+    let sfc = r#"<script setup lang="ts">
+import { ref, computed } from 'vue'
+const count = ref(0)
+const doubled = computed(() => count.value * 2)
+defineExpose({ doubled })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_resolved("doubled", "ComputedRef<number>");
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("doubled: ComputedRef<number>"),
+        "declaration must splice the authoritative computed type, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("doubled: unknown"),
+        "declaration must NOT fall back to unknown once resolution succeeded, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_function_resolves_authoritative_signature() {
+    // An UNANNOTATED function's syntax-only recovery falls back to the
+    // any-shaped callable (`(step: any) => any`). With an authoritative
+    // resolved signature it renders the REAL inferred parameter and return
+    // types instead.
+    let sfc = r#"<script setup lang="ts">
+function bump(step) {
+  return step + 1
+}
+defineExpose({ bump })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_resolved("bump", "(step: number) => number");
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("bump: (step: number) => number"),
+        "declaration must splice the authoritative resolved signature, got:\n{decl}"
+    );
+    // NEGATIVE: the syntax-only any-shaped fallback must not survive once a
+    // real resolved signature is authoritative.
+    assert!(
+        !decl.contains("bump: (step: any) => any") && !decl.contains("bump: (step?: any) => any"),
+        "declaration must NOT fall back to the untyped any-shape once resolution succeeded, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_unavailable_member_falls_back_to_syntax_derived_type() {
+    // A per-member typed `Unavailable` degradation (resolution genuinely
+    // missed) must NOT masquerade as a fabricated success — the compiler
+    // falls back to its own honest syntax-derived answer, exactly the
+    // behavior it had before this DTO row existed.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_with_scope(
+        "count",
+        TscExposeMemberType::Unavailable(TscDeclarationFailureReason::Unresolved(
+            UnresolvedReason::MissingDeclaration,
+        )),
+        TscScopeRequirements::default(),
+    );
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("count: unknown"),
+        "an Unavailable member must fall back to the honest syntax-derived type (unknown here), got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_retains_referenced_local_type_declaration() {
+    // The resolved type text can reference a LOCAL declaration (`Box`) — the
+    // scope requirements the DTO row carries must retain it so the spliced
+    // declaration output stays valid, exactly like the Props/Emits/Model
+    // scope-threading this producer already does.
+    let sfc = r#"<script setup lang="ts">
+interface Box { value: number }
+function makeBox(v: number): Box {
+  return { value: v }
+}
+const count = makeBox(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_with_scope(
+        "count",
+        TscExposeMemberType::Resolved(TscSpliceText::new("Box")),
+        TscScopeRequirements {
+            owner_value_dependencies: Vec::new(),
+            retained_bindings: Vec::new(),
+            dependency_declarations: vec![dependency("Box", Vec::new())],
+        },
+    );
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("count: Box"),
+        "declaration must splice the authoritative resolved type, got:\n{decl}"
+    );
+    assert!(
+        decl.contains("interface Box"),
+        "declaration must retain the referenced local declaration `Box`, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_runtime_object_without_bundle_still_compiles() {
+    // Backward compatibility: a caller that asserts `NotRequired` for a file
+    // whose ONLY macro is a runtime-object `defineExpose` (no type-based
+    // codegen macro at all) must keep compiling exactly as it did before
+    // this producer existed — never a new `MissingAuthoritativeSemantics`
+    // demand.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        decl.contains("count: unknown"),
+        "with no bundle at all, the syntax-derived fallback applies unchanged, got:\n{decl}"
     );
 }
 
