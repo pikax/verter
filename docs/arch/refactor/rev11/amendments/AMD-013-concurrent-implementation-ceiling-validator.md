@@ -2,10 +2,12 @@
 
 **Status:** RATIFIED WITH CORRECTIONS, 2026-08-21. The codex architect ratified
 this amendment subject to two corrections (§11); both were applied in this
-revision before landing. A third, post-landing correction (round 6 — the
-equality-pin self-reference defect the landing commit itself exposed) is
-recorded under §11's "Round 6 correction" subsection; the amendment stays
-RATIFIED.
+revision before landing. Two further post-landing corrections — round 6 (the
+integration-trunk equality-pin self-reference defect the landing commit
+itself exposed) and round 7 (the SAME defect one level down, in the
+per-block `implementation_candidate_sha` pin) — are recorded under §11's
+"Round 6 correction" and "Round 7 correction" subsections; the amendment
+stays RATIFIED.
 
 **Prepared against:** local `feat/concurrent-blocks` commit
 `cd15a31b7a3c087dcca67f105434a823e49c55f1`, tree
@@ -1131,3 +1133,79 @@ against the real tracked files and the real live ledger, not scratch copies
 or fixtures alone. Test suites: 70/70 `validate-program-state.test.mjs`,
 276/276 combined with `validate-mutation-suite.test.mjs` and
 `validate-stack-window.test.mjs`.
+
+### Round 7 correction (2026-08-21)
+
+Round 6 fixed the ledger's OWN self-reference (`repository.integration_head_sha`,
+committed to the branch it pins) by switching that pin from equality to
+ancestry. `checkImplementationRefBinding`'s `implementation_candidate_sha`
+pin — bound to `implementation_ref`'s live tip, closed under round 3/4 —
+still checked EQUALITY, and BV2 (an actively-implementing block whose WIP
+branch commits every few minutes) exposed the same defect one level down:
+live validation of the real ledger against the real repository FAILED
+(`block BV2 implementation_ref ... resolves to <live tip>, but the declared
+implementation_candidate_sha is <pin> — the pin does not match the live
+ref's current tip`); the prior run, minutes earlier, had reported 0
+violations — a green snapshot caught between two of BV2's commits, not a
+genuinely stable pass — and every subsequent BV2 commit invalidates the
+pin again the same way. Not an intermittent staleness gap: a continuously
+failing relation for any block under active implementation.
+
+**Disposition: ADOPT-NOW.** The same reasoning round 6 applied to the trunk
+pin applies here, unchanged: `checkImplementationRefBinding` now requires
+`implementation_candidate_sha` to be a real ANCESTOR of `implementation_ref`'s
+live resolved tip (`git merge-base --is-ancestor`), not `!==` on the two
+resolved SHAs. This still proves `implementation_ref` is the real branch
+carrying this identity — a foreign or rewritten SHA is not in that branch's
+history and still fails closed — while ordinary forward progress on the WIP
+branch no longer invalidates a pin recorded against an earlier commit on the
+same line of history. No staleness bound is added, for the same reason round
+6 added none: an arbitrarily stale-but-ancestor pin only means the
+fixed-landing-order rehearsal (`verifyConcurrentLandingSafety`) replays a
+smaller slice of the block's total pending delta until the next resync — it
+cannot mask a real conflict in content that WAS rehearsed, it only leaves
+content produced after the pin temporarily unrehearsed. The ref-only
+alternative (drop the SHA check entirely for IN_PROGRESS, verify the exact
+SHA only at REVIEW/ACCEPTANCE_RECOMMENDED) was considered and rejected: it
+would stop verifying anything about `implementation_candidate_sha` for the
+entire IN_PROGRESS lifetime — including a foreign/rewritten pin — strictly
+weaker than the ancestor relation for no added benefit; the fixed-landing-
+order rehearsal also consumes this pin while the block is still IN_PROGRESS
+(round 4, FIX 2), so a check that only starts at certification would leave
+the rehearsal's own input unverified.
+
+**What the field now guarantees.** `implementation_candidate_sha` is a real
+commit, genuinely reachable by walking `implementation_ref`'s history
+backward from its live tip — i.e., a real point the WIP branch has actually
+passed through — never a foreign, rewritten, or fabricated identity. It does
+NOT guarantee currency: the pin may lag the branch's actual current tip by
+any number of commits, and the validator does not bound how far. Freshness
+("is this pin recent") is deliberately out of scope, same as round 6's trunk
+pin — see that correction's own rationale, which applies here unchanged.
+
+Verification (re-run after applying):
+
+- `node --test scripts/validate-program-state.test.mjs` — 70/70.
+- `node --test scripts/validate-mutation-suite.test.mjs` — 178/178 (176
+  before this correction, +2 net: one existing test retargeted in place
+  from the equality-mismatch case to the foreign-SHA-fails-closed case, plus
+  two new tests — the genuine-ancestor-lag-passes case and the
+  `checkImplementationRefBinding` merge-base subprocess-failure
+  discriminator).
+- `node --test scripts/validate-stack-window.test.mjs` — 30/30.
+- Live validation against the real ledger and the real, currently-advancing
+  `block/bv2` branch: `OK ... validated 64 blocks (non-zero work asserted)
+  ... 0 violations` on three separate runs (11:28:17, 11:33:37, 11:36:21
+  local time) spanning ~8 minutes — `block/bv2`'s live tip did not itself
+  advance again in that window, but the pinned `implementation_candidate_sha`
+  (recorded 10:20:11, one commit behind the branch's 11:18:29 tip) stayed a
+  valid ancestor throughout, which is the exact lagging-pin shape this
+  correction exists for; it would have failed all three runs under the
+  pre-round-7 equality check (see the mutation-kill proof below).
+- Mutation-kill, against the real tracked `scripts/validate-program-state.mjs`
+  and the real live ledger (not a scratch copy): (a) BV2's
+  `implementation_candidate_sha` replaced with a foreign commit not on
+  `block/bv2` — FAILS with `is not an ancestor of implementation_ref`; (b)
+  the ancestry check reverted in place to the pre-round-7 equality check —
+  FAILS against the live ledger with the exact "the pin does not match the
+  live ref's current tip" symptom that motivated this correction.

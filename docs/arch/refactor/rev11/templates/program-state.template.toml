@@ -144,9 +144,15 @@ evidence_root = "REQUIRED_REPOSITORY_RELATIVE_PATH"
 # inspected" (contracts/stacked-prs.md:140) — an IN_PROGRESS block has no
 # reviewed candidate yet, so it must not overload that field. This pin is
 # bound to a resolvable fact, not merely trusted: implementation_ref (below)
-# must name a real, live git ref whose current resolved tip EQUALS this SHA
-# exactly — a stale pin (the ref has moved on since the ledger was last
-# written) is a validator violation, not a silently trusted declaration.
+# must name a real, live git ref whose current resolved tip has this SHA as a
+# real ANCESTOR (AMD-013 round 7 — not equality; an IN_PROGRESS block's WIP
+# branch commits every few minutes, so requiring exact equality means the
+# ledger is valid only in the instant between a resync commit and the
+# branch's next commit — a continuously failing relation, not an
+# intermittent staleness gap, the same self-outrunning defect round 6 fixed
+# for the integration-trunk pin one level up). A pin naming a commit the live
+# ref's history does NOT contain — a foreign or rewritten SHA — is still a
+# validator violation; ordinary forward progress on the WIP branch is not.
 # implementation_candidate_sha/implementation_ref are REQUIRED, unconditionally,
 # for EVERY IN_PROGRESS block in live mode (AMD-013 round 4, FIX 2) — not only
 # when another block happens to be concurrently ACTIVE; the fixed-landing-order
@@ -157,9 +163,11 @@ evidence_root = "REQUIRED_REPOSITORY_RELATIVE_PATH"
 # `refs/heads/...` branch — never a raw object id, the literal `HEAD`, or a
 # tag) naming the IN_PROGRESS block's live WIP branch. Required for every
 # IN_PROGRESS block, unconditionally, alongside implementation_candidate_sha
-# above; the validator resolves it and REQUIRES the resolved tip to equal
-# implementation_candidate_sha exactly, closing the previously-unverifiable
-# "is this pin the block's actual current tip" trust boundary.
+# above; the validator resolves it and REQUIRES implementation_candidate_sha
+# to be a real ancestor of the resolved tip (round 7), closing the
+# previously-unverifiable "is this pin genuinely on the block's actual WIP
+# branch" trust boundary without demanding a freshness the branch's own
+# commit cadence can never sustain.
 # landing_order = this block's position in the fixed landing order among
 # concurrently active blocks (0 when not concurrently active with any other
 # block — no ordering obligation). Must additionally respect same-stack
