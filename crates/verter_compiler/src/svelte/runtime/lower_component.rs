@@ -206,8 +206,11 @@ pub(super) fn lower_component_slots(
 }
 
 /// Lower a slot's content nodes into a fresh template-scope region under a NEW lexical
-/// slot scope (a child of `parent_scope`), declaring its `let:` slot props as `Derived`
-/// bindings FIRST (so a read inside the slot emits `$.get(item)`).
+/// slot scope (a child of `parent_scope`), declaring its `let:` slot props as
+/// `SlotPropDerived` bindings FIRST (so a read inside the slot emits `$.get(item)`, the
+/// same signal shape as a genuine `$derived(...)` rune — but kept a distinct binding
+/// kind so the bare-Identifier `bind:` gate can refuse a slot-prop reassignment while
+/// still accepting one on a genuine rune).
 ///
 /// Each content node records its lowered id into the placement-fact sets the surface
 /// classifier's unified slot choke-point keys on (see [`SlotContentNode`]): a
@@ -226,7 +229,7 @@ fn lower_slot_region(
         let id = ctx.bindings.push(BindingInfo {
             name: binding.name.clone(),
             scope: slot_scope,
-            kind: BindingRuntimeKind::Derived,
+            kind: BindingRuntimeKind::SlotPropDerived,
             state: None,
         });
         ctx.scopes.declare(slot_scope, &binding.name, id);

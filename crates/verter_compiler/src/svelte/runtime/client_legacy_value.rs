@@ -796,6 +796,7 @@ impl<'a> SupportedClientIr<'a> {
                 | BindingRuntimeKind::BareProxy
                 | BindingRuntimeKind::StateProxy
                 | BindingRuntimeKind::Derived
+                | BindingRuntimeKind::SlotPropDerived
                 | BindingRuntimeKind::EffectTrackingConst
                 | BindingRuntimeKind::PropsIdConst => {
                     parts.push(self.rewrite_source(&r.name, scope)?);
