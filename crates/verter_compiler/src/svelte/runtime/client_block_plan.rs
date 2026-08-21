@@ -14,12 +14,13 @@ use super::client_legacy_value::{AuthoredExpr, AuthoredValueSurface};
 use super::client_plan::SupportedClientIr;
 use super::client_plan_block_types::{
     ClientAwait, ClientBlock, ClientDebugEntry, ClientDeclKeyword, ClientDeclaration, ClientEach,
-    ClientEachKey, ClientIfBranch, DerivedHelper, PreparedDerivedRead, PreparedIfCondition,
+    ClientEachKey, ClientIfBranch, DerivedHelper, EachDestructuredItem, PreparedDerivedRead,
+    PreparedIfCondition,
 };
 use super::client_plan_types::ClientNode;
 use super::expr::{is_signal_kind, BindingRuntimeKind, ExprRefKind};
 use super::ir::{
-    BindingId, BlockIr, DebugArg, DeclKind, ExprId, IfBranch, PatternId, SvelteMode,
+    BindingId, BlockIr, DebugArg, DeclKind, ExprId, IfBranch, PatternId, PatternShape, SvelteMode,
     TemplateDeclarator, TemplateRune,
 };
 use super::unsupported::UnsupportedSvelteRuntimeSurface;
@@ -149,7 +150,33 @@ impl<'a> SupportedClientIr<'a> {
     ) -> Result<ClientEach, UnsupportedSvelteRuntimeSurface> {
         let item_binding = self.pattern_single_binding(item)?;
         let index_binding = self.pattern_single_binding(index)?;
-        let item_param = item_binding.map(|b| self.binding_name(b));
+        // The item context's observed SHAPE decides how the render callback
+        // names/reads it. `ShorthandSingleProperty` (`{ id }`) is the ONLY
+        // decomposition where the declared LOCAL NAME is also the correct
+        // property key to read the value back off the source item — official
+        // routes the raw item through a synthesized `$$item` param and reads
+        // the field back by that same name. Any OTHER decomposition (`{ id:
+        // foo }` renamed, `[id]` array, `{ ...rest }` rest) declares one name
+        // too, but the name is NOT a valid property-key read — reading it as
+        // one would silently emit the wrong property access, so it fails
+        // closed here (a real capability boundary, decided before ever
+        // emitting) rather than at a later invariant check.
+        let item_shape = item.map(|p| self.ir.pattern(p).shape);
+        if item_shape == Some(PatternShape::Decomposed) {
+            let span = item
+                .and_then(|p| self.ir.pattern(p).span)
+                .expect("a Decomposed pattern shape is always produced with a backing span");
+            return Err(UnsupportedSvelteRuntimeSurface::Block {
+                construct: "destructuring-binding",
+                span,
+            });
+        }
+        let item_is_destructured = item_shape == Some(PatternShape::ShorthandSingleProperty);
+        let item_param = if item_is_destructured {
+            Some("$$item".to_string())
+        } else {
+            item_binding.map(|b| self.binding_name(b))
+        };
         let user_index_name = index_binding.map(|b| self.binding_name(b));
 
         // The official flag bits (sans `EACH_IS_CONTROLLED`, OR'd in at emit). The item
@@ -164,7 +191,9 @@ impl<'a> SupportedClientIr<'a> {
         if index_binding.is_some_and(|b| is_signal_kind(self.binding_kind(b))) {
             flags |= EACH_INDEX_REACTIVE;
         }
-        if matches!(self.ir.component.mode, SvelteMode::Runes) {
+        if matches!(self.ir.component.mode, SvelteMode::Runes)
+            && !self.each_collection_uses_store(source)
+        {
             flags |= EACH_ITEM_IMMUTABLE;
         }
         // The official `EACH_IS_ANIMATED` widening: the each body's element carries an
@@ -184,6 +213,16 @@ impl<'a> SupportedClientIr<'a> {
         let index_param = user_index_name
             .clone()
             .or_else(|| item_mutated.then(|| "$$index".to_string()));
+
+        // A key that IS the each's own index makes the each UNKEYED for
+        // official (`metadata.keyed = false`): the custom key callback is
+        // dropped in favour of the plain `$.index` selector, regardless of
+        // the raw key expression being present.
+        let key = if self.key_is_the_index(index, key) {
+            None
+        } else {
+            key
+        };
 
         // The keyed key callback emits in its OWN scope (the key expr was lowered with
         // item / index as PLAIN locals), so the rewrite reads them plainly. The key
@@ -205,7 +244,23 @@ impl<'a> SupportedClientIr<'a> {
                         .any(|r| &r.name == idx)
                 });
                 let mut params = Vec::new();
-                if let Some(item_param) = &item_param {
+                if item_is_destructured {
+                    // The key callback parameterizes with the PATTERN ITSELF
+                    // (`({ id }) => id`), never the synthesized `$$item` —
+                    // official reads the destructured field directly, in its
+                    // own callback scope (a plain, non-`$.get` read).
+                    // `item_is_destructured` is `ShorthandSingleProperty`,
+                    // which `push_pattern_by_shape` always records WITH its
+                    // backing `source_text` — this is an internal-invariant
+                    // check, not a user-facing capability boundary.
+                    let pattern_text = item
+                        .and_then(|p| self.ir.pattern(p).source_text.as_deref())
+                        .expect(
+                            "a ShorthandSingleProperty pattern shape is always produced with \
+                             backing source text",
+                        );
+                    params.push(pattern_text.to_string());
+                } else if let Some(item_param) = &item_param {
                     params.push(item_param.clone());
                 }
                 if key_uses_index {
@@ -218,6 +273,21 @@ impl<'a> SupportedClientIr<'a> {
             None => None,
         };
 
+        let destructure = if item_is_destructured {
+            let item = item.expect("item_is_destructured implies a present item pattern");
+            Some(EachDestructuredItem {
+                fields: self
+                    .ir
+                    .pattern_bindings(item)
+                    .iter()
+                    .map(|&b| self.binding_name(b))
+                    .collect(),
+                item_reactive: flags & EACH_ITEM_REACTIVE != 0,
+            })
+        } else {
+            None
+        };
+
         Ok(ClientEach {
             flags,
             source: self.prepare_template_value(
@@ -228,6 +298,7 @@ impl<'a> SupportedClientIr<'a> {
             item_param,
             index_param,
             emit_index,
+            destructure,
             body,
             else_body,
         })
@@ -250,6 +321,35 @@ impl<'a> SupportedClientIr<'a> {
             runes: matches!(self.ir.component.mode, SvelteMode::Runes),
         }
         .each_item_is_reactive(source, item, key)
+    }
+
+    /// Whether the each's COLLECTION expression subscribes a `$store` — the
+    /// official `EACH_ITEM_IMMUTABLE` exception (`runes && !uses_store`), read
+    /// from the SAME shared predicate `each_item_is_reactive` consults.
+    fn each_collection_uses_store(&self, source: ExprId) -> bool {
+        super::lower_block::EachReactivityFacts {
+            expressions: &self.ir.analysis.expressions,
+            bindings: &self.ir.analysis.bindings,
+            scopes: &self.ir.analysis.scopes,
+            patterns: &self.ir.analysis.patterns,
+            runes: matches!(self.ir.component.mode, SvelteMode::Runes),
+        }
+        .collection_uses_store(source)
+    }
+
+    /// Whether the each's KEY is a bare reference to its own INDEX binding —
+    /// the official rule that makes such an each UNKEYED, read from the SAME
+    /// shared predicate the lowering finalizer drives (so the projected
+    /// keyedness and the index binding's read form can never disagree).
+    fn key_is_the_index(&self, index: Option<PatternId>, key: Option<ExprId>) -> bool {
+        super::lower_block::EachReactivityFacts {
+            expressions: &self.ir.analysis.expressions,
+            bindings: &self.ir.analysis.bindings,
+            scopes: &self.ir.analysis.scopes,
+            patterns: &self.ir.analysis.patterns,
+            runes: matches!(self.ir.component.mode, SvelteMode::Runes),
+        }
+        .key_is_the_index(index, key)
     }
 
     /// Whether the each BODY region's roots include an element bearing an

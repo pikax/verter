@@ -24,21 +24,21 @@ impl<'a> ClientEmitter<'a> {
         target: NodeId,
         emit: &ClientDynAttrEmit,
         memoizer: &mut Option<&mut Memoizer>,
-    ) -> String {
+    ) -> super::output::MappedCode {
         let var = self.dom_var(target);
         match emit {
             ClientDynAttrEmit::SetAttribute { name, value } => {
-                let v = self.build_attr_value(value, memoizer);
-                format!("$.set_attribute({var}, '{name}', {v})")
+                let v = self.build_attr_value_mapped(value, memoizer);
+                v.wrapped(&format!("$.set_attribute({var}, '{name}', "), ")")
             }
             ClientDynAttrEmit::Property { prop, value } => {
-                let v = self.build_attr_value(value, memoizer);
-                format!("{var}.{prop} = {v}")
+                let v = self.build_attr_value_mapped(value, memoizer);
+                v.wrapped(&format!("{var}.{prop} = "), "")
             }
             ClientDynAttrEmit::Autofocus { value } => {
                 // Autofocus is init-only — its value is a pre-flattened string (never
                 // memoized).
-                format!("$.autofocus({var}, {value})")
+                super::output::MappedCode::unmapped(format!("$.autofocus({var}, {value})"))
             }
         }
     }

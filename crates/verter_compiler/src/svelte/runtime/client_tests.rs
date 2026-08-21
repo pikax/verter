@@ -7071,6 +7071,193 @@ fn component_bind_prop_unwritable_root_fails_closed() {
 }
 
 #[test]
+fn a_member_bind_rooted_at_an_each_item_is_accepted_for_a_component_bind() {
+    // The COMPONENT-bind sibling of `a_member_bind_rooted_at_an_each_item_is_accepted_by_official`:
+    // official ACCEPTS a member-rooted bind on a custom component the same way it accepts one on
+    // a DOM element — `<Child bind:value={item.x}/>` inside an `{#each}` is a plain deep-write
+    // through the item's own referenced value (oracle-verified against svelte@5.56.8, cosmetic
+    // formatting aside):
+    //   get value() { return item.x; }
+    //   set value($$value) { item.x = $$value; }
+    // Before the fix this REFUSED with `UnsupportedSvelteRuntimeSurface::Binding` because
+    // `component_bind_root_is_writable`'s Member arm called the UNWIDENED
+    // `bind_root_is_writable_target` (which rejects an each-item root) instead of the same
+    // widened `bind_member_root_is_writable_target` the DOM-bind classifier uses.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let items = $state([{x:'a'}]);</script>\n{#each items as item (item)}<Child bind:value={item.x}/>{/each}\n",
+    )
+    .expect("a member bind on an each item must be accepted for a component bind");
+    assert!(
+        js.contains("get value() {return item.x;}")
+            && js.contains("set value($$value) {item.x = $$value;}"),
+        "a member bind on an each item must lower to the official component getter AND setter:\n{js}"
+    );
+    // NEGATIVE: a bare each-item bind (no member) must still refuse — the widening applies to
+    // the Member arm only, never the Identifier arm.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let items = $state([{x:'a'}]);</script>\n{#each items as item (item)}<Child bind:value={item}/>{/each}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_a_snippet_param_is_accepted() {
+    // A member bind rooted at a `{#snippet}` PARAMETER (`item`) is a plain deep-write
+    // through the parameter's own referenced value — official ACCEPTS
+    // `bind:value={item.x}` (oracle-verified against svelte@5.56.8).
+    let js = emit_result(
+        "<script>let items = $state([{x:'a'}]);</script>\n{#snippet row(item)}<input bind:value={item.x}/>{/snippet}\n{@render row(items[0])}\n",
+    )
+    .expect("a member bind rooted at a snippet param must be accepted");
+    // A snippet param is itself a thunk (`item = $.noop`), so a member read/write
+    // through it calls the thunk first: `item().x`, not the bare `item.x` a plain
+    // local would emit.
+    assert!(
+        js.contains("$.bind_value(input, () => item().x, ($$value) => item().x = $$value)"),
+        "a member bind on a snippet param must read/write through item().x:\n{js}"
+    );
+    // NEGATIVE: a bare snippet-param identifier bind must still refuse — the widening
+    // applies to the Member arm only, never the Identifier arm.
+    assert_fail_closed(
+        "<script></script>\n{#snippet row(item)}<input bind:value={item}/>{/snippet}\n{@render row('a')}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_an_each_destructured_field_is_accepted() {
+    // A member bind rooted at an `{#each items as {x}}` DESTRUCTURED FIELD (`x`) is a
+    // plain deep-write through the field's own referenced value — official ACCEPTS
+    // `bind:value={x.y}` (oracle-verified against svelte@5.56.8).
+    let js = emit_result(
+        "<script>let items = $state([{x:{y:'a'}}]);</script>\n{#each items as {x}}<input bind:value={x.y}/>{/each}\n",
+    )
+    .expect("a member bind rooted at an each-destructured field must be accepted");
+    assert!(
+        js.contains("$.bind_value(input, () => x().y, ($$value) => x().y = $$value)"),
+        "a member bind on a destructured field must read/write through x().y:\n{js}"
+    );
+    // NEGATIVE: a bare destructured-field identifier bind must still refuse.
+    assert_fail_closed(
+        "<script>let items = $state([{x:{y:'a'}}]);</script>\n{#each items as {x}}<input bind:value={x}/>{/each}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_an_await_then_binding_is_accepted() {
+    // A member bind rooted at an `{#await p then item}` binding is a plain deep-write
+    // through the item's own referenced value — official ACCEPTS `bind:value={item.x}`
+    // (oracle-verified against svelte@5.56.8).
+    let js = emit_result(
+        "<script>let p = Promise.resolve({x:'a'});</script>\n{#await p then item}<input bind:value={item.x}/>{/await}\n",
+    )
+    .expect("a member bind rooted at an await-then binding must be accepted");
+    assert!(
+        js.contains(
+            "$.bind_value(input, () => $.get(item).x, ($$value) => $.get(item).x = $$value)"
+        ),
+        "a member bind on an await-then binding must read/write through $.get(item).x:\n{js}"
+    );
+    // NEGATIVE: a bare await-then identifier bind must still refuse.
+    assert_fail_closed(
+        "<script>let p = Promise.resolve({x:'a'});</script>\n{#await p then item}<input bind:value={item}/>{/await}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_a_legacy_const_derived_binding_is_accepted() {
+    // A member bind rooted at a `{@const alias = item}` derived local is a plain
+    // deep-write through the alias's own referenced value — official ACCEPTS
+    // `bind:value={alias.x}` (oracle-verified against svelte@5.56.8).
+    let js = emit_result(
+        "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}{@const alias = item}<input bind:value={alias.x}/>{/each}\n",
+    )
+    .expect("a member bind rooted at a legacy const-derived binding must be accepted");
+    assert!(
+        js.contains(
+            "$.bind_value(input, () => $.get(alias).x, ($$value) => $.get(alias).x = $$value)"
+        ),
+        "a member bind on a const-derived alias must read/write through $.get(alias).x:\n{js}"
+    );
+    // NEGATIVE: a bare const-derived identifier bind must still refuse.
+    assert_fail_closed(
+        "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}{@const alias = item}<input bind:value={alias}/>{/each}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
+    // A member bind rooted at a `Derived` binding is a plain deep-write through the
+    // derived's own referenced value — official ACCEPTS `bind:value={item.x}` where
+    // `item` is a component `let:` slot-prop (lowered to `const item =
+    // $.derived(() => $$slotProps.item)`, the SAME `BindingRuntimeKind::Derived` kind
+    // a genuine `$derived(...)` rune declarator would carry — oracle-verified against
+    // svelte@5.56.8, `runes: true`):
+    //   $.bind_value(input, () => $.get(item).x, ($$value) => $.get(item).x = $$value)
+    // The exact same `$.get(root).field` shape already implemented for `AwaitSignal` /
+    // `LegacyConstDerived` roots in this classifier.
+    //
+    // A top-level `let d = $derived(e)` rune declarator itself is NOT used as the test
+    // vehicle here: every `$derived` reference fails closed at the earlier, unrelated
+    // rune-position gate (`rune_scan.rs::classify_rune_position` — "`$derived` has NO
+    // supported position … a deferral-ledger follow-up") regardless of this classifier,
+    // so a rune-declarator fixture could never reach — and could never discriminate —
+    // this widening. The `let:` slot-prop construct reaches the SAME `Derived` binding
+    // kind through a path this classifier's caller can actually observe today.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item><input bind:value={item.x}/></Child>\n",
+    )
+    .expect("a member bind rooted at a derived binding must be accepted");
+    assert!(
+        js.contains(
+            "$.bind_value(input, () => $.get(item).x, ($$value) => $.get(item).x = $$value)"
+        ),
+        "a member bind on a derived binding must read/write through $.get(item).x:\n{js}"
+    );
+    // NEGATIVE: a bare `Derived`-root identifier bind must still refuse — official
+    // REJECTS `bind:value={item}` here (`constant_binding`, oracle-verified); the
+    // widening applies to the Member arm only, never the Identifier arm.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item><input bind:value={item}/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
+    // The COMPONENT-bind sibling of `bind_value_member_of_import_admitted_with_frame`:
+    // official ACCEPTS `<Child bind:value={store.x}/>` the same way it accepts
+    // `<input bind:value={store.x}/>` — a plain deep-write through the imported value's
+    // own referenced value (oracle-verified against svelte@5.56.8). Before the fix this
+    // REFUSED because `component_bind_root_is_writable`'s Member arm never ported the
+    // DOM-bind Member arm's `root_is_import` OR-clause.
+    //
+    // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
+    // rune usage at all the component compiles in LEGACY mode instead, whose
+    // component-bind codegen has its own separate, pre-existing gap (a missing
+    // `$$legacy: true` props-object marker — out of scope here, see the "Not closed,
+    // disclosed and pinned" section of the BS1 landing record) that would otherwise
+    // ride along unasserted in this test.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
+    )
+    .expect("a member bind rooted at an import must be accepted for a component bind");
+    assert!(
+        js.contains("get value() {return store.x;}")
+            && js.contains("set value($$value) {store.x = $$value;}"),
+        "a member bind on an import must lower to the official component getter AND setter:\n{js}"
+    );
+    // NEGATIVE: a bare import identifier component bind must still refuse.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
 fn svelte_window_size_bind_emits_bind_window_size() {
     // `<svelte:window bind:innerWidth={w}/>` → `$.bind_window_size('innerWidth', ($$value) =>
     // $.set(w, $$value, true))` — the dimension NAME first, NO host expr, setter-only, with
@@ -10270,11 +10457,6 @@ fn a_call_bearing_if_test_carries_its_authored_expression_provenance() {
 }
 
 #[test]
-#[ignore = "known gap, owned by the Svelte instance-script lowering: a top-level `function` \
-            declaration lowers through `rewrite_source`, which discards the rewriter's \
-            mappings, so the emitted function NAME carries no authored provenance. Closing \
-            it needs the item carrier to hold the declaration's name span, the way the \
-            `$state` and `export let` declaration items now do."]
 fn a_function_declaration_carries_its_authored_name_provenance() {
     // The generated `function onClick` must map back to the AUTHORED `onClick`
     // token. Today the generated name is emitted from an unmapped fragment, so
@@ -10296,11 +10478,45 @@ fn a_function_declaration_carries_its_authored_name_provenance() {
 }
 
 #[test]
-#[ignore = "known gap, owned by the Svelte client attribute emitter: a reactive property \
-            write is pushed as `MappedCode::unmapped`, so a shorthand attribute binding's \
-            authored name token has no generated counterpart. Closing it needs the \
-            attribute emit path to carry the prepared value's mapped form the way the \
-            interpolation and `{#if}` paths now do."]
+fn an_async_function_declaration_carries_its_authored_name_provenance() {
+    // `async` shifts the name token off the fixed `"function "` literal offset
+    // — the mapping must follow the REAL parsed offset, not a guessed prefix.
+    let source = "<script>\nlet { ontoggle } = $props();\nasync function onClick() {\n  ontoggle?.(1);\n}\n</script>\n<button onclick={onClick}>go</button>\n";
+    let (code, map) = compile_with_map(source, "Toggle.svelte");
+    let decl = code
+        .find("async function onClick")
+        .expect("the instance-script function declaration is emitted");
+    assert_generated_offset_maps_to_exact_source_offset(
+        &map,
+        &code,
+        decl + "async function ".len(),
+        source
+            .find("async function onClick")
+            .expect("the authored function declaration")
+            + "async function ".len(),
+    );
+}
+
+#[test]
+fn a_generator_function_declaration_carries_its_authored_name_provenance() {
+    // `function*` — same real-offset requirement as the `async` case above.
+    let source = "<script>\nlet { ontoggle } = $props();\nfunction* onClick() {\n  ontoggle?.(1);\n}\n</script>\n<button onclick={onClick}>go</button>\n";
+    let (code, map) = compile_with_map(source, "Toggle.svelte");
+    let decl = code
+        .find("function* onClick")
+        .expect("the instance-script function declaration is emitted");
+    assert_generated_offset_maps_to_exact_source_offset(
+        &map,
+        &code,
+        decl + "function* ".len(),
+        source
+            .find("function* onClick")
+            .expect("the authored function declaration")
+            + "function* ".len(),
+    );
+}
+
+#[test]
 fn a_shorthand_attribute_binding_carries_its_authored_name_provenance() {
     // `<button {disabled}>` lowers to `button.disabled = <read>`; the generated
     // read must map back to the AUTHORED `disabled` inside the shorthand braces.
@@ -28129,12 +28345,6 @@ fn the_each_item_flag_and_its_read_form_move_together() {
 }
 
 #[test]
-#[ignore = "known defect, owned by the Svelte each-block lowering: a single-name \
-            DESTRUCTURE each context is flattened to one item binding named after the \
-            destructured field, so the render callback receives the ITEM object under \
-            that name. Official binds the item to its own parameter and reads the field \
-            off it. Closing it needs the each lowering to carry the context PATTERN, not \
-            a single flattened binding."]
 fn a_single_name_destructure_each_binds_the_item_not_its_field() {
     // Measured against the pinned official compiler:
     //   $.each(node, 17, () => items, ({ id }) => id, ($$anchor, $$item) => {
@@ -28155,14 +28365,91 @@ fn a_single_name_destructure_each_binds_the_item_not_its_field() {
         !js.contains("$.set_text(text, $.get(id))"),
         "the body must read the FIELD, not the whole item object:\n{js}"
     );
+    assert!(
+        js.contains("let id = () => $.get($$item).id;"),
+        "the body must bind a getter thunk reading the FIELD off the whole item:\n{js}"
+    );
+}
+
+/// A single-name each-item destructure whose LOCAL NAME is not a valid
+/// property-key read (a rename, an array element, a rest) must fail closed
+/// with a real source span — never silently emit a read by the wrong key.
+/// Only the plain object-shorthand shape (`{ id }`, pinned above) is
+/// supported.
+fn assert_each_item_destructure_shape_refuses(source: &str) {
+    let err = emit_result(source).expect_err("an unsupported each-item destructure must refuse");
+    let ClientCompileError::Unsupported(surface) = &err else {
+        panic!("expected a typed unsupported refusal, got {err:?}");
+    };
+    let UnsupportedSvelteRuntimeSurface::Block { construct, span } = surface else {
+        panic!("expected a Block refusal, got {surface:?}");
+    };
+    assert_eq!(*construct, "destructuring-binding");
+    assert_ne!(
+        (span.start, span.end),
+        (0, 0),
+        "the refusal must carry the REAL source span, not a placeholder:\n{source}"
+    );
 }
 
 #[test]
-#[ignore = "known divergence, owned by the Svelte each-block lowering: a key that IS the \
-            INDEX makes the each UNKEYED in official (`metadata.keyed = false`), which \
-            drops EACH_INDEX_REACTIVE and reads the index plainly. Verter treats any \
-            present key as keyed. Closing it needs the keyedness decision to compare the \
-            key against the index binding, not merely to observe that a key exists."]
+fn an_each_item_destructure_with_a_renamed_property_refuses() {
+    // `{ id: foo }` declares ONE name (`foo`) but `foo` is NOT the property
+    // key — reading `$$item.foo` would be silently wrong.
+    assert_each_item_destructure_shape_refuses(
+        "<script>\n  let items = $state([{id:1}]);\n</script>\n{#each items as { id: foo } (foo)}<li>{foo}</li>{/each}\n",
+    );
+}
+
+#[test]
+fn an_each_item_array_destructure_refuses() {
+    // `[id]` declares ONE name (`id`) but it is an ARRAY INDEX read, not a
+    // property-key read.
+    assert_each_item_destructure_shape_refuses(
+        "<script>\n  let items = $state([['a']]);\n</script>\n{#each items as [id] (id)}<li>{id}</li>{/each}\n",
+    );
+}
+
+#[test]
+fn an_each_item_rest_destructure_refuses() {
+    // `{ ...rest }` declares ONE name (`rest`) but it is the REMAINDER
+    // object, not a single property read.
+    assert_each_item_destructure_shape_refuses(
+        "<script>\n  let items = $state([{id:1, x:2}]);\n</script>\n{#each items as { ...rest }}<li>{rest.id}</li>{/each}\n",
+    );
+}
+
+#[test]
+#[ignore = "known pre-existing gap, owned by a future Svelte each-item destructure slice: a genuinely \
+            multi-name each-item pattern (`{ a, b }`) refuses through `pattern_single_binding`'s \
+            generic multi-binding arm with a placeholder Span::new(0, 0) instead of the pattern's real \
+            span. Closing it needs the same real-span + per-property-read plumbing as \
+            ShorthandSingleProperty, generalized to N properties — a materially larger change than a \
+            single-name shape gate."]
+fn a_multi_name_each_item_destructure_refuses_with_a_placeholder_span() {
+    // Document today's actual behavior: a genuinely multi-name destructure (`{ a, b
+    // }`) refuses (correctly — this shape isn't supported), but through
+    // `pattern_single_binding`'s generic multi-binding arm, which carries a
+    // placeholder `Span::new(0, 0)` rather than the pattern's real authored
+    // location — unlike the single-name shapes above, which all carry a real span.
+    let source = "<script>\n  let items = $state([{a:1,b:2}]);\n</script>\n{#each items as { a, b }}<li>{a}{b}</li>{/each}\n";
+    let err = emit_result(source).expect_err("a multi-name each-item destructure must refuse");
+    let ClientCompileError::Unsupported(surface) = &err else {
+        panic!("expected a typed unsupported refusal, got {err:?}");
+    };
+    let UnsupportedSvelteRuntimeSurface::Block { construct, span } = surface else {
+        panic!("expected a Block refusal, got {surface:?}");
+    };
+    assert_eq!(*construct, "destructuring-binding");
+    assert_eq!(
+        (span.start, span.end),
+        (0, 0),
+        "pins the CURRENT placeholder-span behavior — this breaks the moment the \
+         refusal starts carrying the pattern's real span:\n{source}"
+    );
+}
+
+#[test]
 fn an_each_keyed_by_its_own_index_is_unkeyed_for_official() {
     // Official emits `$.each(node, 17, …, $.index, ($$anchor, item, i) => …)`
     // and reads `i` plainly; Verter emits flags 19 with `(item, i) => i` and
@@ -28183,29 +28470,18 @@ fn an_each_keyed_by_its_own_index_is_unkeyed_for_official() {
 }
 
 #[test]
-#[ignore = "known gap, owned by the Svelte bind-target classifier: official ACCEPTS a \
-            MEMBER bind rooted at an each item (`bind:value={item.x}` lowers to \
-            `($$value) => (item.x = $$value)`) while refusing a BARE item bind. Verter's \
-            writable-root predicate is kind-based, so it refuses both. Closing it needs \
-            the predicate to distinguish a member target from a bare one for each-item \
-            roots."]
 fn a_member_bind_rooted_at_an_each_item_is_accepted_by_official() {
     let js = emit(
         "<script>\n  let items = $state([{x:'a'}]);\n</script>\n{#each items as item (item)}<input bind:value={item.x}/>{/each}\n",
         "App.svelte",
     );
     assert!(
-        js.contains("$.bind_value(input, () => item.x"),
-        "a member bind on an each item must lower to the official closures:\n{js}"
+        js.contains("$.bind_value(input, () => item.x, ($$value) => item.x = $$value)"),
+        "a member bind on an each item must lower to the official getter AND setter closures:\n{js}"
     );
 }
 
 #[test]
-#[ignore = "known defect, owned by the Svelte expression rewriter's replacement planner: \
-            a NON-ASCII identifier panics on a char-boundary slice. Pre-existing, and \
-            verified as such by compiling the same source against the pre-change tree, \
-            which panics identically. Closing it needs the planner's cursor arithmetic to \
-            advance by char boundaries rather than by one byte."]
 fn a_non_ascii_identifier_compiles_instead_of_panicking() {
     let js = emit(
         "<script>\n  let \u{441}\u{447}\u{451}\u{442} = $state(0);\n</script>\n<button onclick={() => \u{441}\u{447}\u{451}\u{442} += 1}>{\u{441}\u{447}\u{451}\u{442}}</button>\n",
@@ -28215,10 +28491,6 @@ fn a_non_ascii_identifier_compiles_instead_of_panicking() {
 }
 
 #[test]
-#[ignore = "known divergence, owned by the Svelte client block planner: EACH_ITEM_IMMUTABLE \
-            is set from runes mode alone, but the official rule is `runes && !uses_store`, \
-            so a runes component whose {#each} collection subscribes a store keeps the bit \
-            the official compiler clears"]
 fn each_item_immutable_clears_when_a_runes_collection_subscribes_a_store() {
     // Measured against the pinned official compiler through the conformance
     // harness: this source emits `$.each(node, 1, …)` — EACH_ITEM_REACTIVE

@@ -268,49 +268,75 @@ impl<'a> ClientEmitter<'a> {
         value: &AttrValue,
         memoizer: &mut Option<&mut Memoizer>,
     ) -> String {
+        self.build_attr_value_mapped(value, memoizer).into_string()
+    }
+
+    /// Mapping-preserving counterpart of [`Self::build_attr_value`]: an AUTHORED
+    /// `Single` value's rewritten expression, and each AUTHORED `Expr` part of a
+    /// `Mixed` template, carry the prepared value's mapped form forward instead of
+    /// being flattened to a bare `String` — so a consumer that folds the result into
+    /// a `MappedCode` fragment (the reactive attribute-write path) keeps the
+    /// authored provenance the interpolation / `{#if}` paths already preserve. A
+    /// SYNTHESIZED value and every literal/scaffolding byte carry no authored
+    /// position and stay unmapped.
+    pub(super) fn build_attr_value_mapped(
+        &self,
+        value: &AttrValue,
+        memoizer: &mut Option<&mut Memoizer>,
+    ) -> super::output::MappedCode {
         use super::client_plan_types::PlannedTemplateValue;
+        use super::output::MappedCode;
         match value {
-            AttrValue::Const(text) => text.clone(),
+            AttrValue::Const(text) => MappedCode::unmapped(text.clone()),
             AttrValue::Single(PlannedTemplateValue::Authored(p)) => match memoizer {
-                Some(m) => m.add(p.effect_value(), p.has_call()),
-                None => p.inline_expression(),
+                Some(m) => m.add_mapped(p.effect_mapped_value(), p.has_call()),
+                None => p.inline_mapped_expression(),
             },
             AttrValue::Single(PlannedTemplateValue::Synthesized(s)) => match memoizer {
-                Some(m) => m.add(s.raw_text().to_string(), s.has_call()),
-                None => s.raw_text().to_string(),
+                Some(m) => {
+                    m.add_mapped(MappedCode::unmapped(s.raw_text().to_string()), s.has_call())
+                }
+                None => MappedCode::unmapped(s.raw_text().to_string()),
             },
             AttrValue::Mixed(parts) => {
-                let mut tmpl = String::from("`");
+                let mut tmpl = MappedCode::unmapped("`");
                 for part in parts {
                     match part {
                         AttrValuePart::Literal(text) => {
-                            tmpl.push_str(&super::client_codegen_helpers::escape_template_text(
-                                text,
-                            ));
+                            tmpl.push_unmapped(
+                                &super::client_codegen_helpers::escape_template_text(text),
+                            );
                         }
                         AttrValuePart::Expr { value, coalesce } => {
                             let v = match memoizer {
-                                Some(m) => m.add(value.effect_value(), value.has_call()),
-                                None => value.inline_expression(),
+                                Some(m) => {
+                                    m.add_mapped(value.effect_mapped_value(), value.has_call())
+                                }
+                                None => value.inline_mapped_expression(),
                             };
                             // The `?? ''` coercion the plan computed (official
                             // `build_template_chunk`): a provably-defined part is RAW, an
                             // undecided part gets `?? ''` (parenthesized for a `&&`/`||`
                             // operand). A memoized part is the `$N` identifier slot `v`.
                             use super::reactive_fold::NullishCoalesce;
+                            tmpl.push_unmapped("${");
                             match coalesce {
-                                NullishCoalesce::None => tmpl.push_str(&format!("${{{v}}}")),
+                                NullishCoalesce::None => tmpl.push_mapped(&v),
                                 NullishCoalesce::Bare => {
-                                    tmpl.push_str(&format!("${{{v} ?? ''}}"));
+                                    tmpl.push_mapped(&v);
+                                    tmpl.push_unmapped(" ?? ''");
                                 }
                                 NullishCoalesce::Parenthesized => {
-                                    tmpl.push_str(&format!("${{({v}) ?? ''}}"));
+                                    tmpl.push_unmapped("(");
+                                    tmpl.push_mapped(&v);
+                                    tmpl.push_unmapped(") ?? ''");
                                 }
                             }
+                            tmpl.push_unmapped("}");
                         }
                     }
                 }
-                tmpl.push('`');
+                tmpl.push_unmapped("`");
                 tmpl
             }
         }

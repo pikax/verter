@@ -124,6 +124,14 @@ pub(super) enum SupportedInstanceScriptItem {
     FunctionDecl {
         /// The declared function name (the function-pair-referenced ident).
         name: String,
+        /// The declared name TOKEN's span, relative to the instance-script
+        /// source — the authored provenance of the emitted declaration's name.
+        name_span: Span,
+        /// The byte offset of the name token WITHIN `source` (`id.span.start -
+        /// func.span.start`) — an `async` / generator `function*` declaration
+        /// has no fixed keyword-literal prefix, so this is computed from the
+        /// real parse rather than assumed.
+        name_prefix_len: u32,
         /// The function declaration's full source text (lowered via the rewriter).
         source: String,
     },
@@ -835,10 +843,11 @@ fn classify_function_declaration(
         construct: "function",
         span: Span::new(func.span.start, func.span.end),
     };
-    let Some(name) = func.id.as_ref().map(|id| id.name.as_str()) else {
+    let Some(id) = func.id.as_ref() else {
         // An anonymous top-level function declaration has no name to bind a pair to.
         return Err(refuse());
     };
+    let name = id.name.as_str();
     if !bind_function_pair_names.iter().any(|n| n == name)
         && !store_admissions.function_names.contains(name)
     {
@@ -850,6 +859,8 @@ fn classify_function_declaration(
         .to_string();
     Ok(SupportedInstanceScriptItem::FunctionDecl {
         name: name.to_string(),
+        name_span: Span::new(id.span.start, id.span.end),
+        name_prefix_len: id.span.start - func.span.start,
         source,
     })
 }

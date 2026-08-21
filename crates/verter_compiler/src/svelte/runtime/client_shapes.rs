@@ -696,22 +696,26 @@ pub(super) fn classify_bind_shape(
 /// - a CLEAN (non-TS-wrapped) bare-identifier target whose binding is a reactive
 ///   `$state` signal (`$.set(name, $$value)`) OR a PLAIN local (`name = $$value`);
 /// - a CLEAN member target (`o.x` / `a[i]`) whose ROOT identifier is a reactive
-///   `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x = $$value`), or an
+///   `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x = $$value`), an
 ///   IMPORT (`x.k = $$value` — official accepts a member of an import with the
-///   identical plain-member closures and the `$.push($$props, true)` context frame);
+///   identical plain-member closures and the `$.push($$props, true)` context frame),
+///   OR a read-oriented signal binding whose own root is never reassigned by a member
+///   write — an `{#each}` item, a `{#snippet}` parameter, an each-destructured field,
+///   an `{#await}` binding, a `{@const}` derived local, or a `$derived` binding (see
+///   [`bind_member_root_is_writable_target`]);
 /// - a two-element FUNCTION-PAIR `{get, set}`, whose user-supplied get/set are passed
 ///   directly to the helper (signal-rewritten, no synthesized lvalue thunk).
 ///
 /// A BARE import root (`bind:value={x}` where `x` is an import) fails closed at the
 /// writable-root gate — official REJECTS it (`constant_binding`, "Cannot bind to
-/// import"); import bindings are not reassignable. A `$props()` / `$bindable` /
-/// `$derived` root (bare or member) stays fail-closed as a CONSERVATIVE boundary: a
-/// `$props()` / `$bindable` write IS a divergent protocol (a `$.prop` flag-7 setter),
-/// and the `$derived`-member case is not yet modelled in this vertical. Object/array `$state`
-/// (`BareProxy` / `StateProxy`) roots are not reachable here — the object/array `$state`
-/// DECLARATION fails closed upstream at the `$state()` non-primitive-init gate (its
-/// lowering is owned by the runes-completion vertical), so only PLAIN-local and
-/// `$state`-SIGNAL roots reach this classifier.
+/// import"); import bindings are not reassignable. A `$props()` / `$bindable` root
+/// (bare or member) stays fail-closed as a CONSERVATIVE boundary: a `$props()` /
+/// `$bindable` write IS a divergent protocol (a `$.prop` flag-7 setter). Object/array
+/// `$state` (`BareProxy` / `StateProxy`) roots are not reachable here — the
+/// object/array `$state` DECLARATION fails closed upstream at the `$state()`
+/// non-primitive-init gate (its lowering is owned by the runes-completion vertical),
+/// so only PLAIN-local and `$state`-SIGNAL roots reach this classifier at the
+/// bare-identifier arm.
 #[allow(clippy::too_many_arguments)]
 fn classify_dom_value_bind(
     name: &str,
@@ -799,20 +803,19 @@ fn classify_dom_value_bind(
         }
         // A member target (`o.x` / `a[i]`): accepted when its ROOT identifier is a
         // reactive `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x =
-        // $$value`), OR an IMPORT (`x.k = $$value` — official ACCEPTS a member of an
+        // $$value`), an IMPORT (`x.k = $$value` — official ACCEPTS a member of an
         // import with the identical plain-member closures + the context frame; only
-        // the BARE import root is rejected). A member rooted at a `$props()` /
-        // `$bindable` / `$derived` binding is a divergent official surface and fails
-        // closed.
+        // the BARE import root is rejected), OR a read-oriented signal binding whose
+        // own root is never reassigned by a member write — an `{#each}` item, a
+        // `{#snippet}` parameter, an each-destructured field, an `{#await}` binding, a
+        // `{@const}` derived local, or a `$derived` binding (see
+        // `bind_member_root_is_writable_target`). A member rooted at a `$props()` /
+        // `$bindable` binding is a divergent official surface and fails closed.
         Some(BindTargetKind::Member) => {
             let Some(root_name) = &fact.root_ident else {
                 return Err(refuse());
             };
-            let root_is_import = matches!(
-                bindings.resolve_kind(scopes, scope, root_name),
-                Some(k) if super::expr::is_import_binding(k)
-            );
-            if bind_root_is_writable_target(bindings, scopes, scope, root_name) || root_is_import {
+            if bind_member_root_is_writable_target(bindings, scopes, scope, root_name) {
                 accept(BindGetSetForm::TargetLvalue)
             } else {
                 Err(refuse())
@@ -872,8 +875,12 @@ fn classify_dom_value_bind(
 ///
 /// A `$props()` / `$bindable` / `$derived` root is NOT writable here as a CONSERVATIVE
 /// boundary: a `$props()` / `$bindable` write IS a divergent protocol (a `$.prop`
-/// flag-7 accessor), and the `$derived`-member case is not yet modelled in this
-/// vertical. An IMPORT root (`ComponentImport` / `ImportedValue`) is NOT writable BY
+/// flag-7 accessor). A `$derived`-rooted MEMBER write IS modelled — see
+/// [`bind_member_root_is_writable_target`] — a genuine top-level `$derived(...)`
+/// bare-Identifier bind never reaches either predicate regardless (an unconditional,
+/// unrelated earlier gate refuses it — see `rune_scan.rs`'s `$derived`/`$effect`
+/// deferral), so this arm never observes that case in practice. An IMPORT root
+/// (`ComponentImport` / `ImportedValue`) is NOT writable BY
 /// DESIGN, not as a deferral: ES import bindings are not reassignable, and official
 /// REJECTS the bare bind (`constant_binding`) and the reassignment
 /// (`constant_assignment`). A MEMBER rooted at an import is a separate, accepted
@@ -896,13 +903,86 @@ pub(super) fn bind_root_is_writable_target(
     )
 }
 
+/// [`bind_root_is_writable_target`] widened for a MEMBER bind target ONLY: several
+/// READ-ORIENTED signal/local kinds additionally admit — official ACCEPTS
+/// `bind:value={item.x}` (`($$value) => (item.x = $$value)`) while REFUSING a bare
+/// `bind:value={item}` — plus an IMPORT root (`x.k = $$value`; only the BARE import
+/// root is rejected, since ES import bindings are not reassignable but a member of one
+/// is a plain writable lvalue). A member deep-write mutates the root's OWN referenced
+/// value in place (through its normal read form — `$.get(item).x = …` for a reactive
+/// root, plain `item.x = …` otherwise); it never reassigns the binding itself, so it
+/// needs none of the collection-index / import-rebinding redirect a bare identifier
+/// write would. NOT reused for the identifier arm: a bare bind of these roots
+/// generally would reassign the binding, which official rejects (the one nominal
+/// exception, a genuine top-level `$derived(...)` accepting an "overridable derived"
+/// bare-Identifier reassignment, never reaches this arm — an earlier, unconditional,
+/// unrelated gate already refuses it; see the note on [`is_writable_member_bind_extra_root`]).
+///
+/// The widened extra roots are: an `{#each}` item (`EachSignal` / `EachPlain`), an
+/// `{#each … as {field}}` destructured field (`EachDestructuredField`), a
+/// `{#snippet}` parameter (`SnippetParam`), an `{#await … then x}` / `{:catch e}`
+/// binding (`AwaitSignal`), a `{@const}` derived local (`LegacyConstDerived`), and a
+/// `$derived` binding (`Derived` — a genuine `$derived(...)`/`$derived.by(...)` rune
+/// declarator, or the same kind minted for a component `let:` slot-prop).
+///
+/// SHARED by both the element DOM-bind classifier and the component-bind
+/// projection's MEMBER arm (`component_bind_root_is_writable`): official draws no
+/// distinction between `<input bind:value={item.x}>` and `<Child bind:value={item.x}
+/// />` here — both are a plain deep-write through the root's own referenced value, so
+/// the component path consumes this SAME widened policy instead of staying on the
+/// unwidened one.
+pub(super) fn bind_member_root_is_writable_target(
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    scope: ScopeId,
+    root_name: &str,
+) -> bool {
+    matches!(
+        bindings.resolve_kind(scopes, scope, root_name),
+        Some(k) if is_writable_bind_root(k)
+            || is_writable_member_bind_extra_root(k)
+            || super::expr::is_import_binding(k)
+    )
+}
+
+/// Whether a binding kind is one of the READ-ORIENTED kinds that is writable ONLY as
+/// the root of a MEMBER bind target (see [`bind_member_root_is_writable_target`]): an
+/// `{#each}` item, an each-destructured field, a `{#snippet}` parameter, an
+/// `{#await}` binding, a `{@const}` derived local, or a `$derived` binding. None of
+/// these reach this predicate as writable at the bare-Identifier arm
+/// (`is_writable_bind_root`) — a bare-identifier bind of any of them would reassign
+/// the binding itself, which official rejects; a MEMBER write never does. (A genuine
+/// top-level `$derived(...)` is the one kind where official's bare-Identifier
+/// rejection isn't universal — Svelte 5's "overridable derived" accepts a bare
+/// reassignment — but that construct never reaches the bare-Identifier arm either: an
+/// earlier, unconditional, unrelated gate already refuses ALL `$derived` binds before
+/// classification, so the arm never observes it. The `Derived` kind IS live here for
+/// the OTHER construct that mints it — a component `let:` slot-prop — where official's
+/// bare-Identifier rejection (`constant_binding`) does hold.)
+fn is_writable_member_bind_extra_root(kind: BindingRuntimeKind) -> bool {
+    matches!(
+        kind,
+        BindingRuntimeKind::EachSignal
+            | BindingRuntimeKind::EachPlain
+            | BindingRuntimeKind::EachDestructuredField
+            | BindingRuntimeKind::SnippetParam
+            | BindingRuntimeKind::AwaitSignal
+            | BindingRuntimeKind::LegacyConstDerived
+            | BindingRuntimeKind::Derived
+    )
+}
+
 /// Whether a binding kind is an ASSIGNMENT-VALID bind root — the kinds a two-way `bind:`
 /// may legally write: a `$state` SIGNAL (`$.set(name, $$value)`), a `$.state($.proxy)`
 /// reassignable proxy (`$.get(o).x = $$value`), a bare `$.proxy` (a `BareProxy` member
 /// deep-mutation `o.x = $$value` — plain, never a reassignment of the proxy itself), or a
 /// PLAIN local (`name = $$value`). The read-oriented signal kinds — `$derived`, an
-/// `{#each}` item, an `{#await}` binding, and a `{@const}` derived — are READABLE but are
-/// NOT assignment targets, so they are EXCLUDED.
+/// `{#each}` item, an each-destructured field, a `{#snippet}` parameter, an `{#await}`
+/// binding, and a `{@const}` derived — are READABLE but are NOT assignment targets at
+/// this (bare-Identifier) arm, so they are EXCLUDED here; a MEMBER write rooted at ANY
+/// of them IS admitted, but only via the separate widened
+/// [`bind_member_root_is_writable_target`] / [`is_writable_member_bind_extra_root`]
+/// predicates, never here.
 ///
 /// A `BareProxy` reaches this predicate ONLY at a MEMBER bind target (`bind:value={o.x}`) —
 /// a bare-identifier bind (`bind:value={o}`) REASSIGNS its root, which reclassifies a

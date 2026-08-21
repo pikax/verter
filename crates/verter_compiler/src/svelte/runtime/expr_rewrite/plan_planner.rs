@@ -145,7 +145,14 @@ fn replacement_mappings(replacement: &str, token: Option<&MappedToken>) -> Vec<R
                 source_start: token.span.start,
             });
         }
-        cursor = start + 1;
+        // Advance by one CHAR, not one byte — a multi-byte match start (a
+        // non-ASCII identifier) would otherwise land the next slice mid-char
+        // and panic on the non-boundary index.
+        let advance = replacement[start..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8);
+        cursor = start + advance;
     }
     mappings
 }

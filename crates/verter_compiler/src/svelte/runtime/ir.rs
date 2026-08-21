@@ -143,6 +143,18 @@ pub struct PatternBindings {
     pub bindings: Vec<BindingId>,
     /// The syntactic shape the pattern producer OBSERVED for this pattern.
     pub shape: PatternShape,
+    /// The pattern's own AUTHORED source text (e.g. `{ id }`), for a consumer
+    /// that must re-emit the exact pattern rather than a name it declares (a
+    /// destructured `{#each}` item's key callback, which official parameterizes
+    /// with the pattern itself: `({ id }) => id`). `None` when the pattern was
+    /// interned from already-parsed names with no backing span
+    /// ([`PatternShape::Unobserved`]).
+    pub source_text: Option<String>,
+    /// The pattern's own AUTHORED span, for a consumer that must report a
+    /// REAL source location for a shape it does not support (never a
+    /// placeholder span). `None` when the pattern was interned from
+    /// already-parsed names with no backing span.
+    pub span: Option<Span>,
 }
 
 /// The observed syntactic shape of a binding pattern.
@@ -154,8 +166,18 @@ pub struct PatternBindings {
 pub enum PatternShape {
     /// Exactly one bare binding identifier (`item`).
     BareIdentifier,
-    /// A destructuring pattern or a multi-name parameter list — anything that
-    /// is not a single bare identifier.
+    /// Exactly one OBJECT property, SHORTHAND (`{ id }`) — the local binding
+    /// name and the authored property key are the SAME token by JS grammar,
+    /// no rename, no computed key, no default, no rest. Distinguished from
+    /// the broader [`Self::Decomposed`] because a consumer reading a
+    /// destructured value OFF the source object by binding name (rather than
+    /// by a plumbed access path) is correct ONLY for this shape — `{ id: foo
+    /// }` (renamed), `[id]` (array), and `{ ...rest }` (rest) all declare one
+    /// name too but the name is NOT a valid property-key read.
+    ShorthandSingleProperty,
+    /// A destructuring pattern or a multi-name parameter list that is NOT
+    /// [`Self::ShorthandSingleProperty`] — a rename, a computed key, an array
+    /// element, a rest element, a default, or more than one declared name.
     Decomposed,
     /// The pattern was interned from already-parsed NAMES, so no syntactic
     /// shape was observed. A consumer that needs the distinction must treat
@@ -1227,6 +1249,12 @@ impl<'a> SvelteRuntimeIr<'a> {
     #[must_use]
     pub fn pattern_bindings(&self, id: PatternId) -> &[BindingId] {
         &self.analysis.patterns[id.0 as usize].bindings
+    }
+
+    /// The full interned pattern record (bindings, observed shape, source text).
+    #[must_use]
+    pub fn pattern(&self, id: PatternId) -> &PatternBindings {
+        &self.analysis.patterns[id.0 as usize]
     }
 
     /// Look up a template scope by id.

@@ -84,6 +84,15 @@ pub enum BindingRuntimeKind {
     /// and emit a setter that writes the parameter and never reaches the
     /// collection.
     EachPlain,
+    /// A field declared by a single-name DESTRUCTURE `{#each}` context
+    /// (`{#each items as { id }}`) — official binds the raw item to a
+    /// synthesized `$$item` param and declares one per-field getter thunk (`let
+    /// id = () => $.get($$item).id;` for a reactive item, `let id = () =>
+    /// $$item.id;` for a non-reactive one) in the render-callback body. A
+    /// template read of the field calls the thunk (`id()`), never `$.get`. Not
+    /// writable (an each item is not an assignment target — same rationale as
+    /// [`Self::EachPlain`]).
+    EachDestructuredField,
     /// An `{#await … then x}` / `{:catch e}` binding — a SIGNAL read.
     AwaitSignal,
     /// A `{@const}` block-local derived binding.
@@ -1795,16 +1804,16 @@ pub fn collect_pattern_names(pattern: &BindingPattern<'_>, out: &mut Vec<String>
 
 /// The declared names of a binding-pattern fragment plus the syntactic SHAPE
 /// the parse observed, for the consumers that must tell a bare identifier
-/// context apart from a decomposition that happens to declare one name.
+/// context apart from a decomposition that happens to declare one name — and,
+/// for a decomposition, whether it is the narrow PLAIN-SHORTHAND single
+/// property shape a binding name alone can correctly re-read off the source
+/// object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedPattern {
     /// The declared binding names, in source order.
     pub(crate) names: Vec<String>,
-    /// Whether the fragment is EXACTLY one bare binding identifier.
-    ///
-    /// A single-name destructure (`{ a }` / `[a]`) declares one name yet is
-    /// `false`: the NODE KIND is the discriminator, never the name count.
-    pub(crate) bare_identifier: bool,
+    /// The observed shape — see [`super::ir::PatternShape`].
+    pub(crate) shape: super::ir::PatternShape,
 }
 
 /// Parse a binding-pattern text fragment (an each item, a snippet param list, an
@@ -1830,6 +1839,7 @@ pub(crate) fn parse_pattern(pattern_text: &str) -> Result<ParsedPattern, ()> {
     // and a destructure yields a non-identifier element — both are `false`.
     let mut elements = 0usize;
     let mut identifier_elements = 0usize;
+    let mut sole_element: Option<&BindingPattern<'_>> = None;
     for stmt in &parsed.program.body {
         if let Statement::VariableDeclaration(decl) = stmt {
             for d in &decl.declarations {
@@ -1839,19 +1849,46 @@ pub(crate) fn parse_pattern(pattern_text: &str) -> Result<ParsedPattern, ()> {
                         if matches!(element, BindingPattern::BindingIdentifier(_)) {
                             identifier_elements += 1;
                         }
+                        sole_element = Some(element);
                     }
                     if array.rest.is_some() {
                         elements += 1;
+                        sole_element = None;
                     }
                 }
                 collect_pattern_names(&d.id, &mut names);
             }
         }
     }
-    Ok(ParsedPattern {
-        names,
-        bare_identifier: elements == 1 && identifier_elements == 1,
-    })
+    let shape = if elements == 1 && identifier_elements == 1 {
+        super::ir::PatternShape::BareIdentifier
+    } else if elements == 1 && is_shorthand_single_property(sole_element) {
+        super::ir::PatternShape::ShorthandSingleProperty
+    } else {
+        super::ir::PatternShape::Decomposed
+    };
+    Ok(ParsedPattern { names, shape })
+}
+
+/// Whether `element` is an object pattern with EXACTLY one SHORTHAND property
+/// (`{ id }`) — no rest, no computed key, no rename, no default. This is the
+/// ONLY decomposition shape whose declared LOCAL NAME is also the correct
+/// property key to read the value back off the source object; every other
+/// single-name decomposition (a rename `{ id: foo }`, an array element
+/// `[id]`, a rest `{ ...rest }`) declares one name too but the name is not a
+/// valid property-key read, so callers must tell them apart structurally
+/// rather than by name count.
+fn is_shorthand_single_property(element: Option<&BindingPattern<'_>>) -> bool {
+    let Some(BindingPattern::ObjectPattern(obj)) = element else {
+        return false;
+    };
+    obj.rest.is_none()
+        && obj.properties.len() == 1
+        && obj.properties[0].shorthand
+        && matches!(
+            obj.properties[0].value,
+            BindingPattern::BindingIdentifier(_)
+        )
 }
 
 /// Parse a `let:`-directive alias value (`let:item={alias}`) and return the bare LOCAL name

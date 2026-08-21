@@ -786,6 +786,10 @@ impl<'a> SupportedClientIr<'a> {
                 // unreachable in a definitely-legacy component — enumerated so
                 // the mapping stays total.
                 | BindingRuntimeKind::EachPlain
+                // A single-name-destructure each-item field reads through its
+                // own getter thunk (`field()`) via the shared rewriter, same
+                // as every other call-form read below.
+                | BindingRuntimeKind::EachDestructuredField
                 | BindingRuntimeKind::StoreSubscription
                 | BindingRuntimeKind::SnippetParam
                 | BindingRuntimeKind::StateSignal { .. }

@@ -414,16 +414,23 @@ impl<'a> LoweringCtx<'a> {
     /// distinct bindings, not one collapsed binding. A pattern whose text fails to
     /// parse records a diagnostic and declares no names.
     fn push_pattern(&mut self, span: Span, scope: ScopeId, kind: BindingRuntimeKind) -> PatternId {
+        self.push_pattern_by_shape(span, scope, |_shape| kind)
+    }
+
+    /// Like [`Self::push_pattern`], but the binding kind is chosen from the
+    /// pattern's OBSERVED [`PatternShape`] — for a consumer whose declared
+    /// names read differently depending on whether the context is a bare
+    /// identifier or a decomposition (a destructured `{#each}` item field
+    /// reads through a getter thunk, never `$.get`).
+    fn push_pattern_by_shape(
+        &mut self,
+        span: Span,
+        scope: ScopeId,
+        kind_for: impl FnOnce(ir::PatternShape) -> BindingRuntimeKind,
+    ) -> PatternId {
         let text = span_text(self.source, span);
         let (names, shape) = match parse_pattern(text) {
-            Ok(parsed) => (
-                parsed.names,
-                if parsed.bare_identifier {
-                    ir::PatternShape::BareIdentifier
-                } else {
-                    ir::PatternShape::Decomposed
-                },
-            ),
+            Ok(parsed) => (parsed.names, parsed.shape),
             Err(()) => {
                 self.errors.push(
                     "svelte-runtime-pattern-parse",
@@ -433,6 +440,7 @@ impl<'a> LoweringCtx<'a> {
                 (Vec::new(), ir::PatternShape::Unobserved)
             }
         };
+        let kind = kind_for(shape);
         let mut declared = Vec::with_capacity(names.len());
         for name in names {
             let binding = self.bindings.push(BindingInfo {
@@ -449,6 +457,8 @@ impl<'a> LoweringCtx<'a> {
         self.patterns.push(PatternBindings {
             bindings: declared,
             shape,
+            source_text: Some(text.to_string()),
+            span: Some(span),
         });
         id
     }
@@ -482,6 +492,8 @@ impl<'a> LoweringCtx<'a> {
         self.patterns.push(PatternBindings {
             bindings: declared,
             shape: ir::PatternShape::Unobserved,
+            source_text: None,
+            span: None,
         });
         id
     }
@@ -844,6 +856,9 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // `EACH_ITEM_REACTIVE` from the SAME predicate, so the flag and the read
     // form stay two halves of one decision.
     lower_block::finalize_each_item_reactivity(&mut ctx, runes);
+    // A key that IS the each's own INDEX makes the each UNKEYED for official —
+    // mode-independent (unlike the item rule above).
+    lower_block::finalize_each_index_reactivity(&mut ctx);
     // The official in-between MAYBE-RUNES fact (`analysis.maybe_runes`): a
     // non-runes component with no explicit `runes: false` override and no
     // definitively-legacy instance construct (a top-level labeled statement or an

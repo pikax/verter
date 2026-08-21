@@ -702,6 +702,22 @@ impl<'a> ClientEmitter<'a> {
             }
         }
         out.push_str(") => {");
+        // A DECOMPOSED item context declares one per-field getter thunk at the
+        // top of the render-callback body, reading off the synthesized item
+        // param — `$.get($$item).<field>` for a reactive item, plain
+        // `$$item.<field>` otherwise (the read FORM at each use site is a bare
+        // call, `<field>()`, regardless — only the thunk BODY varies).
+        if let Some(destructure) = &each.destructure {
+            let item_var = each.item_param.as_deref().unwrap_or("$$item");
+            for field in &destructure.fields {
+                let read = if destructure.item_reactive {
+                    format!("$.get({item_var}).{field}")
+                } else {
+                    format!("{item_var}.{field}")
+                };
+                out.push_str(&format!("let {field} = () => {read};"));
+            }
+        }
         self.emit_region(out, each.body, "$$anchor");
         out.push('}');
         // The `{:else}` fallback callback.

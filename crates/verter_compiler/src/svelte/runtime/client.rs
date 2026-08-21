@@ -1132,7 +1132,7 @@ impl<'a> ClientEmitter<'a> {
                     reactive: false,
                     target,
                 } if NodeId(target.0) == node => Some(InlineInit::Stmt(
-                    self.emit_reactive_attr(node, emit, &mut None),
+                    self.emit_reactive_attr(node, emit, &mut None).into_string(),
                 )),
                 // A reactive class op declares its `classes` accumulator here.
                 ClientRuntimeOp::SetClass {

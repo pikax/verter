@@ -316,11 +316,9 @@
           "runtime": "not-applicable",
           "structural": "ran"
         },
-        "divergences": [
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-onclick-declaration: no segment maps to fixtures/svelte/props-events.svelte:3:11; anchor-span-coverage — anchor script-onclick-declaration: no segment falls within its authored span; anchor-missing — anchor template-disabled-shorthand-binding: no segment maps to fixtures/svelte/props-events.svelte:8:9; anchor-span-coverage — anchor template-disabled-shorthand-binding: no segment falls within its authored span"
-        ],
+        "divergences": [],
         "kind": "compared",
-        "verdict": "fail"
+        "verdict": "pass"
       },
       "products": [
         "virtual-node.main",
@@ -359,8 +357,7 @@
           "structural": "ran"
         },
         "divergences": [
-          "structural divergence at $.body: length 6 vs 5",
-          "candidate source map is not truthful about its own output: anchor-missing — anchor script-onclick-declaration: no segment maps to fixtures/svelte/props-events.svelte:3:11; anchor-span-coverage — anchor script-onclick-declaration: no segment falls within its authored span; anchor-missing — anchor template-disabled-shorthand-binding: no segment maps to fixtures/svelte/props-events.svelte:8:9; anchor-span-coverage — anchor template-disabled-shorthand-binding: no segment falls within its authored span"
+          "structural divergence at $.body: length 6 vs 5"
         ],
         "kind": "compared",
         "verdict": "fail"

@@ -131,6 +131,17 @@ enum CharacterizedOutcome {
     /// The route emits a candidate and the oracle reports `fail`, with at least
     /// one reason mentioning each named family and NO reason mentioning any
     /// other.
+    ///
+    /// Currently carried by no client cell — the source-map anchor fix closed
+    /// the last cell that had one (`props-events.svelte`). The variant stays
+    /// for the same reason `Refuses` does: a failing-but-emitting outcome
+    /// remains a legal recorded state, and it's what turns a silently
+    /// reopened divergence back into a failure here rather than a pass.
+    #[allow(
+        dead_code,
+        reason = "an emit-and-fail outcome is a legal recorded outcome; no reachable client \
+                  request has one today"
+    )]
     EmitsAndFails(EmittedDivergences),
     /// The route refuses the runtime surface with this typed code.
     ///
@@ -154,16 +165,14 @@ fn characterized_client_outcome(fixture_path: &str) -> CharacterizedOutcome {
     match fixture_path {
         "fixtures/svelte/basic-runes.svelte" => CharacterizedOutcome::EmitsAndPasses,
         "fixtures/svelte/legacy-slots.svelte" => CharacterizedOutcome::EmitsAndPasses,
-        // The component emits, and its instance-script prop reads match the
-        // official accessor shapes. Its own required map anchors are a script
-        // FUNCTION declaration and a shorthand attribute binding — two producer
-        // classes that still write unmapped fragments, characterized by
+        // The component emits, its instance-script prop reads match the official
+        // accessor shapes, and both of its map anchors — a script FUNCTION
+        // declaration and a shorthand attribute binding — now carry authored
+        // provenance, characterized by
         // `a_function_declaration_carries_its_authored_name_provenance` and
         // `a_shorthand_attribute_binding_carries_its_authored_name_provenance`
         // in the compiler crate.
-        "fixtures/svelte/props-events.svelte" => {
-            CharacterizedOutcome::EmitsAndFails(EmittedDivergences::mapping_only())
-        }
+        "fixtures/svelte/props-events.svelte" => CharacterizedOutcome::EmitsAndPasses,
         other => panic!("no characterized outcome for the reachable request `{other}`"),
     }
 }

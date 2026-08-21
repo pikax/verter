@@ -195,6 +195,36 @@ impl<'a> SupportedClientIr<'a> {
                 });
                 continue;
             }
+            // A named function-pair/store/event-referenced function declaration:
+            // its BODY lowers through the shared rewriter (signal reads/writes
+            // rewrite; the `function name(...) {}` structure is preserved), and
+            // its NAME token — always untouched verbatim source at its own
+            // parse-derived offset (`async` / generator forms have no fixed
+            // keyword literal) — carries the authored declaration's
+            // provenance. Intercepted here (rather than through the rewriter
+            // dispatch below, which discards the rewriter's mappings) so the
+            // mapping rides the same fragment the emitter produced.
+            if let Item::FunctionDecl {
+                name,
+                name_span,
+                name_prefix_len,
+                source,
+            } = item
+            {
+                let code = self.rewrite_source(source, root_scope)?;
+                let mapped = expr_emit::function_decl_name_mapped_code(
+                    code.clone(),
+                    name,
+                    *name_prefix_len,
+                    name_span.start,
+                )
+                .with_source_offset(self.instance_source_offset());
+                items.push(ClientScriptItem::BodyStatement {
+                    code,
+                    mapped: Some(mapped),
+                });
+                continue;
+            }
             match expr_emit::lower_simple_instance_item(item) {
                 SimpleItemLowering::Statement(code) => {
                     items.push(ClientScriptItem::BodyStatement { code, mapped: None });
@@ -276,14 +306,6 @@ impl<'a> SupportedClientIr<'a> {
                                 Some(code) => code,
                                 None => continue,
                             }
-                        }
-                        // A named function-pair function: its body lowers through the shared
-                        // rewriter (signal reads/writes rewrite; the `function name(...) {}`
-                        // structure is preserved). The rewriter wraps the source as an
-                        // expression internally, so a declaration's source round-trips as a
-                        // function expression with the body edits applied.
-                        Item::FunctionDecl { source, .. } => {
-                            self.rewrite_source(source, root_scope)?
                         }
                         // A promoted LEGACY `let`: the INIT lowers through the
                         // shared rewriter (a sibling-signal read becomes
@@ -369,7 +391,7 @@ impl<'a> SupportedClientIr<'a> {
                         // intercepted before this dispatch — the first registers
                         // below, the second carries its own authored mapping.)
                         _ => unreachable!(
-                            "only GeneralStatement, PropsDestructure, MutableSourceLet, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                            "only GeneralStatement, PropsDestructure, MutableSourceLet, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
                         ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code, mapped: None });
@@ -519,6 +541,7 @@ impl<'a> SupportedClientIr<'a> {
                 | BindingRuntimeKind::Derived
                 | BindingRuntimeKind::EachSignal
                 | BindingRuntimeKind::EachPlain
+                | BindingRuntimeKind::EachDestructuredField
                 | BindingRuntimeKind::AwaitSignal
                 | BindingRuntimeKind::LegacyConstDerived
                 | BindingRuntimeKind::TemplateDeclLocal
