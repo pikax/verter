@@ -305,6 +305,10 @@ import {
   mapStepReason,
   analyzeNextestSurface,
   analyzeLibtestSurface,
+  // gate telemetry (report-only; see the "GATE TELEMETRY" section of gate-internals.mjs)
+  collectNextestTestTimings,
+  summarizeNextestTimings,
+  parseLibtestSummary,
   // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
   checkBuildPrerequisites,
   probeBudgetMs,
@@ -526,6 +530,63 @@ function reportOversizeProductionSources(repoRoot) {
       `without an explicit exemption:\n  ${rows}\n\n` +
       "File size is advisory and does not affect the gate verdict.",
   );
+}
+
+// ----------------------------------------------------------------------------------------------------
+// GATE TELEMETRY (report-only). Every function here only LOGS; none of it is consulted by any verdict
+// path. See the "GATE TELEMETRY" section in gate-internals.mjs for where the underlying data comes from.
+// ----------------------------------------------------------------------------------------------------
+
+// Sums the on-disk size of every suite binary a nextest archive listing names, resolved the SAME way the
+// gate resolves them to run them (`resolveSuiteBinary`). Best-effort: a binary that cannot be resolved or
+// stat'd is counted as `missing`, never thrown.
+function computeExtractedBinarySizes(listJson, extractDir) {
+  const buildMetaTargetDir =
+    listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
+  const suites = Object.values(listJson["rust-suites"] || {});
+  let totalBytes = 0;
+  let resolved = 0;
+  let missing = 0;
+  for (const s of suites) {
+    const bin = resolveSuiteBinary(s["binary-path"], buildMetaTargetDir, extractDir);
+    if (bin && existsSync(bin)) {
+      try {
+        totalBytes += statSync(bin).size;
+        resolved++;
+        continue;
+      } catch {
+        /* fall through to missing */
+      }
+    }
+    missing++;
+  }
+  return { totalBytes, resolved, missing };
+}
+
+// Reports per-package / per-binary cumulative test duration + the 50 heaviest test families for a nextest
+// surface, derived from the SAME captured stdout+stderr the gate already parses for pass/fail (see the
+// "GATE TELEMETRY" section in gate-internals.mjs). Grouped into one block so the numbers that answer
+// "where did the time go" sit together rather than interleaved with the pass/fail log lines.
+function logNextestTimingReport(label, text, allSuites) {
+  const timings = collectNextestTestTimings(text);
+  const report = summarizeNextestTimings(timings, allSuites, 50);
+  log(
+    `${label} TIMING: ${report.timedCount}/${report.totalTests} terminal test(s) carried a parseable ` +
+      `duration, summing to ${report.totalSec.toFixed(1)}s of reported per-test time (tests run process- ` +
+      "isolated and concurrently, so this sum is NOT the surface's wall-clock).",
+  );
+  log(`${label} TIMING — cumulative duration by package (${report.perPackage.length} package(s)):`);
+  for (const p of report.perPackage) {
+    log(`  ${p.key}: ${p.count} test(s), ${p.totalSec.toFixed(1)}s`);
+  }
+  log(`${label} TIMING — cumulative duration by binary (${report.perBinary.length} binary/-ies):`);
+  for (const b of report.perBinary) {
+    log(`  ${b.key}: ${b.count} test(s), ${b.totalSec.toFixed(1)}s`);
+  }
+  log(`${label} TIMING — top ${report.topFamilies.length} highest cumulative-time test families:`);
+  for (const f of report.topFamilies) {
+    log(`  ${f.totalSec.toFixed(2)}s (${f.count} test(s)) ${f.key}`);
+  }
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -999,6 +1060,18 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   log(
     `archive [${variant.key}] built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`,
   );
+  // TELEMETRY (report-only): the archive step's own successful peak RSS is measured internally by the
+  // watchdog and normally discarded once the step succeeds; the archive's on-disk size costs one stat().
+  let archiveSizeBytes = 0;
+  try {
+    archiveSizeBytes = statSync(archiveFile).size;
+  } catch {
+    /* best-effort */
+  }
+  log(
+    `archive [${variant.key}] TELEMETRY: size ${formatMemorySize(archiveSizeBytes)}, peak RSS ` +
+      `${formatMemorySize(archiveRes.peakRssBytes)} across ${archiveRes.memoryProcessCount} process(es)`,
+  );
 
   // --- LIST the suites from the archive (NO rebuild); JSON to a dedicated stdout capture ---
   log(
@@ -1057,6 +1130,15 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     err(`could not parse nextest list JSON: ${e.message}`);
     return { error: EXIT_USAGE, where: "list-parse", res: listRes };
   }
+  // TELEMETRY (report-only): the list/extract step's own successful peak RSS (also discarded on success
+  // today) + the total size of every suite binary this archive extracted.
+  const extractedSizes = computeExtractedBinarySizes(listJson, extractDir);
+  log(
+    `list [${variant.key}] TELEMETRY: peak RSS ${formatMemorySize(listRes.peakRssBytes)} across ` +
+      `${listRes.memoryProcessCount} process(es); extracted binaries ` +
+      `${formatMemorySize(extractedSizes.totalBytes)} total across ${extractedSizes.resolved} binary/-ies` +
+      `${extractedSizes.missing > 0 ? ` (${extractedSizes.missing} unresolved)` : ""}`,
+  );
   return { listJson, extractDir, archiveFile };
 }
 
@@ -1280,6 +1362,11 @@ async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
       `(${s3.namedCount} named, ${s3.toleratedCount} tolerated), ${s3.summary.skipped} skipped; ` +
       `run exit ${runRes.code}`,
   );
+  log(
+    `SURFACE 3 TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
+      `${runRes.memoryProcessCount} process(es)`,
+  );
+  logNextestTimingReport("SURFACE 3", runRes.stdout + "\n" + runRes.stderr, allSuites);
   return { failures: s3.failures, tolerated: s3.toleratedCount > 0 };
 }
 
@@ -1536,6 +1623,11 @@ async function runGate(opts, ctx) {
       `(${s1.namedCount} named, ${s1.toleratedCount} tolerated), ${s1.summary.skipped} skipped; ` +
       `run exit ${runRes.code}`,
   );
+  log(
+    `SURFACE 1 TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
+      `${runRes.memoryProcessCount} process(es)`,
+  );
+  logNextestTimingReport("SURFACE 1", nextestText, allSuites);
 
   // ---------- SURFACE 2: direct verter_session libtest execution (in-process surface) ----------
   const sel = selectSessionSuites(allSuites);
@@ -1551,6 +1643,13 @@ async function runGate(opts, ctx) {
   let s2Passed = 0;
   let s2Failed = 0;
   let s2Tolerated = 0;
+  // TELEMETRY (report-only) accumulators: Surface 2 is the one surface whose duration and executed-test
+  // count were previously never reported at all — the runner only counted how many suite binaries passed.
+  const s2Details = [];
+  let s2TotalDurationMs = 0;
+  let s2TotalTests = 0;
+  let s2PeakRssBytes = 0;
+  let s2PeakProcessCount = 0;
   // Package identity derived from the archive list JSON (NOT a separate `cargo metadata` subprocess that
   // would escape the watchdog). All session suites share one package, so derive once from the first.
   const sessionPkgInfo = deriveSuitePkgInfo(sessionSuites[0]);
@@ -1626,10 +1725,41 @@ async function runGate(opts, ctx) {
       for (const f of a2.failures) failures.push(f);
       s2Failed++;
     }
+    // TELEMETRY (report-only): this suite's own duration + peak RSS are already returned by
+    // runContainedStep and were previously discarded; the executed-test count is libtest's own trailing
+    // `test result: … N passed; M failed` line (parseLibtestSummary — the SAME parser analyzeLibtestSurface
+    // already calls, invoked again here rather than widening that function's return shape).
+    const libSummary = parseLibtestSummary(libText);
+    const executedTests = libSummary.found ? libSummary.passed + libSummary.failed : 0;
+    s2TotalDurationMs += res.durationMs;
+    s2TotalTests += executedTests;
+    if (res.peakRssBytes > s2PeakRssBytes) {
+      s2PeakRssBytes = res.peakRssBytes;
+      s2PeakProcessCount = res.memoryProcessCount;
+    }
+    s2Details.push({
+      binaryId: s["binary-id"],
+      durationMs: res.durationMs,
+      executedTests,
+      peakRssBytes: res.peakRssBytes,
+      memoryProcessCount: res.memoryProcessCount,
+    });
   }
   log(
     `SURFACE 2 done: ${s2Passed} suites clean, ${s2Failed} suites with non-tolerated failures, ${s2Tolerated} tolerated test failures`,
   );
+  log(
+    `SURFACE 2 TELEMETRY: ${s2TotalTests} executed test(s) across ${s2Details.length} suite(s), total ` +
+      `duration ${(s2TotalDurationMs / 1000).toFixed(1)}s (suites run SEQUENTIALLY here, so — unlike ` +
+      "surface 1/3's process-isolated per-test sum above — this total IS the surface's wall-clock), peak " +
+      `RSS ${formatMemorySize(s2PeakRssBytes)} across ${s2PeakProcessCount} process(es); per-suite:`,
+  );
+  for (const d of s2Details) {
+    log(
+      `  ${d.binaryId}: ${(d.durationMs / 1000).toFixed(1)}s, ${d.executedTests} test(s), peak RSS ` +
+        `${formatMemorySize(d.peakRssBytes)} (${d.memoryProcessCount} process(es))`,
+    );
+  }
 
   // ---------- SURFACE 3: shipped-cfg (debug_assertions OFF) build + run ----------
   // Runs LAST: it needs its own whole-workspace compile, so the two cheap debug surfaces report their

@@ -50,11 +50,16 @@ const cargoEnv = buildCargoEnv(
 );
 assert.equal(cargoEnv.CARGO_BUILD_JOBS, "4");
 
+// `ps -axo pid=,ppid=,rss=` rows: root (100), a direct child (101), a GRANDCHILD (102, ppid=101, not
+// ppid=100) proving the walk is recursive rather than one hop deep, and an unrelated process (103) that
+// must stay excluded. This is also the exact shape of the bug this tree walk fixes: nextest reassigns each
+// executing test to its OWN process group, so a process-group-membership sum (the prior implementation)
+// would miss 101/102 entirely despite them being real descendants — only parent-pid ancestry is reliable.
 const posix = parsePosixProcessTableRss(
-  [" 100 100 1024", " 101 100 2048", " 102 999 8192"].join("\n"),
+  [" 100 1 1024", " 101 100 2048", " 102 101 4096", " 103 999 8192"].join("\n"),
   100,
 );
-assert.deepEqual(posix, { ok: true, rssBytes: 3 * MiB, processCount: 2 });
+assert.deepEqual(posix, { ok: true, rssBytes: 7 * MiB, processCount: 3 });
 
 const windows = parseWindowsProcessTableRss(
   ["100\t1\t1048576", "101\t100\t2097152", "102\t101\t4194304", "999\t1\t8388608"].join("\n"),

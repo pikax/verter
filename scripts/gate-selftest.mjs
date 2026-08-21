@@ -5777,7 +5777,7 @@ async function main() {
     // …and the ones the gate genuinely requires are set back, to the values the parser depends on.
     const required = {
       NEXTEST_NO_OUTPUT_INDENT: "0",
-      NEXTEST_STATUS_LEVEL: "retry",
+      NEXTEST_STATUS_LEVEL: "pass",
       NEXTEST_FINAL_STATUS_LEVEL: "fail",
       NEXTEST_RETRIES: "0",
       NEXTEST_HIDE_PROGRESS_BAR: "1",
@@ -6063,7 +6063,7 @@ async function main() {
           }
           // …and preserving it must NOT reopen the parse: the format pins still apply.
           const pins = {
-            NEXTEST_STATUS_LEVEL: "retry",
+            NEXTEST_STATUS_LEVEL: "pass",
             NEXTEST_FINAL_STATUS_LEVEL: "fail",
             NEXTEST_FAILURE_OUTPUT: "immediate",
             NEXTEST_SUCCESS_OUTPUT: "never",
@@ -6230,7 +6230,7 @@ async function main() {
       ok = false;
     }
     // …and the format pins still win over whatever spelling the caller used.
-    if (win.NEXTEST_STATUS_LEVEL !== "retry" || win.NEXTEST_FAILURE_OUTPUT !== "immediate") {
+    if (win.NEXTEST_STATUS_LEVEL !== "pass" || win.NEXTEST_FAILURE_OUTPUT !== "immediate") {
       fail(
         `(GB6h.1) format pins lost to a case-variant: status=${JSON.stringify(win.NEXTEST_STATUS_LEVEL)} ` +
           `failure-output=${JSON.stringify(win.NEXTEST_FAILURE_OUTPUT)}`,
@@ -6251,7 +6251,7 @@ async function main() {
       ok = false;
     }
     // …while the canonical-case format variable IS stripped on POSIX.
-    if (posix.NEXTEST_STATUS_LEVEL !== "retry") {
+    if (posix.NEXTEST_STATUS_LEVEL !== "pass") {
       fail(
         `(GB6h.2) the canonical NEXTEST_STATUS_LEVEL must still be pinned on POSIX; got ` +
           `${JSON.stringify(posix.NEXTEST_STATUS_LEVEL)}`,
