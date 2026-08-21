@@ -7203,7 +7203,7 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
     // A top-level `let d = $derived(e)` rune declarator itself is NOT used as the test
     // vehicle here: every `$derived` reference fails closed at the earlier, unrelated
     // rune-position gate (`rune_scan.rs::classify_rune_position` — "`$derived` has NO
-    // supported position … a deferral-ledger follow-up") regardless of this classifier,
+    // supported position … tracked separately") regardless of this classifier,
     // so a rune-declarator fixture could never reach — and could never discriminate —
     // this widening. The `let:` slot-prop construct reaches the SAME `Derived` binding
     // kind through a path this classifier's caller can actually observe today.
@@ -7238,8 +7238,8 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
     // rune usage at all the component compiles in LEGACY mode instead, whose
     // component-bind codegen has its own separate, pre-existing gap (a missing
-    // `$$legacy: true` props-object marker — out of scope here, see the "Not closed,
-    // disclosed and pinned" section of the BS1 landing record) that would otherwise
+    // `$$legacy: true` props-object marker — out of scope here and disclosed
+    // in this block's landing evidence) that would otherwise
     // ride along unasserted in this test.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
@@ -13807,7 +13807,7 @@ fn root_text_node_region_fails_closed() {
     // A root TEXT-NODE region (a bare reactive interpolation `{count}` as the
     // component root, with no wrapping element) is the official text-first
     // (`$.text()` + `$.next()`) topology — a distinct emission shape that is a
-    // deferral-ledger follow-up. It fails closed rather than emit INVALID JS (an
+    // separately tracked follow-up. It fails closed rather than emit INVALID JS (an
     // undeclared `text` var). RED against the pre-fix tree (which emitted
     // `$.set_text(text, …)` referencing an undeclared `text`).
     assert_fail_closed(
@@ -14235,7 +14235,7 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
 fn destructured_state_object_fails_closed_not_panic() {
     // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
     // Official 5.56.3 supports it (temp + proxy), but full destructured-state
-    // lowering is a deferral-ledger item; a clean fail-closed is correct. RED against
+    // lowering is a separately tracked item; a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
         "<script>let { a } = $state({ a: 1 });</script>\n<p>{a}</p>\n",
@@ -28420,7 +28420,7 @@ fn an_each_item_rest_destructure_refuses() {
 }
 
 #[test]
-#[ignore = "known pre-existing gap, owned by a future Svelte each-item destructure slice: a genuinely \
+#[ignore = "known pre-existing gap in Svelte each-item destructuring: a genuinely \
             multi-name each-item pattern (`{ a, b }`) refuses through `pattern_single_binding`'s \
             generic multi-binding arm with a placeholder Span::new(0, 0) instead of the pattern's real \
             span. Closing it needs the same real-span + per-property-read plumbing as \
