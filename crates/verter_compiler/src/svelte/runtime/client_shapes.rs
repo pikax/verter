@@ -878,8 +878,8 @@ fn classify_dom_value_bind(
 /// flag-7 accessor). A `$derived`-rooted MEMBER write IS modelled — see
 /// [`bind_member_root_is_writable_target`] — a genuine top-level `$derived(...)`
 /// bare-Identifier bind never reaches either predicate regardless (an unconditional,
-/// unrelated earlier gate refuses it — see `rune_scan.rs`'s `$derived`/`$effect`
-/// deferral), so this arm never observes that case in practice. An IMPORT root
+/// unrelated earlier gate refuses it — see `rune_scan.rs`'s handling of
+/// `$derived`/`$effect`), so this arm never observes that case in practice. An IMPORT root
 /// (`ComponentImport` / `ImportedValue`) is NOT writable BY
 /// DESIGN, not as a deferral: ES import bindings are not reassignable, and official
 /// REJECTS the bare bind (`constant_binding`) and the reassignment

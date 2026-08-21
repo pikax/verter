@@ -7278,9 +7278,8 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     // The fixture carries an unused `let { p } = $props();` to force RUNES mode: with no
     // rune usage at all the component compiles in LEGACY mode instead, whose
     // component-bind codegen has its own separate, pre-existing gap (a missing
-    // `$$legacy: true` props-object marker — out of scope here and disclosed
-    // in this block's landing evidence) that would otherwise
-    // ride along unasserted in this test.
+    // `$$legacy: true` props-object marker, unrelated to
+    // what this test asserts) that would otherwise ride along unasserted here.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; import { store } from './s.js'; let { p } = $props();</script>\n<Child bind:value={store.x} />\n",
     )
@@ -13846,8 +13845,8 @@ fn non_rune_const_local_is_preserved() {
 fn root_text_node_region_fails_closed() {
     // A root TEXT-NODE region (a bare reactive interpolation `{count}` as the
     // component root, with no wrapping element) is the official text-first
-    // (`$.text()` + `$.next()`) topology — a distinct emission shape that is a
-    // separately tracked follow-up. It fails closed rather than emit INVALID JS (an
+    // (`$.text()` + `$.next()`) topology — a distinct emission shape Verter does
+    // not yet produce. It fails closed rather than emit INVALID JS (an
     // undeclared `text` var). RED against the pre-fix tree (which emitted
     // `$.set_text(text, …)` referencing an undeclared `text`).
     assert_fail_closed(
@@ -14274,8 +14273,8 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
 #[test]
 fn destructured_state_object_fails_closed_not_panic() {
     // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
-    // Official 5.56.3 supports it (temp + proxy), but full destructured-state
-    // lowering is a separately tracked item; a clean fail-closed is correct. RED against
+    // Official 5.56.3 supports it (temp + proxy); Verter does not lower
+    // destructured state yet, so a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
         "<script>let { a } = $state({ a: 1 });</script>\n<p>{a}</p>\n",
