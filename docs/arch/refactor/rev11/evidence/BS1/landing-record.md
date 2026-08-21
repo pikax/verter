@@ -51,17 +51,36 @@ Svelte compiler (`svelte@5.56.8`), in `crates/verter_compiler/src/svelte/runtime
   rune declarator (`bind:value={derivedThing}`, emitting `$.set(derivedThing, $$value)` —
   Svelte 5's documented "overridable derived" feature), oracle-verified while widening
   `is_writable_member_bind_extra_root` to admit `BindingRuntimeKind::Derived` for the MEMBER
-  arm. This is out of scope to fix or even to observe today: Verter's client backend refuses
-  EVERY `$derived(...)` rune reference outright at an earlier, unconditional gate
-  (`rune_scan.rs::classify_rune_position` — "`$derived` has NO supported position … a
-  deferral-ledger follow-up," pre-existing and unrelated to this block), so no component using
-  a genuine `$derived` rune reaches the bind classifier at all yet. The Member-arm widening
-  itself was verified and tested through the reachable `Derived`-kind construct instead — a
-  component `let:` slot-prop (`<Child let:item>`, lowered to `const item = $.derived(() =>
-  $$slotProps.item)`) — where official's bare-identifier negative control DOES hold
-  (`constant_binding`), unlike the genuine-rune case. This "overridable-`$derived`" divergence
-  is folded into the pre-existing `$derived`-rune deferral (owned by the runes-completion
-  vertical) rather than tracked as a new standalone item.
+  arm. This bare-identifier "overridable-`$derived`" form is out of scope to fix or even to
+  observe today for a TOP-LEVEL INSTANCE-SCRIPT `let d = $derived(e)` declarator specifically:
+  that form refuses at an earlier, unconditional gate (`rune_scan.rs::classify_rune_position` —
+  "`$derived` has NO supported position … a deferral-ledger follow-up," pre-existing and
+  unrelated to this block).
+  Correction (post-landing, adversarial re-review): the original text here additionally claimed
+  Verter's client backend "refuses EVERY `$derived(...)` rune reference outright" at that gate
+  and that "no component using a genuine `$derived` rune reaches the bind classifier at all
+  yet." That broader claim is FALSE. A second, pre-existing, fully-implemented path — the
+  `{let x = $derived(e)}` TEMPLATE DECLARATION TAG
+  (`declaration_tag_lowering.rs::lower_declaration_tag` +
+  `state_prep::classify_block_rune_declarator`) — lowers a genuine `$derived(...)` rune
+  reference to `BindingRuntimeKind::Derived` and DOES reach the Member-bind classifier; it
+  bypasses `rune_scan.rs` because the declaration-tag lowering pushes only the call's argument
+  span into the template-expression list the rune scan re-walks, never the `$derived(...)` call
+  span itself. Oracle-verified (svelte@5.56.8, `runes: true`): official accepts
+  `bind:value={doubled.x}` there and emits the identical `$.get(root).field` shape as the `let:`
+  slot-prop case, and rejects the bare-identifier form (`constant_binding`), matching Verter's
+  behavior — no functional defect was found, but the construct was untested and the stated
+  reason for not testing it was wrong. Added a discriminating test,
+  `a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted` (`client_tests.rs`),
+  exercising this path directly; it fails against the pre-fix `Derived` widening and passes
+  post-fix. The Member-arm widening itself was ALSO verified and tested through the other
+  reachable `Derived`-kind construct — a component `let:` slot-prop (`<Child let:item>`, lowered
+  to `const item = $.derived(() => $$slotProps.item)`) — where official's bare-identifier
+  negative control DOES hold (`constant_binding`), same as the declaration-tag rune case. The
+  bare-identifier "overridable-`$derived`" divergence remains folded into the pre-existing
+  `$derived`-rune deferral (owned by the runes-completion vertical) rather than tracked as a new
+  standalone item — that divergence is specific to the top-level instance-script declarator
+  form, which the rune-position gate does still refuse.
 
 ## Review arc
 
