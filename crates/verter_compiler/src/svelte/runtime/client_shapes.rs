@@ -716,7 +716,7 @@ pub(super) fn classify_bind_shape(
 /// `$bindable` write IS a divergent protocol (a `$.prop` flag-7 setter). Object/array
 /// `$state` (`BareProxy` / `StateProxy`) roots are not reachable here — the
 /// object/array `$state` DECLARATION fails closed upstream at the `$state()`
-/// non-primitive-init gate (its lowering is owned by the runes-completion vertical),
+/// non-primitive-init gate (object/array `$state` declarations are not yet lowered),
 /// so only PLAIN-local and `$state`-SIGNAL roots reach this classifier at the
 /// bare-identifier arm.
 #[allow(clippy::too_many_arguments)]

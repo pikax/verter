@@ -7079,10 +7079,9 @@ fn a_member_bind_rooted_at_an_each_item_is_accepted_for_a_component_bind() {
     // formatting aside):
     //   get value() { return item.x; }
     //   set value($$value) { item.x = $$value; }
-    // Before the fix this REFUSED with `UnsupportedSvelteRuntimeSurface::Binding` because
-    // `component_bind_root_is_writable`'s Member arm called the UNWIDENED
-    // `bind_root_is_writable_target` (which rejects an each-item root) instead of the same
-    // widened `bind_member_root_is_writable_target` the DOM-bind classifier uses.
+    // `component_bind_root_is_writable`'s Member arm routes through the same widened
+    // `bind_member_root_is_writable_target` the DOM-bind classifier uses (not the narrower
+    // `bind_root_is_writable_target`, which rejects an each-item root).
     let js = emit_result(
         "<script>import Child from './Child.svelte'; let items = $state([{x:'a'}]);</script>\n{#each items as item (item)}<Child bind:value={item.x}/>{/each}\n",
     )
