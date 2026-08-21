@@ -2007,28 +2007,51 @@ export function listProcesses() {
   return rows;
 }
 
-// Parse `ps -axo pid=,pgid=,rss=` and sum the resident sets of the contained POSIX process group.
-// RSS is reported by ps in KiB. Summing per-process RSS is intentionally conservative because shared pages
-// may appear in more than one process: the watchdog's job is to preserve machine headroom, not to maximize
-// utilization up to the last uniquely-resident byte.
-export function parsePosixProcessTableRss(text, processGroupId) {
-  let rssKiB = 0;
-  let processCount = 0;
+// Parse `ps -axo pid=,ppid=,rss=` and recursively sum the resident sets of the REAL process TREE rooted at
+// `rootPid` — every descendant reachable by walking child->parent links, not just processes that still share
+// the root's process GROUP. RSS is reported by ps in KiB. Summing per-process RSS is intentionally
+// conservative because shared pages may appear in more than one process: the watchdog's job is to preserve
+// machine headroom, not to maximize utilization up to the last uniquely-resident byte.
+//
+// This used to group by PROCESS GROUP (`pgid == rootPid`, since `runContainedStep` spawns the root detached
+// so its own pid is its own pgid). That undercounted catastrophically for a `cargo nextest run` root: nextest
+// puts each test process it executes into its OWN fresh process group (confirmed against the real binary —
+// `ps -axo pid=,ppid=,pgid=` during a live run shows every executing test with a unique pgid equal to its own
+// pid, while its ppid stays the nextest process), which is how nextest signals/kills a single hung test
+// without touching its own group. A pgid-only sum sees the `cargo`/`cargo-nextest` wrapper and NONE of the
+// actual test processes doing the work — exactly the "43 MiB across 1 process(es)" reading a full-workspace
+// SURFACE 1/3 run produced. Parent-pid tree walk (mirroring `parseWindowsProcessTableRss`, which was never
+// vulnerable to this because Windows job-tree membership is a parent-pid property, not group membership)
+// finds every descendant regardless of what process group it reassigned itself into.
+export function parsePosixProcessTableRss(text, rootPid) {
+  const rows = new Map();
   for (const line of String(text || "").split(/\r?\n/)) {
     const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
-    if (!match || Number(match[2]) !== Number(processGroupId)) continue;
-    rssKiB += Number(match[3]);
-    processCount += 1;
+    if (!match) continue;
+    rows.set(Number(match[1]), { parentPid: Number(match[2]), rssKiB: Number(match[3]) });
   }
-  if (processCount === 0) {
+  if (!rows.has(Number(rootPid))) {
     return {
       ok: false,
       rssBytes: 0,
       processCount: 0,
-      detail: "process group absent from ps snapshot",
+      detail: "process tree root absent from ps snapshot",
     };
   }
-  return { ok: true, rssBytes: rssKiB * 1024, processCount };
+  const included = new Set([Number(rootPid)]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, row] of rows) {
+      if (!included.has(pid) && included.has(row.parentPid)) {
+        included.add(pid);
+        changed = true;
+      }
+    }
+  }
+  let rssKiB = 0;
+  for (const pid of included) rssKiB += rows.get(pid).rssKiB;
+  return { ok: true, rssBytes: rssKiB * 1024, processCount: included.size };
 }
 
 // Parse `pid<TAB>parent-pid<TAB>working-set-bytes` rows and recursively sum a Windows process tree.
@@ -2091,7 +2114,7 @@ export function sampleProcessTreeRssBytes(rootPid) {
     return parseWindowsProcessTableRss(result.stdout, rootPid);
   }
 
-  const result = spawnSync("ps", ["-axww", "-o", "pid=,pgid=,rss="], {
+  const result = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,rss="], {
     encoding: "utf8",
     timeout: 5_000,
     maxBuffer: 64 * 1024 * 1024,
@@ -3202,6 +3225,109 @@ export function analyzeNextestSurface(text, code, freshnessToleranceAllowed = fa
 }
 
 // ----------------------------------------------------------------------------------------------------
+// GATE TELEMETRY (report-only — nothing here is consulted by any verdict path above). nextest's default
+// terminal reporter prints one status line PER TEST as it completes — the SAME status-line grammar
+// `extractNextestTerminalFailures` parses above, but for every test (not just failing ones) and carrying
+// that test's own `[ <duration> ]` timing bracket. This walks the identical grammar to recover per-test
+// wall time from output the gate was already capturing and then discarding, instead of asking nextest for
+// a second (JUnit) output format or re-running anything.
+// ----------------------------------------------------------------------------------------------------
+const NEXTEST_STATUS_LINE_TIMED = /^(.{12}) \[([^\]]*)\]\s+(.+)$/;
+
+function parseTimingBracket(bracket) {
+  const m = /([\d.]+)\s*s/.exec(bracket);
+  return m ? parseFloat(m[1]) : null;
+}
+
+// Every test's TERMINAL (pass or fail) status line as `{ status, name, binaryId, kind, durationSec }`,
+// resolved by the SAME last-status-wins supersession rule `extractNextestTerminalFailures` uses (so a
+// retried test, or a `SLOW` progress line followed by its `PASS`, is counted once at its final duration —
+// not once per progress line). `durationSec` is `null` when the bracket carried no parseable `Ns` value;
+// callers skip those rather than treat them as zero.
+export function collectNextestTestTimings(text) {
+  const terminal = new Map();
+  for (const line of text.split("\n")) {
+    const m = NEXTEST_STATUS_LINE_TIMED.exec(line);
+    if (!m) continue;
+    if (!NEXTEST_STATUS_FIELD.test(m[1])) continue;
+    const status = m[1].trim();
+    const kind = classifyNextestStatusField(status);
+    if (kind === "unknown") continue;
+    const parts = m[3].trim().split(/\s+/);
+    if (!parts.length) continue;
+    const name = parts[parts.length - 1];
+    const prev = parts.length >= 2 ? parts[parts.length - 2] : "";
+    const binaryId = /^\(.*\)$/.test(prev) ? "" : prev;
+    const key = `${binaryId} ${name}`;
+    const durationSec = parseTimingBracket(m[2]);
+    const existing = terminal.get(key);
+    const entry = { status, name, binaryId, kind, durationSec };
+    if (existing && !nextestStatusSupersedes(existing, entry)) continue;
+    terminal.set(key, entry);
+  }
+  const out = [];
+  for (const entry of terminal.values()) {
+    if (entry.kind === "pass" || entry.kind === "fail") out.push(entry);
+  }
+  return out;
+}
+
+// A test's reporting "family": its module path with the final `::segment` (the leaf test function)
+// stripped, qualified by binary-id so two binaries' same-named module never merge into one row. A bare
+// (non-`::`-qualified) test name is its own family. This grouping exists for the report only — it plays no
+// part in pass/fail classification.
+function testFamilyKey(binaryId, name) {
+  const idx = name.lastIndexOf("::");
+  const family = idx === -1 ? name : name.slice(0, idx);
+  return `${binaryId} ${family}`;
+}
+
+// Aggregates raw per-test timings (see collectNextestTestTimings) into the shapes the gate reports:
+// cumulative duration + count per binary, per package (via the archive's OWN `binary-id -> package-name`
+// listing, so this can never drift from what actually ran), and the top-N cumulative-time test families.
+// Report-only: nothing here feeds the verdict.
+export function summarizeNextestTimings(timings, allSuites, topN = 50) {
+  const binaryToPackage = new Map();
+  for (const s of allSuites || []) {
+    if (s && s["binary-id"] !== undefined) {
+      binaryToPackage.set(s["binary-id"], s["package-name"] || "?");
+    }
+  }
+  const perBinary = new Map();
+  const perPackage = new Map();
+  const perFamily = new Map();
+  let totalSec = 0;
+  let timedCount = 0;
+  const bump = (map, key, durationSec) => {
+    const cur = map.get(key) || { count: 0, totalSec: 0 };
+    cur.count++;
+    cur.totalSec += durationSec;
+    map.set(key, cur);
+  };
+  for (const t of timings) {
+    if (t.durationSec === null) continue;
+    timedCount++;
+    totalSec += t.durationSec;
+    const pkg = binaryToPackage.get(t.binaryId) || t.binaryId || "?";
+    bump(perBinary, t.binaryId || "?", t.durationSec);
+    bump(perPackage, pkg, t.durationSec);
+    bump(perFamily, testFamilyKey(t.binaryId, t.name), t.durationSec);
+  }
+  const sortDesc = (map) =>
+    Array.from(map.entries())
+      .map(([key, v]) => ({ key, ...v }))
+      .sort((a, b) => b.totalSec - a.totalSec);
+  return {
+    totalTests: timings.length,
+    timedCount,
+    totalSec,
+    perBinary: sortDesc(perBinary),
+    perPackage: sortDesc(perPackage),
+    topFamilies: sortDesc(perFamily).slice(0, topN),
+  };
+}
+
+// ----------------------------------------------------------------------------------------------------
 // libtest stdout parsing — the EXACT failed-test names from a direct `cargo test`-style binary run.
 // libtest prints a trailing "failures:\n    <name>\n    <name>\n" block; also each failing test emits
 // "test <name> ... FAILED". We parse the "test … FAILED" lines (stable across libtest versions).
@@ -3602,7 +3728,16 @@ export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS, build
   // The declared set, each with the reason the parser depends on it:
   env.NEXTEST_HIDE_PROGRESS_BAR = "1"; // no spinner interleaved into the captured log
   env.NEXTEST_NO_OUTPUT_INDENT = "0"; // keep the 4-space capture indent (the layout layer's basis)
-  env.NEXTEST_STATUS_LEVEL = "retry"; // terminal status for every test, including retry attempts
+  // "pass" (nextest ordering: none < fail < retry < slow < leak < pass < skip < all) prints a terminal
+  // status line for every FAIL/retry AND every plain PASS. "retry" (the prior pin) sits BELOW "pass" in
+  // that ordering, so it printed fail/retry lines only — on an all-passing run that is ZERO status lines,
+  // which is why the per-test timing telemetry below read 0/0 parseable durations against a real gate run:
+  // there was nothing to parse. "pass" is a strict superset of "retry" for parser-facing content (every
+  // FAIL/TRY line "retry" produced still prints identically), so this changes nothing the verdict path
+  // reads — it only adds PASS lines, which `extractNextestTerminalFailures` already classifies as
+  // `kind: "pass"` and ignores for failure purposes. Not "all": that would also add SKIP lines, which carry
+  // no timing and the telemetry below has no use for.
+  env.NEXTEST_STATUS_LEVEL = "pass"; // terminal status for every test, including plain passes (telemetry)
   env.NEXTEST_FINAL_STATUS_LEVEL = "fail"; // the trailing failure recap the parser reads
   env.NEXTEST_RETRIES = "0"; // no genuine fail->pass supersession, so tolerance-refusal cannot false-RED
   env.NEXTEST_SUCCESS_OUTPUT = "never"; // captured output of PASSING tests never enters the stream
