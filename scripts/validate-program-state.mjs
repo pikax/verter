@@ -824,8 +824,12 @@ function verifyEntryLockRecordBinding(state, dagRoots, stateById, resolvedRoots,
 // latter directly. The previously-named second limit (Finding E, second
 // bullet — implementation_candidate_sha was a trusted, unverifiable
 // declaration) is CLOSED: implementation_ref binds the pin to a real, live
-// git ref, and the rehearsal REQUIRES that ref's resolved tip to equal the
-// pin exactly, so a stale pin is now a violation, not a silent trust.
+// git ref, and the rehearsal REQUIRES that pin to be a real ANCESTOR of that
+// ref's resolved tip (round 7 — equality does not survive an actively-
+// committing WIP branch any better than it survived the self-referential
+// trunk pin round 6 fixed; see checkImplementationRefBinding's comment), so
+// a foreign or rewritten pin is still a violation, but ordinary forward
+// progress is not.
 //
 // Round 4, FIX 1 + FIX 2: validates the implementation_ref/
 // implementation_candidate_sha trust boundary for ONE IN_PROGRESS block.
@@ -891,9 +895,31 @@ function checkImplementationRefBinding(id, b, cwd, v) {
     return null;
   }
   const liveRefTip = refRes.stdout.trim();
-  if (liveRefTip !== cand) {
+  // Round 7: ancestry, not equality — the same self-outrunning defect round
+  // 6 fixed for the trunk pin, one level down. An IN_PROGRESS block's WIP
+  // branch commits every few minutes; requiring implementation_candidate_sha
+  // to equal implementation_ref's live tip exactly means the ledger is valid
+  // only in the instant between a resync commit and the WIP branch's next
+  // commit, and every ordinary commit on the branch invalidates it again —
+  // not an intermittent staleness gap but a continuously failing relation,
+  // observed directly against the live BV2 ledger/branch pair (see AMD-013's
+  // "Round 7 correction"). `cand` need only be an ANCESTOR of the live tip:
+  // that still proves `implementation_ref` is the real branch carrying this
+  // identity (a foreign or rewritten SHA is not in that branch's history and
+  // still fails closed below), while ordinary forward progress on the WIP
+  // branch no longer invalidates a pin recorded against an earlier commit on
+  // the same line of history. Self-ancestry holds, so an exact match still
+  // passes trivially via the `--is-ancestor` call.
+  const ancRes = runGit(["merge-base", "--is-ancestor", cand, liveRefTip], cwd);
+  if (ancRes.status !== 0 && ancRes.status !== 1) {
     v(
-      `block ${id} implementation_ref ${JSON.stringify(ref)} resolves to ${liveRefTip}, but the declared implementation_candidate_sha is ${cand} — the pin does not match the live ref's current tip; a stale pin is not verifiable rehearsal input`,
+      `block ${id} implementation_ref ${JSON.stringify(ref)} ancestry against implementation_candidate_sha ${cand} could not be checked (git merge-base --is-ancestor): ${gitFailureReason(ancRes)}`,
+    );
+    return null;
+  }
+  if (ancRes.status === 1) {
+    v(
+      `block ${id} implementation_candidate_sha ${cand} is not an ancestor of implementation_ref ${JSON.stringify(ref)}'s live tip ${liveRefTip} — a lagging-but-genuinely-ancestral pin is valid rehearsal input (AMD-013 round 7), but this pin names a commit the live branch's history does not contain, so it cannot be trusted as a rehearsal identity`,
     );
     return null;
   }
