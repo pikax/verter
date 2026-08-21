@@ -19,7 +19,7 @@ implementation_baseline_tree = ""
 implementation_lock_digest = ""
 performance_gates_digest = ""
 architecture_premise_ledger_digest = ""
-current_block = "BS1"
+current_block = "BV2"
 
 [repository]
 remote = "https://github.com/pikax/verter"
@@ -651,7 +651,7 @@ notes = "Authorised 2026-08-20 by narrow maintainer ruling alongside BV1. Seven 
 
 [[block]]
 id = "BV2"
-status = "LOCKED"
+status = "IN_PROGRESS"
 charter_digest = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d1461940"
 context_packet_digest = ""
 base_sha = ""

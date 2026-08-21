@@ -361,3 +361,39 @@ documents = ["PRE-ENFORCEMENT-ACCEPTANCES"]
 ratified_by = "designated maintainer"
 ratified_at = "2026-08-20"
 scope = "retroactive ratification of a pre-enforcement acceptance"
+
+# The beta.4 regression intake the maintainer ratified, and the two rulings
+# that root-caused it into blocks. The intake binds BV2 and CM1 by name;
+# each ruling creates the block that answers one of its findings.
+
+[[document]]
+id = "BETA4-REGRESSION-INTAKE"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-BETA4-REGRESSION-INTAKE.md"
+sha256 = "0bcc283edaf168fe1cc566c66986bc79664f47bf672c63117210e8ffd812789b"
+
+[[document]]
+id = "BV2-FINDING-A"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-BV2-FINDING-A-REPAIR-AND-PLACEMENT.md"
+sha256 = "5429fb247b6fda9d90fa58d2a3cf01b8bd99967daafa8c7d04a4f6c3107b4cea"
+
+[[document]]
+id = "CM1-FINDINGS-BC"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-CM1-FINDINGS-BC.md"
+sha256 = "439ecf43810a30410d6129dbd7798f6dc1cbe8ba99a6c7d3a0d4ecf40611f501"
+
+[[authorization]]
+block = "BV2"
+documents = ["BETA4-REGRESSION-INTAKE", "BV2-FINDING-A"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "beta.4 regression intake — block created by the ruling that root-caused its finding"
+
+[[authorization]]
+block = "CM1"
+documents = ["BETA4-REGRESSION-INTAKE", "CM1-FINDINGS-BC"]
+ratified_by = "designated maintainer"
+ratified_at = "2026-08-20"
+scope = "beta.4 regression intake — block created by the ruling that root-caused its finding"
