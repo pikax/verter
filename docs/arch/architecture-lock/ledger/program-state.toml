@@ -665,7 +665,7 @@ id = "BV2"
 status = "IN_PROGRESS"
 charter_digest = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d1461940"
 context_packet_digest = ""
-base_sha = ""
+base_sha = "53d6c315701e81647fad77a6970f6f2c7c218aaf"
 candidate_sha = ""
 # implementation_candidate_sha/implementation_ref (AMD-013 round 4, FIX 2):
 # BV2 predates this schema and was the live-ledger gap FIX 2 was written to
@@ -757,10 +757,13 @@ notes = ""
 
 [[block]]
 id = "CM1"
-status = "LOCKED"
+status = "IN_PROGRESS"
 charter_digest = "1f18b0663dbd15b4e8069b0f0e5b20c2ede13dfe237cfb27f22ba0f69a2bf360"
 context_packet_digest = ""
-base_sha = ""
+base_sha = "53d6c315701e81647fad77a6970f6f2c7c218aaf"
+implementation_candidate_sha = "521491926f6cd3b88e30657e002e7e48edb08540"
+implementation_ref = "refs/heads/block/cm1"
+landing_order = 3
 candidate_sha = ""
 candidate_tree = ""
 accepted_sha = ""
@@ -1432,10 +1435,13 @@ notes = ""
 
 [[block]]
 id = "J1"
-status = "LOCKED"
+status = "IN_PROGRESS"
 charter_digest = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
 context_packet_digest = ""
-base_sha = ""
+base_sha = "9531d625fc2cbf02a2de76feb31f5f519fd8de6c"
+implementation_candidate_sha = "75930dcfc5638d32d081354810f5d3c879f7cadc"
+implementation_ref = "refs/heads/block/j1"
+landing_order = 2
 candidate_sha = ""
 candidate_tree = ""
 accepted_sha = ""

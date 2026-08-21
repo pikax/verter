@@ -397,3 +397,38 @@ documents = ["BETA4-REGRESSION-INTAKE", "CM1-FINDINGS-BC"]
 ratified_by = "designated maintainer"
 ratified_at = "2026-08-20"
 scope = "beta.4 regression intake — block created by the ruling that root-caused its finding"
+
+# Track J's authority. The maintainer's clean-cutover directive and the two
+# rulings that bound the track bind J1 by name; the charter was ratified by the
+# codex architect on 2026-08-21 after eleven review rounds.
+
+[[document]]
+id = "CSS-CLEAN-CUTOVER"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-CSS-CLEAN-CUTOVER.md"
+sha256 = "c2253553b7c1163b98f96471f2f069a77121169594dc57e478ded633b2111133"
+
+[[document]]
+id = "J-TRAIN-SCOPE-PARSING-ONLY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-J-TRAIN-SCOPE-IS-PARSING-ONLY.md"
+sha256 = "a181e3d554be88cef5600772a09e2b5c405be0b53206b84229c74a562f4796b9"
+
+[[document]]
+id = "ONE-CSS-PARSER-PARSE-ONCE"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-ONE-CSS-PARSER-PARSE-ONCE.md"
+sha256 = "4cabfde198cfc246f60e44393ac6b11ef9ef9969c3dca140ea07cf41df9d65b9"
+
+[[document]]
+id = "J1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/J1.md"
+sha256 = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
+
+[[authorization]]
+block = "J1"
+documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-PARSE-ONCE", "J1-CHARTER"]
+ratified_by = "designated maintainer (scope), codex architect (charter)"
+ratified_at = "2026-08-21"
+scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, seven readers converging under one parse"
