@@ -9,6 +9,7 @@ import {
   parseCaseManifest,
   reEnumerateVueRows,
   reEnumerateSvelteRows,
+  reverseEnumerateSvelteRows,
 } from "../src/coverage-report.mjs";
 import { oracleSourcePaths } from "../src/env-paths.mjs";
 
@@ -20,10 +21,10 @@ describe("manifest structural accounting", () => {
     expect(result.problems).toEqual([]);
   });
 
-  it("Svelte manifest: exactly 3457 rows, unique IDs, closed-set dispositions, no unexplained row", () => {
+  it("Svelte manifest: exactly 3475 rows, unique IDs, closed-set dispositions, no unexplained row", () => {
     const result = accountManifestStructure("svelte-official-cases.tsv");
-    expect(result.rowCount).toBe(3457);
-    expect(result.uniqueIds).toBe(3457);
+    expect(result.rowCount).toBe(3475);
+    expect(result.uniqueIds).toBe(3475);
     expect(result.problems).toEqual([]);
   });
 });
@@ -39,12 +40,48 @@ describe("runner re-enumeration against the pinned source trees", () => {
     expect(result.resolvable).toBe(2003);
   });
 
-  runIf("every one of the 3457 Svelte rows resolves inside the pinned checkout", () => {
+  runIf("every one of the 3475 Svelte rows resolves inside the pinned checkout", () => {
     const rows = parseCaseManifest("svelte-official-cases.tsv");
     const result = reEnumerateSvelteRows(svelteSource, rows);
     expect(result.unresolvable).toEqual([]);
-    expect(result.resolvable).toBe(3457);
+    expect(result.resolvable).toBe(3475);
   });
+
+  // The MISSING reverse direction: every real Svelte suite/sample directory
+  // in the pinned checkout must have a covered row — not just "every
+  // committed row still resolves" (the case above). Without this direction,
+  // an upstream case silently added (or a case silently dropped from the
+  // manifest by a bad hand-edit) goes undetected forever, which is exactly
+  // how the pre-bump manifest rotted against 5.56.10 unnoticed.
+  runIf(
+    "bidirectional completeness: every upstream Svelte sample/suite locator has a covered row",
+    () => {
+      const rows = parseCaseManifest("svelte-official-cases.tsv");
+      const result = reverseEnumerateSvelteRows(svelteSource, rows);
+      expect(result.missingFromManifest).toEqual([]);
+      expect(result.goneFromUpstream).toEqual([]);
+      expect(result.liveTotal).toBe(3475);
+    },
+    // svelteManifest() spawns one `git rev-parse` per sample/suite directory
+    // (~3475 of them, unbatched — it is the generator's own enumeration
+    // logic, reused as-is rather than forked into a faster second walker) —
+    // comfortably over vitest's default 5s test timeout.
+    60000,
+  );
+
+  // Proves the reverse check actually discriminates: withholding a single
+  // real, currently-covered row must be caught as "present upstream but
+  // missing from the manifest" — not silently pass.
+  runIf(
+    "bidirectional completeness: a deliberately withheld real row is caught as missing",
+    () => {
+      const rows = parseCaseManifest("svelte-official-cases.tsv");
+      const [withheldRow, ...remainder] = rows;
+      const result = reverseEnumerateSvelteRows(svelteSource, remainder);
+      expect(result.missingFromManifest).toEqual([withheldRow.source_locator]);
+    },
+    60000,
+  );
 
   runIf(
     "a deliberately corrupted locator is correctly reported unresolvable (not silently accepted)",

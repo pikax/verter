@@ -69,11 +69,12 @@ Before the three primary reports exist, the corresponding preparation command is
 `node docs/arch/refactor/rev11/evidence/framework-conformance/validate-package.mjs
 --pre-review`. It intentionally rejects this attached-report state.
 
-The case manifests contain 2,003 Vue official compiler test declarations and 3,457
-Svelte official sample/suite rows. Their SHA-256 values are:
+The case manifests contain 2,003 Vue official compiler test declarations and 3,475
+Svelte official sample/suite rows (regenerated against svelte@5.56.10 — see
+`svelte-case-identity-ledger.md`). Their SHA-256 values are:
 
 - Vue: `76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba`
-- Svelte: `09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e`
+- Svelte: `0ba28efe7aafde6463d0a0977d8297561525d1c6d4161ffec33d0b8369eaaa3c`
 
 These are blocked seed manifests, not conformance acceptance.
 

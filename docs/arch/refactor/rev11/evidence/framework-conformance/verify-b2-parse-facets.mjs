@@ -28,8 +28,15 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 
+import { SVELTE_DOMAIN } from "../../../../../../packages/framework-conformance-harness/src/domain-pin.mjs";
+
+// EXPECTED_SVELTE reads from the same single source of truth as
+// generate-official-case-manifests.mjs — see that file's comment for why
+// this one is no longer hardcoded here. EXPECTED_VUE stays independently
+// hardcoded to this evidence package's own frozen rc.3 pin — see that same
+// file's comment for why it must NOT alias VUE_DOMAIN.commit.
 const EXPECTED_VUE = "3adb225775c9b28223a56e07f7a2f874b6fbb138";
-const EXPECTED_SVELTE = "44a7813730579b94004e182e5a67aab27aa9d2a6";
+const EXPECTED_SVELTE = SVELTE_DOMAIN.commit;
 
 function args(argv) {
   const out = {};

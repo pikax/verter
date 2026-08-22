@@ -2144,6 +2144,15 @@ checkout. Regenerate with the same command to reproduce byte-for-byte.
   - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`64da9ff59c67173bfa4200464a8cc5553347dfa83efc21da96759ceb3bccbeef`
     validation: spans_mapped=`true` diagnostics_sorted=`true`
 
+### SVELTE-E02C5AD1D1551DEA7C44
+
+- classification: `pass`
+- source_locator: `packages/svelte/tests/parser-modern/samples/css-nth-of-minified/`
+- verdict_hash: `2c6870b2db80fa41`
+- invocations:
+  - expected=`valid` outcome=`ok` reject_variant=`n/a` matches=`true` required_code=`n/a` mapped_error=`false` invalid_reject=`false` source_sha256=`5e55b35c47792ed3066984516ad1f60a3acc625df0873f7f05eae52fb7af04df`
+    validation: spans_mapped=`true` diagnostics_sorted=`true`
+
 ### SVELTE-ED2DD7A86E4D9E723BFB
 
 - classification: `pass`

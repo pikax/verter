@@ -6,8 +6,43 @@ import { createRequire } from "node:module";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 
+import { SVELTE_DOMAIN } from "../../../../../../packages/framework-conformance-harness/src/domain-pin.mjs";
+
+// EXPECTED_SVELTE reads from the SAME single source of truth as the rest of
+// the harness (domain-pin.mjs, which mirrors version-domain.md). This
+// generator used to hardcode its own EXPECTED_SVELTE commit constant, which
+// meant a routine upstream version bump had two places to update and
+// silently went stale here when only domain-pin.mjs was updated — exactly
+// what stranded this generator against 5.56.10 while the rest of the
+// harness had already moved. There is now exactly one place to bump for
+// Svelte.
+//
+// EXPECTED_VUE stays independently hardcoded, NOT sourced from
+// VUE_DOMAIN.commit. This BF1/BF2 official-case-manifest evidence package
+// is a separate, already-frozen domain from the general runtime-oracle
+// domain domain-pin.mjs governs — see version-domain.md's "Scope of
+// re-resolved workspace-wide" note. Moving it to track a new Vue commit
+// needs a genuine BF1/BF2 re-certification, not a source-of-truth alias;
+// wiring it to VUE_DOMAIN.commit would silently drag this frozen package
+// along on the next routine Vue bump.
 const EXPECTED_VUE = "3adb225775c9b28223a56e07f7a2f874b6fbb138";
-const EXPECTED_SVELTE = "44a7813730579b94004e182e5a67aab27aa9d2a6";
+const EXPECTED_SVELTE = SVELTE_DOMAIN.commit;
+
+// Durable Svelte case-ID identity salt — FROZEN, independent of the live
+// upstream version pin (SVELTE_DOMAIN.commit / EXPECTED_SVELTE above).
+//
+// A case_id is `SVELTE-${hash(`${SVELTE_CASE_ID_SALT}\0${locator}`)...}`.
+// The locator (suite-relative sample-directory or suite-sentinel path) is
+// the only durable identity input; this salt is a fixed namespace, not a
+// version tracker. Bumping it would mint a brand-new case_id for every
+// existing locator, invalidating every `evidence_id` cross-reference into
+// B2-parse-facet-svelte.md and the manifest-classification accounting for
+// no reason — the exact defect this constant exists to prevent. It must
+// NEVER be updated to track a new Svelte release; see
+// svelte-case-identity-ledger.md for the frozen-salt rationale and the
+// reviewed log of locator identity transitions (rename/removal/addition)
+// across upstream version bumps.
+const SVELTE_CASE_ID_SALT = "svelte-5.56.8";
 
 function args(argv) {
   const out = {};
@@ -217,7 +252,7 @@ function svelteManifest(svelteRoot) {
       const notApplicable = SVELTE_NOT_APPLICABLE.get(suite);
       const locator = `${rel}/`;
       rows.push({
-        case_id: `SVELTE-${hash(`svelte-5.56.8\0${locator}`).slice(0, 20).toUpperCase()}`,
+        case_id: `SVELTE-${hash(`${SVELTE_CASE_ID_SALT}\0${locator}`).slice(0, 20).toUpperCase()}`,
         suite,
         source_locator: locator,
         source_object: tree,
@@ -237,7 +272,7 @@ function svelteManifest(svelteRoot) {
         SVELTE_NON_SAMPLE_SUITES.get(suite) ??
         "Suite contains no sample-case root; BF2 must inspect and classify it before claiming complete coverage.";
       rows.push({
-        case_id: `SVELTE-${hash(`svelte-5.56.8\0${rel}/`).slice(0, 20).toUpperCase()}`,
+        case_id: `SVELTE-${hash(`${SVELTE_CASE_ID_SALT}\0${rel}/`).slice(0, 20).toUpperCase()}`,
         suite,
         source_locator: `${rel}/`,
         source_object: tree,
@@ -253,48 +288,59 @@ function svelteManifest(svelteRoot) {
   return rows;
 }
 
-const options = args(process.argv.slice(2));
-assertCheckout(options["vue-source"], EXPECTED_VUE);
-assertCheckout(options["svelte-source"], EXPECTED_SVELTE);
-const requireFromOracle = createRequire(join(options["vue-modules"], "package.json"));
-const parser = requireFromOracle("@babel/parser");
+// Reusable by other harness modules (e.g. the reverse-completeness check in
+// @verter/framework-conformance-harness's coverage-report.mjs), so upstream
+// enumeration logic has exactly one owner — never a second parallel scanner
+// reimplementing "what counts as a case".
+export { vueManifest, svelteManifest, SVELTE_CASE_ID_SALT, EXPECTED_VUE, EXPECTED_SVELTE };
 
-const vueRows = vueManifest(options["vue-source"], parser);
-const svelteRows = svelteManifest(options["svelte-source"]);
-if (vueRows.length === 0 || svelteRows.length === 0)
-  throw new Error("manifest extraction produced zero rows");
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname);
 
-writeFileSync(
-  join(options["out-dir"], "vue-official-cases.tsv"),
-  tsv(vueRows, [
-    "case_id",
-    "suite",
-    "source_locator",
-    "source_object",
-    "declaration_kind",
-    "title_kind",
-    "title_sha256",
-    "disposition",
-    "provisional_owner",
-    "reason",
-    "evidence_id",
-  ]),
-);
-writeFileSync(
-  join(options["out-dir"], "svelte-official-cases.tsv"),
-  tsv(svelteRows, [
-    "case_id",
-    "suite",
-    "source_locator",
-    "source_object",
-    "declaration_kind",
-    "disposition",
-    "provisional_owner",
-    "reason",
-    "evidence_id",
-  ]),
-);
+if (invokedDirectly) {
+  const options = args(process.argv.slice(2));
+  assertCheckout(options["vue-source"], EXPECTED_VUE);
+  assertCheckout(options["svelte-source"], EXPECTED_SVELTE);
+  const requireFromOracle = createRequire(join(options["vue-modules"], "package.json"));
+  const parser = requireFromOracle("@babel/parser");
 
-process.stdout.write(
-  JSON.stringify({ vue_rows: vueRows.length, svelte_rows: svelteRows.length }) + "\n",
-);
+  const vueRows = vueManifest(options["vue-source"], parser);
+  const svelteRows = svelteManifest(options["svelte-source"]);
+  if (vueRows.length === 0 || svelteRows.length === 0)
+    throw new Error("manifest extraction produced zero rows");
+
+  writeFileSync(
+    join(options["out-dir"], "vue-official-cases.tsv"),
+    tsv(vueRows, [
+      "case_id",
+      "suite",
+      "source_locator",
+      "source_object",
+      "declaration_kind",
+      "title_kind",
+      "title_sha256",
+      "disposition",
+      "provisional_owner",
+      "reason",
+      "evidence_id",
+    ]),
+  );
+  writeFileSync(
+    join(options["out-dir"], "svelte-official-cases.tsv"),
+    tsv(svelteRows, [
+      "case_id",
+      "suite",
+      "source_locator",
+      "source_object",
+      "declaration_kind",
+      "disposition",
+      "provisional_owner",
+      "reason",
+      "evidence_id",
+    ]),
+  );
+
+  process.stdout.write(
+    JSON.stringify({ vue_rows: vueRows.length, svelte_rows: svelteRows.length }) + "\n",
+  );
+}

@@ -360,7 +360,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # criterion selected after candidate measurement" (charter Abort/rescope).
 # What DOES exist, right now, unrelated to any BF2 candidate, is the BF1
 # evidence-preparation tool that already produced the committed
-# vue-official-cases.tsv (2003 rows) and svelte-official-cases.tsv (3457
+# vue-official-cases.tsv (2003 rows) and svelte-official-cases.tsv (3475
 # rows): docs/arch/refactor/rev11/evidence/framework-conformance/
 # generate-official-case-manifests.mjs. Its behavior is fully deterministic
 # and it is not BF2's harness — it is the BF1-owned tool that seeds BF2's
@@ -436,11 +436,20 @@ operation = "official_case_enumeration_and_classification; target_manifest=vue-o
 # pinned framework source commits it asserts via EXPECTED_VUE/
 # EXPECTED_SVELTE, and the oracle npm closure that supplies its one runtime
 # dependency (@babel/parser, resolved via --vue-modules).
-corpus_fingerprint = "git-blob:b61404de48e8ba86767a09414195b67a06ac56be (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:44a7813730579b94004e182e5a67aab27aa9d2a6; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
 # No Revision 11 normalized product-request type exists for this offline
 # evidence-preparation tool (same gap A6 names for its own request digest).
-# SHA-256 over the literal pinned invocation description string instead.
-normalized_product_request_digest = "0dd25cf5991d9e127428a49cdda7874aae684ff3bf5ef246bde293541a9b6ac9"
+# SHA-256 over the literal pinned invocation description string below (no
+# trailing newline) — recorded so the digest can be recomputed instead of
+# trusted, same discipline as A6_META_COMPILE_40_COLD_RUST's own request
+# identity. Bumped alongside the sibling BF2_SVELTE_ORACLE_MANIFEST_GENERATE
+# cell for the generator script's edited blob (decoupling EXPECTED_VUE from
+# the live VUE_DOMAIN pin) — both cells measure the SAME single invocation,
+# so their corpus_fingerprint/request-identity inputs move together even
+# though this edit does not change either manifest's row count.
+#
+#   verter-rev11-cell:BF2_VUE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=vue-official-cases.tsv;generator=git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
+normalized_product_request_digest = "5e270a920fd26be414b07868c2a6c0c149e0d5cd892bcba22c9ef50b5e17ebb4"
 result_contract = "vue_official_case_manifest_tsv_row_set"
 semantic_profile = "none"
 execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"
@@ -589,8 +598,13 @@ owner = "BF2"
 # source tree and assigns a disposition per suite. Makes ZERO calls to the
 # Svelte compiler and writes no golden/compiled output.
 operation = "official_case_enumeration_and_classification; target_manifest=svelte-official-cases.tsv"
-corpus_fingerprint = "git-blob:b61404de48e8ba86767a09414195b67a06ac56be (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:44a7813730579b94004e182e5a67aab27aa9d2a6; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
-normalized_product_request_digest = "94d08f58783de4705dcf2484137e67f16db1649eb8cbedb7978a8ba3906d5676"
+corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+# SHA-256 over the literal pinned invocation description string below (no
+# trailing newline) — see the sibling BF2_VUE_ORACLE_MANIFEST_GENERATE
+# cell's identical-shape comment for the shared rationale.
+#
+#   verter-rev11-cell:BF2_SVELTE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=svelte-official-cases.tsv;generator=git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
+normalized_product_request_digest = "ad8e293cab6969017805bab4e537ac7ea4a1f9003dec53d16ba60266f1193963"
 result_contract = "svelte_official_case_manifest_tsv_row_set"
 semantic_profile = "none"
 execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"
@@ -607,7 +621,7 @@ required_serialization_profiles = []
 required_mapping_kinds = []
 required_diagnostics_policy = "not_applicable"
 required_exactness = "exact"
-output_oracle = "sha256(svelte-official-cases.tsv) == 09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e"
+output_oracle = "sha256(svelte-official-cases.tsv) == 0ba28efe7aafde6463d0a0977d8297561525d1c6d4161ffec33d0b8369eaaa3c"
 zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts"]
 
 # ── timing and memory: identical measured numbers to the sibling
@@ -653,30 +667,32 @@ statistic = "max"
 comparison = "absolute_min"
 limit = 22
 
-# Total enumerated Svelte sample/suite-sentinel rows.
+# Total enumerated Svelte sample/suite-sentinel rows. Bumped 3457 -> 3475
+# for the svelte@5.56.10 regeneration (18 new upstream sample directories,
+# 0 removed/renamed) — see svelte-case-identity-ledger.md.
 [[cell.metric]]
 name = "svelte.official_case_rows.count"
 statistic = "max"
 comparison = "absolute_max"
-limit = 3457
+limit = 3475
 
 [[cell.metric]]
 name = "svelte.official_case_rows.count"
 statistic = "max"
 comparison = "absolute_min"
-limit = 3457
+limit = 3475
 
 [[cell.metric]]
 name = "svelte.blocked_disposition_rows.count"
 statistic = "max"
 comparison = "absolute_max"
-limit = 3313
+limit = 3325
 
 [[cell.metric]]
 name = "svelte.blocked_disposition_rows.count"
 statistic = "max"
 comparison = "absolute_min"
-limit = 3313
+limit = 3325
 
 # migrate/preprocess/print: classified outside Verter's compiler product
 # boundary by the generator itself (SVELTE_NOT_APPLICABLE), not a gap.
@@ -684,13 +700,13 @@ limit = 3313
 name = "svelte.not_applicable_disposition_rows.count"
 statistic = "max"
 comparison = "absolute_max"
-limit = 144
+limit = 150
 
 [[cell.metric]]
 name = "svelte.not_applicable_disposition_rows.count"
 statistic = "max"
 comparison = "absolute_min"
-limit = 144
+limit = 150
 
 [cell.competitor]
 rule = "none"

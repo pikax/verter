@@ -25,7 +25,9 @@ resolve all blocked rows, and attach profile/product evidence. They cannot be tr
 as an accepted conformance pack.
 
 Generation from the exact clean upstream trees produced 2,003 Vue test declarations
-across the five compiler packages and 3,457 Svelte sample/suite rows. The committed
-manifest SHA-256 values are respectively
+across the five compiler packages and 3,475 Svelte sample/suite rows (regenerated
+against svelte@5.56.10; see `svelte-case-identity-ledger.md` for the durable-identity
+reconciliation from the prior svelte@5.56.8 count of 3,457). The committed manifest
+SHA-256 values are respectively
 `76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba` and
-`09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e`.
+`0ba28efe7aafde6463d0a0977d8297561525d1c6d4161ffec33d0b8369eaaa3c`.

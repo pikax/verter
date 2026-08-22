@@ -114,7 +114,7 @@ const caseDispositions = new Set([
 ]);
 const caseCounts = new Map([
   ["vue-official-cases.tsv", 2003],
-  ["svelte-official-cases.tsv", 3457],
+  ["svelte-official-cases.tsv", 3475],
 ]);
 for (const path of ["vue-official-cases.tsv", "svelte-official-cases.tsv"]) {
   const rows = parseTsv(path);
@@ -196,7 +196,7 @@ const expectedDigests = new Map([
   ["oracles/svelte/package-lock.json", EVIDENCE_LOCK_DIGESTS.sveltePackageLockSha256],
   ["oracles/svelte/closure.tsv", EVIDENCE_LOCK_DIGESTS.svelteClosureSha256],
   ["vue-official-cases.tsv", "76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba"],
-  ["svelte-official-cases.tsv", "09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e"],
+  ["svelte-official-cases.tsv", "0ba28efe7aafde6463d0a0977d8297561525d1c6d4161ffec33d0b8369eaaa3c"],
 ]);
 for (const [path, expected] of expectedDigests)
   assert(digest(path) === expected, `${path}: digest drift`);
