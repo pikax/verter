@@ -12,6 +12,7 @@ mod registered_geometry_compile_fail;
 mod repro_member_access_ide_codegen;
 mod segmented_overwrite_compile_fail;
 mod style_declaration_list_routing;
+mod style_pipeline_ordering;
 mod style_planner;
 mod svelte_bind_contract_freshness;
 mod svelte_carrier_parse_rejection;

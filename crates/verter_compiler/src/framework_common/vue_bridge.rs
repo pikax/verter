@@ -41,8 +41,7 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::style_planner::{
-    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
-    PlainCssInput, StyleRewriteOutcome,
+    run_vue_style_cascade, run_vue_style_cascade_post_preprocess, AuthoredStyleInput, PlainCssInput,
 };
 use verter_language::ParseOptions;
 
@@ -1249,6 +1248,10 @@ impl CarrierCompiler for VueCarrierCompiler {
                 let mut applied_rewrite_stages = 0u8;
 
                 if !supplied_preprocessor_output {
+                    // The common path: authored bytes, not already-preprocessed
+                    // output, so all 3 stages apply in one cascade — a stage
+                    // that produces no edits hands its retained IR to the next
+                    // instead of forcing a re-parse (A10i).
                     let authored = AuthoredStyleInput::new(
                         &current,
                         selected_dialect,
@@ -1256,27 +1259,48 @@ impl CarrierCompiler for VueCarrierCompiler {
                         &input.source_space_token,
                         &input.content_artifact_token,
                     );
-                    match transform_vue_v_bind(authored, &style_scope).map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
+                    let outcome =
+                        run_vue_style_cascade(authored, &style_scope, cascade_module, node.scoped);
+                    if !outcome.stage_failures.is_empty() {
+                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
-                        }
-                    })? {
-                        StyleRewriteOutcome::Unchanged { .. } => {}
-                        StyleRewriteOutcome::Rewritten {
-                            code,
-                            source_map,
-                            output_descriptor,
-                            ..
-                        } => {
-                            current = code;
-                            current_map = opts.source_map.then_some(source_map);
-                            descriptor = *output_descriptor;
-                            applied_rewrite_stages = applied_rewrite_stages.saturating_add(1);
-                        }
+                        });
                     }
-                }
-
-                if node.module && selected_dialect == CssDialect::Css {
+                    let stage_count = [
+                        outcome.facts.rewrites.v_bind,
+                        outcome.facts.rewrites.css_modules,
+                        outcome.facts.rewrites.scoped_selector
+                            || outcome.facts.rewrites.keyframes
+                            || outcome.facts.rewrites.deep
+                            || outcome.facts.rewrites.slotted
+                            || outcome.facts.rewrites.global,
+                    ]
+                    .into_iter()
+                    .filter(|applied| *applied)
+                    .count();
+                    if stage_count > 0 {
+                        current = outcome.code;
+                        current_map = opts.source_map.then_some(outcome.source_map);
+                        descriptor = RuntimeOutputDescriptor::generated(
+                            &current,
+                            current_map.as_deref(),
+                            &[(
+                                input.source_space_token.as_str(),
+                                input.content_artifact_token.as_str(),
+                            )],
+                            SourceMapFidelity::Exact,
+                        );
+                        applied_rewrite_stages =
+                            applied_rewrite_stages.saturating_add(stage_count as u8);
+                    }
+                } else {
+                    // Already-preprocessed CSS output: the authored v-bind
+                    // stage does not apply (its content is upstream of the
+                    // supplied bytes), so this branch starts the cascade at
+                    // the modules stage instead — an unchanged modules stage
+                    // still hands its retained IR into the scoped-selector
+                    // stage rather than forcing a second parse (A10i).
                     let plain = PlainCssInput::try_new(
                         &current,
                         selected_dialect,
@@ -1289,56 +1313,43 @@ impl CarrierCompiler for VueCarrierCompiler {
                             adapter_id: self.adapter_id(),
                         }
                     })?;
-                    match transform_vue_css_modules(plain, &style_scope).map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
+                    let outcome = run_vue_style_cascade_post_preprocess(
+                        plain,
+                        &style_scope,
+                        cascade_module,
+                        node.scoped,
+                    );
+                    if !outcome.stage_failures.is_empty() {
+                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
-                        }
-                    })? {
-                        StyleRewriteOutcome::Unchanged { .. } => {}
-                        StyleRewriteOutcome::Rewritten {
-                            code,
-                            source_map,
-                            output_descriptor,
-                            ..
-                        } => {
-                            current = code;
-                            current_map = opts.source_map.then_some(source_map);
-                            descriptor = *output_descriptor;
-                            applied_rewrite_stages = applied_rewrite_stages.saturating_add(1);
-                        }
+                        });
                     }
-                }
-
-                if node.scoped {
-                    let plain = PlainCssInput::try_new(
-                        &current,
-                        selected_dialect,
-                        &input.source_space_token,
-                        &input.source_space_token,
-                        &input.content_artifact_token,
-                    )
-                    .map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        }
-                    })?;
-                    match transform_vue_scoped_css(plain, &style_scope).map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        }
-                    })? {
-                        StyleRewriteOutcome::Unchanged { .. } => {}
-                        StyleRewriteOutcome::Rewritten {
-                            code,
-                            source_map,
-                            output_descriptor,
-                            ..
-                        } => {
-                            current = code;
-                            current_map = opts.source_map.then_some(source_map);
-                            descriptor = *output_descriptor;
-                            applied_rewrite_stages = applied_rewrite_stages.saturating_add(1);
-                        }
+                    let stage_count = [
+                        outcome.facts.rewrites.css_modules,
+                        outcome.facts.rewrites.scoped_selector
+                            || outcome.facts.rewrites.keyframes
+                            || outcome.facts.rewrites.deep
+                            || outcome.facts.rewrites.slotted
+                            || outcome.facts.rewrites.global,
+                    ]
+                    .into_iter()
+                    .filter(|applied| *applied)
+                    .count();
+                    if stage_count > 0 {
+                        current = outcome.code;
+                        current_map = opts.source_map.then_some(outcome.source_map);
+                        descriptor = RuntimeOutputDescriptor::generated(
+                            &current,
+                            current_map.as_deref(),
+                            &[(
+                                input.source_space_token.as_str(),
+                                input.content_artifact_token.as_str(),
+                            )],
+                            SourceMapFidelity::Exact,
+                        );
+                        applied_rewrite_stages =
+                            applied_rewrite_stages.saturating_add(stage_count as u8);
                     }
                 }
 
@@ -2448,6 +2459,105 @@ mod tests {
         assert_eq!(
             style.output_descriptor.source_map.fidelity,
             SourceMapFidelity::Approximate
+        );
+    }
+
+    /// @ai-generated - A10i must hold for the "supplied-preprocessor-output"
+    /// branch too (authored SCSS whose supplied bytes are already-compiled
+    /// plain CSS, so the authored-v-bind stage does not apply): the modules
+    /// stage produces no edits here (no class selector to hash), so its
+    /// retained IR must hand straight into the scoped-selector stage
+    /// instead of forcing a second parse. Proven against the OLD
+    /// two-independent-calls pattern run directly on the same fixture, not
+    /// just the new entry point's absolute count.
+    #[test]
+    fn supplied_preprocessor_output_reuses_parsed_ir_across_modules_and_scoped() {
+        use crate::style_planner::{
+            parse_ir_invocation_count, reset_parse_ir_invocation_count, transform_vue_css_modules,
+            transform_vue_scoped_css, StyleRewriteOutcome,
+        };
+
+        let plain_input = || {
+            PlainCssInput::try_new(
+                "body { color: red; }",
+                CssDialect::Css,
+                "theme.css",
+                "space:theme-scss",
+                "artifact:theme-scss",
+            )
+            .expect("plain css")
+        };
+
+        // The old per-stage-independent pattern this branch used to run:
+        // each call parses its own input, even though the modules stage
+        // produces no edits.
+        reset_parse_ir_invocation_count();
+        let modules_outcome =
+            transform_vue_css_modules(plain_input(), "scope123").expect("modules stage");
+        let after_modules = match modules_outcome {
+            StyleRewriteOutcome::Unchanged { .. } => "body { color: red; }".to_string(),
+            StyleRewriteOutcome::Rewritten { code, .. } => code,
+        };
+        let scoped_plain = PlainCssInput::try_new(
+            &after_modules,
+            CssDialect::Css,
+            "theme.css",
+            "space:theme-scss",
+            "artifact:theme-scss",
+        )
+        .expect("plain css");
+        let _ = transform_vue_scoped_css(scoped_plain, "scope123").expect("scoped stage");
+        assert_eq!(
+            parse_ir_invocation_count(),
+            2,
+            "running modules and scoped independently re-parses the \
+             unchanged hand-off, costing 2 even though the modules stage \
+             produced no edits"
+        );
+
+        // The real production branch (already-preprocessed CSS, module +
+        // scoped) must cost exactly 1.
+        let source = concat!(
+            "<template><div/></template>",
+            "<style module scoped lang=\"scss\" src=\"./theme.scss\"></style>"
+        );
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        reset_parse_ir_invocation_count();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("Theme.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    source_map: true,
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![Some(RuntimeBlockContentInput {
+                            code: Arc::from("body { color: red; }"),
+                            source_map: None,
+                            lang: "css".to_string(),
+                            content_artifact_token: "artifact:theme-scss".to_string(),
+                            source_space_token: "space:theme-scss".to_string(),
+                        })],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("supplied preprocessor output compiles");
+        assert_eq!(
+            parse_ir_invocation_count(),
+            1,
+            "an unchanged modules stage must hand its retained IR into \
+             scoping, not force a second parse"
+        );
+        let style = &output.styles[0];
+        assert!(
+            style.code.contains("body[data-v-scope123]"),
+            "{}",
+            style.code
         );
     }
 

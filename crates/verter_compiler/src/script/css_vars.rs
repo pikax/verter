@@ -57,8 +57,19 @@ pub fn inject_use_css_vars<'alloc>(
         }
         first = false;
 
+        // The client `useCssVars` runtime (`setVarsOnNode`) always prepends
+        // `--` itself when it applies the value (`style.setProperty(`--${key}`,
+        // ...)`), so the JS-registered key here must be bare — never the
+        // `--`-prefixed CSS custom-property name the same `var_name` carries
+        // for the CSS-side `var(--x-color)` reference. Baking `--` into both
+        // sides means the runtime double-prepends it (`----hash-color`) and
+        // the binding silently never applies (A10h).
+        let js_key = v_bind
+            .var_name
+            .strip_prefix("--")
+            .unwrap_or(&v_bind.var_name);
         buf.push_str("  \"");
-        buf.push_str(&v_bind.var_name);
+        buf.push_str(js_key);
         buf.push_str("\": (");
 
         // Resolve expression using binding metadata.
