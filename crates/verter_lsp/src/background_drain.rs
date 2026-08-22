@@ -356,6 +356,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 &snapshot,
                 import_id,
                 None,
+                None,
                 "aliased_resync",
                 carrier_publish.as_ref(),
                 carrier_coordinator,
@@ -363,6 +364,15 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             .await;
             continue;
         }
+
+        // Pin the open document's exact revision BEFORE compiling, if any is
+        // open — see `DocumentRegistry::open_compile_pin`. `None` for a closed
+        // import (no live document to race).
+        let (import_open_uri, import_ide_compile_revision) = documents.open_compile_pin(import_id);
+        let import_open_pin = match (&import_open_uri, &import_ide_compile_revision) {
+            (Some(uri), Some(revision)) => Some((uri, revision)),
+            _ => None,
+        };
 
         // Compile to generate public API. IDE-sync: gate on the IDE/TSX surface
         // (not the runtime `Main`) so a Main-less carrier (Svelte) — which has a
@@ -393,6 +403,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             &snapshot,
             import_id,
             ide.as_ref(),
+            import_open_pin,
             "aliased_resync",
             carrier_publish.as_ref(),
             carrier_coordinator,
@@ -536,6 +547,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     &snapshot,
                     carrier_id,
                     None,
+                    None,
                     "barrel_carrier_dep",
                     carrier_publish.as_ref(),
                     carrier_coordinator,
@@ -543,6 +555,16 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 .await;
                 continue;
             }
+
+            // Pin the open document's exact revision BEFORE compiling, if any
+            // is open — see `DocumentRegistry::open_compile_pin`.
+            let (barrel_dep_open_uri, barrel_dep_ide_compile_revision) =
+                documents.open_compile_pin(carrier_id);
+            let barrel_dep_open_pin = match (&barrel_dep_open_uri, &barrel_dep_ide_compile_revision)
+            {
+                (Some(uri), Some(revision)) => Some((uri, revision)),
+                _ => None,
+            };
 
             // IDE-sync: gate on the IDE/TSX surface (not the runtime `Main`) so
             // a Main-less carrier (Svelte) is not skipped here.
@@ -565,6 +587,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 &snapshot,
                 carrier_id,
                 ide.as_ref(),
+                barrel_dep_open_pin,
                 "barrel_carrier_dep",
                 carrier_publish.as_ref(),
                 carrier_coordinator,
@@ -683,6 +706,14 @@ pub(super) async fn sync_pending_carrier_provider_file(
     // cache treats the next diagnostic request as a cache miss.
     documents.host.invalidate_compile_slots(canonical_id);
     documents.host.bump_diagnostics_generation(canonical_id);
+    // Pin the open document's exact revision BEFORE compiling, if any is open
+    // — see `DocumentRegistry::open_compile_pin`. `None` for a closed carrier
+    // (no live document to race).
+    let (open_uri, ide_compile_revision) = documents.open_compile_pin(canonical_id);
+    let open_pin = match (&open_uri, &ide_compile_revision) {
+        (Some(uri), Some(revision)) => Some((uri, revision)),
+        _ => None,
+    };
     let profile = documents.tsx_profile.read().clone();
     // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
     // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
@@ -706,6 +737,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
         snapshot,
         canonical_id,
         ide.as_ref(),
+        open_pin,
         "pending_snapshot",
         carrier_publish,
         carrier_coordinator,
@@ -764,6 +796,10 @@ fn classify_carrier_apply_outcome(outcome: CarrierApplyOutcome) -> SyncOutcome {
 /// It never closes the open document's existing paths and never removes its
 /// state. Returns `false` so the drain keeps the file in the pending set for
 /// later owner reconciliation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the open-unresolved-preserve path needs the provider-surface pin alongside its sync inputs"
+)]
 pub(super) async fn sync_open_unresolved_carrier_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
@@ -771,6 +807,9 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     canonical_id: &str,
     is_jsx: bool,
     ide: Option<&verter_session::IdeResponse>,
+    // The open-document revision `ide` was compiled against, captured by the
+    // CALLER before that compile ran — see `DocumentRegistry::open_compile_pin`.
+    open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> bool {
     let provider_surfaces = documents.provider_surfaces();
@@ -834,9 +873,13 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     let ide_synced = match result {
         Ok(()) => {
             // Record a fresh generation pinning the EXACT IDE bytes just synced
-            // (interactive queries capture this surface).
+            // (interactive queries capture this surface), through the shared
+            // fenced choke point: `open_pin` was captured by the caller BEFORE
+            // this compile, so the just-run provider sync can only make the
+            // record fail closed, never falsely pair `ide.code` with a source
+            // it wasn't compiled from.
             if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code) {
-                crate::provider_surface_store::record_carrier_ide_surface(
+                crate::provider_surface_store::record_carrier_ide_surface_fenced(
                     provider_surfaces,
                     Some(documents),
                     documents.host(),
@@ -844,6 +887,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
                     &ide_path,
                     &delivered,
                     ide.source_map.as_deref(),
+                    open_pin,
                 );
             }
             true
@@ -952,6 +996,12 @@ async fn apply_owner_resolved_carrier_sync(
     snapshot: &super::PublishedResolverSnapshot,
     canonical_id: &str,
     ide: Option<&verter_session::IdeResponse>,
+    // The open-document revision `ide` was compiled against, captured by the
+    // CALLER before that compile ran (never after) — see
+    // `DocumentRegistry::open_compile_pin`. Threaded down to every record call
+    // this pass can reach so a mid-flight edit fails closed instead of pairing
+    // fresh bytes with a stale/torn source.
+    open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     context: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
@@ -981,6 +1031,7 @@ async fn apply_owner_resolved_carrier_sync(
         canonical_id,
         is_jsx,
         ide,
+        open_pin,
         membership,
         admission: carrier_coordinator,
         reason: crate::external_ts::ReconcileReason::SourceSynced,
@@ -1088,10 +1139,14 @@ async fn apply_owner_resolved_carrier_sync(
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
-                        // synced (interactive queries capture this surface).
+                        // synced (interactive queries capture this surface), through
+                        // the shared fenced choke point: `open_pin` was captured by
+                        // the caller BEFORE this compile, so this just-run provider
+                        // sync can only make the record fail closed, never falsely
+                        // pair `ide.code` with a source it wasn't compiled from.
                         if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code)
                         {
-                            crate::provider_surface_store::record_carrier_ide_surface(
+                            crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                 documents.provider_surfaces(),
                                 Some(documents),
                                 documents.host(),
@@ -1099,6 +1154,7 @@ async fn apply_owner_resolved_carrier_sync(
                                 &ide_path,
                                 &delivered,
                                 ide.source_map.as_deref(),
+                                open_pin,
                             );
                         }
                     }
@@ -1158,6 +1214,7 @@ async fn apply_owner_resolved_carrier_sync(
                             provider_sync_states,
                             canonical_id,
                             ide,
+                            open_pin,
                             snapshot.ownership_ready,
                             context,
                             carrier_coordinator,
@@ -1174,6 +1231,7 @@ async fn apply_owner_resolved_carrier_sync(
                             provider_sync_states,
                             canonical_id,
                             ide,
+                            open_pin,
                             snapshot.ownership_ready,
                             context,
                             carrier_coordinator,
@@ -1244,6 +1302,7 @@ pub(super) async fn sync_api_to_provider_background_task(
             canonical_id: &canonical_id,
             is_jsx,
             ide: None,
+            open_pin: None,
             membership: None,
             admission: &carrier_coordinator,
             reason: crate::external_ts::ReconcileReason::SourceSynced,

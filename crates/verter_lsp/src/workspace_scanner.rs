@@ -30,6 +30,7 @@ use verter_session::{CompileProfile, UpsertRequest, VerterHost};
 #[cfg(test)]
 use verter_session::FileLanguage;
 
+use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
     prepare_sync_transition, revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind,
@@ -73,6 +74,13 @@ pub struct WorkspaceScannerConfig {
     pub root_paths: Vec<PathBuf>,
     /// Shared host for upserting and compiling files.
     pub host: Arc<VerterHost>,
+    /// The server's document registry (shared). `didOpen` prioritizes a
+    /// newly-opened file for this scanner (`signal_priority`), so a scan pass
+    /// CAN reach a carrier that is open in the editor despite the scanner
+    /// normally targeting closed/background files. Lets the carrier-sync
+    /// paths pin an open document's revision before compiling and prefer its
+    /// live buffer over the host/VFS-only source.
+    pub documents: Arc<DocumentRegistry>,
     /// Optional project sync. TSGO uses it for explicit workspace inputs;
     /// tsserver uses it only for interactive/open source synchronization.
     pub project_sync: Option<ProjectSync>,
@@ -507,6 +515,7 @@ async fn scanner_loop(
             sync_file_to_provider(
                 path,
                 &config.host,
+                Some(&config.documents),
                 &config.tsx_profile,
                 config.project_sync.as_ref(),
                 &config.provider_surfaces,
@@ -894,6 +903,14 @@ async fn follow_node_modules_deps(
 pub(crate) async fn sync_file_to_provider(
     canonical_id: &str,
     host: &VerterHost,
+    // The server's document registry, when the scanner is wired to one — see
+    // `WorkspaceScannerConfig::documents`. Lets this pass pin an open
+    // document's revision before compiling below, and lets the fenced record
+    // refuse a torn pair for a carrier that turns out to be open despite the
+    // scanner normally targeting closed/background files (`didOpen`
+    // prioritizes a newly-opened file for this scanner, so it CAN reach an
+    // open carrier).
+    documents: Option<&DocumentRegistry>,
     profile: &CompileProfile,
     sync: Option<&ProjectSync>,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
@@ -928,6 +945,18 @@ pub(crate) async fn sync_file_to_provider(
         return;
     };
     host.ensure_loaded(canonical_id);
+    // Pin the open document's exact revision BEFORE compiling, if the scanner
+    // is wired to a `DocumentRegistry` and this carrier happens to be open —
+    // `didOpen` prioritizes a newly-opened file for this scanner, so it CAN
+    // reach a live open carrier despite normally targeting closed/background
+    // files. See `DocumentRegistry::open_compile_pin`.
+    let (open_uri, open_revision) = documents
+        .map(|documents| documents.open_compile_pin(canonical_id))
+        .unwrap_or((None, None));
+    let open_pin = match (&open_uri, &open_revision) {
+        (Some(uri), Some(revision)) => Some((uri, revision)),
+        _ => None,
+    };
     // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
     // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
     let _ = host.ensure_ide_compiled(canonical_id, profile);
@@ -958,13 +987,12 @@ pub(crate) async fn sync_file_to_provider(
             resolver: &snapshot.resolver,
             provider_sync_states: sync_states,
             provider_surfaces,
-            // The background scan has no `DocumentRegistry`; the carrier source resolves
-            // host/VFS-only for surface recording.
-            documents: None,
+            documents,
             project_sync: sync,
             canonical_id,
             is_jsx,
             ide: ide.as_ref(),
+            open_pin,
             membership,
             admission: carrier_coordinator,
             reason: if deferred_refresh.is_some() {
@@ -1057,11 +1085,12 @@ pub(crate) async fn sync_file_to_provider(
                         committed_state.mark_api_delivered(api_code);
                         synced_kinds.push(ProviderPathKind::Api);
                         // Record a fresh generation pinning the synced content + its
-                        // same-content source map. The background scan has no
-                        // `DocumentRegistry`; the carrier source resolves host/VFS-only.
+                        // same-content source map. Prefers the open document's live
+                        // buffer when the scanner is wired to one and the carrier
+                        // happens to be open; falls back to host/VFS otherwise.
                         crate::provider_surface_store::record_carrier_api_surface(
                             provider_surfaces,
-                            None,
+                            documents,
                             host,
                             canonical_id,
                             &dts_path,
@@ -1084,19 +1113,22 @@ pub(crate) async fn sync_file_to_provider(
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced_kinds.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
-                        // synced (interactive queries capture this surface). The
-                        // background scan has no `DocumentRegistry`; the carrier
-                        // source resolves host/VFS-only.
+                        // synced (interactive queries capture this surface), through
+                        // the shared fenced choke point: `open_pin` was captured
+                        // above BEFORE the compile, so this scan pass can never pair
+                        // stale bytes with a since-edited open document's source —
+                        // it either records the coherent pair or refuses.
                         if let Some(delivered) = sync.carrier_provider_surface(&tsx_path, &ide.code)
                         {
-                            crate::provider_surface_store::record_carrier_ide_surface(
+                            crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                 provider_surfaces,
-                                None,
+                                documents,
                                 host,
                                 canonical_id,
                                 &tsx_path,
                                 &delivered,
                                 ide.source_map.as_deref(),
+                                open_pin,
                             );
                         }
                     }
@@ -1655,6 +1687,7 @@ mod tests {
         sync_file_to_provider(
             canonical_id,
             &host,
+            None,
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -1730,6 +1763,7 @@ mod tests {
         sync_file_to_provider(
             canonical_id,
             &host,
+            None,
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -1840,6 +1874,7 @@ mod tests {
         sync_file_to_provider(
             canonical_id,
             &host,
+            None,
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -1924,6 +1959,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             canonical_id,
             &host,
+            None,
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -2325,6 +2361,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             canonical_id,
             &host,
+            None,
             &profile,
             Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -2528,6 +2565,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             &source,
             &host,
+            None,
             &profile,
             Some(&sync),
             &surfaces,
@@ -2562,6 +2600,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             &source,
             &host,
+            None,
             &profile,
             Some(&sync),
             &surfaces,
@@ -2623,6 +2662,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             &source,
             &host,
+            None,
             &profile,
             None,
             &surfaces,
@@ -2682,6 +2722,7 @@ defineProps<{ msg: string }>()
         sync_file_to_provider(
             &source,
             &host,
+            None,
             &profile,
             Some(&sync),
             &surfaces,

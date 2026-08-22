@@ -277,8 +277,15 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
 
     // No prior state in the (empty) states map; no IDE output this pass.
     let project_sync = deps.project_sync.clone().expect("test deps carry a sync");
-    preserve_open_unresolved_carrier(&deps, &project_sync, "/workspace/src/App.vue", false, None)
-        .await;
+    preserve_open_unresolved_carrier(
+        &deps,
+        &project_sync,
+        "/workspace/src/App.vue",
+        false,
+        None,
+        None,
+    )
+    .await;
 
     let state = deps
         .provider_sync_states
@@ -1377,6 +1384,239 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
     );
 }
 
+/// The coordinator's direct-open IDE sync captures `ide.code` and the
+/// carrier's live source at TWO DIFFERENT instants: `ide` is read from the
+/// host's compile cache before the provider await, while
+/// `resolve_carrier_source` (inside the eventual record) re-reads whatever
+/// document text is live AT RECORD TIME — with no identity fence pinning the
+/// two together, unlike the interactive repair path's
+/// `record_carrier_ide_snapshot_if_current` / `retained_ide_response_is_current`.
+///
+/// A `did_change` landing in the provider-await window is exactly the
+/// documented "surface a request-time repair must resync" scenario — but
+/// this path's finish then pairs the PRE-EDIT `ide.code` (compiled from
+/// revision A) with the POST-EDIT live source (revision B) it re-reads at
+/// record time. That pair validates every live-source hash comparison
+/// (`request_surface_matches_live_source`) because both sides of that later
+/// comparison are revision B, so a subsequent hover/completion/definition
+/// request reads revision A's TSX as if it were current — a torn pairing
+/// serving a stale type, never a repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flight_edit() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/App.vue";
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'revision-b-edited'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, false);
+    // Pause the coordinator's `open_file` call — `ide.code` is already
+    // compiled from revision A by this point, and the record has not run yet.
+    let (arrived, release) = provider.block_open_file(&ide_path);
+
+    let tick = sync_file(&deps, canonical_id, uri.as_str());
+    let edit = async {
+        arrived.notified().await;
+        let result = documents.did_change(&uri, 2, SOURCE_B);
+        assert!(
+            result.changed,
+            "the interleaved edit must really commit revision B"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(tick, edit).await;
+
+    assert_eq!(
+        documents
+            .get(&uri)
+            .expect("document stays open")
+            .source
+            .as_ref(),
+        SOURCE_B,
+        "precondition: the live document is revision B"
+    );
+
+    if let Some(recorded) = documents.provider_surfaces().current_snapshot(&ide_path) {
+        assert!(
+            recorded.provider_content.contains("revision-b-edited"),
+            "a CarrierIde surface recorded by this tick must not pair revision \
+             A's TSX (compiled before the edit) with revision B's live source \
+             — either it reflects B, or nothing should have been recorded, got: \
+             {}",
+            recorded.provider_content
+        );
+    }
+}
+
+/// The sibling of the test above, reaching the OTHER half of the same bug
+/// class: a `did_change` landing between the COMPILE and the pin capture,
+/// rather than between the pin capture and the provider sync.
+///
+/// The test above pauses inside `MockTypeProvider::block_open_file` — a point
+/// that sits AFTER the pin capture under EITHER source ordering (the pin is a
+/// few synchronous statements before the first `.await` in `sync_file`), so
+/// it cannot tell "pin captured before the compile" apart from "pin captured
+/// right after `get_ide` returns, still before the provider await": both
+/// orderings reach `block_open_file` with the pin already set. It only proves
+/// the check-to-record gap (a torn pair surviving the provider await) is
+/// closed.
+///
+/// This test pauses at [`test_hooks::block_after_ide_compile`] — wired
+/// immediately after the compile in `sync_file`, the EXACT source position
+/// the pin capture sat at before this fix (see `eb08424fe`): compile, then
+/// `is_jsx`, then the pin capture. Under the PRE-FIX ordering the pin capture
+/// runs AFTER this pause point, so an edit landing during the pause is
+/// observed BY the pin capture — the pin ends up `B` while `ide.code` was
+/// already compiled from `A`. That pin then MATCHES the still-`B` live
+/// identity at record time, so the OLD fenced record would proceed and pair
+/// stale `A` content with `B`'s identity/source: a torn pair, not a refusal.
+/// (Reverting the pin-capture statements below the hook call reproduces
+/// exactly this and makes the final assertion fail — verified by hand while
+/// authoring this test.)
+///
+/// Under the FIX (pin captured BEFORE the compile, unaffected by this pause):
+/// the pin is already fixed at revision `A` by the time this pause runs, so
+/// the interleaved edit can only ever be observed by the LATER live-identity
+/// read at record time, never by the pin itself. Record time then sees pin
+/// `A` vs live `B` — a mismatch — and refuses (fail closed): nothing is
+/// recorded for this pass, and the edit's own tick records the coherent
+/// `B`/`B` pair instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // A canonical id UNIQUE across this file: the pause hook is a global,
+    // canonical-id-keyed registry (see `test_hooks`), so reusing the common
+    // "/workspace/src/App.vue" fixture literal here would let an unrelated,
+    // concurrently-running test's `sync_file` call steal this test's
+    // registered pause (or vice versa) — an observed flaky failure.
+    let canonical_id = "/workspace/src/PinRaceDirectOpen.vue";
+    let uri: Uri = "file:///workspace/src/PinRaceDirectOpen.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'revision-b-edited'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, false);
+    // Pause the tick right after the compile — the pre-fix pin-capture spot.
+    let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
+
+    let tick = sync_file(&deps, canonical_id, uri.as_str());
+    let edit = async {
+        arrived.notified().await;
+        let result = documents.did_change(&uri, 2, SOURCE_B);
+        assert!(
+            result.changed,
+            "the interleaved edit must really commit revision B"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(tick, edit).await;
+
+    assert_eq!(
+        documents
+            .get(&uri)
+            .expect("document stays open")
+            .source
+            .as_ref(),
+        SOURCE_B,
+        "precondition: the live document is revision B"
+    );
+
+    // The pin was captured BEFORE the compile — before this pause, before the
+    // edit — so it is anchored to revision A regardless of what happens
+    // during this pause. At record time the live identity is B (the edit
+    // already landed), which no longer matches the A-revision pin: the
+    // fenced record MUST refuse outright. A recorded surface here — of ANY
+    // content — would mean the pin drifted to observe the edit, exactly the
+    // pre-fix defect.
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "a pin captured before the compile must make the record refuse when \
+         an edit lands after that capture — a recorded surface here means \
+         the pin was captured too late (or not honored), reproducing the \
+         pre-fix torn-pairing defect"
+    );
+}
+
 /// The coordinator's OPEN-UNRESOLVED preserve (owner-None over a ready
 /// snapshot) keeps the open document's IDE TSX live AND queryable — so a
 /// successful preserve sync must record the `CarrierIde` surface it delivered,
@@ -1448,6 +1688,132 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
         snapshot.kind,
         crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
         "the recorded surface must carry the CarrierIde role"
+    );
+}
+
+/// The SAME compile-to-identity race as
+/// `coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after`,
+/// reached through the OTHER `sync_file` arm that records a `CarrierIde`
+/// surface: `preserve_open_unresolved_carrier` (owner-None over a ready
+/// snapshot). `sync_file` captures ONE pin near its top and threads it
+/// through to whichever arm ends up recording — this test proves that thread-
+/// through actually reaches the unresolved-preserve arm's record call, not
+/// just the owner-resolved `DirectOpen` arm the sibling test covers.
+///
+/// Same discrimination method: pausing at
+/// [`test_hooks::block_after_ide_compile`] (the pre-fix pin-capture spot) and
+/// landing an edit there reproduces the pre-fix torn pair if the pin capture
+/// is moved back below it (verified by hand while authoring this test, same
+/// as the sibling). Against the fix, the already-earlier pin stays anchored
+/// to revision A, so the mismatched live identity (B) at record time makes
+/// `preserve_open_unresolved_carrier`'s fenced record refuse outright.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile_not_after() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // A canonical id UNIQUE across this file — see the sibling test's comment
+    // (`coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after`)
+    // for why the shared "/workspace/src/App.vue" fixture literal is unsafe here.
+    let canonical_id = "/workspace/src/PinRaceUnresolvedPreserve.vue";
+    let uri: Uri = "file:///workspace/src/PinRaceUnresolvedPreserve.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'revision-b-edited'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Ready snapshot rooted ELSEWHERE: owner resolution returns None for the
+    // open file, driving the preserve-open-unresolved arm (never the
+    // owner-resolved `DirectOpen` arm the sibling test exercises).
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    // Pause the tick right after the compile — the pre-fix pin-capture spot,
+    // shared by every `sync_file` arm (including this unresolved-preserve one).
+    let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
+
+    let tick = sync_file(&deps, canonical_id, uri.as_str());
+    let edit = async {
+        arrived.notified().await;
+        let result = documents.did_change(&uri, 2, SOURCE_B);
+        assert!(
+            result.changed,
+            "the interleaved edit must really commit revision B"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(tick, edit).await;
+
+    assert_eq!(
+        documents
+            .get(&uri)
+            .expect("document stays open")
+            .source
+            .as_ref(),
+        SOURCE_B,
+        "precondition: the live document is revision B"
+    );
+
+    let state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("the open unresolved carrier must still commit provider state");
+    assert!(
+        state.is_unresolved(),
+        "owner-None over a ready snapshot must commit an Unresolved binding"
+    );
+    let ide_path = state
+        .ide_path
+        .clone()
+        .expect("the preserve must keep a live IDE path");
+
+    // Same fail-closed requirement as the sibling test: the pin was captured
+    // before the compile and before the edit, so it stays anchored to A while
+    // the live identity moves to B — the fenced record inside
+    // `preserve_open_unresolved_carrier` must refuse outright.
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "a pin captured before the compile must make the unresolved-preserve \
+         record refuse when an edit lands after that capture — a recorded \
+         surface here means the pin either was not threaded through to this \
+         arm or was captured too late, reproducing the pre-fix torn-pairing \
+         defect"
     );
 }
 

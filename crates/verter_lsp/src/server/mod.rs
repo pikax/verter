@@ -514,6 +514,13 @@ pub struct ServerCore {
     /// provider-surface store records the retained bytes and map.
     #[cfg(test)]
     ide_sync_before_surface_record_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause point immediately after `publish_carrier_to_external_ts`'s own
+    /// compile, before it calls the carrier-sync gateway — the exact window
+    /// an interleaved `did_change` must land in to test that the pin captured
+    /// BEFORE that compile (not a pin captured here or later) is what gates
+    /// the gateway's eventual record.
+    #[cfg(test)]
+    publish_carrier_after_compile_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -950,6 +957,14 @@ impl VerterLanguageServer {
     }
 
     #[cfg(test)]
+    fn pause_next_publish_carrier_after_compile(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
+    }
+
+    #[cfg(test)]
     fn pause_next_ide_sync_at(
         slot: &parking_lot::Mutex<Option<IdeSyncPausePoint>>,
         canonical_id: &str,
@@ -1003,6 +1018,12 @@ impl VerterLanguageServer {
     #[cfg(test)]
     async fn maybe_pause_ide_sync_before_surface_record(&self, canonical_id: &str) {
         Self::maybe_pause_ide_sync_at(&self.ide_sync_before_surface_record_pause, canonical_id)
+            .await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_publish_carrier_after_compile(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
             .await;
     }
 
@@ -1168,6 +1189,8 @@ impl VerterLanguageServer {
             ide_sync_before_provider_write_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
             ide_sync_before_surface_record_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            publish_carrier_after_compile_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,

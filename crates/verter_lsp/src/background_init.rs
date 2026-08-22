@@ -422,6 +422,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         crate::workspace_scanner::WorkspaceScannerConfig {
             root_paths,
             host: Arc::clone(&host),
+            documents: Arc::clone(&documents),
             project_sync: project_sync.clone(),
             vfs_workspace: Arc::clone(&vfs_workspace),
             provider_sync_states: Arc::clone(&provider_sync_states),

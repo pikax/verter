@@ -1550,7 +1550,18 @@ fn synced_type_provider_context_surface_only(
     state.ide_path = Some(tsx_path.clone());
     state.ide_background_loaded = true;
     server.commit_provider_sync_state(&canonical_id, state);
-    server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+    // Fenced with the document's OWN current identity: this seed simulates a
+    // successful, non-racing IDE sync for the still-open document, so a real
+    // pin captured right here (nothing can have moved between this capture
+    // and the record just below) records normally.
+    let seed_revision = server.documents.snapshot_identity(uri);
+    server.record_carrier_ide_snapshot_with_pin(
+        seed_revision.as_ref().map(|revision| (uri, revision)),
+        &canonical_id,
+        &tsx_path,
+        &ide.code,
+        None,
+    );
     server
         .type_provider_context(uri)
         .expect("a seeded provider surface must yield a query context")
@@ -4259,6 +4270,103 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
     assert_ne!(
         updated_ide.content_hash, initial_ide.content_hash,
         "a live edit must replace the durable carrier bytes read by the editor plugin"
+    );
+}
+
+/// Discriminates the server-side interactive publish path
+/// (`publish_carrier_to_external_ts` → `reconcile_carrier_via_gateway`'s
+/// tsserver `Published` branch) against the SAME compile-to-identity race the
+/// sync-coordinator tests close: a `did_change` landing between this
+/// function's own compile and its call into the carrier-sync gateway must
+/// never let the gateway pair stale IDE bytes with the edited source.
+///
+/// Before this fix, `reconcile_carrier_via_gateway` self-captured its pin AT
+/// GATEWAY ENTRY — AFTER this function's own compile already ran. An edit
+/// landing in the pause window below would make that self-captured pin
+/// observe revision B while `ide.code` was compiled from revision A: the pin
+/// then MATCHES the still-B live identity at record time and the record
+/// proceeds, pairing stale A bytes with B's source — a torn pair. This test's
+/// pause point sits exactly where that self-capture used to happen
+/// (immediately after the compile, before the gateway call), so it
+/// reproduces the defect if the pin capture is moved back there instead of
+/// being threaded in from the caller before the compile.
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
+    let workspace_root = unique_server_ws_root("publish_pin_race");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'revision-b-edited'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    let uri = open_test_vue(server, &canonical_id, SOURCE_A);
+
+    // Pause right after `publish_carrier_to_external_ts`'s own compile, the
+    // pre-fix self-capture spot.
+    let (arrived, release) = server.pause_next_publish_carrier_after_compile(&canonical_id);
+
+    let publish = server.publish_carrier_to_external_ts(&canonical_id);
+    let edit = async {
+        arrived.notified().await;
+        let result = server.documents.did_change(&uri, 2, SOURCE_B);
+        assert!(
+            result.changed,
+            "the interleaved edit must really commit revision B"
+        );
+        release.notify_one();
+    };
+    let (published, ()) = futures_util::future::join(publish, edit).await;
+    assert!(published, "the publish pass must still complete");
+
+    assert_eq!(
+        server
+            .documents
+            .get(&uri)
+            .expect("document stays open")
+            .source
+            .as_ref(),
+        SOURCE_B,
+        "precondition: the live document is revision B"
+    );
+
+    // The pin was captured before the compile — before this pause, before the
+    // edit — so it stays anchored to revision A while the live identity moves
+    // to B. The fenced record inside the gateway's `Published` branch must
+    // refuse outright rather than pair mismatched content.
+    let ide_path = verter_workspace::carrier_ide_provider_path(&canonical_id, false);
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "a pin captured before the compile must make the publish gateway's \
+         record refuse when an edit lands after that capture — a recorded \
+         surface here means the pin was captured too late (or not honored), \
+         reproducing the pre-fix torn-pairing defect"
     );
 }
 
@@ -11596,7 +11704,14 @@ async fn provider_retry_proceeds_when_carrier_source_is_unchanged_across_regener
             let tsx_path = server
                 .active_ide_path_for_uri(&app_uri)
                 .expect("live IDE path");
-            server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+            let seed_revision = server.documents.snapshot_identity(&app_uri);
+            server.record_carrier_ide_snapshot_with_pin(
+                seed_revision.as_ref().map(|revision| (&app_uri, revision)),
+                &canonical_id,
+                &tsx_path,
+                &ide.code,
+                None,
+            );
             let ctx = server.type_provider_context(&app_uri)?;
             *recaptured_in.lock().unwrap() =
                 Some((ctx.snapshot.stamp.generation, ctx.snapshot.source_hash));
@@ -14025,6 +14140,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
         "/workspace/src/App.vue",
         false,
         None,
+        None,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
@@ -14141,6 +14257,9 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
         is_jsx: false,
         destructured_block: None,
     };
+    let open_revision = documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
         &documents,
@@ -14148,6 +14267,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
         "/workspace/src/App.vue",
         false,
         Some(&ide),
+        Some((&uri, &open_revision)),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
@@ -15175,13 +15295,21 @@ const msg = 'hello'
     );
 
     // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
-    // new `.tsx` open SUCCEEDS (no failure injection).
+    // new `.tsx` open SUCCEEDS (no failure injection). A real pin, matching
+    // how every production caller invokes this for an open document (see
+    // `DocumentRegistry::open_compile_pin`) — this test's document IS open,
+    // and the structural backstop in `record_carrier_ide_snapshot_inner`
+    // correctly refuses an unpinned record for an open document.
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     server
         .preserve_open_unresolved_carrier(
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
+            Some((&uri, &revision)),
         )
         .await;
 
@@ -15593,6 +15721,7 @@ async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved(
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
+        None,
         None,
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
@@ -16446,7 +16575,7 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
     );
 
     server
-        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", false)
+        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", false, None)
         .await;
 
     let state = server
@@ -25793,7 +25922,7 @@ defineProps<{ msg: string }>()
 
     // Absent IDE output: pass `ide = None` (the transient compile-miss condition).
     server
-        .sync_compiled_carrier_to_provider(canonical_id, None)
+        .sync_compiled_carrier_to_provider(canonical_id, None, None)
         .await;
 
     // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
@@ -26046,6 +26175,101 @@ async fn resync_background_owner_loss_retracts_ledger_membership() {
     );
 }
 
+/// A DIFFERENT bug class from the pin-staleness races the sibling tests in
+/// this file discriminate: here the pin's identity NEVER MOVES (the document
+/// is never edited) while the CONTENT the compile actually reads is silently
+/// swapped out from under it.
+///
+/// `resync_background_carrier_file`'s destructive reload
+/// (`host.remove` — which clears the workspace overlay via
+/// `FilesystemWorkspace::notify_delete` — followed by `ensure_loaded`) is
+/// designed for a genuinely closed dependency. When the SAME canonical id is
+/// ALSO open in the editor with unsaved edits, the reload's `ensure_loaded`
+/// used to fail outright for the previously-tracked/open document: verified
+/// by hand (temporarily reverting the fix) that the raw workspace read after
+/// `host.remove` genuinely returns DISK content (`disk-a`), but the host's
+/// SCHEDULER-level `ensure_loaded` — which `resync_background_carrier_file`
+/// actually calls — then fails to reload it at all, so nothing compiles and
+/// nothing gets recorded. Either manifestation (a torn A/B pair, or a total
+/// reload failure for a file the host had previously tracked) is the SAME
+/// root defect: the destructive reload never re-establishes state for an
+/// open document from its OWN buffer, so downstream behavior for that file is
+/// undefined relative to what the open document actually holds. Post-fix,
+/// the destructive reload re-establishes the host overlay from the open
+/// document's OWN buffer before compiling (the scheduler's fast path then
+/// finds it immediately), so the recorded surface coherently reflects B.
+#[tokio::test(flavor = "multi_thread")]
+async fn destructive_background_reload_never_substitutes_disk_for_an_open_documents_buffer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace_dir = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace_dir.join("src")).expect("workspace source dir");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'disk-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = "<script setup lang=\"ts\">\nconst msg = 'buffer-b'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    std::fs::write(workspace_dir.join("src/App.vue"), SOURCE_A).expect("write disk source A");
+    std::fs::write(
+        workspace_dir.join("tsconfig.json"),
+        r#"{ "include": ["src/**/*.vue"] }"#,
+    )
+    .expect("write tsconfig");
+
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace_dir);
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    // Installs a REAL disk-backed `FilesystemWorkspace` as both the
+    // ownership-resolution source and (via `set_workspace`) the host's own
+    // workspace — the same one `host.remove` / `ensure_loaded` reload
+    // through, so this genuinely exercises disk fallthrough.
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+
+    // Open the SAME file with UNSAVED content B — deliberately diverging
+    // from disk's content A. No edit happens after this: the pin's identity
+    // is stable for the rest of the test, so any torn pair proves content
+    // substitution, not a stale-pin race.
+    let uri = open_test_vue(server, &canonical_id, SOURCE_B);
+
+    server.resync_background_carrier_file(&canonical_id).await;
+
+    assert_eq!(
+        server
+            .documents
+            .get(&uri)
+            .expect("document stays open")
+            .source
+            .as_ref(),
+        SOURCE_B,
+        "precondition: the open buffer still holds the unsaved edit"
+    );
+
+    let ide_path = verter_workspace::carrier_ide_provider_path(&canonical_id, false);
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect(
+            "the destructive reload must still deliver a coherent surface for the \
+             open document — reflecting its own live buffer",
+        );
+    assert!(
+        recorded.provider_content.contains("buffer-b"),
+        "a destructive background reload must compile the OPEN document's own \
+         live buffer, never silently fall through to disk — got: {}",
+        recorded.provider_content
+    );
+    assert!(
+        !recorded.provider_content.contains("disk-a"),
+        "a destructive background reload must never pair disk content with the \
+         open document's identity/source — got: {}",
+        recorded.provider_content
+    );
+}
+
 /// Gap (d) defect 2 — an OWNER-RESOLVED tsserver carrier reaches the store/ledger
 /// through the reconciler, NOT the no-op ProjectSync content verbs. Driven through
 /// `sync_compiled_carrier_to_provider` (the post-compile sync decision
@@ -26080,7 +26304,7 @@ async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     // (which compiles internally), so the ledger advertises regardless of the
     // passed IDE output.
     server
-        .sync_compiled_carrier_to_provider(&canonical_id, None)
+        .sync_compiled_carrier_to_provider(&canonical_id, None, None)
         .await;
 
     assert!(
@@ -26870,8 +27094,18 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
     );
     // Record the surface a successful IDE sync would have recorded — the
     // virtual-file routing context resolves the TSX path through the CAPTURED
-    // surface, not an independent committed-path read.
-    server.record_carrier_ide_snapshot("/workspace/src/App.vue", tsx_path, virtual_content, None);
+    // surface, not an independent committed-path read. Fenced with the open
+    // document's own current identity (no race here — this is test seeding).
+    let seed_revision = server.documents.snapshot_identity(&source_uri);
+    server.record_carrier_ide_snapshot_with_pin(
+        seed_revision
+            .as_ref()
+            .map(|revision| (&source_uri, revision)),
+        "/workspace/src/App.vue",
+        tsx_path,
+        virtual_content,
+        None,
+    );
 
     // Open the virtual document (`verter-virtual://...?sourceUri=<vue-uri>`).
     let virtual_uri_str = format!(
@@ -28259,6 +28493,9 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
+    let app_revision = documents
+        .snapshot_identity(&uri)
+        .expect("the open document has a live identity to pin");
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
         &documents,
@@ -28266,6 +28503,7 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         "/workspace/src/App.vue",
         false,
         Some(&ide),
+        Some((&uri, &app_revision)),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
@@ -28316,6 +28554,9 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         .get_ide("/workspace/src/Other.vue", &profile)
         .expect("IDE output should exist for the second carrier");
     provider.set_fail_sync_path("/workspace/src/Other.vue.tsx");
+    let other_revision = documents
+        .snapshot_identity(&other_uri)
+        .expect("the open document has a live identity to pin");
     let _ = sync_open_unresolved_carrier_provider_file(
         &sync,
         &documents,
@@ -28323,6 +28564,7 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         "/workspace/src/Other.vue",
         false,
         Some(&other_ide),
+        Some((&other_uri, &other_revision)),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
@@ -28512,7 +28754,16 @@ async fn make_virtual_file_fixture(
             shadow_delivered_source_hash: None,
         },
     );
-    server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);
+    let seed_revision = server.documents.snapshot_identity(&source_uri);
+    server.record_carrier_ide_snapshot_with_pin(
+        seed_revision
+            .as_ref()
+            .map(|revision| (&source_uri, revision)),
+        "/workspace/src/App.vue",
+        &tsx_path,
+        recorded_content,
+        None,
+    );
 
     let virtual_uri_str = format!(
         "verter-virtual://generated/App.vue.tsx?sourceUri={}",
@@ -30946,7 +31197,7 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
         .get_ide(&child_id, &profile)
         .expect("the closed child has an IDE projection for publication");
     let parked_child_admission = match server
-        .reconcile_carrier_via_gateway(&child_id, child_ide.is_jsx, Some(&child_ide))
+        .reconcile_carrier_via_gateway(&child_id, child_ide.is_jsx, Some(&child_ide), None)
         .await
     {
         crate::external_ts::CarrierSyncDecision::DirectOpen { pending, .. } => pending,

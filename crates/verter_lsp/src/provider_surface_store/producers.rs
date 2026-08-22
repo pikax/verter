@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tower_lsp_server::ls_types::Uri;
 
 use verter_semantic::analysis::types::Hash16;
 use verter_session::VerterHost;
@@ -21,7 +22,7 @@ use crate::carrier_provider_projection::PreparedCarrierProviderContent;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::provider_projection::ProviderPositionMapper;
-use crate::documents::DocumentRegistry;
+use crate::documents::{DocumentRegistry, DocumentSnapshotIdentity};
 
 use super::{
     CapturedPathState, ContentHash, ProviderQuerySnapshot, ProviderSurfaceKind,
@@ -498,6 +499,107 @@ pub(crate) fn record_carrier_ide_surface_with_source(
     );
 }
 
+/// THE single fenced record choke point for a carrier IDE surface synced
+/// against a specific open-document revision — the shared implementation every
+/// call site that can race a mid-flight edit against an open document funnels
+/// through, replacing a per-site inline `with_current_snapshot_identity` dance.
+///
+/// `open_pin`, when supplied, MUST have been captured by the CALLER before the
+/// compile that produced `delivered`/the synced IDE bytes — never after.
+/// Capturing first guarantees the pinned revision is never LATER than the
+/// revision that actually produced the compiled bytes: a racing edit between
+/// the pin capture and this record call can only advance the LIVE identity
+/// past the pin, which makes the check below MISS (fail closed, safe) — it can
+/// never falsely MATCH a torn pair. Capturing the pin AFTER the compile (the
+/// bug this replaces) allows the opposite: the pin observes a revision newer
+/// than the one that actually produced the bytes, and an unrelated later edit
+/// landing back on that newer revision would make the check falsely pass.
+///
+/// - `Some((uri, revision))`: records only while `revision` is still the exact
+///   live document identity, via [`DocumentRegistry::with_current_snapshot_identity`],
+///   using the open document's own live source captured under that same guard.
+///   A moved identity records nothing (fail closed) — the same hazard class as
+///   `VerterLanguageServer::record_carrier_ide_snapshot_if_current`.
+/// - `None`: the caller captured no pin because it believed the carrier closed
+///   at compile time (no document to race). If the carrier is, right now,
+///   open anyway — a close→open mid-flight transition, or simply a call site
+///   that never captured a pin for an open document — an unguarded record
+///   would pair THIS compile's bytes with whatever buffer revision is live
+///   now: the same torn-pair hazard, just with no pin available to catch it.
+///   Refuse and fail closed. Only when the file is genuinely not open at all
+///   does this fall through to the ordinary unguarded
+///   [`record_carrier_ide_surface`] — correct there, since there is no live
+///   buffer to race.
+///
+/// Returns whether the surface was actually recorded — `false` on either
+/// refusal branch (moved identity, or open-with-no-pin). Callers that need to
+/// retry/requeue on a refused record (the server-side interactive paths) read
+/// this; callers that treat a refusal as a normal fail-closed no-op may
+/// ignore it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fenced record choke point needs the pin alongside every other producer input"
+)]
+pub(crate) fn record_carrier_ide_surface_fenced(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    provider_path: &str,
+    delivered: &PreparedCarrierProviderContent,
+    source_map_json: Option<&str>,
+    open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
+) -> bool {
+    if let Some((open_uri, revision)) = open_pin {
+        let Some(documents) = documents else {
+            tracing::debug!(
+                "provider_surface_store: discarding IDE surface for {provider_path} — a \
+                 revision was pinned but no document registry was supplied to fence against"
+            );
+            return false;
+        };
+        let recorded = documents
+            .with_current_snapshot_identity(open_uri, revision, |document| {
+                record_carrier_ide_surface_with_source(
+                    store,
+                    canonical_id,
+                    provider_path,
+                    delivered,
+                    source_map_json,
+                    Arc::clone(&document.source),
+                );
+            })
+            .is_some();
+        if !recorded {
+            tracing::debug!(
+                "provider_surface_store: discarding IDE surface for {provider_path} — the \
+                 open document moved mid-sync"
+            );
+        }
+        return recorded;
+    }
+
+    if let Some(documents) = documents {
+        if documents.canonical_id_to_uri(canonical_id).is_some() {
+            tracing::debug!(
+                "provider_surface_store: discarding IDE surface for {provider_path} — the \
+                 carrier is open but no revision was pinned for this compile"
+            );
+            return false;
+        }
+    }
+    record_carrier_ide_surface(
+        store,
+        documents,
+        host,
+        canonical_id,
+        provider_path,
+        delivered,
+        source_map_json,
+    );
+    true
+}
+
 /// The bytes to record for a companion surface, and — for the projected carrier
 /// IDE role — the mapper describing exactly those bytes.
 ///
@@ -608,6 +710,68 @@ fn record_carrier_companion_surface_with_source(
     Some(store.record(surface).stamp.generation)
 }
 
+/// Fenced variant of [`record_carrier_companion_surface`] for the carrier IDE
+/// role. Mirrors [`record_carrier_ide_surface_fenced`]'s reasoning exactly
+/// (see its doc comment for the full pin-before-compile invariant) — the only
+/// difference is this returns the linearized generation so the caller can
+/// stamp `companion.version` from it, the same contract
+/// [`record_carrier_companion_surface`] offers non-fenced callers.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fenced record choke point needs the pin alongside every other producer input"
+)]
+fn record_carrier_companion_surface_fenced(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    provider_path: &str,
+    surface: RecordedProviderSurface<'_>,
+    source_map_json: Option<&str>,
+    open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
+) -> Option<u64> {
+    if let Some((open_uri, revision)) = open_pin {
+        let documents = documents?;
+        let generation = documents
+            .with_current_snapshot_identity(open_uri, revision, |document| {
+                record_carrier_companion_surface_with_source(
+                    store,
+                    canonical_id,
+                    provider_path,
+                    surface,
+                    source_map_json,
+                    Arc::clone(&document.source),
+                )
+            })
+            .flatten();
+        if generation.is_none() {
+            tracing::debug!(
+                "provider_surface_store: discarding IDE companion for {provider_path} — the \
+                 open document moved mid-sync"
+            );
+        }
+        return generation;
+    }
+    if let Some(documents) = documents {
+        if documents.canonical_id_to_uri(canonical_id).is_some() {
+            tracing::debug!(
+                "provider_surface_store: discarding IDE companion for {provider_path} — the \
+                 carrier is open but no revision was pinned for this compile"
+            );
+            return None;
+        }
+    }
+    record_carrier_companion_surface(
+        store,
+        documents,
+        host,
+        canonical_id,
+        provider_path,
+        surface,
+        source_map_json,
+    )
+}
+
 /// Record EVERY published carrier companion's surface through the store at publish
 /// time (so each role's generation — the plugin's `getScriptVersion` — advances on
 /// content change) and stamp each companion's `version` from its freshly-recorded
@@ -617,12 +781,20 @@ fn record_carrier_companion_surface_with_source(
 /// its version pinned at `1` (a stale-diagnostics defect, since the live tsserver
 /// backend invalidates on `getScriptVersion`). Records each companion exactly once
 /// (no double-record) under its role's [`ProviderSurfaceKind`].
-pub fn record_and_version_carrier_companions(
+///
+/// `open_pin`, when supplied, MUST have been captured by the caller BEFORE the
+/// compile that produced the companions' content — never after (see
+/// [`record_carrier_ide_surface_fenced`] for the full invariant). It fences
+/// only the `CarrierIde` companion — the role the torn-pairing hazard applies
+/// to — through [`record_carrier_companion_surface_fenced`]; every other role
+/// records through the ordinary unfenced path unaffected by this pin.
+pub(crate) fn record_and_version_carrier_companions(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
     host: &VerterHost,
     canonical_id: &str,
     companions: &mut [crate::external_ts::CarrierCompanion],
+    open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
 ) {
     use verter_session::external_ts::SnapshotRole;
     for companion in companions.iter_mut() {
@@ -648,15 +820,28 @@ pub fn record_and_version_carrier_companions(
         // companion at the `1` fail-safe) or to a sibling capture's generation. The
         // `1` fail-safe survives only when the carrier source was unavailable
         // (record skipped, returns `None`).
-        let generation = record_carrier_companion_surface(
-            store,
-            documents,
-            host,
-            canonical_id,
-            &companion.provider_uri,
-            surface,
-            companion.map_json.as_deref(),
-        )
+        let generation = if companion.role == SnapshotRole::CarrierIde {
+            record_carrier_companion_surface_fenced(
+                store,
+                documents,
+                host,
+                canonical_id,
+                &companion.provider_uri,
+                surface,
+                companion.map_json.as_deref(),
+                open_pin,
+            )
+        } else {
+            record_carrier_companion_surface(
+                store,
+                documents,
+                host,
+                canonical_id,
+                &companion.provider_uri,
+                surface,
+                companion.map_json.as_deref(),
+            )
+        }
         .unwrap_or(1);
         companion.version = generation;
     }

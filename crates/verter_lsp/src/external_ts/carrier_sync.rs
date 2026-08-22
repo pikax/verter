@@ -118,6 +118,34 @@ pub(crate) struct CarrierSyncRequest<'a> {
     pub is_jsx: bool,
     /// The compiled IDE output, when available (the IDE companion content).
     pub ide: Option<&'a IdeResponse>,
+    /// The open document's exact revision `ide` was compiled against, when the
+    /// caller compiled `ide` against a currently-open document — captured by
+    /// the CALLER before that compile ran (never after; see
+    /// `DocumentRegistry::open_compile_pin`). Fences the published IDE
+    /// companion's record against a mid-flight edit
+    /// (`record_and_version_carrier_companions`). `None` when the caller had
+    /// no live document to pin against (a closed carrier, or a call site that
+    /// never compiles against an open buffer).
+    ///
+    /// UNTESTED-BY-DESIGN for the tsserver `Published` branch specifically:
+    /// from wherever the caller compiled `ide` through to
+    /// `record_and_version_carrier_companions` inside this function's
+    /// `Published` arm, there is no `.await` — `capture_carrier_ownership`,
+    /// `prepare_sync_transition`, `get_public_api` (via `block_in_place`), and
+    /// `build_carrier_companions` are all synchronous. A same-task `did_change`
+    /// therefore cannot interleave there via cooperative yielding (the
+    /// mechanism `sync_coordinator_tests.rs`'s `block_after_ide_compile`-based
+    /// tests exploit); only literal concurrent OS-thread execution racing the
+    /// SAME few statements could matter, which a `Notify`-pause test cannot
+    /// force deterministically without an explicit yield point this branch
+    /// does not have. `open_pin` still closes the same class of bug here
+    /// (narrows the window to true multi-thread races the sync stretch cannot
+    /// avoid regardless), it is simply not independently exercised by a new
+    /// deterministic test the way the `DirectOpen` branch is.
+    pub open_pin: Option<(
+        &'a tower_lsp_server::ls_types::Uri,
+        &'a crate::documents::DocumentSnapshotIdentity,
+    )>,
     /// The engine membership context. `None` ⇒ tsgo direct-open.
     pub membership: Option<CarrierMembershipCtx<'a>>,
     /// The per-source carrier transaction coordinator — the admission-token / owner-loss
@@ -683,6 +711,19 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     // un-resolves a plain `.ts` import of the carrier (it stops being a program
     // member). Fetch the IDE companion when the caller didn't provide it, so every
     // publish — regardless of entry point — advertises both kinds.
+    // NOTE on `req.open_pin` here: a caller that passed `ide: None` normally
+    // also passed `open_pin: None` (it believed there was nothing to compile,
+    // hence nothing to pin — e.g. the pre-compile owner-loss reconcile paths
+    // in `background_drain_owner_loss.rs`, which route an unowned source
+    // through this gateway with no IDE output). If authoritative resolution
+    // unexpectedly resolves `Bound` here and this fetch produces a genuine
+    // `ide` for what turns out to be an open document, the fenced record
+    // below correctly has no pin to check against and REFUSES — a transient
+    // false negative (a valid IDE surface goes unrecorded this pass), never a
+    // torn pair. That is the intended fail-closed trade-off: the caller
+    // believed the carrier had no owner and did not capture a pin for it: a
+    // later request or the next debounced tick repairs the miss with a real
+    // pin once that caller (or a fresher one) observes the correct ownership.
     let fetched_ide = if req.ide.is_none() {
         req.documents.and_then(|documents| {
             let profile = documents.tsx_profile.read().clone();
@@ -759,6 +800,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         req.host,
         req.canonical_id,
         &mut companions,
+        req.open_pin,
     );
 
     match membership

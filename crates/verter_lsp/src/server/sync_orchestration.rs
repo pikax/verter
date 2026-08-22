@@ -283,6 +283,13 @@ impl VerterLanguageServer {
             return;
         };
         self.documents.host().ensure_loaded(&canonical_id);
+        // Pin the open document's exact revision BEFORE compiling — see
+        // `DocumentRegistry::open_compile_pin`.
+        let (open_uri, open_revision) = self.documents.open_compile_pin(&canonical_id);
+        let open_pin = match (&open_uri, &open_revision) {
+            (Some(uri), Some(revision)) => Some((uri, revision)),
+            _ => None,
+        };
         let Some(ide) = self.documents.get_ide(uri) else {
             tracing::debug!("sync_ide: no IDE output available for {}", uri.as_str());
             return;
@@ -292,7 +299,7 @@ impl VerterLanguageServer {
         // provider-state commit. tsserver ⇒ `Published`; tsgo ⇒ `DirectOpen` (open the
         // IDE companion buffer directly).
         match self
-            .reconcile_carrier_via_gateway(&canonical_id, ide.is_jsx, Some(&ide))
+            .reconcile_carrier_via_gateway(&canonical_id, ide.is_jsx, Some(&ide), open_pin)
             .await
         {
             crate::external_ts::CarrierSyncDecision::Published {
@@ -322,8 +329,10 @@ impl VerterLanguageServer {
                     committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                     synced_kinds.push(ProviderPathKind::Ide);
                     // Record a fresh generation pinning the EXACT IDE bytes just
-                    // synced (interactive queries capture this surface).
-                    self.record_carrier_ide_snapshot(
+                    // synced (interactive queries capture this surface), fenced
+                    // by the SAME pin captured before the compile above.
+                    self.record_carrier_ide_snapshot_with_pin(
+                        open_pin,
                         &canonical_id,
                         &ide_path,
                         &ide.code,
@@ -365,6 +374,13 @@ impl VerterLanguageServer {
             None => return,
         };
         self.documents.host().ensure_loaded(&canonical_id);
+        // Pin the open document's exact revision BEFORE compiling — see
+        // `DocumentRegistry::open_compile_pin`.
+        let (open_uri, open_revision) = self.documents.open_compile_pin(&canonical_id);
+        let open_pin = match (&open_uri, &open_revision) {
+            (Some(uri), Some(revision)) => Some((uri, revision)),
+            _ => None,
+        };
         let ide = self.documents.get_ide(uri);
         let is_jsx = ide
             .as_ref()
@@ -374,7 +390,7 @@ impl VerterLanguageServer {
         // provider-state commit. tsserver ⇒ `Published` (the plugin serves both
         // companions); tsgo ⇒ `DirectOpen` (open the API companion buffer directly).
         match self
-            .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
+            .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref(), open_pin)
             .await
         {
             crate::external_ts::CarrierSyncDecision::Published {
@@ -483,6 +499,15 @@ impl VerterLanguageServer {
             return false;
         }
         self.documents.host().ensure_loaded(canonical_id);
+        // Pin the open document's exact revision BEFORE compiling — see
+        // `DocumentRegistry::open_compile_pin`. Reachable for an open document
+        // (e.g. the completion no-content-recovery path re-publishes the
+        // carrier of the file the user is actively editing).
+        let (open_uri, open_revision) = self.documents.open_compile_pin(canonical_id);
+        let open_pin = match (&open_uri, &open_revision) {
+            (Some(uri), Some(revision)) => Some((uri, revision)),
+            _ => None,
+        };
         let profile = self.documents.tsx_profile.read().clone();
         let _ = block_in_place_if_available(|| {
             self.documents
@@ -495,6 +520,14 @@ impl VerterLanguageServer {
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
 
+        // TEST SEAM: fires HERE — immediately after the compile above and
+        // before the gateway call below — so a test can land a `did_change`
+        // in exactly the window a pin captured anywhere at or after this
+        // point (rather than before the compile) would fail to close.
+        #[cfg(test)]
+        self.maybe_pause_publish_carrier_after_compile(canonical_id)
+            .await;
+
         // This is the MEMBERSHIP-refresh entry (eager carrier refresh / cross-file
         // prewarm): route through the SINGLE carrier-sync gateway for the store
         // membership decision (publish on owned / retract on owner-loss). The
@@ -504,7 +537,7 @@ impl VerterLanguageServer {
         // settled through the coordinator so a transient defer requeues (the F3/F4
         // dropped-outcome class) and a terminal owner-loss advances the barrier.
         match self
-            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
+            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref(), open_pin)
             .await
         {
             crate::external_ts::CarrierSyncDecision::Published { .. }
@@ -1132,7 +1165,12 @@ impl VerterLanguageServer {
         // yields no authorization (the open-document liveness commit below is
         // membership-free).
         let owned_commit_authorization = match self
-            .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
+            .reconcile_carrier_via_gateway(
+                &canonical_id,
+                is_jsx,
+                ide.as_ref(),
+                compiled_revision.as_ref().map(|revision| (uri, revision)),
+            )
             .await
             .into_owned_commit_authorization()
         {
@@ -2051,6 +2089,10 @@ impl VerterLanguageServer {
         canonical_id: &str,
         ide_code: &str,
         is_jsx: bool,
+        // The open-document revision `ide_code` was compiled against, captured
+        // by the CALLER before that compile ran — see
+        // `DocumentRegistry::open_compile_pin`.
+        open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) -> bool {
         let Some(sync) = &self.project_sync else {
             return false;
@@ -2087,10 +2129,17 @@ impl VerterLanguageServer {
         match result {
             Ok(()) => {
                 // Record a fresh generation pinning the EXACT IDE bytes just
-                // synced (before `ide_path` is moved). No source map in scope
-                // here → the choke attaches the live IDE artifact's map only if
-                // it still byte-matches `ide_code`.
-                self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                // synced (before `ide_path` is moved), fenced by the pin the
+                // caller captured before compiling `ide_code`. No source map
+                // in scope here → the choke attaches the live IDE artifact's
+                // map only if it still byte-matches `ide_code`.
+                self.record_carrier_ide_snapshot_with_pin(
+                    open_pin,
+                    canonical_id,
+                    &ide_path,
+                    ide_code,
+                    None,
+                );
                 state.ide_path = Some(ide_path);
                 state.ide_background_loaded = true;
                 self.commit_provider_sync_state(canonical_id, state);
@@ -2328,6 +2377,16 @@ impl VerterLanguageServer {
             }
         };
         if let Some(api) = public_api {
+            // Pin the open document's exact revision BEFORE compiling below —
+            // see `DocumentRegistry::open_compile_pin`. `canonical_id` is an
+            // IMPORTED child carrier: usually not open, but nothing prevents
+            // it (a component imported by the active file can independently
+            // be open in another tab).
+            let (open_uri, open_revision) = self.documents.open_compile_pin(canonical_id);
+            let open_pin = match (&open_uri, &open_revision) {
+                (Some(uri), Some(revision)) => Some((uri, revision)),
+                _ => None,
+            };
             let ide = if is_tsgo {
                 let cached = self.documents.host.get_ide(canonical_id, &profile);
                 if cached.is_some() {
@@ -2371,7 +2430,7 @@ impl VerterLanguageServer {
                 };
                 if let Some(ide) = ide.as_ref() {
                     let delivered = self
-                        .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
+                        .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx, open_pin)
                         .await;
                     outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
@@ -2395,7 +2454,7 @@ impl VerterLanguageServer {
                 // reaches tsserver as a store-backed configured-project member
                 // (`Published`); tsgo opens the companions directly (`DirectOpen`).
                 match self
-                    .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
+                    .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref(), open_pin)
                     .await
                 {
                     crate::external_ts::CarrierSyncDecision::Published {
@@ -2432,8 +2491,10 @@ impl VerterLanguageServer {
                                     synced_kinds.push(ProviderPathKind::Ide);
                                     // Record a fresh generation pinning the EXACT IDE
                                     // bytes just synced (interactive queries capture
-                                    // this surface).
-                                    self.record_carrier_ide_snapshot(
+                                    // this surface), fenced by the SAME pin captured
+                                    // before the compile above.
+                                    self.record_carrier_ide_snapshot_with_pin(
+                                        open_pin,
                                         canonical_id,
                                         &ide_path,
                                         &ide.code,
@@ -2515,7 +2576,7 @@ impl VerterLanguageServer {
                                     canonical_id,
                                     is_jsx,
                                     ide.as_ref().map(|output| &*output.code),
-                                    None,
+                                    open_pin,
                                 )
                                 .await;
                             } else {
@@ -2530,8 +2591,67 @@ impl VerterLanguageServer {
 
         if !ownership_ready {
             // Bootstrap: no owner snapshot yet, unresolved sync allowed.
-            let compiled = block_in_place_if_available(|| {
+            //
+            // Serialize the destructive `remove` + repair against the SAME
+            // lifecycle mutex `did_change`/`did_open`/`did_close` commit
+            // through (see `lifecycle.rs`'s `did_change_mutex` usage). Without
+            // this, a concurrent `did_change` can commit a newer revision C
+            // between `reestablish_host_overlay_from_open_buffer`'s read of
+            // the buffer and its write into the host, or a concurrent
+            // `did_close` can remove the document/overlay mid-reload — either
+            // way the registry ends up saying one revision while the host
+            // just compiled another, and neither side's identity actually
+            // moved during THIS pass, so no pin comparison downstream can
+            // catch it. Holding this mutex around the read-then-write repair
+            // makes that interleaving impossible: a racing lifecycle commit
+            // simply waits.
+            //
+            // The mutex is released BEFORE the compile below, deliberately:
+            // `documents/mod.rs`'s `did_change` is explicitly designed so a
+            // document commit never waits on an IDE compile (see its own
+            // comment there — a real, previously-shipped ~9s-per-keystroke
+            // regression). Holding `did_change_mutex` across a compile here
+            // would make every OTHER open document's `did_change`/`did_open`/
+            // `did_close` block on this one background reload's compile,
+            // reintroducing that same class of stall globally. The narrower
+            // hold (just `remove` + the repair) is sufficient: once released,
+            // an interleaving `did_change` can still land before the compile
+            // runs, but that is the ORDINARY revision-moved case the pin
+            // fence (rounds 1-2) already detects and refuses at record time —
+            // it is not the torn read-then-write this mutex specifically
+            // closes.
+            //
+            // The pin is captured INSIDE the held mutex, immediately before
+            // the reload — the SEPARATE compile from the one above (the
+            // destructive `host.remove` + reload makes it a distinct pass),
+            // so it needs its own freshly-captured pin, not the outer
+            // `open_pin`. Capturing it here (rather than before acquiring the
+            // mutex) guarantees it reflects exactly the revision the repair
+            // actually establishes, with nothing able to move it in between.
+            let document_commit_guard = self.did_change_mutex.lock().await;
+            let (bootstrap_open_uri, bootstrap_open_revision) =
+                self.documents.open_compile_pin(canonical_id);
+            let bootstrap_open_pin = match (&bootstrap_open_uri, &bootstrap_open_revision) {
+                (Some(uri), Some(revision)) => Some((uri, revision)),
+                _ => None,
+            };
+            block_in_place_if_available(|| {
                 self.documents.host.remove(canonical_id);
+                // `remove` clears the workspace overlay: if this canonical id
+                // is ALSO currently open, re-establish the overlay from its
+                // OWN live buffer before the reload below — never let the
+                // subsequent `ensure_loaded` fall through to disk and
+                // silently substitute foreign/stale bytes for the open
+                // document's unsaved edits, which the pin above cannot detect
+                // (the open document's identity never moves; only the HOST's
+                // content would have diverged from it). A no-op when not
+                // open, in which case disk is the correct source.
+                self.documents
+                    .reestablish_host_overlay_from_open_buffer(canonical_id);
+            });
+            drop(document_commit_guard);
+
+            let compiled = block_in_place_if_available(|| {
                 if !self.documents.host.ensure_loaded(canonical_id) {
                     return false;
                 }
@@ -2553,7 +2673,12 @@ impl VerterLanguageServer {
                 if is_tsgo {
                     if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
                         let delivered = self
-                            .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
+                            .sync_carrier_ide_unresolved(
+                                canonical_id,
+                                &ide.code,
+                                ide.is_jsx,
+                                bootstrap_open_pin,
+                            )
                             .await;
                         outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                     }
@@ -2610,15 +2735,73 @@ impl VerterLanguageServer {
             )
             .is_unresolved()
             {
-                self.sync_compiled_carrier_to_provider(canonical_id, None)
+                self.sync_compiled_carrier_to_provider(canonical_id, None, None)
                     .await;
                 return;
             }
         }
-        // Load from disk + upsert + compile (all blocking) — wrapped in block_in_place
-        // to prevent tokio worker thread exhaustion during background sync.
-        let compile_result = block_in_place_if_available(|| {
+        // Serialize the destructive `remove` + repair against the SAME
+        // lifecycle mutex `did_change`/`did_open`/`did_close` commit through
+        // (see `lifecycle.rs`'s `did_change_mutex` usage). Without this, a
+        // concurrent `did_change` can commit a newer revision C between
+        // `reestablish_host_overlay_from_open_buffer`'s read of the buffer and
+        // its write into the host, or a concurrent `did_close` can remove the
+        // document/overlay mid-reload — either way the registry ends up
+        // saying one revision while the host just compiled another, and
+        // neither side's identity actually moved during THIS pass, so no pin
+        // comparison downstream can catch it. Holding this mutex around the
+        // read-then-write repair makes that interleaving impossible: a racing
+        // lifecycle commit simply waits.
+        //
+        // The mutex is released BEFORE the compile below, deliberately:
+        // `documents/mod.rs`'s `did_change` is explicitly designed so a
+        // document commit never waits on an IDE compile (see its own comment
+        // there — a real, previously-shipped ~9s-per-keystroke regression).
+        // Holding `did_change_mutex` across a compile here would make every
+        // OTHER open document's `did_change`/`did_open`/`did_close` block on
+        // this background resync's compile, reintroducing that same class of
+        // stall globally. The narrower hold (just `remove` + the repair) is
+        // sufficient: once released, an interleaving `did_change` can still
+        // land before the compile runs, but that is the ORDINARY
+        // revision-moved case the pin fence (rounds 1-2) already detects and
+        // refuses at record time — it is not the torn read-then-write this
+        // mutex specifically closes.
+        //
+        // The pin is captured INSIDE the held mutex, immediately before the
+        // reload — see `DocumentRegistry::open_compile_pin`.
+        // `resync_background_carrier_file` targets what is USUALLY a closed
+        // dependency, but nothing prevents the same file from independently
+        // being open (e.g. in another tab) while a dependency-triggered
+        // background resync reaches it here. Capturing the pin here (rather
+        // than before acquiring the mutex) guarantees it reflects exactly the
+        // revision the repair actually establishes, with nothing able to move
+        // it in between.
+        let document_commit_guard = self.did_change_mutex.lock().await;
+        let (open_uri, open_revision) = self.documents.open_compile_pin(canonical_id);
+        let open_pin = match (&open_uri, &open_revision) {
+            (Some(uri), Some(revision)) => Some((uri, revision)),
+            _ => None,
+        };
+        block_in_place_if_available(|| {
             self.documents.host.remove(canonical_id);
+            // `remove` clears the workspace overlay: if this canonical id is
+            // ALSO currently open, re-establish the overlay from its OWN live
+            // buffer before the reload below — never let the subsequent
+            // `ensure_loaded` fall through to disk and silently substitute
+            // foreign/stale bytes for the open document's unsaved edits,
+            // which `open_pin` above cannot detect (the open document's
+            // identity never moves; only the HOST's content would have
+            // diverged from it). A no-op when not open, in which case disk is
+            // the correct source.
+            self.documents
+                .reestablish_host_overlay_from_open_buffer(canonical_id);
+        });
+        drop(document_commit_guard);
+
+        // Load from disk + compile (all blocking) — wrapped in block_in_place
+        // to prevent tokio worker thread exhaustion during background sync.
+        // Deliberately UNGUARDED by `did_change_mutex` (see comment above).
+        let compile_result = block_in_place_if_available(|| {
             if !self.documents.host.ensure_loaded(canonical_id) {
                 tracing::debug!("resync_background: can't read {canonical_id}");
                 return None;
@@ -2649,7 +2832,7 @@ impl VerterLanguageServer {
         self.refresh_carrier_dependency_tracking(canonical_id);
 
         let ide = self.documents.host.get_ide(canonical_id, &profile);
-        self.sync_compiled_carrier_to_provider(canonical_id, ide.as_ref())
+        self.sync_compiled_carrier_to_provider(canonical_id, ide.as_ref(), open_pin)
             .await;
     }
 
@@ -2671,6 +2854,10 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
         ide: Option<&verter_session::IdeResponse>,
+        // The open-document revision `ide` was compiled against, captured by
+        // the CALLER before that compile ran — see
+        // `DocumentRegistry::open_compile_pin`.
+        open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
         let Some(sync) = &self.project_sync else {
             return;
@@ -2686,7 +2873,7 @@ impl VerterLanguageServer {
         // open-document liveness state or clear a non-open file); bootstrap/degraded
         // ⇒ `Pending` (keep queued).
         match self
-            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide)
+            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide, open_pin)
             .await
         {
             crate::external_ts::CarrierSyncDecision::Published {
@@ -2725,8 +2912,10 @@ impl VerterLanguageServer {
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced_kinds.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
-                        // synced (interactive queries capture this surface).
-                        self.record_carrier_ide_snapshot(
+                        // synced (interactive queries capture this surface), fenced
+                        // by the SAME pin the caller captured before compiling `ide`.
+                        self.record_carrier_ide_snapshot_with_pin(
+                            open_pin,
                             canonical_id,
                             &tsx_path,
                             &ide.code,
@@ -2809,7 +2998,7 @@ impl VerterLanguageServer {
                             canonical_id,
                             is_jsx,
                             ide.map(|output| &*output.code),
-                            None,
+                            open_pin,
                         )
                         .await;
                     } else {

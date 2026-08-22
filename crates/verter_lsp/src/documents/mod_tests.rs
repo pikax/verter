@@ -862,3 +862,76 @@ async fn did_change_commit_window_never_exposes_a_stale_semantic_snapshot() {
     );
     assert!(registry.cached_semantic_analysis(&canonical_id).is_none());
 }
+
+/// Unit-proves the shared primitive both destructive-reload sites
+/// (`resync_background_carrier_file`, the bootstrap branch in
+/// `sync_imported_carrier_api_lightweight`) depend on to avoid substituting
+/// disk content for an open document's unsaved edits.
+///
+/// `VerterHost::remove` clears the workspace overlay (via
+/// `FilesystemWorkspace::notify_delete`); a bare re-read after that falls
+/// through to disk. `reestablish_host_overlay_from_open_buffer` must put the
+/// open document's OWN live buffer back as the overlay BEFORE anything reads
+/// through the host again.
+#[test]
+fn reestablish_host_overlay_from_open_buffer_restores_the_live_buffer_over_disk() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace_dir = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace_dir.join("src")).expect("workspace source dir");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'disk-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = "<script setup lang=\"ts\">\nconst msg = 'buffer-b'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    std::fs::write(workspace_dir.join("src/App.vue"), SOURCE_A).expect("write disk source A");
+
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace_dir);
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+    let uri: Uri = format!("file://{canonical_id}").parse().expect("uri");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = Arc::new(verter_session::VerterHost::new(
+        verter_session::HostConfig::default(),
+        ws,
+    ));
+    let registry = DocumentRegistry::new(Arc::clone(&host));
+
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_B.to_string(),
+    });
+    assert_eq!(
+        host.get_source(&canonical_id).as_deref(),
+        Some(SOURCE_B),
+        "precondition: the open document's overlay serves its own buffer"
+    );
+
+    host.remove(&canonical_id);
+    assert!(
+        host.workspace_read()
+            .read_file(&canonical_id)
+            .as_deref()
+            .is_some_and(|content| content.contains("disk-a")),
+        "precondition: the raw workspace read now falls through to disk \
+         (the overlay `remove` cleared)"
+    );
+
+    let reestablished = registry.reestablish_host_overlay_from_open_buffer(&canonical_id);
+    assert!(
+        reestablished,
+        "the open document's overlay must be re-establishable after remove"
+    );
+    assert_eq!(
+        host.get_source(&canonical_id).as_deref(),
+        Some(SOURCE_B),
+        "after re-establishing, the host must serve the open document's OWN \
+         live buffer again, never disk"
+    );
+
+    // A closed canonical id has no buffer to re-establish from — a no-op.
+    let closed_id = format!("{workspace_root}/src/NotOpen.vue");
+    assert!(!registry.reestablish_host_overlay_from_open_buffer(&closed_id));
+}

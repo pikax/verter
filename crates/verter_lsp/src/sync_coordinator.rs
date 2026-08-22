@@ -796,6 +796,20 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         return;
     }
 
+    // Pin the open document's exact revision BEFORE compiling, if any is
+    // open. Capturing the pin first — rather than after `get_ide` returns, as
+    // this used to — guarantees the pinned revision is never LATER than the
+    // revision that actually produces `ide.code` below: a `did_change` landing
+    // during the compile can only advance the LIVE identity past this pin,
+    // which makes the later current-identity check MISS (fail closed, safe) —
+    // it can never falsely MATCH a torn pair. `None` for a closed carrier (no
+    // live document to race against; the unguarded record stays correct there,
+    // same as every other closed-file producer path).
+    let uri_for_open_identity = deps.documents.canonical_id_to_uri(canonical_id);
+    let ide_compile_revision = uri_for_open_identity
+        .as_ref()
+        .and_then(|uri| deps.documents.snapshot_identity(uri));
+
     // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
     // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
     // populates its `CachedTsx` before the `get_ide` read below.
@@ -815,6 +829,21 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
+
+    // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —
+    // immediately after the compile above, at the exact source position the
+    // pin capture USED to sit at before this fix moved it earlier. A test can
+    // land a `did_change` during this pause to prove the pin (already
+    // captured above, before the compile) stays anchored to the PRE-edit
+    // revision instead of drifting to whatever capturing it here would
+    // observe. See `test_hooks::block_after_ide_compile`.
+    #[cfg(test)]
+    test_hooks::maybe_pause_after_ide_compile(canonical_id).await;
+    // The pin, in the shape the shared fenced-record entry point expects.
+    let open_pin = match (&uri_for_open_identity, &ide_compile_revision) {
+        (Some(uri), Some(revision)) => Some((uri, revision)),
+        _ => None,
+    };
 
     // The tsserver carrier-membership context: the debounced carrier reaches the
     // provider as a store-backed configured-project member. Clone the VFS handle in
@@ -852,6 +881,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         canonical_id,
         is_jsx,
         ide: ide.as_ref(),
+        open_pin,
         membership,
         admission: &deps.carrier_transaction_coordinator,
         reason: crate::external_ts::ReconcileReason::SourceSynced,
@@ -907,11 +937,20 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                             committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
-                            // just synced (interactive queries capture this surface).
+                            // just synced (interactive queries capture this surface),
+                            // through the shared fenced choke point: `open_pin` was
+                            // captured BEFORE the compile above, so the two awaits
+                            // just run (open_tsx/sync_tsx) giving a concurrent
+                            // `did_change` a window to land can only make this
+                            // record fail closed, never falsely pair `ide.code` with
+                            // a source it wasn't compiled from. Same hazard, same
+                            // fence shape, as
+                            // `VerterLanguageServer::record_carrier_ide_snapshot_if_current`
+                            // on the interactive repair path.
                             if let Some(delivered) =
                                 project_sync.carrier_provider_surface(&ide_path, &ide.code)
                             {
-                                crate::provider_surface_store::record_carrier_ide_surface(
+                                crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
                                     deps.documents.host(),
@@ -919,6 +958,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                                     &ide_path,
                                     &delivered,
                                     ide.source_map.as_deref(),
+                                    open_pin,
                                 );
                             }
                         }
@@ -1036,6 +1076,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                         canonical_id,
                         is_jsx,
                         ide.as_ref(),
+                        open_pin,
                     )
                     .await;
                 } else if snapshot.ownership_ready {
@@ -1080,6 +1121,10 @@ async fn preserve_open_unresolved_carrier(
     canonical_id: &str,
     is_jsx: bool,
     ide: Option<&verter_session::IdeResponse>,
+    open_pin: Option<(
+        &tower_lsp_server::ls_types::Uri,
+        &crate::documents::DocumentSnapshotIdentity,
+    )>,
 ) {
     let previous = deps
         .provider_sync_states
@@ -1113,10 +1158,14 @@ async fn preserve_open_unresolved_carrier(
             Ok(()) => {
                 ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
-                // synced (interactive queries capture this surface).
+                // synced (interactive queries capture this surface), through the
+                // shared fenced choke point: `open_pin` was captured by the
+                // caller BEFORE this compile, so the just-run provider await
+                // can only make this record fail closed, never falsely pair
+                // `ide.code` with a source it wasn't compiled from.
                 if let Some(delivered) = project_sync.carrier_provider_surface(&ide_path, &ide.code)
                 {
-                    crate::provider_surface_store::record_carrier_ide_surface(
+                    crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
                         deps.documents.host(),
@@ -1124,6 +1173,7 @@ async fn preserve_open_unresolved_carrier(
                         &ide_path,
                         &delivered,
                         ide.source_map.as_deref(),
+                        open_pin,
                     );
                 }
             }
@@ -1564,6 +1614,63 @@ pub(crate) async fn carrier_provider_diagnostics(
                 canonical_id
             );
             verter_diags
+        }
+    }
+}
+
+/// TEST SEAM: a global (process-wide, canonical-id-keyed) one-shot pause,
+/// independent of [`SyncCoordinatorDeps`] so no test's struct literal needs a
+/// new field. A test [`block_after_ide_compile`] a canonical id before
+/// calling `sync_file`; the FIRST subsequent `sync_file` pass for that id
+/// notifies `arrived`, then blocks on `release` right after the compile —
+/// the exact source position the pin capture sat at BEFORE this fix moved it
+/// earlier — giving the test a window to commit an interleaved `did_change`
+/// there and prove the (now-earlier) pin capture stays anchored to the
+/// pre-edit revision instead of drifting.
+///
+/// GLOBAL means process-wide, not per-test: `cargo test` runs tests
+/// concurrently in the SAME process, so two tests racing `sync_file` for the
+/// SAME canonical id can steal each other's registration (`insert` replaces,
+/// `remove` takes whatever is currently there) — an observed flaky failure
+/// when a test reused the common `"/workspace/src/App.vue"` fixture literal.
+/// Every caller of [`block_after_ide_compile`] MUST use a canonical id unique
+/// across the whole crate's test suite (a distinctive filename is enough; a
+/// unique workspace root, as `unique_server_ws_root` produces, also works).
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::LazyLock;
+
+    use dashmap::DashMap;
+    use tokio::sync::Notify;
+
+    type PauseGates = (std::sync::Arc<Notify>, std::sync::Arc<Notify>);
+
+    static PAUSE_AFTER_IDE_COMPILE: LazyLock<DashMap<String, PauseGates>> =
+        LazyLock::new(DashMap::new);
+
+    /// Register a one-shot pause for `canonical_id`. Returns `(arrived,
+    /// release)`: await `arrived.notified()` to know the pause point was
+    /// reached, then `release.notify_one()` to let `sync_file` proceed.
+    pub(crate) fn block_after_ide_compile(canonical_id: &str) -> PauseGates {
+        let arrived = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        PAUSE_AFTER_IDE_COMPILE.insert(
+            canonical_id.to_string(),
+            (
+                std::sync::Arc::clone(&arrived),
+                std::sync::Arc::clone(&release),
+            ),
+        );
+        (arrived, release)
+    }
+
+    /// Consume and honor a registered pause for `canonical_id`, if any. A
+    /// no-op (no await) when nothing was registered — so untouched tests pay
+    /// zero cost.
+    pub(crate) async fn maybe_pause_after_ide_compile(canonical_id: &str) {
+        if let Some((_, (arrived, release))) = PAUSE_AFTER_IDE_COMPILE.remove(canonical_id) {
+            arrived.notify_one();
+            release.notified().await;
         }
     }
 }
