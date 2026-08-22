@@ -346,6 +346,18 @@ pub(super) fn prepare_authored_partial_type_decl(
 /// canonicalization as the type space, WITHOUT the type-symbol shadow skip:
 /// in a prepared value decl's annotation scope the import binding wins over
 /// a same-named local symbol.
+///
+/// A single import binding that fails to canonicalize (an unresolvable
+/// specifier — no `node_modules` package, an unconfigured project, a genuine
+/// broken import) is SKIPPED, exactly like the type-space sibling
+/// ([`insert_resolvable_type_space_imports`]) already skips its own
+/// unresolvable entries: this unrelated non-canonicalizable binding must not
+/// make every local value declaration in the owner unavailable — a single
+/// bad import must not poison every sibling declaration's admission
+/// (methods, plain values, everything) by aborting the whole per-owner base
+/// build. A reference to the skipped name still fails to resolve on its
+/// own — this only stops one bad import from taking down the rest of the
+/// file.
 fn insert_value_space_import_resolutions(
     table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
     _canonical_id: &Arc<str>,
@@ -354,7 +366,7 @@ fn insert_value_space_import_resolutions(
     _dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
-) -> Result<(), PreparationFailure> {
+) {
     for (local, target) in state.owner_import_targets.iter() {
         if local.owner != owner {
             continue;
@@ -369,10 +381,12 @@ fn insert_value_space_import_resolutions(
             continue;
         }
         let local_name = local.name.as_ref();
-        let resolved = canonicalize_import_target(import_canonicalization, local_name, owner)?;
+        let Ok(resolved) = canonicalize_import_target(import_canonicalization, local_name, owner)
+        else {
+            continue;
+        };
         table.insert(interner.intern(local_name), resolved);
     }
-    Ok(())
 }
 
 /// Build the per-FILE TYPE-space `name_resolution` base table: file symbols,
@@ -422,7 +436,7 @@ pub(super) fn build_value_name_resolution_base(
         dep_edges,
         import_canonicalization,
         interner,
-    )?;
+    );
     Ok(table)
 }
 

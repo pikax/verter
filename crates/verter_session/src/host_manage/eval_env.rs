@@ -20,6 +20,18 @@ use super::{
     is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes,
 };
 
+/// [`VerterHost::component_meta_binding_type_entries`]'s admission result:
+/// the demanded `defineExpose` binding names split into ones the shared
+/// prepared-value resolver can expand (`admitted`) and ones whose
+/// preparation genuinely FAILED (`failed`) — kept distinct from a binding
+/// the admission gate simply never offered (a proven schema absence),
+/// which appears in neither list.
+#[derive(Default)]
+struct BindingAdmissionResult {
+    admitted: Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry>,
+    failed: Vec<String>,
+}
+
 impl VerterHost {
     /// The canonical per-file `EvalEnv` for a base (non-overlay) read.
     ///
@@ -903,22 +915,27 @@ impl VerterHost {
     /// names that resolve to a prepared VALUE declaration carrying an
     /// annotation fact (the same has-annotation gate the retired typed-entry
     /// list applied — the closure resolves the binding's TYPE on demand
-    /// through the prepared surface, by name).
+    /// through the prepared surface, by name); plus the requested binding
+    /// NAMES whose preparation genuinely FAILED — a distinct outcome from a
+    /// proven-absent binding, preserved here rather than collapsed by the
+    /// `Option`-shaped [`crate::resolver_core::resolver_context::ResolverContext::prepared_value_decl_return_only`]
+    /// so the caller can publish a typed `Failed` result instead of silently
+    /// dropping the binding.
     fn component_meta_binding_type_entries(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical: &str,
         requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
-    ) -> Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry> {
+    ) -> BindingAdmissionResult {
         if requested_bindings.is_empty() {
-            return Vec::new();
+            return BindingAdmissionResult::default();
         }
 
         let Some(indexed) = ctx
             .ensure_indexed_ready_serve(canonical)
             .map(|serve| serve.indexed)
         else {
-            return Vec::new();
+            return BindingAdmissionResult::default();
         };
         let mut admitted = std::collections::BTreeSet::new();
         for demand in requested_bindings {
@@ -935,24 +952,72 @@ impl VerterHost {
             ));
         }
 
-        admitted
-            .iter()
-            .filter(|binding| {
-                ctx.prepared_value_decl(canonical, binding.owner, binding.name.as_ref())
-                    .is_some_and(|decl| {
-                        !matches!(
-                            decl.type_annotation.classification,
-                            verter_type_expr::facts::ValueAnnotationClass::Absent
-                        )
-                    })
-            })
-            .map(
-                |binding| verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
-                    name: binding.name.to_string(),
-                    owner: binding.owner,
-                },
+        let mut result = BindingAdmissionResult::default();
+        for binding in &admitted {
+            match ctx.prepared_value_decl(canonical, binding.owner, binding.name.as_ref()) {
+                Ok(Some(decl)) if Self::prepared_value_decl_has_demandable_type(&decl) => {
+                    result.admitted.push(
+                        verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
+                            name: binding.name.to_string(),
+                            owner: binding.owner,
+                        },
+                    );
+                }
+                // A proven schema absence (no fact carrier at all) — the
+                // caller's own unannotated fallback, not a gate omission.
+                Ok(_) => {}
+                // A demanded binding whose preparation genuinely FAILED —
+                // never collapsed into the same silent drop the proven
+                // absence above applies. The wire-level publication has only
+                // one applicable `SemanticSourceFailure` variant for a
+                // required member-value position
+                // (`UnrepresentableRequiredMemberValue` — see
+                // `compute_evaluated_types_from_owner_context_with_ctx`'s
+                // failed-binding publication below), so the specific
+                // `PreparationFailure` reason cannot travel further than this
+                // boundary as a TYPED value; preserve it here as structured
+                // tracing instead of a silent discard, matching
+                // `ResolverContext::prepared_type_decl_return_only`'s own
+                // failure-logging pattern for the parallel type-decl path.
+                Err(failure) => {
+                    tracing::warn!(
+                        canonical,
+                        owner = ?binding.owner,
+                        symbol_name = binding.name.as_ref(),
+                        ?failure,
+                        "defineExpose binding preparation failed; publishing as a typed Failed source"
+                    );
+                    result.failed.push(binding.name.to_string());
+                }
+            }
+        }
+        result
+    }
+
+    /// Whether a prepared value declaration carries ANY fact a demanded
+    /// binding can be expanded through — the admission gate's EXHAUSTIVE
+    /// read over `PreparedValueDecl`'s own fact carriers: an authored /
+    /// `typeof`-peel annotation, a function signature group (a `function`
+    /// declaration carries no annotation at all — its type lives entirely on
+    /// `signatures`), a const-object/namespace shape, an enum member
+    /// inventory, or a class declaration (its construct signature lives on
+    /// `signatures`, keyed here on `kind` since a class with only property
+    /// members carries no signature). A binding with NONE of these facts
+    /// carries no demandable type at all — that is the proven `Absent` case,
+    /// not a gate omission.
+    fn prepared_value_decl_has_demandable_type(
+        decl: &verter_semantic::analysis::type_solver::prepared::PreparedValueDecl,
+    ) -> bool {
+        !matches!(
+            decl.type_annotation.classification,
+            verter_type_expr::facts::ValueAnnotationClass::Absent
+        ) || !decl.signatures.is_empty()
+            || decl.object_shape.is_some()
+            || decl.enum_members.is_some()
+            || matches!(
+                decl.kind,
+                verter_semantic::analysis::type_eval::ValueDeclKind::Class
             )
-            .collect()
     }
 
     /// Macro-argument-type expander entry point. The expander uses
@@ -1012,14 +1077,14 @@ impl VerterHost {
         let binding_node_ids: std::cell::RefCell<
             Vec<Option<crate::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
-        let result = {
+        let mut result = {
             component_meta_trace_custom!(
                 "compute_evaluated_types_expand_macros",
                 format!(
                     "owner={} macros={} bindings={} store_view={}",
                     canonical,
                     snapshot.macros.len(),
-                    binding_entries.len(),
+                    binding_entries.admitted.len(),
                     false,
                 ),
             );
@@ -1027,7 +1092,7 @@ impl VerterHost {
             verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
                 snapshot.macros.as_ref(),
                 Some(eval_source),
-                binding_entries.as_slice(),
+                binding_entries.admitted.as_slice(),
                 None,
                 match purpose {
                     crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
@@ -1618,6 +1683,35 @@ impl VerterHost {
                 },
             )
         };
+        // A demanded `defineExpose` binding whose preparation genuinely
+        // FAILED never reached the closure above (it was never admitted
+        // into `binding_entries.admitted`) — publish it directly as a
+        // `Failed`-authority entry instead of silently omitting it. Kept in
+        // sync with the audit capture buffers: each failed binding never
+        // dispatched, so its captured node id is `None`, the same value
+        // every non-dispatching closure branch records.
+        for name in &binding_entries.failed {
+            binding_node_ids.borrow_mut().push(None);
+            result
+                .bindings
+                .push(verter_semantic::analysis::type_expand::ExpandedField {
+                    name: name.clone(),
+                    authority: verter_type_expr::ResolvedTypeAuthority::failed(
+                        verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                        ),
+                        verter_type_expr::ResolutionProvenance::SemanticEvaluator,
+                        Arc::from([]),
+                    ),
+                    authored_evidence: None,
+                    optional: false,
+                    exactness: verter_semantic::analysis::type_solver::SolverExactness::Incomplete,
+                    execution_status:
+                        verter_semantic::analysis::type_solver::ExecutionStatus::Completed,
+                    diagnostics: Vec::new(),
+                    declared_in_macro_type_arg: false,
+                });
+        }
         // Dependency tracking comes from the frontier/shallow-file-state path.
         let discovered_dependencies = std::collections::BTreeSet::<String>::new();
         if component_meta_debug_enabled() {

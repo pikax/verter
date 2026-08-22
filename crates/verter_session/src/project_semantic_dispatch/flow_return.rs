@@ -747,9 +747,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scope_owner = value_root.scope.owner;
         let value_name = Arc::clone(&value_root.name);
         drop(data);
-        let prepared =
-            self.ctx
-                .prepared_value_decl(scope_canonical.as_ref(), scope_owner, &value_name)?;
+        let prepared = self.ctx.prepared_value_decl_return_only(
+            scope_canonical.as_ref(),
+            scope_owner,
+            &value_name,
+        )?;
         let [signature] = prepared.signatures.as_slice() else {
             return None;
         };
@@ -7954,7 +7956,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // an empty-cycle outcome is a hold the SCC close discharges
                 // on the component's admitted returns; every other outcome
                 // contributes the callee's return or its typed failure.
-                let prepared = self.dispatch.ctx.prepared_value_decl(
+                let prepared = self.dispatch.ctx.prepared_value_decl_return_only(
                     self.canonical,
                     target.declaration.owner,
                     target.declaration.name.as_ref(),

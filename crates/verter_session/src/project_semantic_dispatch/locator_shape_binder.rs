@@ -392,7 +392,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }),
                 verter_type_expr::locators::LocatorSymbolSpace::Value => self
                     .ctx
-                    .prepared_value_decl(canonical.as_ref(), anchor.owner, anchor_symbol.as_ref())
+                    .prepared_value_decl_return_only(
+                        canonical.as_ref(),
+                        anchor.owner,
+                        anchor_symbol.as_ref(),
+                    )
                     .map(AnchorPreparedDecl::Value),
                 verter_type_expr::locators::LocatorSymbolSpace::Namespace => None,
             },

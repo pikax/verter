@@ -221,7 +221,10 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
         self.inner
             .prepared_value_decl_in_with_context(self, canonical_id, owner, symbol_name)
     }

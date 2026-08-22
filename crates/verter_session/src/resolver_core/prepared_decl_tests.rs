@@ -909,8 +909,14 @@ export namespace NS {
              not rebuild it per declaration"
     );
 
-    let c = value_cache.get("c").expect("c should be present");
-    let d = value_cache.get("d").expect("d should be present");
+    let c = value_cache
+        .get("c")
+        .expect("c preparation should succeed")
+        .expect("c should be present");
+    let d = value_cache
+        .get("d")
+        .expect("d preparation should succeed")
+        .expect("d should be present");
     assert!(
         Arc::ptr_eq(&c.name_resolution, &d.name_resolution),
         "value decls of one file must SHARE one base table"
@@ -1101,7 +1107,7 @@ fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {
     );
 
     assert!(
-        cache.get("alpha").is_some(),
+        cache.get("alpha").is_ok_and(|value| value.is_some()),
         "alpha prepares under a live lease"
     );
     assert!(cache.slot_committed_for_test("alpha"));
@@ -1109,7 +1115,7 @@ fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {
     state.decl_bodies().release_retained_snapshot_for_test();
 
     assert!(
-        cache.get("beta").is_none(),
+        cache.get("beta").is_ok_and(|value| value.is_none()),
         "a broken-lease prepared-value demand fails CLOSED to None (ReturnOnly)"
     );
     assert!(
@@ -1423,6 +1429,7 @@ export const defaults = { label: 'ok' }
     let value = bundle
         .prepared_value_decls
         .get("defaults")
+        .expect("defaults preparation should succeed")
         .expect("defaults should be present");
     assert!(
         Arc::ptr_eq(
