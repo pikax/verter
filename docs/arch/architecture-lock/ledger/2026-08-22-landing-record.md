@@ -72,3 +72,40 @@ blocks, (b) run the missing mandates retroactively against the landed SHAs, or
 ## In flight at time of writing
 `block/css-cutover`, `block/svelte-css-grammar`, `block/css-closing-items`,
 `block/dependency-alignment`.
+
+## Validator state — `scripts/validate-program-state.mjs --mode live`
+
+Run after the landings. Two violations, one fixed, one left for the maintainer.
+
+**Fixed — CM1's rehearsal pin was dangling.**
+`implementation_candidate_sha` was `521491926…`, a commit `block/cm1`'s history no
+longer contains: the branch was rebased, rewriting it. The object survives but is
+unreachable from the ref, so it could not serve as a rehearsal identity.
+Repinned to `47e85159063b0ea841548f0d29aa0eb1d22c7fad`, the live tip and the
+candidate that was actually reviewed and landed.
+
+**Note this violation PREDATES today's landings** — the ledger was already
+failing with it before any of this session's work, and it masked the second one.
+
+**Open — the fixed-landing-order rehearsal fails for CM1.**
+Replaying `53d6c3157..47e851590` against the cumulative prior-block result
+reports real conflicts in `contracts/stacked-prs.md` and
+`MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md`.
+
+This is structural, not a defect in the work. The rehearsal runs for blocks that
+are CONCURRENTLY ACTIVE (`IN_PROGRESS ∪ REVIEW ∪ ACCEPTANCE_RECOMMENDED`), and
+CM1, BV2 and J1 are all still marked `IN_PROGRESS` — while all three have in fact
+LANDED (`0e5177931`, `979123ef4`, `eadec2dc0` + `120eede71`). The ledger is
+rehearsing a landing order for branches that no longer need landing, against a
+cumulative base that history has already moved past.
+
+Resolving it means deciding what status a block landed OUTSIDE the fixed-order
+protocol should carry. `ACCEPTANCE_RECOMMENDED` is the closest fit — reviewed and
+landed, not yet ratified — but it is still counted as active, so it would not
+clear the rehearsal either. That is a maintainer call, not one to guess at, so
+the rows are left as they are and the violation stands recorded rather than
+papered over.
+
+**Process change adopted so this does not recur:** landing a block now includes
+updating its ledger row in the same step. Today's landings were recorded
+retrospectively, which is how CM1's pin went stale unnoticed in the first place.
