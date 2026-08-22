@@ -65,8 +65,8 @@ pub mod span_origins;
 /// query-time `TypeExpr` walking.
 pub mod facts;
 pub use facts::{
-    merge_route_demands, DeclBindingKey, RouteDemand, RouteKeySet, TopLevelOwnerId,
-    TopLevelOwnerKind, ValueDeclIdentityPart,
+    merge_route_demands, ConstructorBindingEntry, ConstructorBindingOutcome, DeclBindingKey,
+    RouteDemand, RouteKeySet, TopLevelOwnerId, TopLevelOwnerKind, ValueDeclIdentityPart,
 };
 
 mod indexed_expression;

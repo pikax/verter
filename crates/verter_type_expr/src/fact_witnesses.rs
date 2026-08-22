@@ -475,6 +475,7 @@ fn prop_field(name: &str, declared_in_macro_type_arg: bool) -> AnalyzedPropField
         type_expr_scope: None,
         payload: None,
         name_span_origin: member_origin(0),
+        constructor_bindings: Vec::new(),
     }
 }
 
@@ -491,6 +492,31 @@ fn declared_in_macro_type_arg_participates_in_fact_identity() {
     );
     // ...but two facts that agree on the flag (and everything else) are equal.
     assert_eq!(authored, prop_field("count", true));
+}
+
+#[test]
+fn constructor_bindings_participates_in_fact_identity() {
+    // A `Global`-resolved constructor spelling is a DISTINCT fact from a
+    // `Local`-resolved one at the same name — the whole point of the
+    // owner-aware binding index is that these two outcomes must never
+    // collapse to the same cached fact.
+    let entry = |resolution: ConstructorBindingOutcome| ConstructorBindingEntry {
+        spelling: std::sync::Arc::from("String"),
+        resolution,
+    };
+    let mut global = prop_field("label", true);
+    global.constructor_bindings = vec![entry(ConstructorBindingOutcome::Global)];
+    let mut local = prop_field("label", true);
+    local.constructor_bindings = vec![entry(ConstructorBindingOutcome::Local(
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "String"),
+    ))];
+    assert_ne!(
+        global, local,
+        "constructor_bindings must discriminate fact identity"
+    );
+    let mut global_again = prop_field("label", true);
+    global_again.constructor_bindings = vec![entry(ConstructorBindingOutcome::Global)];
+    assert_eq!(global, global_again);
 }
 
 #[test]

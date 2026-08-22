@@ -501,6 +501,7 @@ fn runes_props_from_destructure_geometry(
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
                 declared_in_macro_type_arg: false,
+                constructor_bindings: Vec::new(),
             };
             fields.push(
                 crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
@@ -798,6 +799,7 @@ fn legacy_prop_field(
             resolution_source: TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: false,
+            constructor_bindings: Vec::new(),
         },
         verter_type_expr::facts::SourcePosition::unannotated(),
         verter_type_expr::PropCallableRole::Other,
@@ -857,6 +859,7 @@ fn resolve_bindable(
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
                     declared_in_macro_type_arg: false,
+                    constructor_bindings: Vec::new(),
                 });
             ModelBinding {
                 name: name.as_str().to_string(),

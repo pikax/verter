@@ -860,6 +860,7 @@ mod tests {
             resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: true,
+            constructor_bindings: Vec::new(),
         }
     }
 

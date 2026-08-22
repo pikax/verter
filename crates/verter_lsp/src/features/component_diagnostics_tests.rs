@@ -846,6 +846,7 @@ fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysi
             payload: None,
             type_expr_scope: None,
             declared_in_macro_type_arg: true,
+            constructor_bindings: Vec::new(),
         })
         .collect();
 
@@ -1404,6 +1405,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     payload: None,
                     type_expr_scope: None,
                     declared_in_macro_type_arg: false,
+                    constructor_bindings: Vec::new(),
                 })
                 .collect(),
             emit_fields: vec![],
@@ -1512,6 +1514,7 @@ fn macro_fallback_with_defaults_pattern() {
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
@@ -1525,6 +1528,7 @@ fn macro_fallback_with_defaults_pattern() {
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     },
                 ],
                 emit_fields: vec![],

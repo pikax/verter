@@ -1155,6 +1155,14 @@ pub struct AnalyzedPropField {
     /// asked for this name" from "this name arrived via inheritance".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declared_in_macro_type_arg: bool,
+    /// Owner-aware binding resolution of each runtime-constructor spelling
+    /// at this prop's value position (`RootBindingIndex`-gated), in
+    /// authored order: empty for a type-based prop (no runtime-constructor
+    /// position at all), one entry for a single constructor identifier
+    /// (`name: String`), one entry per element for a constructor array
+    /// (`name: [String, Number]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constructor_bindings: Vec<verter_type_expr::ConstructorBindingEntry>,
 }
 
 fn is_rust_resolution(src: &TypeResolutionSource) -> bool {
@@ -1516,6 +1524,13 @@ pub struct AnalyzedOptionsProp {
     /// JSDoc tags (e.g., `@default`, `@deprecated`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<JsdocTag>,
+    /// Owner-aware binding resolution of each runtime-constructor spelling
+    /// at this prop's `props:` value position (`RootBindingIndex`-gated),
+    /// in authored order: empty for an annotation-only/no-constructor prop,
+    /// one entry for a single constructor identifier, one entry per element
+    /// for a constructor array (`foo: [String, Number]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constructor_bindings: Vec<verter_type_expr::ConstructorBindingEntry>,
 }
 
 /// A named field from an Options API option (data, computed, methods, etc.).

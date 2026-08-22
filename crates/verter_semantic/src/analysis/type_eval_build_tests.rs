@@ -3248,6 +3248,7 @@ fn make_synth_typed_prop(name: &str, field_index: u32) -> AnalyzedPropField {
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
         declared_in_macro_type_arg: false,
+        constructor_bindings: Vec::new(),
     }
 }
 
@@ -3451,6 +3452,7 @@ fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
             resolution_source: TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: false,
+            constructor_bindings: Vec::new(),
         }],
         Vec::new(),
         Vec::new(),

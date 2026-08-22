@@ -441,6 +441,7 @@ mod tests {
             resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: false,
+            constructor_bindings: Vec::new(),
         };
         let runes = ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
             props: Some(crate::typeinfo::framework_surface::results::PropsSurface {

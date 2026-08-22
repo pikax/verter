@@ -1199,6 +1199,7 @@ type Props = Pick<ImportedBase, 'href'>
                 resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
                 declared_in_macro_type_arg: false,
+                constructor_bindings: Vec::new(),
             }],
             emit_fields: Vec::new(),
             slot_fields: Vec::new(),

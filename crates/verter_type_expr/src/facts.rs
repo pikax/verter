@@ -159,6 +159,63 @@ impl DeclBindingKey {
     }
 }
 
+/// The owner-aware binding-resolution outcome for a Vue runtime-constructor
+/// spelling (`String`/`Number`/`Boolean`/`Array`/`Object`/`Function`/`Symbol`/
+/// `Date`/`RegExp`/`Promise`) at a `defineProps`/`defineModel`/Options
+/// `props:` runtime-argument position. Producer-owned: emitted by the
+/// analyzer's `RootBindingIndex`-gated extraction (`verter_semantic`), never
+/// recomputed downstream. See
+/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum ConstructorBindingOutcome {
+    /// No runtime-surviving local declaration binds this name — the spelling
+    /// is safe to fold via the shared runtime-constructor mapping (the
+    /// closed-fact primitive fold for `String`/`Number`/`Boolean`, or the
+    /// existing display-text route for the other seven spellings).
+    Global,
+    /// Bound to a real local, runtime-surviving value declaration. Never
+    /// folded as a runtime constructor — resolved through the general
+    /// authored-value-reference route keyed by this pair.
+    Local(DeclBindingKey),
+    /// Static resolution does not apply (`with`, a sloppy direct `eval`
+    /// reaching the reference, ambiguous/missing owner topology, or a
+    /// non-clean parse). Fails closed — never folded as `Global`.
+    Indeterminate,
+}
+
+/// One runtime-constructor position's authored spelling paired with its
+/// [`ConstructorBindingOutcome`]: a single entry for `foo: String`, or one
+/// entry per element (in authored order) for a constructor array
+/// (`foo: [String, Number]`). `spelling` is the identifier's own source
+/// text (e.g. `"String"`) — the raw name the shared runtime-constructor
+/// mapping keys on when `resolution` is `Global`; a `Local`/`Indeterminate`
+/// resolution never applies that mapping regardless of `spelling`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct ConstructorBindingEntry {
+    pub spelling: Arc<str>,
+    pub resolution: ConstructorBindingOutcome,
+}
+
 #[cfg(test)]
 mod top_level_owner_identity_tests {
     use super::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind, ValueDeclIdentityPart};
@@ -2608,6 +2665,13 @@ pub struct AnalyzedPropFieldFact {
     pub payload: Option<MacroPayloadLocator>,
     /// Origin locator recovering the prop-name span.
     pub name_span_origin: MemberSpansOrigin,
+    /// Owner-aware binding resolution of each runtime-constructor spelling
+    /// at this prop's value position, in authored order: empty for a
+    /// type-based prop (no runtime-constructor position at all), one entry
+    /// for a single constructor identifier (`name: String`), or one entry
+    /// per element for a constructor array (`name: [String, Number]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constructor_bindings: Vec<ConstructorBindingEntry>,
 }
 
 /// The narrowed `AnalyzedEmitField`.
@@ -2710,6 +2774,13 @@ pub struct AnalyzedOptionsPropFact {
     pub payload: Option<MacroPayloadLocator>,
     /// Origin locator recovering the prop-name span.
     pub name_span_origin: MemberSpansOrigin,
+    /// Owner-aware binding resolution of each runtime-constructor spelling
+    /// at this prop's `props:` value position, in authored order: empty for
+    /// an annotation-only/no-constructor prop, one entry for a single
+    /// constructor identifier, one entry per element for a constructor
+    /// array (`foo: [String, Number]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constructor_bindings: Vec<ConstructorBindingEntry>,
 }
 
 /// The narrowed `AnalyzedExposeField`.

@@ -574,6 +574,27 @@ fn analyze_macros_from_program_with_owners(
     owners: &TopLevelOwnerTable,
 ) -> Vec<AnalyzedMacro> {
     let mut macros = Vec::new();
+    // This whole function is a deterministic REPLAY of the analyzer's own
+    // macro assembly over the same retained `(program, owners)` pair the
+    // initial shallow analysis already ran against — never a second,
+    // independently-implemented engine. Rebuilding the binding index here
+    // is therefore pure recompute of the same pinned inputs (never a
+    // diverging resolution), and the deref-side caller
+    // (`lower_macro_field_payload_at_with_owners`) never reads the
+    // constructor-binding outcome this replay recomputes — it only inspects
+    // `AnalyzedPropField::type_expr_scope`/`span` on the target field, per
+    // the "deterministic macro replay" note in the design doc. `parse_errors`
+    // is `false` here regardless of the ORIGINAL parse's actual cleanliness
+    // (the initial analysis still publishes fields from an error-recovered
+    // parse — a degenerate binding index there does not suppress
+    // publication, only forces `Indeterminate` constructor bindings): this
+    // is safe ONLY because, again, this replay's recomputed constructor
+    // bindings are never read. If a future caller of this replay ever
+    // starts reading `constructor_bindings` off its output, this hardcoded
+    // `false` must be replaced with the original parse's real cleanliness
+    // signal.
+    let binding_index =
+        crate::analysis::root_binding_index::RootBindingIndex::build(program, owners, false);
 
     for (statement_index, stmt) in program.body.iter().enumerate() {
         let owner = owners.statement(statement_index).owner;
@@ -585,6 +606,7 @@ fn analyze_macros_from_program_with_owners(
                     source,
                     &program.comments,
                     owner,
+                    &binding_index,
                 );
             }
             Statement::VariableDeclaration(var_decl) => {
@@ -595,6 +617,7 @@ fn analyze_macros_from_program_with_owners(
                         source,
                         &program.comments,
                         owner,
+                        &binding_index,
                     );
                 }
             }
@@ -1654,6 +1677,7 @@ fn extract_fields_from_interface_body_like(
                     payload: None,
                     type_expr_scope,
                     declared_in_macro_type_arg,
+                    constructor_bindings: Vec::new(),
                 })
             } else {
                 None
@@ -2514,10 +2538,11 @@ pub(crate) fn try_extract_macro_from_expr(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) {
-    if let Some(m) = try_extract_macro(expression, None, source, comments, owner) {
+    if let Some(m) = try_extract_macro(expression, None, source, comments, owner, binding_index) {
         if m.kind == AnalyzedMacroKind::WithDefaults {
-            try_extract_inner_macro(expression, macros, source, comments, owner);
+            try_extract_inner_macro(expression, macros, source, comments, owner, binding_index);
         }
         macros.push(m);
     }
@@ -2531,6 +2556,7 @@ pub(crate) fn try_extract_macro_from_var_decl(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) {
     if let Some(ref init) = decl.init {
         let binding_name = if let BindingPattern::BindingIdentifier(id) = &decl.id {
@@ -2538,9 +2564,11 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) = try_extract_macro(init, binding_name, source, comments, owner) {
+        if let Some(m) =
+            try_extract_macro(init, binding_name, source, comments, owner, binding_index)
+        {
             if m.kind == AnalyzedMacroKind::WithDefaults {
-                try_extract_inner_macro(init, macros, source, comments, owner);
+                try_extract_inner_macro(init, macros, source, comments, owner, binding_index);
             }
             macros.push(m);
         }
@@ -2555,11 +2583,14 @@ fn try_extract_inner_macro(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) {
     if let Expression::CallExpression(call) = expr {
         if let Some(first_arg) = call.arguments.first() {
             if let Some(inner_expr) = first_arg.as_expression() {
-                if let Some(m) = try_extract_macro(inner_expr, None, source, comments, owner) {
+                if let Some(m) =
+                    try_extract_macro(inner_expr, None, source, comments, owner, binding_index)
+                {
                     macros.push(m);
                 }
             }
@@ -2594,6 +2625,7 @@ fn try_extract_macro(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) -> Option<AnalyzedMacro> {
     match expr {
         Expression::CallExpression(call) => {
@@ -2642,7 +2674,7 @@ fn try_extract_macro(
                 kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
 
             let prop_extraction = if kind == AnalyzedMacroKind::DefineProps {
-                extract_prop_fields(call, source, comments)
+                extract_prop_fields(call, source, comments, binding_index)
             } else if kind == AnalyzedMacroKind::DefineModel {
                 PropFieldExtraction {
                     fields: extract_define_model_type(call, source, &model_name),
@@ -2767,6 +2799,7 @@ fn extract_define_model_type(
         // `defineModel<T>()` declares the model prop name explicitly at the
         // macro site.
         declared_in_macro_type_arg: true,
+        constructor_bindings: Vec::new(),
     }]
 }
 
@@ -2906,6 +2939,7 @@ fn extract_prop_fields(
     call: &CallExpression<'_>,
     source: &str,
     comments: &[Comment],
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) -> PropFieldExtraction {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
@@ -2921,7 +2955,7 @@ fn extract_prop_fields(
     // Runtime: extract from first argument
     if let Some(first_arg) = call.arguments.first() {
         if let Some(expr) = first_arg.as_expression() {
-            let rt = extract_prop_fields_from_runtime(expr, source, comments);
+            let rt = extract_prop_fields_from_runtime(expr, source, comments, binding_index);
             return PropFieldExtraction {
                 fields: rt.fields,
                 default_keys: rt.default_keys,
@@ -3022,6 +3056,62 @@ fn has_authored_prop_type_assertion(ts_as: &TSAsExpression<'_>) -> bool {
     }
 }
 
+/// Resolve one runtime-constructor-position identifier against the shared
+/// owner-aware binding index: the gate (`Global`/`Local`/`Indeterminate`)
+/// plus the existing display-text mapping (`constructor_to_ts_type`),
+/// applied ONLY when the gate answers `Global` — a `Local`/`Indeterminate`
+/// identifier is never folded to a runtime-constructor display string, so
+/// its type resolves through the general authored-value-reference route
+/// instead.
+pub(crate) fn resolve_runtime_constructor_identifier(
+    id: &IdentifierReference<'_>,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+) -> (Option<String>, verter_type_expr::ConstructorBindingEntry) {
+    let entry = crate::analysis::root_binding_index::resolve_constructor_binding(binding_index, id);
+    let display = matches!(
+        entry.resolution,
+        verter_type_expr::ConstructorBindingOutcome::Global
+    )
+    .then(|| constructor_to_ts_type(&id.name))
+    .flatten()
+    .map(str::to_string);
+    (display, entry)
+}
+
+/// Resolve a constructor-array position (`name: [String, Number]`), one
+/// element per authored array entry. A `null` element is DEFERRED — Vue's
+/// own runtime semantics for a nullable constructor entry are unconfirmed
+/// (see the design doc's "Nullable constructor-array element" note) — it
+/// routes through the same `Indeterminate`-shaped failure channel as an
+/// unresolvable identifier rather than guessing an interpretation.
+pub(crate) fn resolve_runtime_constructor_array(
+    arr: &ArrayExpression<'_>,
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+) -> Vec<verter_type_expr::ConstructorBindingEntry> {
+    // ONE entry per authored array element, in order — never a shrunk vec.
+    // An element this gate cannot classify as an identifier or `null` (a
+    // spread, a computed expression, an elision) fails closed as
+    // `Indeterminate` rather than silently dropping out of the array: a
+    // shrunk vec would let a partial array be published as if it were the
+    // author's complete constructor list.
+    arr.elements
+        .iter()
+        .map(|elem| match elem {
+            ArrayExpressionElement::Identifier(id) => {
+                crate::analysis::root_binding_index::resolve_constructor_binding(binding_index, id)
+            }
+            ArrayExpressionElement::NullLiteral(_) => verter_type_expr::ConstructorBindingEntry {
+                spelling: std::sync::Arc::from("null"),
+                resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
+            },
+            _ => verter_type_expr::ConstructorBindingEntry {
+                spelling: std::sync::Arc::from("<unrecognized>"),
+                resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
+            },
+        })
+        .collect()
+}
+
 /// Extract prop fields from a runtime argument (object or array).
 ///
 /// For object form, detects both shorthand (`name: String`) and expanded
@@ -3030,6 +3120,7 @@ fn extract_prop_fields_from_runtime(
     expr: &Expression<'_>,
     source: &str,
     comments: &[Comment],
+    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
 ) -> RuntimePropExtraction {
     match expr {
         Expression::ObjectExpression(obj) => {
@@ -3053,12 +3144,20 @@ fn extract_prop_fields_from_runtime(
                 let mut has_authored_prop_type = false;
                 // Vue semantics: props are optional by default unless `required: true` is set.
                 let mut is_optional = true;
+                let mut constructor_bindings: Vec<verter_type_expr::ConstructorBindingEntry> =
+                    Vec::new();
 
                 // Check if value is a constructor (shorthand: `name: String`)
                 if let Expression::Identifier(id) = &p.value {
-                    if let Some(ts_text) = constructor_to_ts_type(&id.name) {
-                        type_annotation = Some(ts_text.to_string());
-                    }
+                    let (display, entry) =
+                        resolve_runtime_constructor_identifier(id, binding_index);
+                    type_annotation = display;
+                    constructor_bindings.push(entry);
+                }
+
+                // Shorthand constructor array: `name: [String, Number]`.
+                if let Expression::ArrayExpression(arr) = &p.value {
+                    constructor_bindings = resolve_runtime_constructor_array(arr, binding_index);
                 }
 
                 // Check if value is an expanded object: `name: { type: String, default: 'Hello' }`
@@ -3075,7 +3174,8 @@ fn extract_prop_fields_from_runtime(
                             "type" => {
                                 // Try to extract an explicit type assertion first (`X as PropType<T>`,
                                 // `X as () => T`, `X as new () => T`), then fall back to mapping the
-                                // base constructor identifier via `constructor_to_ts_type`.
+                                // base constructor identifier via `constructor_to_ts_type`, gated by
+                                // the owner-aware binding index.
                                 if let Expression::TSAsExpression(ts_as) = &sp.value {
                                     if has_authored_prop_type_assertion(ts_as) {
                                         // Display: slice the source span of the inner type-arg / return-type
@@ -3103,14 +3203,22 @@ fn extract_prop_fields_from_runtime(
                                         });
                                         has_authored_prop_type = true;
                                     } else if let Expression::Identifier(id) = &ts_as.expression {
-                                        if let Some(ts_text) = constructor_to_ts_type(&id.name) {
-                                            type_annotation = Some(ts_text.to_string());
-                                        }
+                                        let (display, entry) =
+                                            resolve_runtime_constructor_identifier(
+                                                id,
+                                                binding_index,
+                                            );
+                                        type_annotation = display;
+                                        constructor_bindings = vec![entry];
                                     }
                                 } else if let Expression::Identifier(id) = &sp.value {
-                                    if let Some(ts_text) = constructor_to_ts_type(&id.name) {
-                                        type_annotation = Some(ts_text.to_string());
-                                    }
+                                    let (display, entry) =
+                                        resolve_runtime_constructor_identifier(id, binding_index);
+                                    type_annotation = display;
+                                    constructor_bindings = vec![entry];
+                                } else if let Expression::ArrayExpression(arr) = &sp.value {
+                                    constructor_bindings =
+                                        resolve_runtime_constructor_array(arr, binding_index);
                                 }
                             }
                             "required" => {
@@ -3152,6 +3260,7 @@ fn extract_prop_fields_from_runtime(
                     // Runtime object form — the author wrote this prop name
                     // directly as a key in `defineProps({ ... })`.
                     declared_in_macro_type_arg: true,
+                    constructor_bindings,
                 });
             }
 
@@ -3182,6 +3291,9 @@ fn extract_prop_fields_from_runtime(
                             // Runtime array form — the author wrote the name
                             // directly as an array entry in `defineProps([...])`.
                             declared_in_macro_type_arg: true,
+                            // Prop-NAME array form (`defineProps(['count'])`)
+                            // — no runtime-constructor position at all.
+                            constructor_bindings: Vec::new(),
                         })
                     } else {
                         None

@@ -3920,6 +3920,7 @@ const count = ref(0)
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "b".into(),
@@ -3933,6 +3934,7 @@ const count = ref(0)
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "c".into(),
@@ -3946,6 +3948,7 @@ const count = ref(0)
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     },
                 ],
                 emit_fields: vec![],
