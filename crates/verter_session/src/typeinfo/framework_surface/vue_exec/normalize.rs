@@ -250,6 +250,7 @@ pub(crate) fn props_from_typeinfo_surface(
                         resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                         resolution_error: None,
                         declared_in_macro_type_arg,
+                        constructor_bindings: Vec::new(),
                     },
                     type_source,
                     verter_type_expr::PropCallableRole::Other,

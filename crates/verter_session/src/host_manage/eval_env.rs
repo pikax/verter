@@ -1045,7 +1045,25 @@ impl VerterHost {
             } else {
                 std::collections::BTreeSet::new()
             };
-        let binding_entries = {
+        // Runtime-constructor positions the owner-aware `RootBindingIndex`
+        // resolved to a real local declaration (`ConstructorBindingOutcome::
+        // Local`) — ALREADY PROVEN local, unlike `requested_bindings` above,
+        // so these never go through `component_meta_binding_type_entries`'s
+        // own `visible_value_binding` re-derivation (a second, potentially
+        // diverging binding-resolution check for a question the index
+        // already answered authoritatively). They feed directly into the
+        // SAME `BindingExpansionEntry` demand vector the expander resolves
+        // through — the shared local-value-type-expansion primitive.
+        let constructor_binding_keys =
+            if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {
+                crate::resolver_core::collect_local_constructor_binding_keys(
+                    snapshot.macros.as_ref(),
+                    snapshot.options_api.as_ref(),
+                )
+            } else {
+                std::collections::BTreeSet::new()
+            };
+        let mut binding_entries = {
             component_meta_trace_custom!(
                 "compute_evaluated_types_binding_entries",
                 format!(
@@ -1057,6 +1075,15 @@ impl VerterHost {
             );
             self.component_meta_binding_type_entries(ctx, canonical, &requested_bindings)
         };
+        for key in &constructor_binding_keys {
+            let entry = verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
+                name: key.name.to_string(),
+                owner: key.owner,
+            };
+            if !binding_entries.admitted.contains(&entry) {
+                binding_entries.admitted.push(entry);
+            }
+        }
         // the retired `external_engine` branch is
         // gone; there is only one `expand_macro_types` entry point left.
         // Step 9.1 / D32: surface-id sidecar capture buffers. Populated

@@ -927,6 +927,7 @@ mod unused_declaration_population {
             payload: None,
             type_expr_scope: None,
             declared_in_macro_type_arg: true,
+            constructor_bindings: Vec::new(),
         }
     }
 

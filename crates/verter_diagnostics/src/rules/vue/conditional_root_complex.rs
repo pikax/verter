@@ -226,6 +226,7 @@ mod tests {
                         payload: None,
                         type_expr_scope: None,
                         declared_in_macro_type_arg: false,
+                        constructor_bindings: Vec::new(),
                     })
                     .collect(),
                 emit_fields: vec![],

@@ -150,18 +150,6 @@ fn publication_from_position(
     )
 }
 
-/// A present source, else the PROVEN unannotated schema absence. Used at
-/// the extraction fallbacks whose `None` structurally means "this position
-/// carries no semantic annotation" (untyped bindings, unevaluated exposures,
-/// display-only positions) — REQUIRED-position failures never flow through
-/// these fallbacks (they arrive as already-classified `Failed` positions on
-/// the evaluated lanes).
-fn present_or_unannotated(source: Option<SemanticTypeSource>) -> SourcePosition {
-    source
-        .map(SourcePosition::Present)
-        .unwrap_or_else(SourcePosition::unannotated)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Input view
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1580,7 +1568,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     // Options API fallback
     if let Some(opts) = input.options_api {
         if props.is_empty() {
-            extract_props_from_options(opts, &mut props);
+            extract_props_from_options(opts, evaluated_types, &mut props);
         }
         if events.is_empty() {
             extract_events_from_options(opts, &mut events);
@@ -2052,6 +2040,30 @@ fn resolve_prop_type(
     TypePublication,
     Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) {
+    // A runtime-constructor position (`defineProps({ label: String })`) is
+    // never authored (`field.payload` is always `None` in this branch — the
+    // two are mutually exclusive at extraction, see macros.rs), so it takes
+    // priority over the row's base authority (which for such a field is
+    // just the PROVEN unannotated absence) whenever the binding index found
+    // one or more constructor identifiers at this prop's value position.
+    if let Some(position) =
+        constructor_binding_source_position(&row.field.constructor_bindings, evaluated)
+    {
+        let metadata = evaluated.and_then(|eval| {
+            eval.props
+                .iter()
+                .find(|f| f.name == row.field.name)
+                .map(field_expansion_metadata)
+        });
+        let publication = publication_from_position(
+            &position,
+            metadata.as_ref(),
+            row.authored_evidence.clone(),
+            ResolutionProvenance::SemanticEvaluator,
+        );
+        return (publication, metadata);
+    }
+
     // The row's own session-resolved source is the authority; the flat
     // evaluated lane contributes ONLY expansion metadata (an INCOMPLETE
     // expansion still falls back to the author's own annotation position —
@@ -2068,6 +2080,137 @@ fn resolve_prop_type(
         &PublicationPolicy::exact_only(),
     );
     (publication, metadata)
+}
+
+/// Fold a runtime-constructor position's owner-aware binding-resolution
+/// outcomes (`RootBindingIndex`-gated, see
+/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`) into a
+/// [`SourcePosition`]. Shared by the macro path (`resolve_prop_type`) and
+/// the Options-API path (`extract_props_from_options`) — the ONLY place
+/// either path applies the runtime-constructor closed-fact fold or resolves
+/// a local shadow.
+///
+/// Returns `None` when there is no runtime-constructor position at all
+/// (`bindings` empty) or when every entry resolved `Global` to a
+/// non-primitive spelling — that case keeps the EXISTING display-text-only
+/// route unchanged (the caller's own `raw_type`/`type_annotation` already
+/// carries the display text; no closed fact exists for it).
+fn constructor_binding_source_position(
+    bindings: &[verter_type_expr::ConstructorBindingEntry],
+    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+) -> Option<SourcePosition> {
+    use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticSourceFailure};
+    use verter_type_expr::{ConstructorBindingOutcome, PrimitiveName};
+
+    if bindings.is_empty() {
+        return None;
+    }
+
+    // Static resolution did not apply anywhere in this position — fails
+    // closed as a genuine preparation failure, never a silent `Global`
+    // fallback and never collapsed into the proven-absent `None` above.
+    if bindings
+        .iter()
+        .any(|entry| matches!(entry.resolution, ConstructorBindingOutcome::Indeterminate))
+    {
+        return Some(SourcePosition::Failed(
+            SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ));
+    }
+
+    // A locally-shadowed spelling is never folded as a runtime constructor —
+    // it resolves through the general authored-value-reference route the
+    // host already resolves defineExpose-style bindings through (the SAME
+    // `ExpandedComponentTypes.bindings` lane, keyed by the shadowing
+    // declaration's own name).
+    if bindings
+        .iter()
+        .any(|entry| matches!(entry.resolution, ConstructorBindingOutcome::Local(_)))
+    {
+        // A constructor array mixing a `Local` entry with anything else (a
+        // second `Local`, or a `Global` spelling) would need a proper union
+        // of the resolved types to publish correctly — not implemented.
+        // Fail closed rather than publish only one element's type and
+        // silently drop the rest (`[String, LocalClass]` losing `String`,
+        // or two `Local` elements losing the second, is worse than an
+        // honest failure). The single-element case (the common,
+        // non-array `defineProps({ label: LocalClass })` shape) still
+        // resolves normally below.
+        let [entry] = bindings else {
+            return Some(SourcePosition::Failed(
+                SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ));
+        };
+        let ConstructorBindingOutcome::Local(key) = &entry.resolution else {
+            unreachable!("guarded by the Local-membership check above");
+        };
+        let Some(eval) = evaluated else {
+            return Some(SourcePosition::Failed(
+                SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ));
+        };
+        // `ExpandedComponentTypes.bindings` is keyed by NAME ONLY (no
+        // owner) — the same lane `defineExpose` resolves through. A module
+        // declaration and an unrelated same-name instance declaration can
+        // both be admitted into it (e.g. this constructor's module-owned
+        // shadow alongside a `defineExpose`-requested instance-owned
+        // binding of the same name). Never silently pick one: an ambiguous
+        // name match fails closed exactly like an unresolvable one.
+        let mut matching = eval.bindings.iter().filter(|f| f.name == key.name.as_ref());
+        let Some(field) = matching.next() else {
+            return Some(SourcePosition::Failed(
+                SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ));
+        };
+        if matching.next().is_some() {
+            return Some(SourcePosition::Failed(
+                SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ));
+        }
+        return Some(match field.authority.outcome() {
+            ResolvedTypeOutcome::Present { source, .. } => {
+                SourcePosition::Present(source.as_ref().clone())
+            }
+            ResolvedTypeOutcome::Failed { failure } => {
+                let verter_type_expr::TypedResolutionFailure::SourceConstruction(failure) = failure;
+                SourcePosition::Failed(*failure)
+            }
+            ResolvedTypeOutcome::Absent { .. } => {
+                return None;
+            }
+        });
+    }
+
+    // Every entry resolved `Global`: fold String/Number/Boolean spellings to
+    // the closed primitive fact (a union of primitives for a multi-element
+    // constructor array); any other spelling keeps its existing
+    // display-text-only route — no closed-fact plumbing for the other seven
+    // spellings.
+    fn primitive_of(spelling: &str) -> Option<PrimitiveName> {
+        match spelling {
+            "String" => Some(PrimitiveName::String),
+            "Number" => Some(PrimitiveName::Number),
+            "Boolean" => Some(PrimitiveName::Boolean),
+            _ => None,
+        }
+    }
+    let primitives: Option<Vec<PrimitiveName>> = bindings
+        .iter()
+        .map(|entry| primitive_of(entry.spelling.as_ref()))
+        .collect();
+    primitives.map(|primitives| {
+        let fact = if let [only] = primitives.as_slice() {
+            ClosedTypeFact::Leaf(LeafTypeFact::Primitive(*only))
+        } else {
+            ClosedTypeFact::LeafUnion(
+                primitives
+                    .into_iter()
+                    .map(LeafTypeFact::Primitive)
+                    .collect(),
+            )
+        };
+        SourcePosition::Present(SemanticTypeSource::Closed(fact))
+    })
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -3050,35 +3193,32 @@ fn merged_slot_fields(
     }
 }
 
-fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnalysis>) {
+fn extract_props_from_options(
+    opts: &AnalyzedOptionsApi,
+    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    out: &mut Vec<PropAnalysis>,
+) {
     for prop in &opts.props {
         let raw_type = prop
             .type_annotation
             .clone()
             .or_else(|| prop.type_constructor.clone());
         // Prefer the authored `PropType<T>` payload position when available;
-        // else fold the primitive runtime constructor to a closed leaf fact
-        // (non-primitive constructors carry display text only — `raw_type`).
-        let type_source = authored_payload_source(prop.payload.as_ref()).or_else(|| {
-            prop.type_constructor.as_ref().and_then(|rt| {
-                use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
-                use verter_type_expr::PrimitiveName;
-                let primitive = match rt.as_str() {
-                    "String" => PrimitiveName::String,
-                    "Number" => PrimitiveName::Number,
-                    "Boolean" => PrimitiveName::Boolean,
-                    _ => return None,
-                };
-                Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
-                    LeafTypeFact::Primitive(primitive),
-                )))
-            })
-        });
+        // else the binding-index-gated runtime-constructor fold (closed
+        // primitive fact for `Global` String/Number/Boolean, a resolved
+        // local reference for `Local`, a typed failure for `Indeterminate`);
+        // else the PROVEN unannotated absence (a non-primitive `Global`
+        // spelling keeps its display-text-only route via `raw_type`, and a
+        // genuinely annotation-less prop has no source at all).
+        let position = authored_payload_source(prop.payload.as_ref())
+            .map(SourcePosition::Present)
+            .or_else(|| constructor_binding_source_position(&prop.constructor_bindings, evaluated))
+            .unwrap_or_else(SourcePosition::unannotated);
         out.push(PropAnalysis {
             name: prop.name.clone(),
             callable_role: verter_type_expr::PropCallableRole::Other,
             publication: publication_from_position(
-                &present_or_unannotated(type_source),
+                &position,
                 None,
                 authored_type_evidence(prop.payload.as_ref(), raw_type.as_deref()),
                 ResolutionProvenance::SemanticEvaluator,

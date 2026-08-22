@@ -269,6 +269,7 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         payload,
         type_expr_scope,
         declared_in_macro_type_arg: false,
+        constructor_bindings: Vec::new(),
     }
 }
 
@@ -3453,6 +3454,10 @@ fn options_api_props_used_when_no_composition_props() {
             description: None,
             tags: Vec::new(),
             span: verter_span::Span::default(),
+            constructor_bindings: vec![verter_type_expr::ConstructorBindingEntry {
+                spelling: std::sync::Arc::from("String"),
+                resolution: verter_type_expr::ConstructorBindingOutcome::Global,
+            }],
         }],
         ..Default::default()
     };
@@ -3504,6 +3509,10 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
             description: None,
             tags: Vec::new(),
             span: verter_span::Span::default(),
+            constructor_bindings: vec![verter_type_expr::ConstructorBindingEntry {
+                spelling: std::sync::Arc::from("Object"),
+                resolution: verter_type_expr::ConstructorBindingOutcome::Global,
+            }],
         }],
         ..Default::default()
     };
@@ -5369,4 +5378,136 @@ fn slot_merge_replaces_evidence_atomically_and_failed_authority_is_absorbing() {
         failed_merged[0].publication.result(),
         verter_type_expr::PublicationResult::Failed { .. }
     ));
+}
+
+// ── constructor_binding_source_position ─────────────────────────────────
+
+fn test_expanded_field(
+    name: &str,
+    position: SourcePosition,
+) -> crate::analysis::type_expand::ExpandedField {
+    crate::analysis::type_expand::ExpandedField {
+        name: name.to_string(),
+        authority: test_authority(
+            position,
+            crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+        ),
+        authored_evidence: None,
+        optional: false,
+        exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+        execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+        diagnostics: Vec::new(),
+        declared_in_macro_type_arg: false,
+    }
+}
+
+fn local_entry(
+    spelling: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+) -> verter_type_expr::ConstructorBindingEntry {
+    verter_type_expr::ConstructorBindingEntry {
+        spelling: Arc::from(spelling),
+        resolution: verter_type_expr::ConstructorBindingOutcome::Local(
+            verter_type_expr::DeclBindingKey::new(owner, name),
+        ),
+    }
+}
+
+fn global_entry(spelling: &str) -> verter_type_expr::ConstructorBindingEntry {
+    verter_type_expr::ConstructorBindingEntry {
+        spelling: Arc::from(spelling),
+        resolution: verter_type_expr::ConstructorBindingOutcome::Global,
+    }
+}
+
+fn unrepresentable_failure() -> SourcePosition {
+    SourcePosition::Failed(
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+    )
+}
+
+#[test]
+fn constructor_local_resolves_via_evaluated_bindings() {
+    let owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let bindings = vec![local_entry("String", owner, "String")];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![test_expanded_field(
+            "String",
+            SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+        )],
+        ..Default::default()
+    };
+    let position = constructor_binding_source_position(&bindings, Some(&evaluated));
+    assert_eq!(
+        position,
+        Some(SourcePosition::Present(closed_leaf(PrimitiveName::Number)))
+    );
+}
+
+#[test]
+fn constructor_array_mixing_local_with_anything_else_fails_closed() {
+    // `[LocalString, Number]` — publishing only one element's type and
+    // silently dropping the rest would be worse than an honest failure.
+    let owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let bindings = vec![
+        local_entry("String", owner, "String"),
+        global_entry("Number"),
+    ];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![test_expanded_field(
+            "String",
+            SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+        )],
+        ..Default::default()
+    };
+    let position = constructor_binding_source_position(&bindings, Some(&evaluated));
+    assert_eq!(position, Some(unrepresentable_failure()));
+}
+
+#[test]
+fn constructor_local_ambiguous_cross_owner_name_collision_fails_closed() {
+    // `ExpandedComponentTypes.bindings` is keyed by name only. Two entries
+    // sharing the constructor's shadowing name (e.g. a module-owned
+    // constructor shadow admitted alongside an unrelated instance-owned
+    // `defineExpose` binding of the same name) must never let the lookup
+    // silently pick one.
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let bindings = vec![local_entry("String", module_owner, "String")];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![
+            test_expanded_field(
+                "String",
+                SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+            ),
+            test_expanded_field(
+                "String",
+                SourcePosition::Present(closed_leaf(PrimitiveName::Boolean)),
+            ),
+        ],
+        ..Default::default()
+    };
+    let position = constructor_binding_source_position(&bindings, Some(&evaluated));
+    assert_eq!(position, Some(unrepresentable_failure()));
+}
+
+#[test]
+fn constructor_indeterminate_fails_closed_never_global() {
+    let bindings = vec![verter_type_expr::ConstructorBindingEntry {
+        spelling: Arc::from("String"),
+        resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
+    }];
+    let position = constructor_binding_source_position(&bindings, None);
+    assert_eq!(position, Some(unrepresentable_failure()));
+}
+
+#[test]
+fn constructor_empty_bindings_is_no_position() {
+    assert_eq!(constructor_binding_source_position(&[], None), None);
+}
+
+#[test]
+fn constructor_global_nonprimitive_keeps_display_only_route() {
+    let bindings = vec![global_entry("Array")];
+    assert_eq!(constructor_binding_source_position(&bindings, None), None);
 }

@@ -8,7 +8,11 @@ use oxc_ast::Comment;
 use oxc_span::GetSpan;
 use verter_span::Span;
 
-use crate::analysis::macros::{default_value_source_text, extract_jsdoc_for};
+use crate::analysis::macros::{
+    default_value_source_text, extract_jsdoc_for, resolve_runtime_constructor_array,
+    resolve_runtime_constructor_identifier,
+};
+use crate::analysis::root_binding_index::RootBindingIndex;
 use crate::analysis::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
@@ -32,6 +36,7 @@ pub(crate) fn try_extract_options_from_expression(
     source: &str,
     import_sources: &rustc_hash::FxHashMap<String, String>,
     comments: &[Comment],
+    binding_index: &RootBindingIndex,
 ) -> Option<AnalyzedOptionsApi> {
     match expr {
         Expression::ObjectExpression(obj) => Some(extract_options_api(
@@ -40,6 +45,7 @@ pub(crate) fn try_extract_options_from_expression(
             false,
             import_sources,
             comments,
+            binding_index,
         )),
         Expression::CallExpression(call) => {
             let is_define_component = match &call.callee {
@@ -57,6 +63,7 @@ pub(crate) fn try_extract_options_from_expression(
                     true,
                     import_sources,
                     comments,
+                    binding_index,
                 ))
             } else {
                 None
@@ -77,6 +84,7 @@ fn extract_options_api(
     is_define_component: bool,
     import_sources: &rustc_hash::FxHashMap<String, String>,
     comments: &[Comment],
+    binding_index: &RootBindingIndex,
 ) -> AnalyzedOptionsApi {
     let mut result = AnalyzedOptionsApi {
         is_define_component,
@@ -96,7 +104,9 @@ fn extract_options_api(
         let Some(key) = key_name else { continue };
 
         match key {
-            "props" => result.props = extract_options_props(&p.value, _source, comments),
+            "props" => {
+                result.props = extract_options_props(&p.value, _source, comments, binding_index)
+            }
             "emits" => result.emits = extract_options_emits(&p.value, _source),
             "data" => result.data_fields = extract_data_fields(&p.value),
             "computed" => result.computed_fields = extract_object_keys(&p.value),
@@ -121,6 +131,7 @@ fn extract_options_props(
     value: &Expression<'_>,
     source: &str,
     comments: &[Comment],
+    binding_index: &RootBindingIndex,
 ) -> Vec<AnalyzedOptionsProp> {
     match value {
         // props: ['foo', 'bar']
@@ -141,6 +152,7 @@ fn extract_options_props(
                         type_expr_scope: None,
                         description: None,
                         tags: Vec::new(),
+                        constructor_bindings: Vec::new(),
                     })
                 } else {
                     None
@@ -162,19 +174,34 @@ fn extract_options_props(
 
                 match &p.value {
                     // Shorthand: `foo: String`
-                    Expression::Identifier(id) => Some(AnalyzedOptionsProp {
-                        name,
-                        span,
-                        type_constructor: Some(id.name.to_string()),
-                        is_required: false,
-                        has_default: false,
-                        default_value: None,
-                        type_annotation: None,
-                        payload: None,
-                        type_expr_scope: None,
-                        description,
-                        tags,
-                    }),
+                    Expression::Identifier(id) => {
+                        let (_display, entry) =
+                            resolve_runtime_constructor_identifier(id, binding_index);
+                        // `type_constructor` carries the RAW spelling (unlike
+                        // the macro path's `type_annotation`, which carries
+                        // the display-mapped TS text) — gated the same way:
+                        // only a `Global` resolution is a genuine runtime
+                        // constructor name.
+                        let type_constructor = matches!(
+                            entry.resolution,
+                            verter_type_expr::ConstructorBindingOutcome::Global
+                        )
+                        .then(|| id.name.to_string());
+                        Some(AnalyzedOptionsProp {
+                            name,
+                            span,
+                            type_constructor,
+                            is_required: false,
+                            has_default: false,
+                            default_value: None,
+                            type_annotation: None,
+                            payload: None,
+                            type_expr_scope: None,
+                            description,
+                            tags,
+                            constructor_bindings: vec![entry],
+                        })
+                    }
                     // Full object: `foo: { type: String, required: true, default: 'x' }`
                     Expression::ObjectExpression(sub_obj) => {
                         let mut type_constructor = None;
@@ -182,6 +209,9 @@ fn extract_options_props(
                         let mut is_required = false;
                         let mut has_default = false;
                         let mut default_value = None;
+                        let mut constructor_bindings: Vec<
+                            verter_type_expr::ConstructorBindingEntry,
+                        > = Vec::new();
 
                         for sub_prop in &sub_obj.properties {
                             let ObjectPropertyKind::ObjectProperty(sp) = sub_prop else {
@@ -207,8 +237,30 @@ fn extract_options_props(
                                         }
                                         other => other,
                                     };
-                                    if let Expression::Identifier(id) = expr {
-                                        type_constructor = Some(id.name.to_string());
+                                    match expr {
+                                        Expression::Identifier(id) => {
+                                            let (_display, entry) =
+                                                resolve_runtime_constructor_identifier(
+                                                    id,
+                                                    binding_index,
+                                                );
+                                            // Raw spelling, gated the same
+                                            // way as the shorthand form above.
+                                            type_constructor = matches!(
+                                                entry.resolution,
+                                                verter_type_expr::ConstructorBindingOutcome::Global
+                                            )
+                                            .then(|| id.name.to_string());
+                                            constructor_bindings = vec![entry];
+                                        }
+                                        Expression::ArrayExpression(arr) => {
+                                            constructor_bindings =
+                                                resolve_runtime_constructor_array(
+                                                    arr,
+                                                    binding_index,
+                                                );
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 "required" => {
@@ -239,10 +291,13 @@ fn extract_options_props(
                             type_expr_scope: None,
                             description,
                             tags,
+                            constructor_bindings,
                         })
                     }
-                    // Array form for multiple types: `foo: [String, Number]` — treat as no single constructor
-                    Expression::ArrayExpression(_) => Some(AnalyzedOptionsProp {
+                    // Array form for multiple types: `foo: [String, Number]` —
+                    // never a single constructor; each element is gated
+                    // independently through the binding index.
+                    Expression::ArrayExpression(arr) => Some(AnalyzedOptionsProp {
                         name,
                         span,
                         type_constructor: None,
@@ -254,6 +309,7 @@ fn extract_options_props(
                         type_expr_scope: None,
                         description,
                         tags,
+                        constructor_bindings: resolve_runtime_constructor_array(arr, binding_index),
                     }),
                     _ => Some(AnalyzedOptionsProp {
                         name,
@@ -267,6 +323,7 @@ fn extract_options_props(
                         type_expr_scope: None,
                         description,
                         tags,
+                        constructor_bindings: Vec::new(),
                     }),
                 }
             })

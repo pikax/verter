@@ -369,6 +369,15 @@ fn build_script_analysis_inner(
         return build_script_ingress_only(content, source_type, program, owners);
     }
 
+    // Built ONCE per parse and threaded to both runtime-constructor
+    // extraction consumers (macro-argument props below, and the Options-API
+    // `props:` walk reached via `try_extract_options_from_expression`) —
+    // never rebuilt per call site. See
+    // `crate::analysis::root_binding_index` and
+    // `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`.
+    let binding_index =
+        crate::analysis::root_binding_index::RootBindingIndex::build(program, owners, parse_errors);
+
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
     // complete when we encounter variable/function/class declarations.
@@ -461,6 +470,7 @@ fn build_script_analysis_inner(
                     content,
                     &program.comments,
                     owner,
+                    &binding_index,
                 );
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
                 try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
@@ -508,6 +518,7 @@ fn build_script_analysis_inner(
                         content,
                         &program.comments,
                         owner,
+                        &binding_index,
                     );
 
                     let (initializer, is_reactive, mut reactivity_kind) =
@@ -665,6 +676,7 @@ fn build_script_analysis_inner(
                         content,
                         &source_map,
                         &program.comments,
+                        &binding_index,
                     );
                 }
             }

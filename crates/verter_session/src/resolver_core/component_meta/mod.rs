@@ -54,6 +54,175 @@ pub fn collect_requested_binding_demands(
         .collect()
 }
 
+/// Collect the local-value-declaration keys a runtime-constructor position
+/// resolved to (`ConstructorBindingOutcome::Local`) across every macro's
+/// `prop_fields` and, when present, the Options-API `props:` object.
+///
+/// Unlike [`collect_requested_binding_demands`], these keys are ALREADY
+/// PROVEN local by the owner-aware `RootBindingIndex`
+/// (`verter_semantic::analysis::root_binding_index`) — no second
+/// name-visibility re-derivation applies to them (see
+/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`,
+/// "Consumer wiring"). The caller feeds the result directly into
+/// `expand_macro_types_impl_with_expander`'s `binding_entries` — the same
+/// shared local-value-type-expansion primitive `defineExpose` bindings
+/// resolve through — never through `component_meta_binding_type_entries`,
+/// which re-derives Local-vs-Import visibility for a DIFFERENT field kind
+/// and would be a second, potentially-diverging binding-resolution engine
+/// for a question this index already answered authoritatively.
+pub fn collect_local_constructor_binding_keys(
+    macros: &[AnalyzedMacro],
+    options_api: Option<&verter_semantic::analysis::AnalyzedOptionsApi>,
+) -> BTreeSet<verter_type_expr::DeclBindingKey> {
+    fn local_key(
+        entry: &verter_type_expr::ConstructorBindingEntry,
+    ) -> Option<verter_type_expr::DeclBindingKey> {
+        match &entry.resolution {
+            verter_type_expr::ConstructorBindingOutcome::Local(key) => Some(key.clone()),
+            _ => None,
+        }
+    }
+
+    let from_macros = macros.iter().flat_map(|mac| {
+        mac.prop_fields
+            .iter()
+            .flat_map(|field| field.constructor_bindings.iter().filter_map(local_key))
+    });
+    let from_options = options_api.into_iter().flat_map(|opts| {
+        opts.props
+            .iter()
+            .flat_map(|prop| prop.constructor_bindings.iter().filter_map(local_key))
+    });
+    from_macros.chain(from_options).collect()
+}
+
+#[cfg(test)]
+mod collect_local_constructor_binding_keys_tests {
+    use super::collect_local_constructor_binding_keys;
+    use std::collections::BTreeSet;
+    use verter_semantic::analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedOptionsProp,
+        AnalyzedPropField, TypeResolutionSource,
+    };
+    use verter_type_expr::{ConstructorBindingEntry, ConstructorBindingOutcome, DeclBindingKey};
+
+    fn constructor_prop_field(
+        name: &str,
+        constructor_bindings: Vec<ConstructorBindingEntry>,
+    ) -> AnalyzedPropField {
+        AnalyzedPropField {
+            name: name.to_string(),
+            is_optional: true,
+            span: verter_span::Span::new(0, 0),
+            type_annotation: None,
+            payload: None,
+            type_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
+            resolution_source: TypeResolutionSource::Rust,
+            resolution_error: None,
+            declared_in_macro_type_arg: true,
+            constructor_bindings,
+        }
+    }
+
+    fn define_props_macro(prop_fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
+        AnalyzedMacro {
+            edit_anchors: Default::default(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: false,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields,
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
+            span: verter_span::Span::new(0, 0),
+        }
+    }
+
+    /// The "bridge" this test exercises: `RootBindingIndex`-proven `Local`
+    /// constructor keys collected from a macro's `prop_fields`, threaded
+    /// (by the caller, `compute_evaluated_types_from_owner_context_with_ctx`)
+    /// directly into `expand_macro_types_impl_with_expander`'s
+    /// `BindingExpansionEntry` demand list. The full session/host-backed
+    /// integration is out of scope for a pure-function unit test; this
+    /// pins the collection half of that bridge.
+    #[test]
+    fn collects_local_keys_from_macro_prop_fields_only() {
+        let owner = verter_type_expr::TopLevelOwnerId::module(0);
+        let key = DeclBindingKey::new(owner, "String");
+        let macros = vec![define_props_macro(vec![constructor_prop_field(
+            "label",
+            vec![ConstructorBindingEntry {
+                spelling: std::sync::Arc::from("String"),
+                resolution: ConstructorBindingOutcome::Local(key.clone()),
+            }],
+        )])];
+        let collected = collect_local_constructor_binding_keys(&macros, None);
+        assert_eq!(collected, BTreeSet::from([key]));
+    }
+
+    #[test]
+    fn global_and_indeterminate_entries_are_excluded() {
+        let macros = vec![define_props_macro(vec![constructor_prop_field(
+            "label",
+            vec![
+                ConstructorBindingEntry {
+                    spelling: std::sync::Arc::from("String"),
+                    resolution: ConstructorBindingOutcome::Global,
+                },
+                ConstructorBindingEntry {
+                    spelling: std::sync::Arc::from("Number"),
+                    resolution: ConstructorBindingOutcome::Indeterminate,
+                },
+            ],
+        )])];
+        assert!(collect_local_constructor_binding_keys(&macros, None).is_empty());
+    }
+
+    #[test]
+    fn collects_local_keys_from_options_api_props_too() {
+        let owner = verter_type_expr::TopLevelOwnerId::module(0);
+        let key = DeclBindingKey::new(owner, "Array");
+        let options_api = AnalyzedOptionsApi {
+            props: vec![AnalyzedOptionsProp {
+                name: "items".to_string(),
+                span: verter_span::Span::new(0, 0),
+                type_constructor: None,
+                is_required: false,
+                has_default: false,
+                default_value: None,
+                type_annotation: None,
+                payload: None,
+                type_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+                constructor_bindings: vec![ConstructorBindingEntry {
+                    spelling: std::sync::Arc::from("Array"),
+                    resolution: ConstructorBindingOutcome::Local(key.clone()),
+                }],
+            }],
+            ..Default::default()
+        };
+        let collected = collect_local_constructor_binding_keys(&[], Some(&options_api));
+        assert_eq!(collected, BTreeSet::from([key]));
+    }
+
+    #[test]
+    fn no_macros_no_options_api_is_empty() {
+        assert!(collect_local_constructor_binding_keys(&[], None).is_empty());
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetaEvalOutputs {
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,

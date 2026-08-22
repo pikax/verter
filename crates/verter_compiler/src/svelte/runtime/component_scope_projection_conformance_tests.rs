@@ -42,8 +42,10 @@ use crate::svelte::runtime::client_imports::UserImportSlot;
 use crate::svelte::runtime::client_surface_imports::classify_script_imports_from_sources;
 use crate::svelte::runtime::naming::derive_component_name;
 use crate::svelte::runtime::{compile_client, ClientCompileError, SvelteRuntimeOptions};
-use oxc_ast::ast::{BindingPattern, ObjectPropertyKind, Program, PropertyKey};
-use oxc_span::Span;
+use oxc_ast::ast::{
+    BindingPattern, ClassElement, Expression, ObjectPropertyKind, Program, PropertyKey,
+};
+use oxc_span::{GetSpan, Span};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
