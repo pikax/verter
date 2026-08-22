@@ -772,7 +772,7 @@ impl ResolutionFactRoot {
         node: ResolutionFactKey,
         dependencies: impl IntoIterator<Item = ResolutionFactKey>,
     ) -> bool {
-        debug_assert!(
+        verter_debug_assert!(
             node.is_derived_node(),
             "only a derived DAG node carries direct edges"
         );

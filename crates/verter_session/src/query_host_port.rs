@@ -79,7 +79,7 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
     pub(crate) fn new(ctx: &'ctx dyn RequestBoundResolverContext) -> Self {
-        debug_assert!(
+        verter_debug_assert!(
             ctx.is_request_bound(),
             "QueryHostPort binds a request-view-bound ResolverContext"
         );

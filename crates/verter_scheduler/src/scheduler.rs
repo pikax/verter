@@ -241,7 +241,7 @@ fn dispatch_ready_job_to_executor(
             match outcome {
                 Ok(Ok(())) => {
                     let newly_ready = dag.lock().complete(&job.identity);
-                    debug_assert!(
+                    verter_debug_assert!(
                         newly_ready.is_empty(),
                         "CacheNode completion must not strand DAG waiters: \
                          CacheNode identities are not used as DepKey prerequisites",
@@ -253,7 +253,7 @@ fn dispatch_ready_job_to_executor(
                     // FAILED — never complete-as-success. This is the same
                     // mechanism the cache-node submit-failure path uses.
                     let stranded = dag.lock().cancel(&job.identity);
-                    debug_assert!(
+                    verter_debug_assert!(
                         stranded.is_empty(),
                         "CacheNode failure-cancel must not strand DAG waiters: \
                          CacheNode identities are not used as DepKey prerequisites",
@@ -267,7 +267,7 @@ fn dispatch_ready_job_to_executor(
                     // already reported by the default hook); the scheduler does
                     // not re-raise on its worker thread.
                     let stranded = dag.lock().cancel(&job.identity);
-                    debug_assert!(
+                    verter_debug_assert!(
                         stranded.is_empty(),
                         "CacheNode panic-cancel must not strand DAG waiters: \
                          CacheNode identities are not used as DepKey prerequisites",
@@ -697,7 +697,7 @@ impl ScopedCacheFlight {
                 aggregate_registration,
             },
         );
-        debug_assert!(prior.is_none(), "scoped owner ids are process-unique");
+        verter_debug_assert!(prior.is_none(), "scoped owner ids are process-unique");
         true
     }
 
@@ -2694,7 +2694,7 @@ impl Scheduler {
         // stranded list here. The `debug_assert!` catches any
         // future change that adds Artifact-on-Artifact gating.
         let stranded = guard.cancel(&artifact_id);
-        debug_assert!(
+        verter_debug_assert!(
             stranded.is_empty(),
             "external commit_artifact terminalize must not strand DAG waiters: \
              Artifact identities are graph leaves"
@@ -4367,7 +4367,7 @@ impl Scheduler {
         );
         self.stale_completion_refusals
             .fetch_add(1, Ordering::Relaxed);
-        debug_assert!(
+        verter_debug_assert!(
             dag.token_for(identity).is_none(),
             "refused stage completion must leave no live DAG token for the retired \
              identity: {identity:?}",
@@ -5086,7 +5086,7 @@ impl Scheduler {
                 // DepKey prerequisites, so this cannot strand a waiter.
                 Err(_err) => {
                     let stranded = self.dag.lock().cancel(&cache_identity);
-                    debug_assert!(
+                    verter_debug_assert!(
                         stranded.is_empty(),
                         "CacheNode submit-failure release must not strand DAG waiters: \
                          CacheNode identities are not used as DepKey prerequisites",
@@ -5147,7 +5147,7 @@ impl Scheduler {
         let node = match self.nodes.get(&file_id) {
             Some(n) => n.clone(),
             None => {
-                debug_assert!(
+                verter_debug_assert!(
                     self.dag.lock().token_for(&job.identity).is_none(),
                     "defensive dispatch skip: removed-FileNode case implies the prior \
                      `remove()` cancelled the DAG identity before clearing nodes"
@@ -5156,7 +5156,7 @@ impl Scheduler {
             }
         };
         if node.generation() != generation {
-            debug_assert!(
+            verter_debug_assert!(
                 self.dag.lock().token_for(&job.identity).is_none(),
                 "defensive dispatch skip: generation-mismatch case implies the prior \
                  `supersede_old_file_generations` cancelled the stale-generation DAG \
@@ -5557,7 +5557,7 @@ impl Scheduler {
                 false
             }
         };
-        debug_assert!(
+        verter_debug_assert!(
             test_injected,
             "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
              capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
@@ -5798,7 +5798,7 @@ impl Scheduler {
         let node = match self.nodes.get(&file_id) {
             Some(n) => n.clone(),
             None => {
-                debug_assert!(
+                verter_debug_assert!(
                     self.dag.lock().token_for(&job.identity).is_none(),
                     "defensive inline dispatch skip: removed-FileNode case implies the prior \
                      `remove()` cancelled the DAG identity before clearing nodes"
@@ -5808,7 +5808,7 @@ impl Scheduler {
         };
 
         if node.generation() != generation {
-            debug_assert!(
+            verter_debug_assert!(
                 self.dag.lock().token_for(&job.identity).is_none(),
                 "defensive inline dispatch skip: generation-mismatch case implies the prior \
                  `supersede_old_file_generations` cancelled the stale-generation DAG \
@@ -6136,7 +6136,7 @@ impl Scheduler {
         if let Some((_first_key, first_record)) = failed_blocker_deps.iter().next() {
             use crate::job::SchedulerError;
             let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-            debug_assert!(
+            verter_debug_assert!(
                 !matches!(first_record.dep_key, crate::dag::DepKey::CacheNode { .. }),
                 "CacheNode DepKey should not appear in failed_blocker_deps",
             );
@@ -6164,7 +6164,7 @@ impl Scheduler {
             // `FileStage{Source}` node maps to `Load`); the load+parse work
             // runs in this one source-stage execution path.
             TaskKind::Load => {
-                debug_assert!(
+                verter_debug_assert!(
                     failed_blocker_deps.is_empty(),
                     "Source stage received failed_blocker_deps — pre-dispatch \
                      short-circuit must consume the marker before kind-dispatch \
@@ -6181,7 +6181,7 @@ impl Scheduler {
                 );
             }
             TaskKind::Analysis => {
-                debug_assert!(
+                verter_debug_assert!(
                     failed_blocker_deps.is_empty(),
                     "Analysis stage received failed_blocker_deps — pre-dispatch \
                      short-circuit must consume the marker before kind-dispatch \
@@ -6190,7 +6190,7 @@ impl Scheduler {
                 Self::execute_analysis_stage(node, generation, executor, inbox_sender, dag);
             }
             TaskKind::Artifact { profile_hash } => {
-                debug_assert!(
+                verter_debug_assert!(
                     failed_blocker_deps.is_empty(),
                     "Artifact stage received failed_blocker_deps — pre-dispatch \
                      short-circuit must consume the marker before kind-dispatch \
@@ -6456,7 +6456,7 @@ impl Scheduler {
             // pre-executor race-skip cancel here cannot strand
             // any waiter.
             let stranded = dag.lock().cancel(&artifact_id);
-            debug_assert!(
+            verter_debug_assert!(
                 stranded.is_empty(),
                 "race-safe pre-executor skip must not strand DAG waiters: \
                  Artifact identities are graph leaves"
@@ -6656,7 +6656,7 @@ impl Scheduler {
         // `cfg(not(target_arch = "wasm32"))`), so a `Driver` caller
         // cannot occur there and the invariant is vacuous.
         #[cfg(not(target_arch = "wasm32"))]
-        debug_assert!(
+        verter_debug_assert!(
             !matches!(caller_kind, CallerKind::Driver) || self.driver_handle.lock().is_none(),
             "Driver thread must not enter wait_or_drive (would deadlock: \
              driver loop is not running while parked)"

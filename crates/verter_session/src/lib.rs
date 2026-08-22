@@ -48,6 +48,10 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
+
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod app_config_proof_db;
 #[cfg(test)]
 mod audit_caps_truncation_tests;
@@ -401,11 +405,7 @@ pub mod tests;
 pub mod for_tests;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub mod projection_bench_support {
-    pub use crate::project_semantic_dispatch::locator_view::{
-        ProjectionBenchCase, ProjectionBenchHarness,
-    };
-}
+pub use for_tests::projection_bench_support;
 
 pub use block_content::hash_block_content;
 pub use host_audit_runtime::{

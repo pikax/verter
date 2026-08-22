@@ -408,7 +408,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             context.mode,
             crate::semantic_query::ProjectionMode::Shallow,
             "resolve_typeinfo_surface_view synthesises a one-level surface; mode must be Shallow"

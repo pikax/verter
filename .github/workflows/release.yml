@@ -144,7 +144,7 @@ jobs:
           VERTER_REQUIRE_TSGO: "1"
         run: node scripts/gate.mjs
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --all -- --check
       - name: JS tests

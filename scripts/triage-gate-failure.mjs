@@ -173,7 +173,10 @@ async function runOneAttempt(target, ctx, opts) {
     memoryLimitBytes: opts.memoryLimitBytes,
   });
   if (res.reason) {
-    return { outcome: "abort", detail: `${res.reason} after ${Math.round(res.durationMs / 1000)}s` };
+    return {
+      outcome: "abort",
+      detail: `${res.reason} after ${Math.round(res.durationMs / 1000)}s`,
+    };
   }
   const text = res.stdout + "\n" + res.stderr;
   const summary = parseNextestSummary(text);
@@ -189,7 +192,8 @@ async function runOneAttempt(target, ctx, opts) {
   const matched = failures.some(
     (f) => f.name === target.name && (!target.binaryId || f.binaryId === target.binaryId),
   );
-  if (matched) return { outcome: "fail", detail: `exit ${res.code}, ${summary.runCount} test(s) run` };
+  if (matched)
+    return { outcome: "fail", detail: `exit ${res.code}, ${summary.runCount} test(s) run` };
   if (res.code === 0 && summary.nonPassed === 0) {
     return { outcome: "pass", detail: `exit 0, ${summary.runCount} test(s) run` };
   }
@@ -210,6 +214,7 @@ function formatTargetReport(target, attempts, verdict) {
   lines.push(`    surface:  ${target.surface}`);
   if (target.binaryId) lines.push(`    binary:   ${target.binaryId}`);
   if (target.cargoProfile) lines.push(`    profile:  ${target.cargoProfile}`);
+  if (target.packageScope) lines.push(`    package:  ${target.packageScope}`);
   lines.push(
     `    attempts: ${verdict.totalAttempts} total, ${verdict.validAttempts} valid ` +
       `(${verdict.passes} passed, ${verdict.fails} failed)${verdict.aborted > 0 ? `, ${verdict.aborted} aborted` : ""}`,
@@ -270,8 +275,10 @@ async function runTriage(opts) {
   });
 
   if (targets.length === 0 && unclassifiable.length === 0) {
-    err(`'${opts.logPath}' shows ${verdict.failures.length} failure(s) but none could be classified at ` +
-      "all — this is a triage FAILURE, not a clean bill of health.");
+    err(
+      `'${opts.logPath}' shows ${verdict.failures.length} failure(s) but none could be classified at ` +
+        "all — this is a triage FAILURE, not a clean bill of health.",
+    );
     return EXIT_FAIL;
   }
 
@@ -299,7 +306,11 @@ async function runTriage(opts) {
   const lockdir =
     process.env.VERTER_GATE_LOCK || process.env.MOM_GATE_LOCK || defaultLockDir(repoRealpath);
   const token = `triage.${process.pid}.${nowMs()}.${Math.floor(Math.random() * 1e9)}`;
-  const mutex = new Mutex(lockdir, token, { pid: process.pid, repoRealpath, targetDir: runnerTarget });
+  const mutex = new Mutex(lockdir, token, {
+    pid: process.pid,
+    repoRealpath,
+    targetDir: runnerTarget,
+  });
   let acquired = false;
   let teardownPromise = null;
   const teardown = () => {
@@ -338,7 +349,9 @@ async function runTriage(opts) {
     return EXIT_USAGE;
   }
   if (!acquired) {
-    err(`LOCK-REFUSED: ${mutex.refuseDetail} (lockdir=${lockdir}) — another gate/triage run is active.`);
+    err(
+      `LOCK-REFUSED: ${mutex.refuseDetail} (lockdir=${lockdir}) — another gate/triage run is active.`,
+    );
     await teardown();
     return EXIT_LOCK_REFUSED;
   }
@@ -375,7 +388,9 @@ async function runTriage(opts) {
         `${interactionCount} INTERACTION, ${inconclusiveCount} INCONCLUSIVE\n`,
     );
     if (unclassifiable.length > 0) {
-      process.stdout.write(`${unclassifiable.length} failure(s) could not be reduced to a single test id:\n`);
+      process.stdout.write(
+        `${unclassifiable.length} failure(s) could not be reduced to a single test id:\n`,
+      );
       for (const u of unclassifiable) {
         process.stdout.write(`  [${u.surface}] ${u.name}\n    reason: ${u.reason}\n`);
       }
@@ -387,7 +402,9 @@ async function runTriage(opts) {
     );
 
     if (inconclusiveCount > 0) {
-      warn(`${inconclusiveCount} target(s) were INCONCLUSIVE — every isolated attempt aborted; see above.`);
+      warn(
+        `${inconclusiveCount} target(s) were INCONCLUSIVE — every isolated attempt aborted; see above.`,
+      );
     }
     exitCode = EXIT_PASS;
   } finally {

@@ -26,7 +26,7 @@
 //!
 //! Companion structural guards (the bounded residuals the compiler cannot
 //! express) live in the integration suite at
-//! `tests/cases/output_projector_residual_guards.rs`:
+//! `crates/verter_source_policy_gate/tests/cases/output_projector_residual_guards.rs`:
 //! `output_projector_owner_registration_inventory` (the sanctioned sink set +
 //! the EXACT module-topology confinement of the owner file — banning
 //! item/include/attribute macro injection and any module other than the

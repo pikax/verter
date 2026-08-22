@@ -3,6 +3,9 @@
 // crate-wide so a regression fails the build, matching `verter_type_runtime`.
 #![deny(clippy::await_holding_lock)]
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 /// Max concurrent in-flight requests the tower-lsp-server serve loop dispatches
 /// (`Server::concurrency_level`). tower-lsp-server 0.23 defaults to 4; a handful
 /// of slow semantic handlers then occupy every slot, the framed-stdin forwarder

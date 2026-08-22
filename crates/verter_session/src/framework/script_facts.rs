@@ -798,7 +798,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // registration carries any provider — a registry-wide oracle, NOT a
     // per-registration mirror. The per-registration list below keys THIS
     // registration's own facts.
-    debug_assert!(
+    verter_debug_assert!(
         host.framework_registry().active_provider_index().is_empty()
             != host.framework_registry().any_provider_registered(),
         "the host index emptiness must agree with the registry-wide provider presence"

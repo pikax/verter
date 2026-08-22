@@ -57,7 +57,7 @@ pub(crate) type RegistryQueuedNames = rustc_hash::FxHashSet<(RegistryProducerSco
 
 impl RegistryProducerScope {
     pub(crate) fn explicit(canonical_id: &str, owner: verter_type_expr::TopLevelOwnerId) -> Self {
-        debug_assert!(!canonical_id.is_empty());
+        verter_debug_assert!(!canonical_id.is_empty());
         Self {
             canonical_id: Arc::from(canonical_id),
             owner,

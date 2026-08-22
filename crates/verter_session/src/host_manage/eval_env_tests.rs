@@ -1022,7 +1022,7 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
 ///
 /// Discrimination proof (break → red → revert), run on THIS fixture:
 /// 1. Temporarily restore the retired in-production cross-check in
-///    `fallthrough.rs` (`debug_assert!(graph_native_dep_count >= added)`
+///    `fallthrough.rs` (`verter_debug_assert!(graph_native_dep_count >= added)`
 ///    around the `materialize_imported_runtime_values_into_env` call).
 /// 2. This test PANICS in a debug build — the `build_*_lightweight` call
 ///    below hits the assert (`1 >= 2` false) and reddens.

@@ -1025,7 +1025,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>> {
-        debug_assert!(
+        verter_debug_assert!(
             matches!(key, SemanticQueryKey::FlowReturn(_)),
             "the flow-return executor admits FlowReturn keys only"
         );
@@ -1564,7 +1564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // singleflight, which owns the root's own admission —
                     // so it never claims an inline flight, and this arm
                     // has none to drop.
-                    debug_assert!(
+                    verter_debug_assert!(
                         inline_flight.is_none(),
                         "a machinery root publishes through the family singleflight \
                          and must never hold an inline flight to drop"

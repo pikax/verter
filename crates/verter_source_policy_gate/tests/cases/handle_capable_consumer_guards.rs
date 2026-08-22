@@ -50,8 +50,18 @@ use std::path::PathBuf;
 
 use walkdir::WalkDir;
 
+// Relocated from `verter_session` (gate-performance step 2): this guard scans
+// verter_session's OWN production `src/` (and reads sibling verter_session
+// test files, e.g. `architecture_guards.rs`, which stayed behind), so —
+// unlike a same-crate test where `CARGO_MANIFEST_DIR` IS the scanned crate —
+// `crate_root()` must explicitly re-anchor to `crates/verter_session` rather
+// than to this crate's own manifest dir.
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crate is <ws>/crates/verter_source_policy_gate")
+        .join("crates/verter_session")
 }
 
 fn read_rel(rel: &str) -> String {

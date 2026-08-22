@@ -595,7 +595,7 @@ impl StyleSyntaxIrSink {
     }
 
     pub fn finish(self) -> Result<StyleSyntaxIr, CssStructureTooLarge> {
-        debug_assert!(self.open.is_empty(), "parser must balance IR frames");
+        verter_debug_assert!(self.open.is_empty(), "parser must balance IR frames");
         Ok(StyleSyntaxIr {
             source: self.source,
             dialect: self.dialect,
@@ -916,7 +916,7 @@ impl ParseEventSink for StyleSyntaxIrSink {
             }
             ParseEvent::FinishNode { kind, end } => {
                 let frame = self.open.pop().expect("parser emits balanced IR nodes");
-                debug_assert_eq!(frame.kind, kind);
+                verter_debug_assert_eq!(frame.kind, kind);
                 self.close_frame(frame, end);
             }
             ParseEvent::Diagnostic(diagnostic) => {

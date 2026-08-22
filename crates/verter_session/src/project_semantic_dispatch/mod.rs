@@ -281,7 +281,7 @@ impl Drop for ConnectedDemandGuard<'_> {
                 .set(self.state.query_depth.get().saturating_sub(1));
         }
         if self.root {
-            debug_assert!(
+            verter_debug_assert!(
                 self.state.query_depth.get() == 0,
                 "connected-demand root dropped while a nested query boundary remained active"
             );
@@ -620,7 +620,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
         let state = &self.connected_demand;
-        debug_assert!(
+        verter_debug_assert!(
             state.active.get(),
             "connected work must be charged inside a connected-demand guard"
         );
@@ -652,7 +652,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
     ) -> Result<usize, crate::semantic_query::PartialReasonSet> {
         let state = &self.connected_demand;
-        debug_assert!(
+        verter_debug_assert!(
             state.active.get(),
             "connected work must be observed inside a connected-demand guard"
         );
@@ -675,9 +675,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         let state = &self.connected_demand;
-        debug_assert!(state.active.get());
+        verter_debug_assert!(state.active.get());
         let work_used = state.work_used.get();
-        debug_assert!(work_used.saturating_add(consumed) <= state.work_limit.get());
+        verter_debug_assert!(work_used.saturating_add(consumed) <= state.work_limit.get());
         state.work_used.set(work_used + consumed);
     }
 
@@ -694,7 +694,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         reason: crate::semantic_query::PartialReasonSet,
     ) -> crate::semantic_query::PartialReasonSet {
         let state = &self.connected_demand;
-        debug_assert!(
+        verter_debug_assert!(
             state.active.get(),
             "an operational limit can trip only inside a connected demand"
         );
@@ -3183,7 +3183,7 @@ fn finalise_traced_build_output<T>(
     if output.result_is_partial {
         output.cache_suppress = true;
     }
-    debug_assert!(
+    verter_debug_assert!(
         !output.result_is_partial || output.cache_suppress,
         "§1 invariant violated at finalisation: result_is_partial \
          without cache_suppress would launder a partial into the memo"

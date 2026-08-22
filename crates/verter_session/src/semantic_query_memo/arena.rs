@@ -297,7 +297,7 @@ impl NodeArena {
             if discriminant < prov.node_arena_pushes_per_discriminant.len() {
                 prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
             } else {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "SemanticNodeData::discriminant_index() returned {} >= SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT",
                     discriminant

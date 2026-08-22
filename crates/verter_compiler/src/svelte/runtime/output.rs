@@ -37,7 +37,7 @@ impl MappedCode {
     }
 
     pub(super) fn from_parts(text: String, mappings: Vec<SourceMapping>) -> Self {
-        debug_assert!(mappings.iter().all(|mapping| {
+        verter_debug_assert!(mappings.iter().all(|mapping| {
             mapping.generated_start < mapping.generated_end
                 && mapping.generated_end as usize <= text.len()
         }));

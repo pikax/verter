@@ -739,7 +739,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // transition itself, so it runs in EVERY build; only its verdict
             // is asserted.
             let committed = session.commit_completed();
-            debug_assert!(
+            verter_debug_assert!(
                 committed,
                 "a validated staged call session commits its immutable snapshot"
             );
@@ -854,7 +854,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         state.self_roots.push(root.clone());
                     }
                 }
-                debug_assert_eq!(idx, self.dispatch_txn.borrow().reentry().depth());
+                verter_debug_assert_eq!(idx, self.dispatch_txn.borrow().reentry().depth());
                 Ok(state)
             }
             CandidateVerdict::Selected(_) | CandidateVerdict::Mismatch => {

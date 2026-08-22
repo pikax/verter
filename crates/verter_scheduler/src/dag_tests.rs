@@ -349,7 +349,7 @@ fn submit_dedup_merges_incoming_deps_into_existing_node() {
 /// legitimate in-flight dedup — a second caller is joining the
 /// in-flight work without adding new gating. Without the joiner
 /// allowance, the dispatched arm of `submit` panicked via
-/// `debug_assert!(false)`. With the allowance, the same call is a
+/// `verter_debug_assert!(false)`. With the allowance, the same call is a
 /// no-op on `deps_remaining` and returns the existing token so the
 /// joiner shares the in-flight result.
 #[test]
@@ -370,7 +370,7 @@ fn in_flight_dedup_no_panic_no_deps_change() {
 
     // id is now dispatched. A second submit with empty deps is a
     // legitimate joiner. Without the joiner allowance this would
-    // `debug_assert!(false)`.
+    // `verter_debug_assert!(false)`.
     let t2 = dag.submit_expect(
         id.clone(),
         WorkKind::Load,

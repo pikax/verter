@@ -368,8 +368,9 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
     // The observation carries one `Arc<IndexedReady>`; its top-level
     // `whole_hash` and its `shallow_state.whole_hash` are the same
     // parse by construction (`FileArtifactStore` is content-addressed).
-    debug_assert_eq!(
-        observed_scope.indexed.shallow_state.whole_hash, observed_scope_whole_hash,
+    verter_debug_assert_eq!(
+        observed_scope.indexed.shallow_state.whole_hash,
+        observed_scope_whole_hash,
         "MaterializeScopeObservation must carry one internally-consistent IndexedReady",
     );
 

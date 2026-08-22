@@ -218,7 +218,7 @@ impl VerterHost {
         );
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        debug_assert!(ctx.audit_registration.get().is_none());
+        verter_debug_assert!(ctx.audit_registration.get().is_none());
         let _ = ctx.install_audit_registration(Arc::clone(&registration));
 
         let request_start = Instant::now();
@@ -737,7 +737,7 @@ pub(crate) fn materialize_through_aliases(
     start: SemanticNodeId,
     mode: ProjectionMode,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
-    debug_assert!(!matches!(mode, ProjectionMode::Identity));
+    verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     let mut current = start;
     for _ in 0..16 {

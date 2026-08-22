@@ -1513,14 +1513,14 @@ export function checkOracleCachePrerequisite(opts) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// SHIPPED-CFG SURFACE 3 FILTER — the packages Surface 3 (the `no-debug-assertions` shipped-cfg archive)
-// runs, and the archive-build features every archive (dev AND shipped-cfg) is built with.
+// ARCHIVE-BUILD FEATURES — the features the ONE `cargo nextest archive --workspace` build (SURFACE 1's
+// archive, per SINGLE-TEST-UNIVERSE) is built with.
 //
-// `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for the ONE `cargo nextest archive
-// --workspace` build both variants share (`archiveAndList` in gate.mjs), so the 45 tests that feature
-// gates are PRESENT in the archived test universe — not merely listed by a standalone `cargo test
-// --features` invocation nobody runs. Both debug surfaces (1 and 2) and the shipped-cfg surface (3) build
-// from an archive that includes them.
+// `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for that archive build
+// (`archiveAndList` in gate.mjs), so the 45 tests that feature gates are PRESENT in the archived test
+// universe — not merely listed by a standalone `cargo test --features` invocation nobody runs. The
+// separate shipped-cfg guard (`runShippedCfgGuard`) does not consume this archive at all — it is a
+// small package-scoped `cargo nextest run -p verter_shipped_cfg_contract`, built and run independently.
 export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative"]);
 
 // Pure builder for the `cargo nextest archive` argv — used by BOTH archive variants in gate.mjs, so a
@@ -1543,41 +1543,6 @@ export function buildNextestArchiveArgs(opts) {
     "--zstd-level",
     "-7",
   ];
-}
-
-// The packages Surface 3 must select (ruling §10: the conformance crates + verter_compiler join
-// verter_session + verter_scheduler). `verter_session` gets its OWN richer check (`selectSessionSuites` —
-// requires at least one `lib` AND one `test` suite); every other package here only needs to exist with a
-// non-zero lib/test suite count, checked generically by `checkPackagesPresentInArchive` below.
-export const SHIPPED_CFG_EXTRA_PACKAGES = Object.freeze([
-  "verter_scheduler",
-  "verter_svelte_conformance",
-  "verter_vue_conformance",
-  "verter_compiler",
-]);
-
-export function buildShippedCfgFilter(
-  extraPackages = SHIPPED_CFG_EXTRA_PACKAGES,
-  sessionPackage = "verter_session",
-) {
-  return [sessionPackage, ...extraPackages].map((pkg) => `package(${pkg})`).join(" + ");
-}
-
-// Generic "does this archive listing have real work for these packages" guard — the same shape
-// `runShippedCfgSurface` used to hand-roll for `verter_scheduler` alone, now covering every package a
-// filterset names so a typo or a renamed/removed crate FAILS LOUD instead of silently selecting nothing.
-// Returns `{ counts: { <package>: n }, missing: [packages with zero lib/test suites] }`.
-export function checkPackagesPresentInArchive(allSuites, packages) {
-  const counts = {};
-  const missing = [];
-  for (const pkg of packages) {
-    const n = (allSuites || []).filter(
-      (s) => s["package-name"] === pkg && (s.kind === "lib" || s.kind === "test"),
-    ).length;
-    counts[pkg] = n;
-    if (n === 0) missing.push(pkg);
-  }
-  return { counts, missing };
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -1642,8 +1607,9 @@ export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITE
 // moved, or deleted without updating this registry — the exclusion has silently gone stale (either it now
 // excludes nothing for that file, letting the cargo-spawning cost back into the gate unnoticed, or worse,
 // a differently-named module drifted under the same prefix). The caller must treat `missing.length > 0` as
-// a hard setup failure, never a silent pass — this is the same "selectors matched non-zero work" contract
-// `checkPackagesPresentInArchive` enforces for SURFACE 3's package filter, applied per-row here.
+// a hard setup failure, never a silent pass — the same "selectors matched non-zero work" contract the
+// shipped-cfg guard's independent expected-test-inventory scan (`countTestAttributesInDir`) enforces for
+// verter_shipped_cfg_contract, applied per-row here.
 export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLUDED_SUITES) {
   const perRow = suites.map(() => 0);
   let total = 0;
@@ -2665,6 +2631,10 @@ export async function runContainedStep(opts) {
   let lastSize = -1;
   let lastArtifact = "";
   let peakRssBytes = 0;
+  // The process count reported alongside peakRssBytes MUST be the count observed AT the peak sample, not
+  // whatever the most recent sample happened to see — see the update site below for why the two used to
+  // drift apart.
+  let peakRssProcessCount = 0;
   let memoryProcessCount = 0;
   let memorySampleFailures = 0;
   let memorySampleFailureDetail = "";
@@ -2741,8 +2711,21 @@ export async function runContainedStep(opts) {
         if (sample && sample.ok) {
           memorySampleFailures = 0;
           memorySampleFailureDetail = "";
-          peakRssBytes = Math.max(peakRssBytes, sample.rssBytes || 0);
+          // memoryProcessCount is this SAMPLE's count (used by the abort message below, where "this
+          // sample" and "the peak sample" are the same sample by construction). peakRssProcessCount is
+          // the count AT WHICHEVER sample produced peakRssBytes — captured only when this sample ties or
+          // extends the running max, so the two numbers a caller reports together ("peak RSS X across N
+          // process(es)") describe the SAME instant. Before this fix peakRssProcessCount did not exist and
+          // callers read memoryProcessCount instead, which held whatever the LAST sample before the step
+          // ended saw — for a non-aborting run that is unrelated to the peak-RSS sample, so a build whose
+          // true peak occurred mid-run with several concurrent rustc could report that peak's byte value
+          // paired with a much later, lower-parallelism sample's process count (e.g. "4.87 GiB across 1
+          // process(es)" for a 4-way parallel archive build).
           memoryProcessCount = sample.processCount || 0;
+          if (sample.rssBytes >= peakRssBytes) {
+            peakRssProcessCount = memoryProcessCount;
+          }
+          peakRssBytes = Math.max(peakRssBytes, sample.rssBytes || 0);
           if (sample.rssBytes >= memoryLimitBytes) {
             err(
               `ABORTED — memory ceiling: active child tree RSS ${formatMemorySize(sample.rssBytes)} ` +
@@ -2860,6 +2843,11 @@ export async function runContainedStep(opts) {
     signalName,
     peakRssBytes,
     memoryLimitBytes,
+    // The process count AT the peakRssBytes sample — use this alongside peakRssBytes when reporting
+    // "peak RSS X across N process(es)". memoryProcessCount is the LAST sample's count (used internally by
+    // the abort message, where last-sample and peak-sample coincide by construction) and is kept for
+    // callers that specifically want "what was alive most recently", not "what was alive at the peak".
+    peakRssProcessCount,
     memoryProcessCount,
     memorySampleFailures,
     memorySampleFailureDetail,
@@ -3481,6 +3469,101 @@ export function findFileByName(root, name, maxDepth) {
       if (ent.isFile() && ent.name === name) return full;
       if (ent.isDirectory() && depth < maxDepth) stack.push({ dir: full, depth: depth + 1 });
     }
+  }
+  return null;
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Independent expected-test-count discovery for the shipped-cfg guard's package-scoped nextest run
+// (deletion-bar row "shipped configuration silently selects zero tests" -> required detector
+// "independent expected inventory" — NOT a `runCount !== 0` check, which a regression that compiles out
+// every behavioral test while leaving unrelated `#[test]` fns intact would still satisfy). Counts
+// `#[test]` attributes by walking a source tree directly — not a hand-maintained name list (CLAUDE.md's
+// "Verification Must Prove Execution": "a hand-maintained filename list may not define the primary
+// universe unless generated from independent discovery"). Depth-bounded like `findFileByName` above,
+// not identity-tracked: this walks small, first-party, non-symlinked crate source trees.
+//
+// DELIBERATE, ACCEPTED LIMITATION: this is a TEXTUAL scan, not CFG-aware — it does not parse Rust, so it
+// can miscount a `#[test]` that appears inside a block comment or raw string, or under a `#[cfg(test)]`
+// module gated out of the compiled target, and it requires `#[test]` alone on its own line (whitespace
+// aside) — `#[test] fn foo() { .. }` on one line is NOT counted. Hardening this into a real tokenizer was
+// weighed against just documenting the gap: this scanner only ever walks
+// `crates/verter_shipped_cfg_contract/src` — one small, human-reviewed crate whose sole purpose IS this
+// guard's own test inventory, not the general workspace — so pulling in a real Rust parser for it is not
+// worth the dependency. If this crate ever grows enough that the risk stops being tolerable, replace this
+// with a real tokenizer rather than patching the regex further.
+// ----------------------------------------------------------------------------------------------------
+const TEST_ATTRIBUTE_LINE = /^[ \t]*#\[test\][ \t]*$/gm;
+
+export function countTestAttributesInDir(root, maxDepth = 16) {
+  if (!existsSync(root)) return 0;
+  let count = 0;
+  const stack = [{ dir: root, depth: 0 }];
+  while (stack.length) {
+    const { dir, depth } = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (depth < maxDepth) stack.push({ dir: full, depth: depth + 1 });
+        continue;
+      }
+      if (!ent.isFile() || !ent.name.endsWith(".rs")) continue;
+      let source;
+      try {
+        source = readFileSync(full, "utf8");
+      } catch {
+        continue;
+      }
+      const matches = source.match(TEST_ATTRIBUTE_LINE);
+      if (matches) count += matches.length;
+    }
+  }
+  return count;
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Shipped-cfg guard: the expected-vs-selected test-count VERDICT, pulled out of `runShippedCfgGuard`
+// (gate.mjs) as the SOLE place this comparison is made. `runShippedCfgGuard` calls this function directly
+// rather than inlining the comparison — so a regression that "reverts the live guard's check back to a
+// bare `runCount !== 0`" necessarily reverts THIS function (there is no separate inline copy left in
+// gate.mjs to revert instead while leaving `countTestAttributesInDir` and this decision untouched, which
+// is exactly the gap a round-2 review found in the self-test: it exercised `countTestAttributesInDir` in
+// isolation but never drove the actual comparison gate.mjs branches on). (GB12.3) in gate-selftest.mjs
+// calls this function directly with the same fixture-tree-derived count (GB12.2) exercises, including a
+// mutation that simulates "nextest selected fewer tests than the independent scanner counted" — the named
+// regression class this guard exists to catch.
+//
+// Returns `null` when the counts are reconcilable (proceed); otherwise `{ exit, message }` — the exact
+// exit code and error text `runShippedCfgGuard` reports via `err()` and returns as the guard's exit.
+// ----------------------------------------------------------------------------------------------------
+export function decideShippedCfgGuardExpectedCountMatch(runCount, expectedTestCount) {
+  if (expectedTestCount === 0) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        "SHIPPED-CFG GUARD SETUP FAILURE: the independent source scan of " +
+        "crates/verter_shipped_cfg_contract/src found ZERO #[test] attributes. Either the crate's tests " +
+        "were deleted/moved, or the scanner itself is broken — refusing to trust a guard whose own " +
+        "expected-inventory check cannot count anything.",
+    };
+  }
+  if (runCount !== expectedTestCount) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        `SHIPPED-CFG GUARD SETUP FAILURE: verter_shipped_cfg_contract selected ${runCount} ` +
+        `test(s) to run, but an independent scan of crates/verter_shipped_cfg_contract/src found ` +
+        `${expectedTestCount} #[test] attribute(s). A guard that silently selects fewer tests than its ` +
+        "own source declares proves less than it claims to; refusing to pass it. (A superset — more " +
+        "selected than declared — is equally untrusted: it means the scan missed a source file nextest " +
+        "did compile.)",
+    };
   }
   return null;
 }

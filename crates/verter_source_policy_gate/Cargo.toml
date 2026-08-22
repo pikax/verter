@@ -1,0 +1,39 @@
+[package]
+name = "verter_source_policy_gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Architecture/policy/portability guards relocated out of verter_session's consolidated test binary because their verdict is deterministic across the shared-process and shipped-cfg surfaces (a source-tree scan, or a check against verter_session's public API, neither of which is debug_assertions- or process-model-sensitive). Kept as a separate crate so `cargo nextest run --workspace` executes them exactly once — Surface 2 and Surface 3 select by package, so they never replay here regardless of what this crate depends on."
+publish = false
+
+# No production dependency: this crate is test-only (a `tests/main.rs`
+# integration binary). See `tests/cases/mod.rs` for the moved-scanner
+# inventory and the `crate_root()` re-anchor note each moved file carries.
+[dependencies]
+
+[dev-dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+serde_json = { workspace = true }
+static_assertions = "1.1.0"
+syn = { workspace = true }
+tempfile = "3.27"
+# Two of the eight moved scanners are NOT pure disk scans: they validate real
+# generated output against verter_session's own production surface
+# (`tracked_paths_are_portable`: generated virtual-file names against the live
+# `FrameworkAdapterDescriptor` registry; `output_projector_residual_guards`:
+# the sealed `TypeExpr`/`NoTypeExpr` capability fence against the live
+# `SemanticNodeId`/`TypeArgList` types). Depending on verter_session here does
+# not undo the surface-exclusion this crate exists for — Surface 2/3 select by
+# PACKAGE, not by dependency graph, so a verter_source_policy_gate test never
+# joins their filtersets regardless of what it depends on.
+verter_no_typeexpr = { workspace = true }
+verter_session = { path = "../verter_session", features = ["test-support"] }
+verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }
+verter_workspace = { path = "../verter_workspace" }
+walkdir = "2.5"

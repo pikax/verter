@@ -9,4 +9,7 @@
 //! dedicated `#[global_allocator]`, stay in the separate
 //! `allocator_canaries` binary.
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 mod cases;

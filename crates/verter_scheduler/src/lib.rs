@@ -91,6 +91,9 @@
 //!   `dag.submit`) which MUST run under one lock guard for TOCTOU
 //!   atomicity — the region is non-blocking (<1µs typical).
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod audit_publish;
 pub mod cache_id;

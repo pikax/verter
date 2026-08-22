@@ -70,7 +70,7 @@ impl<'a> Cursor<'a> {
         self.bytes[s]
     }
     pub fn byte_ahead(&self, offset: usize) -> u8 {
-        debug_assert!(self.position.byte_index + offset < self.len);
+        verter_debug_assert!(self.position.byte_index + offset < self.len);
         self.bytes[self.position.byte_index + offset]
     }
     #[inline(always)]
@@ -95,7 +95,7 @@ impl<'a> Cursor<'a> {
     }
     pub fn advance(&mut self, len: usize) {
         let new_byte = self.position.byte_index + len;
-        debug_assert!(new_byte <= self.len, "Advance past end of input");
+        verter_debug_assert!(new_byte <= self.len, "Advance past end of input");
 
         let seg = &self.bytes[self.position.byte_index..new_byte];
 

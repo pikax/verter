@@ -41,7 +41,7 @@ impl<'a> ScriptParseContext<'a> {
     pub fn slice_str(&self, start: u32, end: u32) -> &'a str {
         // Safety: OXC guarantees valid UTF-8 boundaries from the parsed source
         let bytes = &self.source_bytes[start as usize..end as usize];
-        debug_assert!(
+        verter_debug_assert!(
             std::str::from_utf8(bytes).is_ok(),
             "OXC span {}..{} is not valid UTF-8",
             start,

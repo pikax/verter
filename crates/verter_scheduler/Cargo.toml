@@ -33,6 +33,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 test-support = []
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
 hotpath = { version = "0.16", optional = true }
 parking_lot = "0.12.5"

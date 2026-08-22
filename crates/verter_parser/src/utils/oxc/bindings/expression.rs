@@ -72,7 +72,7 @@ pub fn extract_bindings_from_program<'a>(
 #[inline]
 fn arena_name<'a>(ident: &BindingIdentifier<'a>) -> &'a str {
     let name_str = ident.name.as_str();
-    debug_assert!(
+    verter_debug_assert!(
         !name_str.is_empty(),
         "binding identifier should be non-empty"
     );
@@ -86,7 +86,7 @@ fn arena_name<'a>(ident: &BindingIdentifier<'a>) -> &'a str {
 #[inline]
 fn arena_ident_name<'a>(ident: &IdentifierName<'a>) -> &'a str {
     let name_str = ident.name.as_str();
-    debug_assert!(!name_str.is_empty(), "identifier name should be non-empty");
+    verter_debug_assert!(!name_str.is_empty(), "identifier name should be non-empty");
     unsafe { std::mem::transmute::<&str, &'a str>(name_str) }
 }
 

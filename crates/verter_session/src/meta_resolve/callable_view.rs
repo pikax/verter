@@ -1020,7 +1020,7 @@ impl SignatureNodeView<'_, '_> {
         match self.data(self.function).as_deref() {
             Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
             _ => {
-                debug_assert!(false, "SignatureNodeView function is not a Function node");
+                verter_debug_assert!(false, "SignatureNodeView function is not a Function node");
                 None
             }
         }

@@ -191,7 +191,7 @@ pub(crate) fn build_position_preserving_script_source(
         }
     }
 
-    debug_assert_eq!(
+    verter_debug_assert_eq!(
         out.len(),
         src.len(),
         "position-preserving script source must equal the SFC source length"

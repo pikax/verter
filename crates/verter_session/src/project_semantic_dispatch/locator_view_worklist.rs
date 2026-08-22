@@ -530,7 +530,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                         }
                         let resumed = frames.pop();
-                        debug_assert!(matches!(
+                        verter_debug_assert!(matches!(
                             resumed,
                             Some(ProjectionFrame::CompositeResume { .. })
                         ));
@@ -995,7 +995,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return Ok(());
             }
             let resumed = frames.pop();
-            debug_assert!(matches!(
+            verter_debug_assert!(matches!(
                 resumed,
                 Some(ProjectionFrame::CompositeResume { .. })
             ));

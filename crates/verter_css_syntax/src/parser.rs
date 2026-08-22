@@ -737,7 +737,7 @@ impl<'a> Parser<'a> {
             return self.finish(sink, kind, end);
         }
         self.bump(sink)?;
-        debug_assert!(
+        verter_debug_assert!(
             self.lookahead.is_none(),
             "unicode-range mode must change before the value is tokenized"
         );
@@ -1313,7 +1313,7 @@ impl<'a> Parser<'a> {
         sink: &mut impl ParseEventSink,
     ) -> Result<(), CssParseFailure> {
         let count = self.namespace_token_count();
-        debug_assert!(count >= 2);
+        verter_debug_assert!(count >= 2);
         let start = self.current_position();
         self.start(sink, SyntaxKind::NamespaceSelector, start)?;
         let mut end = start;

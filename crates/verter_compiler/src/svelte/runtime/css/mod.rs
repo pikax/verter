@@ -250,7 +250,7 @@ pub fn complete_style_scope_plan(
         syntax,
         analysis,
     } = analyzed;
-    debug_assert_eq!(syntax.dialect(), CssDialect::Css);
+    verter_debug_assert_eq!(syntax.dialect(), CssDialect::Css);
     let content = ast.span;
     let facts = matcher::match_stylesheet(&mut ast, ir).map_err(|refusal| StylePlanFailure {
         class: StylePlanFailureClass::SelectorUnprovable,

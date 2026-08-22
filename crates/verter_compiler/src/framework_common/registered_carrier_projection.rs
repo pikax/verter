@@ -420,7 +420,7 @@ impl RegisteredCarrierProjection {
             parse_key,
             syntax_profile,
         } = self;
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             compute_carrier_structure_hash(&inventory),
             carrier_structure_hash,
         );

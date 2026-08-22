@@ -322,7 +322,7 @@ impl<'a> Scanner<'a> {
     /// delimiter. `allow_empty` distinguishes call args (`fn()` fine) from
     /// computed members (`a[]` invalid — checked by the caller).
     fn scan_balanced_group(&mut self, open: u8, close: u8, _allow_empty: bool) -> Option<usize> {
-        debug_assert_eq!(self.peek(), Some(open));
+        verter_debug_assert_eq!(self.peek(), Some(open));
         self.pos += 1;
         let mut depth = 1usize;
         while let Some(b) = self.peek() {

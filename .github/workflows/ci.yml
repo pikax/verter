@@ -272,7 +272,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-clippy
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # The two build configurations no other job compiles.

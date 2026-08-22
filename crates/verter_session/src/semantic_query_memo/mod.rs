@@ -2827,7 +2827,7 @@ impl SemanticGraphStore {
         // would be reconstructed as a COMPLETE `CacheRead` on a later warm
         // read). `finalise_traced_build_output` already enforces
         // `result_is_partial ⟹ cache_suppress`; the debug_assert pins it here.
-        debug_assert!(
+        verter_debug_assert!(
             !result_is_partial || cache_suppress,
             "§1 invariant violated at memo admission: result_is_partial \
              without cache_suppress would launder a partial into the family memo"
@@ -3163,7 +3163,7 @@ impl SemanticGraphStore {
         // §3.4 soundness invariant (production publish ONLY): the recorded
         // terminal must be at-least the slot's mode — see
         // `family::slot_domain_siblings`. Test-only publishes bypass this.
-        debug_assert!(
+        verter_debug_assert!(
             cached_satisfies(satisfied_projection, prepared.requested_point()),
             "warm_publish_one: {:?} records no terminal satisfying the slot's mode (§3.4)",
             prepared.key()
@@ -3368,7 +3368,7 @@ impl SemanticGraphStore {
         let requested_path = prepared.requested_path();
         // §3.4 soundness invariant — same as `warm_publish_one` (a
         // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
-        debug_assert!(
+        verter_debug_assert!(
             cached_satisfies(&satisfied_projection, prepared.requested_point()),
             "warm_publish_one_if_absent: {:?} records no terminal satisfying the slot's \
              mode (§3.4)",

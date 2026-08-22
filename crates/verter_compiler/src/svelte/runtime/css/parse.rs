@@ -846,7 +846,7 @@ impl<'a> CssParser<'a> {
 
     /// The NEGATIVE An+B arm `-\d*n(\s*\+\s*\d+)` (a `+` offset ONLY).
     fn nth_negative_arm_len(&self, rest: &[u8]) -> Option<usize> {
-        debug_assert_eq!(rest.first(), Some(&b'-'));
+        verter_debug_assert_eq!(rest.first(), Some(&b'-'));
         let mut j = 1usize;
         while matches!(rest.get(j), Some(b) if b.is_ascii_digit()) {
             j += 1;

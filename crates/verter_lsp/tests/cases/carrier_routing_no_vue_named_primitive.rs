@@ -196,7 +196,7 @@ enum StrState {
 /// state carried forward, the remainder of the FILE. Every identifier after any
 /// `<'a>` signature then becomes invisible to the scan.
 fn opens_lifetime(bytes: &[u8], i: usize) -> bool {
-    debug_assert_eq!(bytes[i], b'\'');
+    verter_debug_assert_eq!(bytes[i], b'\'');
     let start = i + 1;
     if start >= bytes.len() {
         return false;

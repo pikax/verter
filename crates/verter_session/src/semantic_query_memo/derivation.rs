@@ -347,7 +347,7 @@ impl DerivationStore {
     /// (append + per-bucket / bucket-level eviction) and reset by
     /// `clear` — so callers do not pay an O(buckets) walk.
     pub(super) fn edge_count(&self) -> usize {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             self.total_edges,
             self.edges.values().map(Vec::len).sum::<usize>(),
             "total_edges counter desynced from the actual bucket edge sum",

@@ -3803,7 +3803,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let n = originals.len();
         let start = results.len().saturating_sub(n);
         let expanded: Vec<SemanticNodeId> = results.drain(start..).collect();
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             expanded.len(),
             n,
             "ExpandFrame combine: expected {n} prior arm results, saw {}",
@@ -6384,7 +6384,7 @@ fn merge_value_nodes_recursive(
     graph: &SemanticGraphStore,
     values: &[SemanticNodeId],
 ) -> SemanticNodeId {
-    debug_assert!(values.len() >= 2);
+    verter_debug_assert!(values.len() >= 2);
     // If every contributing value is an `Object` surface, produce a
     // merged Object directly (one-level deep) so the consumer-visible
     // shape is a unified surface, not an `Intersection` carrier.

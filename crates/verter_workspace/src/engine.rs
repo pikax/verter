@@ -978,7 +978,7 @@ impl Engine {
         base_seeds: &[ResolutionFactKey],
         held_session: Option<SessionFingerprint>,
     ) {
-        debug_assert!(
+        verter_debug_assert!(
             !crate::resolution_currency::ResolutionEpoch::from_raw(
                 self.resolution_epoch.load(Ordering::Acquire)
             )

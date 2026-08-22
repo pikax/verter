@@ -393,7 +393,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
         session: ApiSessionHandle,
         clearance: GateClearance,
     ) -> Self {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             lsp.ownership(),
             O::expected_connection_ownership(),
             "the runtime ConnectionOwnership tag must mirror the compile-time \

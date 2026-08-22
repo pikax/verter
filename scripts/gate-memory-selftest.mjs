@@ -232,4 +232,54 @@ try {
   rmSync(multiTargetDir, { recursive: true, force: true });
 }
 
+// peakRssProcessCount must report the process count OBSERVED AT the peak sample, not whichever sample
+// happened to run last. A run that peaks early (several concurrent processes) and then winds down to one
+// straggler before completing normally is exactly the shape a parallel build takes: peak RSS lands mid-run
+// with several rustc alive, and the final samples before archiving finishes see only one. Pre-fix,
+// `memoryProcessCount` was overwritten on every tick, so a non-aborting run's LAST sample's count (1) was
+// reported alongside the (correct) MAX rss (from the high-count sample) — this scripted sampler sequence
+// reproduces that exact shape and asserts the pairing is now correct.
+const pairingTargetDir = mkdtempSync(join(tmpdir(), "verter-gate-memory-selftest-pairing-"));
+try {
+  let sampleCall = 0;
+  const scriptedSampler = () => {
+    sampleCall += 1;
+    // First sample: the (higher) peak, with 2 processes alive. Every later sample: LOWER rss, 1 process —
+    // simulates parallel rustc winding down to a single straggler well before the child exits.
+    if (sampleCall === 1) {
+      return { ok: true, rssBytes: 100 * MiB, processCount: 2 };
+    }
+    return { ok: true, rssBytes: 10 * MiB, processCount: 1 };
+  };
+  const pairingResult = await runContainedStep({
+    // A short-lived child that exits normally well after a few poll ticks, so the step completes via the
+    // ordinary `close` path rather than a MEMORY abort — this test is about the NON-abort reporting path.
+    cmd: process.execPath,
+    args: ["-e", "setTimeout(()=>{}, 250)"],
+    cwd: process.cwd(),
+    env: process.env,
+    phase: "test",
+    deadlineMs: Date.now() + 30_000,
+    stallMs: 30_000,
+    targetDir: pairingTargetDir,
+    memoryLimitBytes: 200 * MiB, // never crossed by either scripted sample
+    memoryPollMs: 20,
+    memorySampler: scriptedSampler,
+  });
+  assert.equal(pairingResult.reason, "");
+  assert.equal(pairingResult.peakRssBytes, 100 * MiB);
+  assert.equal(
+    pairingResult.peakRssProcessCount,
+    2,
+    "peakRssProcessCount must be the process count from the PEAK sample (2), not the last sample's " +
+      `count (1) — got ${pairingResult.peakRssProcessCount}`,
+  );
+  // memoryProcessCount is deliberately the LAST sample's count (1 here) — it answers "what was alive most
+  // recently", a different question from peakRssProcessCount, and callers reporting "peak RSS across N
+  // process(es)" must use peakRssProcessCount, not this field.
+  assert.equal(pairingResult.memoryProcessCount, 1);
+} finally {
+  rmSync(pairingTargetDir, { recursive: true, force: true });
+}
+
 process.stderr.write("gate memory self-test passed\n");

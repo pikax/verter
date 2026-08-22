@@ -984,7 +984,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 );
                 // Both identities come from the same immutable setup value;
                 // candidate collection cannot make them diverge.
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     txn.relation
                         .sessions
                         .last()
@@ -1105,7 +1105,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     txn.relation.sessions.insert(position, session);
                     match state {
                         InferenceSessionState::CommittedDeterministic => {
-                            debug_assert!(committed, "relation fixation commits at its safe pop");
+                            verter_debug_assert!(
+                                committed,
+                                "relation fixation commits at its safe pop"
+                            );
                             session_bindings = fixed;
                         }
                         InferenceSessionState::Abandoned => session_abandoned = true,

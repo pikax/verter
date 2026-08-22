@@ -9,6 +9,9 @@
 //! canonicalizers both consume this single definition, never a per-surface
 //! reimplementation.
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 /// The exact ECMA-262 `Number::toString` (radix 10) spelling of an f64.
 ///
 /// Implements the spec layout over Rust's shortest-round-trip digit sequence
@@ -129,7 +132,7 @@ fn js_even_tie_break(magnitude: f64, digits: &str, n: i64) -> Option<(String, i6
     } else {
         (frac | (1u64 << 52), exp_bits - 1075)
     };
-    debug_assert!(m != 0, "zero magnitude is handled before digit layout");
+    verter_debug_assert!(m != 0, "zero magnitude is handled before digit layout");
     let a = i64::from(m.trailing_zeros());
     // 2-adic valuations must match: `2·value = m'·2^(a+p+1)` vs
     // `(2s ∓ 1)·2^e10·5^e10` with odd `2s ∓ 1`.

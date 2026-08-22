@@ -106,7 +106,7 @@ impl TemplateAst {
             let parent = &self.nodes[parent_id.0];
             match &parent.kind {
                 AstNodeKind::Element(el) => {
-                    debug_assert!(
+                    verter_debug_assert!(
                         el.content.is_some(),
                         "parent element has no content but is used for siblings()"
                     );

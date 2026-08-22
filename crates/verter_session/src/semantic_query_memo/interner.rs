@@ -123,7 +123,7 @@ impl DepSignatureInterner {
         canonical: Arc<str>,
         version: crate::semantic_query::DepVersion,
     ) -> DepSignature {
-        debug_assert!(
+        verter_debug_assert!(
             !canonical.as_ref().is_empty(),
             "intern_canonical: canonical id must be non-empty"
         );

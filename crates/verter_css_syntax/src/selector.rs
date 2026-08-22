@@ -804,7 +804,7 @@ impl ParseEventSink for SelectorSink {
                     .open
                     .pop()
                     .expect("parser emits balanced selector nodes");
-                debug_assert_eq!(open.kind, kind);
+                verter_debug_assert_eq!(open.kind, kind);
                 if let Some(built) = self.build_node(open, end) {
                     if let Some(parent) = self.open.last_mut() {
                         match built {

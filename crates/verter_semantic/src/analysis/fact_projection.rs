@@ -86,9 +86,9 @@ pub(crate) fn value_type_annotation_fact(
     inference_unavailable: Option<InferenceUnavailableReason>,
 ) -> ValueTypeAnnotationFact {
     if let Some(reason) = inference_unavailable {
-        debug_assert!(annotation.is_none());
-        debug_assert!(annotation_source.is_none());
-        debug_assert!(expression_source.is_none());
+        verter_debug_assert!(annotation.is_none());
+        verter_debug_assert!(annotation_source.is_none());
+        verter_debug_assert!(expression_source.is_none());
         return ValueTypeAnnotationFact {
             is_unique_symbol: false,
             typeof_alias_target: None,
@@ -100,7 +100,7 @@ pub(crate) fn value_type_annotation_fact(
     }
     let Some(annotation) = annotation else {
         if expression_source.is_some() {
-            debug_assert!(annotation_source.is_none());
+            verter_debug_assert!(annotation_source.is_none());
             return ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 typeof_alias_target: None,
@@ -110,7 +110,7 @@ pub(crate) fn value_type_annotation_fact(
                 expression_source,
             };
         }
-        debug_assert!(
+        verter_debug_assert!(
             annotation_source.is_none(),
             "annotation/source pairing: an absent annotation carries no source"
         );

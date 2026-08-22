@@ -15,7 +15,7 @@ guard is a curated ratchet/census rather than a structural-confinement proof.
 ## The reader classes at the terminal state
 
 The live census is the curated ratchet in
-`crates/verter_session/tests/cases/residual_type_expr_body_reader_inventory.rs` (a curated
+`crates/verter_source_policy_gate/tests/cases/residual_type_expr_body_reader_inventory.rs` (a curated
 inventory/ratchet, NOT terminal confinement): 1 `GraphBackedMigrated` + 6 `ProducerLowering` +
 0 `AuthoredShape` + 5 `GraphFreeDto` + 0 `GraphBackedPending`.
 

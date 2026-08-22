@@ -114,7 +114,7 @@ impl VerterHost {
 
         // BEFORE installing the TLS guard: construct the registration.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        debug_assert!(
+        verter_debug_assert!(
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );

@@ -2238,7 +2238,7 @@ impl VerterHost {
             // CLOSED (no artifact) — loud in debug builds — never a
             // transient re-parse.
             let Some(products) = outcome else {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "cold-index run missed its own held lease pin for {}",
                     snapshot_key.canonical

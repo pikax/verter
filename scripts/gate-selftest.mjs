@@ -252,12 +252,11 @@ import {
   ORACLE_CACHE_PROVISION_COMMAND,
   ORACLE_CACHE_PROBE_MAX_MS,
   ORACLE_CACHE_PROBE_MODULE_SEGMENTS,
-  // shipped-cfg archive/filter builders (GB12).
+  // shipped-cfg archive-build feature wiring + independent expected-test-inventory scan (GB12).
   ARCHIVE_FEATURES,
   buildNextestArchiveArgs,
-  SHIPPED_CFG_EXTRA_PACKAGES,
-  buildShippedCfgFilter,
-  checkPackagesPresentInArchive,
+  countTestAttributesInDir,
+  decideShippedCfgGuardExpectedCountMatch,
   // trybuild exclusion (interim, pending maintainer disposition) — GB13.
   TRYBUILD_EXCLUDED_SUITES,
   buildTrybuildExclusionFilterExpr,
@@ -7481,19 +7480,33 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING — ruling §10: the conformance crates and
-  // `verter_compiler` join `verter_session` + `verter_scheduler` on surface 3, and
-  // `verter_session/bf2-authoritative` is ON for every archive so the 45 gated tests are actually built.
+  // (GB12) SHIPPED-CFG ARCHIVE-FEATURE WIRING + INDEPENDENT EXPECTED-TEST-INVENTORY SCAN.
   //
-  // THE REGRESSION THIS CATCHES: someone drops `"verter_session/bf2-authoritative"` from `ARCHIVE_FEATURES`
-  // (the 45 tests silently vanish from the archive again) or drops a package from
-  // `SHIPPED_CFG_EXTRA_PACKAGES` / lets a package name typo through (surface 3's filterset silently stops
-  // covering it). Both are pinned assertions against the REAL exported constants AND the REAL builder
-  // functions gate.mjs calls — a source edit to either breaks this test, not just gate.mjs's runtime
-  // behavior. `checkPackagesPresentInArchive` is additionally proven to discriminate on a synthetic
-  // archive listing missing one required package.
+  // GB12.1 — ARCHIVE_FEATURES + buildNextestArchiveArgs: `verter_session/bf2-authoritative` is ON for the
+  // ONE `cargo nextest archive --workspace` build (surface 1), so the 45 gated tests are actually built.
+  // THE REGRESSION THIS CATCHES: someone drops `"verter_session/bf2-authoritative"` from
+  // `ARCHIVE_FEATURES` (the 45 tests silently vanish from the archive again), or `buildNextestArchiveArgs`
+  // stops threading `features` through even though the constant stayed correct.
+  //
+  // GB12.2 — countTestAttributesInDir: the shipped-cfg guard's independent expected-test-inventory scan
+  // (deletion-bar row "shipped configuration silently selects zero tests" -> required detector
+  // "independent expected inventory", per the maintainer directive). THE REGRESSION THIS CATCHES: a
+  // guard that only checks `runCount !== 0` cannot tell "ran every declared test" from "ran only the two
+  // profile-sanity canaries because every behavioral test got compiled out" — both report a non-zero
+  // count. A genuine before/after mutation on a synthetic fixture directory proves the scanner tracks the
+  // actual `#[test]` count, not a value baked in at some earlier read.
+  //
+  // GB12.3 — decideShippedCfgGuardExpectedCountMatch: the actual comparison `runShippedCfgGuard` (gate.mjs)
+  // branches on, exercised directly (not reimplemented) against GB12.2's own fixture-derived count. Round-2
+  // review finding: GB12.2 alone tested only the independent SCANNER, never the VERDICT gate.mjs derives
+  // from it — reverting the live guard's comparison back to `runCount === 0` while leaving the scanner
+  // untouched would have left the self-test green. `decideShippedCfgGuardExpectedCountMatch` is now the
+  // SOLE place that comparison is made (gate.mjs contains no inline copy), so GB12.3 calling it directly IS
+  // calling the production decision path.
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write("\n(GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING\n");
+  process.stderr.write(
+    "\n(GB12) SHIPPED-CFG ARCHIVE-FEATURE WIRING + EXPECTED-TEST-INVENTORY SCAN\n",
+  );
   {
     let ok = true;
 
@@ -7506,10 +7519,10 @@ async function main() {
       );
       ok = false;
     }
-    // The WIRING: buildNextestArchiveArgs (the function gate.mjs actually calls for BOTH the dev and the
-    // shipped-cfg archive) must emit `--features` with the CURRENT ARCHIVE_FEATURES value, for every
-    // cargoProfile — a future refactor that stops threading `features` through would be caught here even
-    // though the constant itself stayed correct.
+    // The WIRING: buildNextestArchiveArgs (the function gate.mjs actually calls for the archive both
+    // surface 1 and the shipped-cfg guard's compile-check step share) must emit `--features` with the
+    // CURRENT ARCHIVE_FEATURES value, for every cargoProfile — a future refactor that stops threading
+    // `features` through would be caught here even though the constant itself stayed correct.
     for (const cargoProfile of [null, "no-debug-assertions"]) {
       const args = buildNextestArchiveArgs({
         buildJobs: 4,
@@ -7544,70 +7557,213 @@ async function main() {
       ok = false;
     }
 
-    // The filter's required packages: verter_scheduler + the two conformance crates + verter_compiler.
-    const wantExtra = [
-      "verter_scheduler",
-      "verter_svelte_conformance",
-      "verter_vue_conformance",
-      "verter_compiler",
-    ];
-    if (
-      SHIPPED_CFG_EXTRA_PACKAGES.length !== wantExtra.length ||
-      wantExtra.some((pkg) => !SHIPPED_CFG_EXTRA_PACKAGES.includes(pkg))
-    ) {
-      fail(
-        `(GB12.2) SHIPPED_CFG_EXTRA_PACKAGES must be exactly ${JSON.stringify(wantExtra)} (order-independent); ` +
-          `got ${JSON.stringify(SHIPPED_CFG_EXTRA_PACKAGES)}`,
+    // GB12.2: countTestAttributesInDir against a synthetic fixture tree, mutated in place.
+    const fxRoot = mkdtempSync(join(tmpdir(), "gate-shipped-cfg-inventory-"));
+    try {
+      mkdirSync(join(fxRoot, "nested"), { recursive: true });
+      writeFileSync(
+        join(fxRoot, "lib.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() {}\n\n    #[test]\n    fn b() {}\n}\n",
       );
-      ok = false;
-    }
-    const filter = buildShippedCfgFilter();
-    for (const pkg of ["verter_session", ...wantExtra]) {
-      if (!filter.includes(`package(${pkg})`)) {
-        fail(`(GB12.2) the shipped-cfg filterset must name package(${pkg}); got '${filter}'`);
+      writeFileSync(join(fxRoot, "nested", "more.rs"), "#[test]\nfn c() {}\n");
+      // A non-`.rs` file containing the literal text must NOT be counted — the scanner walks source
+      // files, not arbitrary text.
+      writeFileSync(join(fxRoot, "notes.md"), "#[test]\nfn decoy() {}\n");
+
+      const before = countTestAttributesInDir(fxRoot);
+      if (before !== 3) {
+        fail(
+          `(GB12.2) countTestAttributesInDir must count exactly the 3 #[test] attributes across ` +
+            `lib.rs + nested/more.rs (and ignore notes.md); got ${before}`,
+        );
         ok = false;
       }
-    }
 
-    // checkPackagesPresentInArchive: DISCRIMINATION — a listing missing ONE required package's lib/test
-    // suites must report exactly that package as missing (never silently pass), and a complete listing
-    // must report zero missing.
-    const partialSuites = [
-      { "package-name": "verter_scheduler", kind: "lib" },
-      { "package-name": "verter_svelte_conformance", kind: "lib" },
-      { "package-name": "verter_vue_conformance", kind: "test" },
-      // verter_compiler deliberately absent — models a renamed/removed crate or a typo in the filter.
-    ];
-    const partial = checkPackagesPresentInArchive(partialSuites, SHIPPED_CFG_EXTRA_PACKAGES);
-    if (partial.missing.length !== 1 || partial.missing[0] !== "verter_compiler") {
-      fail(
-        `(GB12.3) a listing missing verter_compiler's suites must report missing=["verter_compiler"]; got ` +
-          JSON.stringify(partial.missing),
+      // THE MUTATION: add a fourth #[test] fn to the nested file. A scanner that cached its first read,
+      // globbed only the top-level directory, or hardcoded a count would NOT observe this.
+      writeFileSync(
+        join(fxRoot, "nested", "more.rs"),
+        "#[test]\nfn c() {}\n\n#[test]\nfn d() {}\n",
       );
-      ok = false;
-    }
-    const completeSuites = SHIPPED_CFG_EXTRA_PACKAGES.map((pkg) => ({
-      "package-name": pkg,
-      kind: "lib",
-    }));
-    const complete = checkPackagesPresentInArchive(completeSuites, SHIPPED_CFG_EXTRA_PACKAGES);
-    if (complete.missing.length !== 0) {
-      fail(
-        `(GB12.3) a complete listing must report zero missing packages; got ${JSON.stringify(complete.missing)}`,
-      );
-      ok = false;
+      const after = countTestAttributesInDir(fxRoot);
+      if (after !== 4) {
+        fail(
+          `(GB12.2) DISCRIMINATION: adding a #[test] fn to nested/more.rs must raise the count from 3 to ` +
+            `4; got ${after} (before-mutation count was ${before}) — the scanner is not actually reading ` +
+            "the current source tree.",
+        );
+        ok = false;
+      }
+
+      // GB12.3: decideShippedCfgGuardExpectedCountMatch — the actual VERDICT `runShippedCfgGuard` (gate.mjs)
+      // branches on, extracted into gate-internals.mjs as the SOLE place the comparison is made (no inline
+      // copy left in gate.mjs). Exercised directly against `after` (4), the SAME count GB12.2 just proved
+      // `countTestAttributesInDir` tracks live — not a hand-picked number disconnected from the scanner.
+      //
+      // THE REGRESSION THIS CATCHES (round-2 review counterexample): reverting `runShippedCfgGuard`'s check
+      // back to a bare `runCount === 0` while leaving `countTestAttributesInDir` untouched. Because
+      // `runShippedCfgGuard` now has no inline comparison of its own — it only calls this function — that
+      // revert IS a revert of this function, and GB12.3 calls it directly.
+      if (decideShippedCfgGuardExpectedCountMatch(after, after) !== null) {
+        fail(
+          `(GB12.3) decideShippedCfgGuardExpectedCountMatch(${after}, ${after}) (exact match) must return ` +
+            `null (proceed); got ${JSON.stringify(decideShippedCfgGuardExpectedCountMatch(after, after))}`,
+        );
+        ok = false;
+      }
+      // THE NAMED REGRESSION CLASS: nextest selected FEWER tests than the independent scanner counted
+      // (e.g. an accidental cfg(debug_assertions) compiled out a behavioral #[test] while the two
+      // profile-sanity canaries stayed intact — a bare `runCount !== 0` check would miss this entirely).
+      const fewer = decideShippedCfgGuardExpectedCountMatch(after - 1, after);
+      if (
+        !fewer ||
+        fewer.exit !== EXIT_USAGE ||
+        !/selected 3/.test(fewer.message) ||
+        !/found 4/.test(fewer.message)
+      ) {
+        fail(
+          `(GB12.3) DISCRIMINATION: decideShippedCfgGuardExpectedCountMatch(${after - 1}, ${after}) ` +
+            `(nextest selected fewer than the scanner counted) must fail closed with exit ${EXIT_USAGE} ` +
+            `and name both counts in the message; got ${JSON.stringify(fewer)}`,
+        );
+        ok = false;
+      }
+      // A superset is equally untrusted (means the scan missed a source file nextest did compile) — must
+      // also fail, not be waved through because it is "more, not fewer".
+      const more = decideShippedCfgGuardExpectedCountMatch(after + 1, after);
+      if (!more || more.exit !== EXIT_USAGE) {
+        fail(
+          `(GB12.3) decideShippedCfgGuardExpectedCountMatch(${after + 1}, ${after}) (a superset) must also ` +
+            `fail closed with exit ${EXIT_USAGE}; got ${JSON.stringify(more)}`,
+        );
+        ok = false;
+      }
+      // A zero expected-inventory (the scanner itself broken, or the crate's tests deleted/moved) must
+      // fail closed regardless of what nextest reported running.
+      const zeroExpected = decideShippedCfgGuardExpectedCountMatch(2, 0);
+      if (
+        !zeroExpected ||
+        zeroExpected.exit !== EXIT_USAGE ||
+        !/ZERO #\[test\]/.test(zeroExpected.message)
+      ) {
+        fail(
+          `(GB12.3) decideShippedCfgGuardExpectedCountMatch(2, 0) (broken/empty expected-inventory scan) ` +
+            `must fail closed naming the zero-inventory setup failure; got ${JSON.stringify(zeroExpected)}`,
+        );
+        ok = false;
+      }
+
+      // An empty directory (the shape a regression that deletes every source file produces) must report
+      // zero, not throw and not silently report a stale non-zero value.
+      const emptyRoot = mkdtempSync(join(tmpdir(), "gate-shipped-cfg-inventory-empty-"));
+      try {
+        const emptyCount = countTestAttributesInDir(emptyRoot);
+        if (emptyCount !== 0) {
+          fail(`(GB12.2) an empty directory must count 0; got ${emptyCount}`);
+          ok = false;
+        }
+      } finally {
+        rmSync(emptyRoot, { recursive: true, force: true });
+      }
+
+      // A missing directory (the shape a renamed crate produces) must report zero rather than throw —
+      // `decideShippedCfgGuardExpectedCountMatch`'s zero-expected-inventory check (GB12.3 above) is what
+      // turns that into a loud failure, not an uncaught exception here.
+      const missingCount = countTestAttributesInDir(join(fxRoot, "does-not-exist"));
+      if (missingCount !== 0) {
+        fail(`(GB12.2) a missing directory must count 0 (not throw); got ${missingCount}`);
+        ok = false;
+      }
+    } finally {
+      rmSync(fxRoot, { recursive: true, force: true });
     }
 
     if (ok) {
       pass(
-        "(GB12) SHIPPED-CFG SURFACE 3 PACKAGE/FEATURE WIRING: ARCHIVE_FEATURES names " +
-          "verter_session/bf2-authoritative and buildNextestArchiveArgs actually threads it into the cargo " +
-          "nextest archive argv for every cargo profile (an empty features list, the shape of the exact " +
-          "regression, provably emits no --features flag at all); SHIPPED_CFG_EXTRA_PACKAGES + " +
-          "buildShippedCfgFilter name verter_scheduler and the conformance crates and verter_compiler " +
-          "(ruling §10); checkPackagesPresentInArchive discriminates a listing missing one required " +
-          "package's suites from a complete one.",
+        "(GB12) ARCHIVE_FEATURES names verter_session/bf2-authoritative and buildNextestArchiveArgs " +
+          "actually threads it into the cargo nextest archive argv for every cargo profile (an empty " +
+          "features list, the shape of the exact regression, provably emits no --features flag at all); " +
+          "countTestAttributesInDir counts #[test] attributes across a real multi-file source tree, " +
+          "ignores non-.rs files, and is proven to track a live mutation (3 -> 4) rather than a cached or " +
+          "hardcoded value, plus the empty/missing-directory edge cases report 0 without throwing; " +
+          "decideShippedCfgGuardExpectedCountMatch (the SOLE production comparison, called directly, not " +
+          "reimplemented) proceeds on an exact match, fails closed on a fewer-selected-than-expected " +
+          "regression naming both counts, fails closed on a superset, and fails closed on a zero " +
+          "expected-inventory scan.",
       );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB12.4) WIRING PROOF — GB12.3 above proves `decideShippedCfgGuardExpectedCountMatch` behaves
+  // correctly, but calling it directly never touches gate.mjs's real call site (`runShippedCfgGuard`,
+  // around the `const parityFailure = decideShippedCfgGuardExpectedCountMatch(...)` line). THE REGRESSION
+  // THIS CATCHES: someone reverts that ONE call site back to an inline `runCount === 0` (or any other
+  // inline) comparison while leaving `decideShippedCfgGuardExpectedCountMatch` itself untouched — GB12.3
+  // would stay green because it never observes the call site, only the function. A full CLI drive here
+  // would mean faking BOTH `cargo check --profile no-debug-assertions` and
+  // `cargo nextest run -p verter_shipped_cfg_contract` behind a synthetic `cargo` on PATH — disproportionate
+  // for proving one call site invokes one named function. Instead this statically scans the PRODUCTION
+  // gate.mjs source for `runShippedCfgGuard`'s function body and asserts (a) it calls
+  // `decideShippedCfgGuardExpectedCountMatch(` and (b) it contains no inline `runCount` comparison
+  // (`===`/`!==`/`==`/`!=` against `0`) that could stand in for that call — the two-sided check a
+  // one-sided "does it call the function" assertion would miss (the revert keeps the call in scope
+  // elsewhere, or the reverted code compares a differently-named local, without actually restoring the old
+  // behavior at this call site).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB12.4) SHIPPED-CFG GUARD CALL-SITE WIRING (static source scan)\n");
+  {
+    const gateSource = readFileSync(GATE, "utf8");
+    const fnStart = gateSource.indexOf("async function runShippedCfgGuard(");
+    if (fnStart === -1) {
+      fail(
+        "(GB12.4) could not find `async function runShippedCfgGuard(` in gate.mjs — has it been renamed?",
+      );
+    } else {
+      // The function ends at the next top-level `\n}\n` followed by a blank line — bounded by scanning for
+      // the next line that is exactly `}` at column 0 after fnStart (functions in this file are not
+      // nested at top level, so the first column-0 `}` after the opening brace closes this function).
+      const afterStart = gateSource.slice(fnStart);
+      const closeMatch = afterStart.match(/\n}\n/);
+      if (!closeMatch) {
+        fail("(GB12.4) could not find the closing `}` of runShippedCfgGuard in gate.mjs");
+      } else {
+        const fnBody = afterStart.slice(0, closeMatch.index);
+        const callsExtracted = fnBody.includes("decideShippedCfgGuardExpectedCountMatch(");
+        // Scan CODE lines only — this function's own doc comments discuss the historical
+        // `runCount === 0` / `runCount !== 0` shape by name (that is exactly what they were replaced
+        // by), so scanning raw source text (comments included) would false-positive on the prose
+        // describing the fix rather than the fix itself. Drop every line whose trimmed content starts
+        // with `//` before matching.
+        const fnBodyCodeOnly = fnBody
+          .split("\n")
+          .filter((line) => !line.trim().startsWith("//"))
+          .join("\n");
+        // Matches an inline runCount comparison against 0, e.g. `runCount === 0`, `runCount !== 0`,
+        // `guard.summary.runCount == 0` — the shape the extraction was supposed to remove. Deliberately
+        // does NOT flag `guard.summary.runCount` used merely as an ARGUMENT to
+        // `decideShippedCfgGuardExpectedCountMatch(...)` (no comparison operator there).
+        const hasInlineComparison = /runCount\s*[=!]==?\s*0\b/.test(fnBodyCodeOnly);
+        if (!callsExtracted) {
+          fail(
+            "(GB12.4) runShippedCfgGuard's body in gate.mjs no longer calls " +
+              "decideShippedCfgGuardExpectedCountMatch(...) — the extracted function GB12.3 verifies is no " +
+              "longer wired to the real call site.",
+          );
+        } else if (hasInlineComparison) {
+          fail(
+            "(GB12.4) runShippedCfgGuard's body in gate.mjs contains an inline `runCount ... 0` comparison " +
+              "in addition to (or instead of) calling decideShippedCfgGuardExpectedCountMatch(...) — this is " +
+              "exactly the round-2 regression: an inline check that bypasses the verified extracted function.",
+          );
+        } else {
+          pass(
+            "(GB12.4) runShippedCfgGuard's real call site in gate.mjs calls " +
+              "decideShippedCfgGuardExpectedCountMatch(...) directly with no inline runCount comparison " +
+              "standing in for it.",
+          );
+        }
+      }
     }
   }
 
@@ -7896,25 +8052,26 @@ async function main() {
       "       PASS [   0.010s] verter_span uri::tests::b\n" +
       "────────────\n" +
       "     Summary [   1.000s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
-    const surface3Text =
-      "        FAIL [   0.010s] verter_session::main cases::shared::x\n" +
+    const shippedCfgText =
+      "        FAIL [   0.010s] verter_shipped_cfg_contract cases::shared::x\n" +
       "────────────\n" +
       "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n";
     const { targets, unclassifiable } = resolveIsolationTargets({
       failures: [
         { surface: "nextest", name: "uri::tests::a" },
         { surface: "shipped-cfg/nextest", name: "cases::shared::x" },
+        { surface: "shipped-cfg/nextest", name: "cases::shared::NOT_IN_RECAP" },
         { surface: "libtest:verter_session::main", name: "cases::other::y" },
         { surface: "nextest", name: "uri::tests::MISSING_FROM_RECAP" },
         { surface: "nextest", name: "<run did not complete: 1 of 2 never ran>" },
         { surface: "some-unrecognized-surface", name: "cases::z" },
       ],
-      surfaces: { surface1: surface1Text, surface3: surface3Text },
+      surfaces: { surface1: surface1Text, shippedCfg: shippedCfgText },
       extractNextestTerminalFailures,
     });
-    if (targets.length !== 4 || unclassifiable.length !== 2) {
+    if (targets.length !== 5 || unclassifiable.length !== 2) {
       fail(
-        `(GB14.3) expected 4 isolatable targets + 2 unclassifiable, got ${targets.length}/${unclassifiable.length}`,
+        `(GB14.3) expected 5 isolatable targets + 2 unclassifiable, got ${targets.length}/${unclassifiable.length}`,
       );
       ok = false;
     }
@@ -7923,19 +8080,44 @@ async function main() {
       !byName["uri::tests::a"] ||
       byName["uri::tests::a"].binaryId !== "verter_span" ||
       byName["uri::tests::a"].cargoProfile !== null ||
+      byName["uri::tests::a"].packageScope !== null ||
       byName["uri::tests::a"].caveat !== ""
     ) {
       fail(
-        `(GB14.3) SURFACE 1 target should recover binary-id 'verter_span', dev profile, no caveat`,
+        `(GB14.3) SURFACE 1 target should recover binary-id 'verter_span', dev profile, no package ` +
+          `scope, no caveat`,
       );
       ok = false;
     }
     if (
       !byName["cases::shared::x"] ||
-      byName["cases::shared::x"].binaryId !== "verter_session::main" ||
-      byName["cases::shared::x"].cargoProfile !== "no-debug-assertions"
+      byName["cases::shared::x"].binaryId !== "verter_shipped_cfg_contract" ||
+      byName["cases::shared::x"].cargoProfile !== "no-debug-assertions" ||
+      byName["cases::shared::x"].packageScope !== "verter_shipped_cfg_contract" ||
+      !byName["cases::shared::x"].runArgs.includes("-p")
     ) {
-      fail(`(GB14.3) SURFACE 3 target should recover binary-id + the shipped-cfg profile`);
+      fail(
+        `(GB14.3) shipped-cfg target should recover binary-id + the shipped-cfg profile + package scope ` +
+          `verter_shipped_cfg_contract, with -p threaded into runArgs`,
+      );
+      ok = false;
+    }
+    // THE REGRESSION THIS DISCRIMINATES: a shipped-cfg failure whose name is NOT in the (correctly
+    // segmented) raw recap — binary-id recovery legitimately fails — must NOT degrade to a bare
+    // whole-workspace name-only rerun; it must stay package-scoped regardless.
+    const notInRecap = byName["cases::shared::NOT_IN_RECAP"];
+    if (
+      !notInRecap ||
+      notInRecap.binaryId !== null ||
+      notInRecap.packageScope !== "verter_shipped_cfg_contract" ||
+      !notInRecap.runArgs.includes("-p") ||
+      notInRecap.runArgs[notInRecap.runArgs.indexOf("-p") + 1] !== "verter_shipped_cfg_contract"
+    ) {
+      fail(
+        "(GB14.3) DISCRIMINATION: a shipped-cfg failure with NO binary-id recovered must still carry " +
+          `packageScope=verter_shipped_cfg_contract and '-p verter_shipped_cfg_contract' in runArgs — got ` +
+          `${JSON.stringify(notInRecap)}`,
+      );
       ok = false;
     }
     if (
@@ -7948,9 +8130,10 @@ async function main() {
       ok = false;
     }
     const missing = byName["uri::tests::MISSING_FROM_RECAP"];
-    if (!missing || missing.binaryId !== null || !missing.caveat) {
+    if (!missing || missing.binaryId !== null || missing.packageScope !== null || !missing.caveat) {
       fail(
-        `(GB14.3) a name absent from its surface's recap must degrade to a name-only filter WITH a caveat`,
+        `(GB14.3) a SURFACE 1 name absent from its surface's recap must degrade to a name-only filter ` +
+          `WITH a caveat and no package scope (surface 1 is not package-scoped)`,
       );
       ok = false;
     }
@@ -7990,9 +8173,10 @@ async function main() {
         "(GB14.3) ISOLATION FILTER/ARGV: binary-id recovery is scoped to the failure's OWNING surface " +
           "segment (never a different surface's), routes to the right cargo profile per surface " +
           "(nextest=dev, shipped-cfg/nextest=no-debug-assertions, libtest:<id>=dev via the tag directly), " +
-          "degrades to a caveated name-only filter when the recap does not name the test, and both a " +
-          "synthetic diagnostic name and an unrecognized surface tag land in unclassifiable rather than " +
-          "being silently dropped or crashing the resolver.",
+          "degrades to a caveated name-only filter when the recap does not name the test, a shipped-cfg " +
+          "target stays package-scoped to verter_shipped_cfg_contract EVEN when binary-id recovery fails " +
+          "(never a whole-workspace fallback), and both a synthetic diagnostic name and an unrecognized " +
+          "surface tag land in unclassifiable rather than being silently dropped or crashing the resolver.",
       );
     }
   }
@@ -8042,29 +8226,44 @@ async function main() {
     // (GB14.5) SURFACE SEGMENTATION — a nextest recap for a given test-name is read ONLY from that test's
     // OWNING surface segment, never from a different surface's (which could name the same test string
     // under a DIFFERENT profile/outcome and silently cross-contaminate binary-id recovery).
+    // Header/body text matched byte-for-byte against what gate.mjs's log()/`runShippedCfgGuard` actually
+    // print (log() prefixes every line with "[gate] ") — NOT the deleted SURFACE 2 / old package-filtered
+    // SURFACE 3 shape. A stale fixture here would pass against itself while the real regex silently never
+    // matches a real gate log — the failure mode this test exists to catch.
     const log =
       "[gate] SURFACE 1: nextest run from the archive (process isolation) …\n" +
       "        FAIL [   0.010s] pkg_a cases::shared::x\n" +
       "────────────\n" +
       "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n" +
-      "[gate] SURFACE 2: directly executing 0 verter_session libtest binaries (lib=true, test=true) in-process from the SAME archive …\n" +
-      "[gate] SURFACE 3: building the shipped-cfg test universe (cargo nextest archive --workspace --cargo-profile no-debug-assertions) …\n" +
+      "[gate] SHIPPED-CFG GUARD: cargo check --workspace --all-targets --profile no-debug-assertions …\n" +
+      "[gate] SHIPPED-CFG GUARD: compile check clean in 5s\n" +
+      "[gate] SHIPPED-CFG GUARD: cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions …\n" +
       "        FAIL [   0.010s] pkg_b cases::shared::x\n" +
       "────────────\n" +
       "     Summary [   1.000s] 1 tests run: 0 passed, 1 failed, 0 skipped\n" +
       "[gate][error] VERDICT: FAIL — 2 non-tolerated failure(s):\n";
     const segs = splitGateLogSurfaces(log);
     const s1 = extractNextestTerminalFailures(segs.surface1);
-    const s3 = extractNextestTerminalFailures(segs.surface3);
+    const sc = extractNextestTerminalFailures(segs.shippedCfg);
     if (
       s1.failures.length !== 1 ||
       s1.failures[0].binaryId !== "pkg_a" ||
-      s3.failures.length !== 1 ||
-      s3.failures[0].binaryId !== "pkg_b"
+      sc.failures.length !== 1 ||
+      sc.failures[0].binaryId !== "pkg_b"
     ) {
       fail(
-        `(GB14.5) surface1/surface3 segments must each contain ONLY their own surface's recap ` +
-          `(got s1=${JSON.stringify(s1.failures)}, s3=${JSON.stringify(s3.failures)})`,
+        `(GB14.5) surface1/shippedCfg segments must each contain ONLY their own surface's recap ` +
+          `(got s1=${JSON.stringify(s1.failures)}, shippedCfg=${JSON.stringify(sc.failures)})`,
+      );
+      ok = false;
+    }
+    // DISCRIMINATION: the compile-check line ("SHIPPED-CFG GUARD: cargo check …") precedes the
+    // nextest-run header and must NOT itself be mistaken for the segment start — proves the header regex
+    // matches the specific "cargo nextest run" line, not any "SHIPPED-CFG GUARD:" line.
+    if (!segs.shippedCfg.startsWith("[gate] SHIPPED-CFG GUARD: cargo nextest run")) {
+      fail(
+        `(GB14.5) DISCRIMINATION: the shippedCfg segment must start at the "cargo nextest run" header, ` +
+          `not the earlier "cargo check" line; got segment starting: ${JSON.stringify(segs.shippedCfg.slice(0, 80))}`,
       );
       ok = false;
     }
@@ -8072,7 +8271,9 @@ async function main() {
       pass(
         "(GB14.5) SURFACE SEGMENTATION: the SAME test name failing on two different surfaces (dev vs " +
           "shipped-cfg) resolves to two DIFFERENT binary-ids because each surface's raw recap is searched " +
-          "in isolation — never a cross-surface false match.",
+          "in isolation — never a cross-surface false match — and the shipped-cfg segment starts at its " +
+          "OWN 'cargo nextest run' header, not the earlier 'cargo check' compile-only line under the same " +
+          "'SHIPPED-CFG GUARD:' prefix.",
       );
     }
   }

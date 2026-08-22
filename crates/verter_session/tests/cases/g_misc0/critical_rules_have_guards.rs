@@ -1749,7 +1749,7 @@ fn strip_visibility_qualifier(line: &str) -> &str {
 /// function as a libtest test entry-point — see the adjacency
 /// contract in `collect_known_guard_names` for the accepted set.
 fn attribute_line_marks_test(line: &str) -> bool {
-    debug_assert!(line.starts_with("#["));
+    verter_debug_assert!(line.starts_with("#["));
     // Strip the leading `#[` and the trailing `]` (or anything
     // after, since some attributes span lines — but the test
     // attributes we recognise are single-line forms).

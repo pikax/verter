@@ -264,7 +264,7 @@ impl<'a> CodeTransform<'a> {
         // the only case in which a transform with no chunks at all emits.
         while scheduled < schedule.len() {
             let (offset, index) = schedule[scheduled];
-            debug_assert_eq!(offset, text_len);
+            verter_debug_assert_eq!(offset, text_len);
             let token = &tokens[index];
             out.push(token_at(gen_line, gen_col, payload_of(token)));
             scheduled += 1;

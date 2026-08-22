@@ -12,6 +12,7 @@ description = "Deterministic constrained mixed-strength covering-array engine fo
 [lib]
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 

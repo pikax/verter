@@ -124,7 +124,7 @@ impl KeyFilter {
             KeyFilter::Include(set) => set.iter().any(|candidate| candidate == key),
             KeyFilter::Exclude(set) => set.iter().all(|candidate| candidate != key),
             KeyFilter::UnknownDeferred => {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "KeyFilter::UnknownDeferred reached at publication \
                      boundary in KeyFilter::admits — Rule-5 violation \
@@ -311,7 +311,7 @@ impl<'a> ProjectionCursor<'a> {
         // return `None` (conservative-reject) so we don't admit
         // a stale filter's silent member drops.
         if matches!(self.node.key_filter, KeyFilter::UnknownDeferred) {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "KeyFilter::UnknownDeferred reached at publication \
                  boundary in ProjectionCursor::descend — Rule-5 \
@@ -443,7 +443,7 @@ impl<'a> ProjectionCursor<'a> {
         // F6: UnknownDeferred at the publication boundary is a Rule-5
         // violation site — the caller must resolve the filter first.
         if matches!(self.node.key_filter, KeyFilter::UnknownDeferred) {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "KeyFilter::UnknownDeferred reached at publication \
                  boundary in ProjectionCursor::descend_published_member \

@@ -1030,13 +1030,13 @@ pub(super) fn get_possible_element_siblings(
         }
         // `const fragment = path[i--]`.
         let PathEntry::Frag(fragment) = path[i as usize] else {
-            debug_assert!(false, "the path alternates fragment/container entries");
+            verter_debug_assert!(false, "the path alternates fragment/container entries");
             break;
         };
         i -= 1;
         let nodes = index.frag_nodes(fragment);
         let Some(position) = nodes.iter().position(|&n| n == current) else {
-            debug_assert!(false, "a node is always a member of its parent fragment");
+            verter_debug_assert!(false, "a node is always a member of its parent fragment");
             break;
         };
         let step: isize = match direction {
@@ -1102,7 +1102,7 @@ pub(super) fn get_possible_element_siblings(
             break;
         }
         let PathEntry::Node(container) = path[i as usize] else {
-            debug_assert!(false, "the path alternates fragment/container entries");
+            verter_debug_assert!(false, "the path alternates fragment/container entries");
             break;
         };
         current = container;

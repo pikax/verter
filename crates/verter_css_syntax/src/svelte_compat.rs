@@ -870,7 +870,7 @@ impl<'a> CssParser<'a> {
     /// then a MANDATORY `\s*\+\s*\d+` offset — a `+` offset ONLY (a `-` offset, a missing `n`, or a
     /// missing offset is NOT this arm, so `-2`, `-2n`, and `-2n-1` all return `None`).
     fn nth_negative_arm_len(&self, rest: &[u8]) -> Option<usize> {
-        debug_assert_eq!(rest.first(), Some(&b'-'));
+        verter_debug_assert_eq!(rest.first(), Some(&b'-'));
         let mut j = 1usize; // the leading `-`
         j += ascii_digits_len(rest, j);
         if rest.get(j) != Some(&b'n') {

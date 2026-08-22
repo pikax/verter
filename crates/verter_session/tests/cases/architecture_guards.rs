@@ -6031,8 +6031,10 @@ pub(crate) mod foundations_guards {
         // Criterion-only projection primitive harness. The module is compiled
         // solely by the explicit `test-support` feature used by the checked-in
         // projection safety benchmark; default production builds do not expose
-        // it.
-        "pub mod projection_bench_support",
+        // it. Body now lives in `for_tests.rs` (re-exported here at the
+        // crate root so `benches/projection_safety_bench.rs` keeps a
+        // stable `verter_session::projection_bench_support` path).
+        "pub use for_tests::projection_bench_support",
         // Test-only probe substrate for the content-addressed
         // `MapperFingerprint` primitive. Consumed by
         // `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`. The

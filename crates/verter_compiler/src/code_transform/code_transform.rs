@@ -331,7 +331,7 @@ impl<'a> CodeTransform<'a> {
         // handle) rather than record a combined `content + old_intro` pointer that would publish a
         // WRONG boundary after the whole combined intro.
         let intro_was_empty = self.intro.is_empty();
-        debug_assert!(
+        verter_debug_assert!(
             intro_was_empty,
             "prepend_helper_preamble_content requires an empty intro (single-prepend contract)"
         );
@@ -1645,7 +1645,7 @@ impl<'a> CodeTransform<'a> {
                 }
             }
         }
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             generated as usize + self.outro.len(),
             output.len(),
             "source-range geometry must cover the built output bytes"

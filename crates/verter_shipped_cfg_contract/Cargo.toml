@@ -1,0 +1,27 @@
+[package]
+name = "verter_shipped_cfg_contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Surface 3 replacement: a small, deliberately-scoped test target run ONLY under the workspace `no-debug-assertions` Cargo profile (see the workspace Cargo.toml and scripts/gate.mjs). Covers behaviour that can differ when debug_assertions/overflow-checks are off — not a general-purpose test crate."
+publish = false
+
+# This crate carries NO production code — its `src/lib.rs` is a placeholder
+# and every test lives under `#[cfg(test)] mod tests`. It exists to be
+# compiled and run exactly once, scoped to this package, under
+# `--cargo-profile no-debug-assertions` (see gate.mjs's `runShippedCfgContract`).
+# Running it under the default `dev` profile is a NO-OP by design: the two
+# profile-sanity tests assert the OPPOSITE of what `dev` provides and will
+# fail loudly there — that is deliberate, not a bug, and is exactly what
+# proves the alternate profile actually took effect (see the deletion-bar
+# row "shipped configuration silently selects zero tests").
+
+[dev-dependencies]
+verter_session = { path = "../verter_session" }
+# Direct (non-verter_session-mediated) coverage of verter_compiler's own
+# codegen under the shipped-cfg profile.
+verter_compiler = { path = "../verter_compiler" }

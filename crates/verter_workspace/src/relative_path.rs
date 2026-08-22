@@ -33,7 +33,7 @@
 /// callers SHOULD guard against passing non-relative specifiers because the
 /// result is undefined per the documented contract.
 pub fn join_relative(importer_id: &str, specifier: &str) -> String {
-    debug_assert!(
+    verter_debug_assert!(
         specifier.starts_with('.'),
         "join_relative expects a relative specifier (starts with '.'); got {specifier:?}",
     );

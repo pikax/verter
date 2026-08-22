@@ -368,7 +368,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     // should never appear here. The debug_assert catches missed transitions
                     // during development; in release the +1 ensures forward progress to
                     // avoid an infinite loop should a state somehow leak through.
-                    debug_assert!(
+                    verter_debug_assert!(
                         other == State::Text || other == State::InRCDATA,
                         "Unexpected state {other:?} in run loop at index {}",
                         self.index

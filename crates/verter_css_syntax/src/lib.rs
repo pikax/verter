@@ -5,6 +5,9 @@
 //! optional retained projection. Source bytes stay in [`CssSource`], and hot
 //! records contain compact integer kinds and spans rather than owned text.
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod cst;
 pub mod diagnostic;
 pub mod dialect;

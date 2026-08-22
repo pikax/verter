@@ -146,7 +146,7 @@ impl SemanticGraphStore {
         hit.read_set_signature.bubble(ctx);
         match hit.result {
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
-                debug_assert!(
+                verter_debug_assert!(
                     result.degradation().is_none(),
                     "the FlowReturn memo never stores a degraded success (ReturnOnly by contract)"
                 );

@@ -59,7 +59,7 @@ impl WaitForGraph {
             let mut state = self.state.lock();
             if let Some(id) = state.free_owner_ids.pop() {
                 let slot = &mut state.owners[id];
-                debug_assert!(!slot.active, "free execution-owner slot must be inactive");
+                verter_debug_assert!(!slot.active, "free execution-owner slot must be inactive");
                 slot.generation = slot
                     .generation
                     .checked_add(1)

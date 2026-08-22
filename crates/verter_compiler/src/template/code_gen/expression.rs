@@ -161,7 +161,7 @@ pub(crate) fn write_prefixed_expr<S: ExprSink>(
     // by recording bindings in order (`push_binding`). This pins the precondition
     // at the point it is CONSUMED, so a result assembled by some other route
     // fails loudly here instead of emitting text that has lost a source run.
-    debug_assert!(
+    verter_debug_assert!(
         is_source_ordered(&bindings.bindings),
         "resolved-expression bindings must be in source order, got {:?} for {expr:?}",
         bindings

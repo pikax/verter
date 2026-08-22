@@ -25,6 +25,7 @@ required-features = ["test-fake-engine"]
 test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }

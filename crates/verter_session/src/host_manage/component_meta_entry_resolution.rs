@@ -71,7 +71,7 @@ impl VerterHost {
                 self,
                 std::sync::Arc::clone(&ctx),
             ));
-        debug_assert!(
+        verter_debug_assert!(
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );
@@ -741,7 +741,7 @@ impl VerterHost {
                 trace_id,
                 capture_state: verter_audit::AuditCaptureState::ActiveStored,
             };
-            debug_assert_eq!(synthesized.request_id, resolution.request_id);
+            verter_debug_assert_eq!(synthesized.request_id, resolution.request_id);
             self.finalize_request_audit_record(synthesized);
         }
 

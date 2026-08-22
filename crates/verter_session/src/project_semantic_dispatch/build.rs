@@ -2881,7 +2881,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 declaration,
                 failure,
             } => {
-                debug_assert_eq!(root_identity, declaration.root_identity);
+                verter_debug_assert_eq!(root_identity, declaration.root_identity);
                 let crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
                     ..
                 } = failure

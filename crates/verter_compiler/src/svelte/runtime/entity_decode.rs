@@ -198,7 +198,7 @@ fn is_entity_word_char(ch: char) -> bool {
 /// reference (the `&` is then kept literal). The form is a byproduct of the
 /// arm the decode already takes — reporting it costs no extra scan.
 fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize, EntityRefForm)> {
-    debug_assert_eq!(s.as_bytes().first(), Some(&b'&'));
+    verter_debug_assert_eq!(s.as_bytes().first(), Some(&b'&'));
     // Numeric reference: `&#65` / `&#65;` (decimal) / `&#x41` / `&#x41;` (hex). The
     // official pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?` makes the trailing `;`
     // OPTIONAL — the numeric run ends at the first non-matching char (or `;`).

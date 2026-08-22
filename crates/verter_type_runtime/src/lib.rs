@@ -30,6 +30,9 @@
 // crate-wide so a held-lock restart/backpressure stall cannot reappear.
 #![deny(clippy::await_holding_lock)]
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod backend;
 pub mod codec;
 pub mod contents_snapshot;
