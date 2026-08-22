@@ -14,13 +14,11 @@ use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
     VueBackendRequest, VueCompileRequest,
 };
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
-
 fn compile(
     source: &str,
     filename: &str,
     macro_semantics: &VueMacroSemanticInput,
-    _allocator: &oxc_allocator::Allocator,
+    allocator: &oxc_allocator::Allocator,
 ) -> VerterCompileResult {
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
@@ -37,14 +35,18 @@ fn compile(
         false,
     )
     .expect("a lone RuntimeClient product must construct");
-    StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            macro_semantics,
-        )
-        .expect("a plain RuntimeClient compile must not be refused")
+    // Drives the pre-assembly `compile()` entry directly (`#[doc(hidden)]`
+    // — this batch tool inspects the raw per-block script/template output,
+    // a shape the public one-shot `StandaloneCompiler::compile` atomic
+    // contract does not expose).
+    verter_compiler::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        macro_semantics,
+        allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused")
 }
 
 // ── File discovery ──────────────────────────────────────────────────

@@ -23,5 +23,6 @@ publish = false
 [dev-dependencies]
 verter_session = { path = "../verter_session" }
 # Direct (non-verter_session-mediated) coverage of verter_compiler's own
-# codegen under the shipped-cfg profile.
+# codegen under the shipped-cfg profile, through its public
+# `StandaloneCompiler::compile` boundary — no test-support feature needed.
 verter_compiler = { path = "../verter_compiler" }

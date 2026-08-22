@@ -20,6 +20,7 @@ pub mod plan;
 pub mod publish;
 pub mod source_space;
 pub mod source_unit;
+pub mod vue_module;
 
 pub use compose::{
     assemble_sequence, prepend_preamble, splice_into_hole, ComposeRefusal, ComposedOutput,
@@ -31,6 +32,15 @@ pub use fragment::{
     SyntacticContract, ValidatedFragment,
 };
 pub use plan::{PlannedArtifact, ProductPlan};
-pub use publish::{publish, ArtifactContribution, ArtifactSet, AssembledArtifact, AssemblyRefusal};
+// `publish` and `ArtifactContribution` are `pub(crate)` (see their own doc
+// comments) — this crate's compose-and-publish callers
+// (`vue_module::compose_main_module`, `standalone::StandaloneCompiler`)
+// reach them through `super::publish::{publish, ArtifactContribution}`
+// directly, not through this public re-export.
+pub use publish::{ArtifactSet, AssembledArtifact, AssemblyRefusal};
 pub use source_space::{AssembledOffset, FragmentOffset, FragmentRange, SourceSpaceKind};
 pub use source_unit::{ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId};
+pub use vue_module::{
+    compose_main_module, ExtraFragment, SfcRewriteRefusal, VueMainAssemblyFailure,
+    VueMainCompositionFailure, VueMainModuleRequest,
+};

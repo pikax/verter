@@ -506,8 +506,25 @@ fn collect_template_compile_diagnostics(parsed: &ParsedSfc, diagnostics: &mut Ve
 ///
 /// Returns a [`VerterCompileResult`] containing the generated code for each block,
 /// timing information, and any diagnostics emitted during compilation.
+///
+/// Every production route reaches [`compile_with_parsed`] (or the standalone
+/// one-shot direct core, [`crate::standalone::StandaloneCompiler::compile`],
+/// which publishes an atomic [`crate::assembly::ArtifactSet`]) directly —
+/// this plain parse-and-discard convenience wrapper has NO production caller
+/// at all, so unlike [`compile_with_parsed`] it needs no `pub(crate)`
+/// production arm: it is `pub` ONLY under `cfg(test)`/`feature =
+/// "test-support"`, genuinely absent from a shipped build, not merely
+/// hidden from docs — the SAME opt-in seam `verter_css_syntax`'s own
+/// cross-crate test-support edge uses (see this crate's `Cargo.toml`), for
+/// callers that genuinely need the pre-assembly, per-block
+/// [`VerterCompileResult`] shape directly rather than an atomic
+/// [`crate::assembly::ArtifactSet`]: this crate's own
+/// `direct_result_tests`/`compile_tests`, and `verter_bench`'s profiling
+/// examples/benches (both enable `test-support` on their own
+/// `verter_compiler` dev-dependency edge, never on their regular one).
+#[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) fn compile(
+pub fn compile(
     input: &str,
     request: &crate::compile_request::CompileRequest,
     execution_inputs: &VueExecutionInputs,
@@ -521,7 +538,42 @@ pub(crate) fn compile(
 ///
 /// This is the standalone bridge for consumers that must qualify emitted
 /// block maps without reparsing the carrier.
+///
+/// Same visibility seam as [`compile`] and for the same reason: never
+/// publishes an [`crate::assembly::ArtifactSet`], so it is not a second
+/// alternate core, but a SHIPPED build must not be able to reach it at all
+/// — `pub(crate)` there, `pub` only under `cfg(test)`/`feature =
+/// "test-support"`. Callers needing the raw parse-plus-result pair: this
+/// crate's own direct one-shot core (`crate::standalone`, which calls the
+/// `pub(crate)` production arm directly — same crate, unconditional), and
+/// cross-crate conformance/characterization harnesses like
+/// `verter_vue_conformance`'s seed comparator and `verter_session`'s
+/// dispatch-byte-identity pin that build a
+/// [`crate::framework_common::RuntimeCompileOutput`] from the SAME parse
+/// `compile_with_parsed` produced, rather than reparsing.
+#[cfg(any(test, feature = "test-support"))]
+pub fn compile_with_parsed(
+    input: &str,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &Allocator,
+) -> Result<(ParsedSfc, VerterCompileResult), crate::compile_request::CompileRequestError> {
+    compile_with_parsed_impl(input, request, execution_inputs, macro_semantics, allocator)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn compile_with_parsed(
+    input: &str,
+    request: &crate::compile_request::CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &Allocator,
+) -> Result<(ParsedSfc, VerterCompileResult), crate::compile_request::CompileRequestError> {
+    compile_with_parsed_impl(input, request, execution_inputs, macro_semantics, allocator)
+}
+
+fn compile_with_parsed_impl(
     input: &str,
     request: &crate::compile_request::CompileRequest,
     execution_inputs: &VueExecutionInputs,

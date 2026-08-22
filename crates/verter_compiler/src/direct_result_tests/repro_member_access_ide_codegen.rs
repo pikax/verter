@@ -34,16 +34,19 @@
 //! control. The `a.` arms each exercise the same root cause through a different
 //! codegen path and would fail if recovery regressed.
 
-use oxc_allocator::Allocator;
-use verter_compiler::compile::types::VueExecutionInputs;
-use verter_compiler::compile::VueMacroSemanticInput;
-use verter_compiler::compile_request::{
+use crate::compile::types::VueExecutionInputs;
+use crate::compile::VueMacroSemanticInput;
+use crate::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest, VueCompileRequest,
 };
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+use oxc_allocator::Allocator;
 
 /// Compile an SFC to IDE TSX — the exact product the LSP requests
-/// (a lone `IdeCompanion`).
+/// (a lone `IdeCompanion`). Drives the pre-assembly `compile()` entry
+/// directly (this module lives inside the crate under `#[cfg(test)]`
+/// precisely so it can — the raw per-block `VerterCompileResult` this file
+/// inspects has no equivalent on the public one-shot
+/// `StandaloneCompiler::compile` atomic contract).
 fn ide_tsx(source: &str) -> String {
     let request = CompileRequest::new(
         vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
@@ -55,14 +58,15 @@ fn ide_tsx(source: &str) -> String {
         false,
     )
     .expect("a lone IdeCompanion product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain IdeCompanion compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain IdeCompanion compile must not be refused");
     result
         .tsx
         .as_ref()

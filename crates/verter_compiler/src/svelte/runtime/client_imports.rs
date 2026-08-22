@@ -109,6 +109,47 @@ impl UserImport {
         self.specifiers.is_empty()
     }
 
+    /// This import's own declared facts — one [`DeclaredImport`](crate::assembly::DeclaredImport)
+    /// entry per bound-name CLAUSE SHAPE against this import's specifier, so a
+    /// mixed declaration (`import Default, { named } from '…'`, real valid JS)
+    /// reports as two entries sharing one specifier rather than being forced
+    /// into a single-kind shape. The external `imported` module-export name of
+    /// a named specifier is dropped — [`DeclaredImportKind`](crate::assembly::DeclaredImportKind)
+    /// carries only LOCAL bound names, which is exactly what a fragment's own
+    /// code references.
+    pub(super) fn declared_imports(&self) -> Vec<crate::assembly::DeclaredImport> {
+        use crate::assembly::{DeclaredImport, DeclaredImportKind};
+
+        if self.is_side_effect() {
+            return vec![DeclaredImport {
+                specifier: self.source.clone(),
+                kind: DeclaredImportKind::SideEffect,
+            }];
+        }
+        let mut out = Vec::new();
+        let mut named_locals = Vec::new();
+        for spec in &self.specifiers {
+            match spec {
+                UserImportSpecifier::Default { local } => out.push(DeclaredImport {
+                    specifier: self.source.clone(),
+                    kind: DeclaredImportKind::Default(local.clone()),
+                }),
+                UserImportSpecifier::Namespace { local } => out.push(DeclaredImport {
+                    specifier: self.source.clone(),
+                    kind: DeclaredImportKind::Namespace(local.clone()),
+                }),
+                UserImportSpecifier::Named { local, .. } => named_locals.push(local.clone()),
+            }
+        }
+        if !named_locals.is_empty() {
+            out.push(DeclaredImport {
+                specifier: self.source.clone(),
+                kind: DeclaredImportKind::Named(named_locals),
+            });
+        }
+        out
+    }
+
     /// Render the emitted `import …;` statement text (no trailing newline). Every
     /// string payload (the specifier, string-literal export names, attribute keys /
     /// values) routes through the JS single-quote serializer so a quote / backslash

@@ -459,10 +459,19 @@ impl<'a> ClientEmitter<'a> {
             );
         }
 
+        // The exact import facts written above at (1) — the SAME two sources
+        // `emit_imports` wrote from, reported as a fact rather than
+        // recovered by reparsing `code`.
+        let mut declared_imports = topology.imports.declared_imports();
+        for import in &self.plan.user_imports {
+            declared_imports.extend(import.declared_imports());
+        }
+
         let (code, source_map) = out.finish(source, filename, want_source_map, allocator)?;
         Ok(ClientModule {
             code,
             source_map,
+            declared_imports,
             // The EXTERNAL css artifact is attached by `compile_client` (the
             // routing decision lives with the plan's output mode, not here).
             css: None,

@@ -28,5 +28,12 @@ oxc_semantic = { workspace = true }
 oxc_span = { workspace = true }
 
 [dev-dependencies]
-verter_compiler = { path = "../verter_compiler" }
+# `test-support` reaches `compile_with_parsed` — `pub(crate)` in production
+# (`verter_compiler`'s own raw-source direct-compile boundary is
+# `StandaloneCompiler::compile` alone); this crate's seed comparator needs
+# the RETAINED parse alongside the raw result to build a
+# `RuntimeCompileOutput` (via `vue_result_to_runtime_bundle`) without
+# reparsing, testing the HOST route's OWN `assemble_vue_main_module`
+# composition specifically — not the direct core's.
+verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 verter_session = { path = "../verter_session" }

@@ -24,7 +24,6 @@ use verter_compiler::framework_common::{
     RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 
-use super::map_compose::rewrite_script;
 use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily};
 use super::{assemble_vue_main_module, AssembleMapFailure, VueMainAssemblyFailure};
 use crate::types::{CompileProfile, FileMeta, HmrStrategy};
@@ -2996,83 +2995,6 @@ fn a_mappings_divergence_is_caught_even_when_the_decoded_segments_agree() {
     assert_ne!(
         base, trailing,
         "so the comparison must fail through the `mappings` member alone"
-    );
-}
-
-/// The chained script map carries BOTH passes, composed in sequence.
-///
-/// The two authorized rewrites must be applied SEQUENTIALLY — pass two on
-/// pass one's output coordinate space. The failure mode that requirement
-/// exists to exclude is a chain whose second pass is applied to the ORIGINAL
-/// fragment map instead of pass one's output: the code still comes out right,
-/// because the code is built by the transforms themselves, but the map silently
-/// loses pass one's contribution.
-///
-/// The fixture makes both contributions observable in one sequence, at
-/// coordinates that differ under the defect:
-///
-/// - the rename is two bytes longer than what it replaces, so an authored
-///   position after it on line 0 lands at generated column 16; chained over the
-///   original map it would land at 14, its unshifted column;
-/// - the removal deletes line 1 entirely, so the authored position on line 2
-///   lands on generated line 1; a chain that never ran pass two would leave it
-///   on line 2.
-///
-/// Asserting both in one result is what pins the composition rather than either
-/// pass alone.
-#[test]
-fn the_chained_script_map_carries_both_rewrite_passes_in_sequence() {
-    let code = "const __sfc__ = {}\nexport default __sfc__;\nconst z = 2\n";
-    let raw = map_of(&[
-        seg(0, 0, 1, 0),
-        // Column 14 is the `=` of `const __sfc__ = {}`, i.e. the first authored
-        // position AFTER the identifier pass one rewrites.
-        seg(0, 14, 1, 14),
-        seg(2, 0, 3, 0),
-    ]);
-    let decoded = validate_and_decode(&raw, code).expect("the fixture map is composable");
-    let fact = super::map_compose::literal_scan_placement_for_fixture(code)
-        .expect("the fixture declares a __sfc__ binding and export statement");
-
-    let (rewritten, chained) =
-        rewrite_script(code, Some(&fact), Some(&decoded)).expect("the fact matches the fixture");
-    let chained = chained.expect("a contributing map produces a chained sequence");
-    let chained = validate_and_decode(&chained, &rewritten)
-        .expect("rewrite_script's own re-encoded chain is composable")
-        .segments;
-
-    assert_eq!(
-        rewritten, "const _sfc_main = {}\nconst z = 2\n",
-        "both passes must have run on the bytes"
-    );
-
-    let at = |line: u32, column: u32| {
-        chained
-            .iter()
-            .any(|segment| segment.generated_line == line && segment.generated_column == column)
-    };
-
-    assert!(
-        at(0, 16),
-        "pass one's rename must be carried into the chained map: the authored \
-         position at original column 14 belongs at generated column 16. Chained \
-         over the ORIGINAL fragment map it would sit at 14.\n{chained:#?}"
-    );
-    assert!(
-        !at(0, 14),
-        "generated column 14 is pass one's INPUT column; its presence means the \
-         second pass was chained over the original map rather than over pass \
-         one's output.\n{chained:#?}"
-    );
-    assert!(
-        at(1, 0),
-        "pass two's removal must be carried too: the authored position on \
-         original line 2 belongs on generated line 1.\n{chained:#?}"
-    );
-    assert!(
-        chained.iter().all(|segment| segment.generated_line < 2),
-        "the rewritten script has two lines, so no chained segment may remain on \
-         line 2 — one that does means the removal never reached the map.\n{chained:#?}"
     );
 }
 

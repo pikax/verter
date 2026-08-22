@@ -28,6 +28,10 @@ currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_pr
 attribution = ["verter_audit/attribution"]
 
 [dependencies]
+# `bench` unlocks `template`/`script` module visibility (see
+# `verter_compiler`'s own Cargo.toml) for the benches/examples below; it does
+# NOT gate `compile`/`compile_with_parsed`/`compile_client`, so it stays on
+# the plain, non-dev dependency edge.
 verter_compiler = { path = "../verter_compiler", features = ["bench"] }
 verter_css_syntax = { path = "../verter_css_syntax" }
 verter_parser = { path = "../verter_parser" }
@@ -50,6 +54,19 @@ tempfile = "3.27"
 hotpath = { version = "0.16", optional = true }
 
 [dev-dependencies]
+# Activates `test-support` on `verter_compiler` for THIS crate's own
+# bench/example targets only — `real_world_compile_bench.rs` and the
+# `new_impl_check`/`profile_ast`/`vapor_check` examples measure the raw
+# `compile`/`compile_with_parsed` one-shot core directly rather than through
+# `StandaloneCompiler`'s atomic-publish wrapper. The regular `[dependencies]`
+# edge above does NOT enable the feature: Cargo unifies dev-dependency
+# features only for a package's own test/bench/example targets, never for
+# its normal lib/bin build or for sibling workspace members sharing the same
+# `verter_compiler` instance — so a plain `cargo check --workspace` (or any
+# other crate's build) never observes `test-support` turned on because of
+# this crate. Same idiom as the `verter_scheduler`/`verter_semantic`/
+# `verter_compiler` dev-dependency edges in `verter_session`'s Cargo.toml.
+verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 smallvec = "1.15"
 tempfile = "3.27"

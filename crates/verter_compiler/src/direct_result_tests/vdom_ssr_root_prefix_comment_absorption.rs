@@ -50,24 +50,24 @@
 //! `CompileRequest::new`") that the host's `compile_many`/`compileMany`
 //! render lane reaches through
 //! `VerterHost::compile_entry_runtime_render` → `compiler.compile_bundle`,
-//! never through `StandaloneCompiler`. Exercising it here proves the repair
-//! independently of the direct `StandaloneCompiler` route the rest of this
-//! file uses.
+//! never through the pre-assembly `compile()` entry. Exercising it here
+//! proves the repair independently of the direct `compile()` route the rest
+//! of this file uses.
 
-use oxc_sourcemap::OwnedSourceMap;
-use std::sync::Arc;
-use verter_compiler::compile::types::VueExecutionInputs;
-use verter_compiler::compile::VueMacroSemanticInput;
-use verter_compiler::compile_request::{
+use crate::compile::types::VueExecutionInputs;
+use crate::compile::VueMacroSemanticInput;
+use crate::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
     VueBackendRequest, VueCompileRequest,
 };
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::{
+use crate::framework_common::vue_bridge::VueCarrierCompiler;
+use crate::framework_common::{
     CarrierCompileOutcome, CarrierCompiler, CarrierCompilerRegistry, FrameworkParseArtifact,
     RuntimeCompileOptions,
 };
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+use oxc_allocator::Allocator;
+use oxc_sourcemap::OwnedSourceMap;
+use std::sync::Arc;
 
 /// Compile a single `RuntimeClient` (VDOM/Vapor) product and return the
 /// generated template code. Panics propagate to the caller — the RED state
@@ -98,14 +98,15 @@ fn compile_client(
         true,
     )
     .expect("a lone RuntimeClient product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeClient compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused");
     assert!(
         result.errors.is_empty(),
         "compile diagnostics: {:?}",
@@ -137,14 +138,15 @@ fn compile_server(source: &str, is_production: bool) -> String {
         true,
     )
     .expect("a lone RuntimeServer product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeServer compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeServer compile must not be refused");
     assert!(
         result.errors.is_empty(),
         "compile diagnostics: {:?}",
@@ -200,14 +202,15 @@ fn compile_client_with_map(
         true,
     )
     .expect("a lone RuntimeClient product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeClient compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused");
     assert!(result.errors.is_empty(), "diagnostics: {:?}", result.errors);
     let template = result
         .template
@@ -234,14 +237,15 @@ fn compile_server_with_map(source: &str, is_production: bool) -> (String, String
         true,
     )
     .expect("a lone RuntimeServer product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeServer compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeServer compile must not be refused");
     assert!(result.errors.is_empty(), "diagnostics: {:?}", result.errors);
     let template = result
         .template
@@ -367,7 +371,7 @@ fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
 /// the production entry point the host's `compile_many`/native `compileMany`
 /// render lane reaches via `compile_entry_runtime_render` (see this file's
 /// module doc). Distinct from every other test in this file, which drives
-/// the `StandaloneCompiler` route instead.
+/// the direct `compile()` route instead.
 fn native_route_compile_bundle(
     source: &str,
     is_production: bool,
@@ -659,8 +663,8 @@ export default {}
 /// The headline VDOM shape through the SAME production entry point the
 /// host's `compile_many`/native `compileMany` render lane reaches
 /// (`compile_entry_runtime_render` → `compiler.compile_bundle`) — see the
-/// module doc for why this is a genuinely SEPARATE call chain from
-/// `StandaloneCompiler`.
+/// module doc for why this is a genuinely SEPARATE call chain from the
+/// direct `compile()` route.
 #[test]
 fn native_route_vdom_leading_comment_static_class_root_production() {
     let source = r#"<script>
@@ -780,14 +784,15 @@ export default {}
         true,
     )
     .expect("a lone RuntimeServer product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeServer compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeServer compile must not be refused");
     assert!(result.errors.is_empty(), "diagnostics: {:?}", result.errors);
     let template = result
         .template

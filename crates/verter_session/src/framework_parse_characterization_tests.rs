@@ -389,7 +389,6 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         RuntimeProductRequest, VueCompileRequest,
     };
     use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
-    use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
     // A spread of fixture SFCs covering script-setup, plain script,
     // template, styles, and JS dialect.
@@ -421,15 +420,19 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         )
         .expect("RuntimeClient + IdeCompanion together must construct");
 
-        // Direct path: the compiler's untouched public `compile()`.
-        let direct = StandaloneCompiler
-            .compile_source(
-                &StandaloneSourceBytes::copied_from(source),
-                &request,
-                &VueExecutionInputs::default(),
-                &VueMacroSemanticInput::Unavailable,
-            )
-            .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
+        // Direct path: the compiler's untouched `#[doc(hidden)]` `compile()`
+        // — the raw per-block `VerterCompileResult` this test compares has
+        // no equivalent on the public one-shot `StandaloneCompiler::compile`
+        // atomic contract.
+        let alloc_direct = oxc_allocator::Allocator::new();
+        let direct = verter_compiler::compile::compile(
+            source,
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+            &alloc_direct,
+        )
+        .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
 
         // Rehoused path: the session's carrier dispatch produces the
         // framework-neutral artifact, the host reaches its parsed SFC back

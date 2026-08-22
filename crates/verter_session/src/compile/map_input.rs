@@ -214,7 +214,7 @@ pub enum AssembleMapFailure {
     /// defect, reported rather than silently rediscovered by scanning
     /// generated text for the landmark string.
     InvalidSfcExportPlacement {
-        reason: super::map_compose::SfcRewriteRefusal,
+        reason: verter_compiler::assembly::SfcRewriteRefusal,
     },
 }
 
