@@ -444,7 +444,7 @@ scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, se
 id = "RULING-2026-08-22-BV2-B5-J1"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md"
-sha256 = "b7b0e5c24fc0ac2879e65cae1ab646e79b6ad08ec1b5cfab36c440f00f3c630c"
+sha256 = "e439ea9721716281a8249731fb3d20923a03c50899055163dde35bf61c71bad0"
 
 [[document]]
 id = "B5-CHARTER"
