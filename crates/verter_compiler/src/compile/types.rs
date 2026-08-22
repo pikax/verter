@@ -445,6 +445,11 @@ pub struct VerterStyleBlock {
     pub lang: Option<String>,
     pub duration_ms: f64,
     pub attrs: Vec<(String, String)>,
+    /// `<style module>` class-name analysis: authored class name → hashed
+    /// name. Populated for all 5 native CSS dialects (CSS-Modules class
+    /// *analysis* is dialect-unconditional); the byte-level class-name
+    /// *rewrite* stays CSS-only (row 19, `css/modules.rs`, untouched).
+    pub module_classes: Vec<(String, String)>,
 }
 
 /// A custom block extracted from the SFC (e.g., `<i18n>`, `<docs>`).

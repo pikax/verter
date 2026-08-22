@@ -2,8 +2,10 @@
  * @ai-generated - Exercises the typed two-stage framework style planner boundary.
  */
 use verter_compiler::style_planner::{
+    analyze_css_module_classes, build_string_invocation_count, parse_ir_invocation_count,
+    reset_build_string_invocation_count, reset_parse_ir_invocation_count, run_vue_style_cascade,
     transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
-    PlainCssInput, StyleRewriteFailureClass, StyleRewriteOutcome,
+    PlainCssInput, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
 };
 use verter_compiler::{
     compile::{types::VueExecutionInputs, VueMacroSemanticInput},
@@ -570,4 +572,580 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
         result.errors
     );
     assert_eq!(result.styles[0].code, ".bad { color: v-bind(tone; }");
+}
+
+// ─── J1 §3.1 vue-benchmarks probe findings (A10d-h) ────────────────────────
+//
+// Oracle: literal, exact byte capture from the workspace's pinned
+// `@vue/compiler-sfc@3.5.34` (J1.md §3.1). These assert the SEMANTIC content
+// the oracle proves — attribute-injection point/presence, renamed
+// identifiers, reference-rewrite targets — token-normalized via `scoped()`'s
+// `selector_head()`/`normalize_selector()` helpers, never raw string
+// equality against Vue's own cosmetic reprint (Compiled-Output Conformance).
+
+// @ai-generated - A10d: `:deep()` as its own space-separated segment attaches
+// the scope attribute to the preceding compound with NO combinator space.
+#[test]
+fn deep_segment_no_combinator_space() {
+    let actual = scoped(".deep-host :deep(.deep-target) { color:red }", "x");
+    assert_eq!(selector_head(&actual), ".deep-host[data-v-x] .deep-target");
+    assert!(!actual.contains(".deep-host ["), "{actual}");
+}
+
+// @ai-generated - A10e: `:global()` composed with surrounding local selector
+// segments discards EVERYTHING outside the parens.
+#[test]
+fn global_discards_surrounding_context() {
+    let actual = scoped(".foo :global(.bar) .baz { color:red }", "x");
+    assert_eq!(selector_head(&actual), ".bar");
+    assert!(!actual.contains(":global("), "{actual}");
+    assert!(!actual.contains(".foo"), "{actual}");
+    assert!(!actual.contains(".baz"), "{actual}");
+}
+
+// @ai-generated - A10f (anchored branch): with an outer local anchor, the
+// anchor is scoped and the `:is()`/`:where()` argument list stays unscoped.
+#[test]
+fn is_where_anchored_argument_list_unscoped() {
+    let is_actual = scoped(".item:is(.a, .b) { color:red }", "x");
+    assert_eq!(selector_head(&is_actual), ".item[data-v-x]:is(.a, .b)");
+
+    let where_actual = scoped(".item:where(.a, .b) { color:red }", "x");
+    assert_eq!(
+        selector_head(&where_actual),
+        ".item[data-v-x]:where(.a, .b)"
+    );
+}
+
+// @ai-generated - A10f (bare branch): with no outer local anchor, EACH
+// `:is()`/`:where()` argument is scoped individually.
+#[test]
+fn is_where_bare_selector_scopes_each_argument() {
+    let is_actual = scoped(":is(.a, .b) { color:red }", "x");
+    assert_eq!(selector_head(&is_actual), ":is(.a[data-v-x], .b[data-v-x])");
+
+    let where_actual = scoped(":where(.a, .b) { color:red }", "x");
+    assert_eq!(
+        selector_head(&where_actual),
+        ":where(.a[data-v-x], .b[data-v-x])"
+    );
+}
+
+// @ai-generated - A10g: scoped `@keyframes` identifier uniqueing renames the
+// keyframes name and rewrites every `animation`/`animation-name` reference,
+// including each entry of a comma-separated list — `none` stays untouched.
+#[test]
+fn scoped_keyframes_rename_and_rewrite_references() {
+    let source = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } \
+                  .x { animation: fade 1s; animation-name: fade, none; }";
+    let actual = scoped(source, "x");
+    assert!(actual.contains("@keyframes fade-x"), "{actual}");
+    assert!(!actual.contains("@keyframes fade {"), "{actual}");
+    assert!(actual.contains("animation: fade-x 1s"), "{actual}");
+    assert!(actual.contains("animation-name: fade-x, none"), "{actual}");
+    assert!(!actual.contains("animation-name: fade,"), "{actual}");
+}
+
+// @ai-generated - A10h (highest severity): the client `_useCssVars` runtime
+// prepends `--` itself, so the JS-registered key must be bare while the CSS
+// `var()` reference carries the full `--`-prefixed custom-property name.
+// Baking `--` into both sides (the pre-fix bug) makes the runtime
+// double-prepend it and the binding silently never applies.
+#[test]
+fn v_bind_js_key_and_css_var_reference_agree() {
+    let source = StandaloneSourceBytes::copied_from(
+        "<script setup>\nimport { ref } from 'vue'\nconst color = ref('red')\n</script>\n\
+         <template><div/></template>\n\
+         <style scoped>.x { color: v-bind(color); }</style>",
+    );
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        Some("sc1".to_string()),
+        false,
+        false,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let result = StandaloneCompiler
+        .compile_source(
+            &source,
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+        )
+        .expect("a plain RuntimeClient compile must not be refused");
+
+    let css = &result.styles[0].code;
+    assert!(css.contains("var(--sc100000-color)"), "CSS side: {css}");
+
+    let script = &result.script.expect("script block emitted").code;
+    assert!(
+        script.contains("\"sc100000-color\":"),
+        "JS key must be bare (no --): {script}"
+    );
+    assert!(
+        !script.contains("\"--sc100000-color\":"),
+        "JS key must not carry the CSS `--` prefix: {script}"
+    );
+}
+
+// ─── A10a/A10b: Native CSS-Modules class *analysis* for all 5 dialects ─────
+
+// @ai-generated - A10a/A10b: class analysis is unconditional over all 5
+// native dialects (Native), not silently restricted to `dialect == Css` —
+// runtime class-name rewriting (row 19) is untouched, this is analysis only.
+#[test]
+fn css_modules_class_analysis_native_for_all_five_dialects() {
+    let cases = [
+        (CssDialect::Css, ".active { color: red; }"),
+        (CssDialect::Scss, ".active { color: red; }"),
+        (CssDialect::Sass, ".active\n  color: red\n"),
+        (CssDialect::Less, ".active { color: red; }"),
+        (CssDialect::Stylus, ".active\n  color: red\n"),
+    ];
+
+    let mut hashed_names = Vec::new();
+    for (dialect, source) in cases {
+        let input = AuthoredStyleInput::new(
+            source,
+            dialect,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        );
+        let classes = analyze_css_module_classes(input, "sc1")
+            .unwrap_or_else(|e| panic!("{dialect:?} class analysis must not be refused: {e}"));
+        assert_eq!(classes.len(), 1, "{dialect:?}: {classes:?}");
+        assert_eq!(classes[0].0, "active", "{dialect:?}: {classes:?}");
+        hashed_names.push(classes[0].1.clone());
+    }
+
+    // Same class name + scope id must hash identically regardless of the
+    // authoring dialect — the class-selector shape is dialect-neutral.
+    assert!(
+        hashed_names.iter().all(|name| name == &hashed_names[0]),
+        "{hashed_names:?}"
+    );
+    assert_ne!(
+        hashed_names[0], "active",
+        "must actually hash, not pass through"
+    );
+}
+
+// ─── A10 directive-required evidence categories ────────────────────────────
+
+// @ai-generated - A10: an untouched style block with no Vue-owned construct
+// stays byte-identical (`Unchanged`) across all 5 native dialects.
+#[test]
+fn plain_passthrough_preserves_authored_bytes_all_five_dialects() {
+    let cases = [
+        (CssDialect::Css, ".a { color: red; }\n"),
+        (CssDialect::Scss, "$c: red;\n.a { color: $c; }\n"),
+        (CssDialect::Sass, ".a\n  color: red\n"),
+        (CssDialect::Less, "@c: red;\n.a { color: @c; }\n"),
+        (CssDialect::Stylus, ".a\n  color red\n"),
+    ];
+
+    for (dialect, source) in cases {
+        let input = AuthoredStyleInput::new(
+            source,
+            dialect,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        );
+        let outcome = transform_vue_v_bind(input, "sc1")
+            .unwrap_or_else(|e| panic!("{dialect:?} plain style must not be refused: {e}"));
+        match outcome {
+            StyleRewriteOutcome::Unchanged { .. } => {}
+            StyleRewriteOutcome::Rewritten { code, .. } => {
+                panic!("{dialect:?} expected byte-identical passthrough, got: {code}")
+            }
+        }
+    }
+}
+
+// @ai-generated - A10: native CSS nesting is scoped correctly (Css, the only
+// dialect the post-preprocess scoping stage runs under); the authored v-bind
+// stage round-trips native `&` nesting syntax byte-for-byte for the other
+// four dialects, proving the shared IR walk never corrupts nesting content
+// regardless of authoring dialect.
+#[test]
+fn css_nesting_transforms_correctly_all_five_dialects() {
+    let css = scoped(".a { &:hover { color: blue } }", "sc1");
+    assert!(css.contains("&[data-v-sc1]:hover"), "{css}");
+    assert!(!css.contains("&:hover"), "{css}");
+
+    for (dialect, source) in [
+        (CssDialect::Scss, ".a { &:hover { color: blue; } }"),
+        (CssDialect::Sass, ".a\n  &:hover\n    color: blue\n"),
+        (CssDialect::Less, ".a { &:hover { color: blue; } }"),
+        (CssDialect::Stylus, ".a\n  &:hover\n    color: blue\n"),
+    ] {
+        let input = AuthoredStyleInput::new(
+            source,
+            dialect,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        );
+        let outcome = transform_vue_v_bind(input, "sc1")
+            .unwrap_or_else(|e| panic!("{dialect:?} nesting must not be refused: {e}"));
+        let code = match outcome {
+            StyleRewriteOutcome::Unchanged { .. } => source.to_string(),
+            StyleRewriteOutcome::Rewritten { code, .. } => code,
+        };
+        assert_eq!(
+            code, source,
+            "{dialect:?}: nesting syntax must round-trip byte-for-byte"
+        );
+    }
+}
+
+// @ai-generated - A10 / §2 regression guard: no lightningcss-style
+// modern-syntax normalization of an untouched declaration survives — e.g.
+// `@media (min-width:1px)` must never silently become `(width >= 1px)`.
+#[test]
+fn no_modern_syntax_normalization_of_untouched_declarations() {
+    let source = "@media (min-width:1px) { .a { color: red; } }";
+    let input = AuthoredStyleInput::new(
+        source,
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    );
+    match transform_vue_v_bind(input, "sc1").expect("plain media query must not be refused") {
+        StyleRewriteOutcome::Unchanged { .. } => {}
+        StyleRewriteOutcome::Rewritten { code, .. } => {
+            panic!("must not rewrite an untouched declaration: {code}")
+        }
+    }
+
+    let scoped_code = scoped(source, "sc1");
+    assert!(scoped_code.contains("(min-width:1px)"), "{scoped_code}");
+    assert!(!scoped_code.contains("(width >= 1px)"), "{scoped_code}");
+}
+
+// ─── §2 Bounds: Edit topology ───────────────────────────────────────────────
+
+// @ai-generated - Edit topology bound: a style block with 0 edits returns
+// `Unchanged` via an early return before any `CodeTransform` is constructed.
+#[test]
+fn zero_edit_style_block_returns_unchanged_variant() {
+    let source = "body { color: red; }";
+    let input = AuthoredStyleInput::new(
+        source,
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    );
+    assert!(matches!(
+        transform_vue_v_bind(input, "sc1").expect("plain css must not be refused"),
+        StyleRewriteOutcome::Unchanged { .. }
+    ));
+
+    let plain = PlainCssInput::try_new(
+        source,
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    assert!(matches!(
+        transform_vue_css_modules(plain, "sc1").expect("no class selectors, no edits"),
+        StyleRewriteOutcome::Unchanged { .. }
+    ));
+
+    let empty = PlainCssInput::try_new(
+        "",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    assert!(matches!(
+        transform_vue_scoped_css(empty, "sc1").expect("empty style has no selectors to scope"),
+        StyleRewriteOutcome::Unchanged { .. }
+    ));
+}
+
+// @ai-generated - Edit topology bound: `build_string()` runs exactly M times,
+// the edit-composition depth the construct requires. M=1 for a flat edit set
+// (plain scope-attribute insertion, `:deep()`'s argument render, which never
+// scopes its own contents). M=2 for a construct needing one nested sub-span
+// build (`:slotted()`'s argument IS scoped, so `render_special_argument`
+// builds its own `CodeTransform` in addition to the outer emit).
+#[test]
+fn build_string_call_count_matches_edit_composition_depth() {
+    reset_build_string_invocation_count();
+    let _ = scoped(".a { color: red }", "sc1");
+    assert_eq!(build_string_invocation_count(), 1, "flat scope insertion");
+
+    reset_build_string_invocation_count();
+    let _ = scoped(".a :deep(.b) { color: red }", "sc1");
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        ":deep()'s argument is never itself scoped, so no nested build"
+    );
+
+    reset_build_string_invocation_count();
+    let _ = scoped(":slotted(.a) { color: red }", "sc1");
+    assert_eq!(
+        build_string_invocation_count(),
+        2,
+        ":slotted()'s argument IS scoped, requiring one nested sub-span build \
+         plus the outer emit build"
+    );
+}
+
+// ─── A10i: the Vue-owned cascade parses each content identity once ─────────
+
+// @ai-generated - A10i: an `Unchanged` stage hands its already-parsed
+// `StyleSyntaxIr` to the next stage instead of causing a re-parse. Every
+// scenario below is a genuine, verified count for the exact scenario
+// described — never the pre-fix baseline's unconditional per-stage re-parse
+// (which would cost 3 calls whenever module+scoping are both requested,
+// regardless of what actually changed).
+#[test]
+fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
+    // 0 stages change (empty style block): a single initial parse, retained
+    // through modules and scoping untouched.
+    reset_parse_ir_invocation_count();
+    let input = AuthoredStyleInput::new("", CssDialect::Css, "p.css", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    assert_eq!(outcome.code, "");
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "0 changed stages must cost exactly 1 parse"
+    );
+
+    // Only the sole applicable stage changes (modules/scoping disabled: S=1).
+    // Nothing follows it to force a re-parse.
+    reset_parse_ir_invocation_count();
+    let input = AuthoredStyleInput::new(
+        ".a { color: v-bind(c); }",
+        CssDialect::Css,
+        "p.css",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", false, false);
+    assert!(outcome.facts.rewrites.v_bind);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "the only applicable stage changing costs exactly 1 parse"
+    );
+
+    // Only the LAST applicable stage changes (an element selector with no
+    // v-bind, no class): stage 1 and 2 both hand their retained IR forward
+    // unchanged; scoping's own change has no successor to force a re-parse
+    // for, so this still costs exactly 1 parse — even though scoping IS the
+    // stage that ends up rewriting.
+    reset_parse_ir_invocation_count();
+    let input = AuthoredStyleInput::new(
+        "body { color: red; }",
+        CssDialect::Css,
+        "p.css",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    assert!(outcome.facts.rewrites.scoped_selector);
+    assert!(!outcome.facts.rewrites.v_bind);
+    assert!(!outcome.facts.rewrites.css_modules);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "only the last applicable stage changing costs exactly 1 parse"
+    );
+
+    // v-bind changes, modules does not (an element selector has no class to
+    // hash), scoping inevitably changes too (any selector gets scoped) but
+    // as the last stage its own change costs nothing further: v-bind's
+    // change forces exactly one re-parse before modules can see the
+    // rewritten bytes — 1 (initial) + 1 (re-parse for modules, which then
+    // hands its own retained IR straight through to scoping) = 2, never 3.
+    reset_parse_ir_invocation_count();
+    let input = AuthoredStyleInput::new(
+        "body { color: v-bind(c); }",
+        CssDialect::Css,
+        "p.css",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    assert!(outcome.facts.rewrites.v_bind);
+    assert!(!outcome.facts.rewrites.css_modules);
+    assert!(outcome.facts.rewrites.scoped_selector);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        2,
+        "one stage (v-bind) forcing a successor re-parse must cost exactly 2, \
+         never the pre-fix baseline's 3"
+    );
+
+    // Worst case within this cascade: v-bind AND modules both change (a
+    // class selector), each forcing the immediate next stage to re-parse —
+    // scoping (last) inevitably changes too but costs nothing further:
+    // 1 (initial) + 1 (re-parse for modules) + 1 (re-parse for scoping) = 3.
+    // This is the one scenario where the fixed cascade costs the same as
+    // the pre-fix baseline's unconditional per-stage re-parse — every
+    // applicable stage's own change genuinely invalidates the next stage's
+    // retained IR here, so 3 is the correct (not merely tolerated) count.
+    reset_parse_ir_invocation_count();
+    let input = AuthoredStyleInput::new(
+        ".a { color: v-bind(c); }",
+        CssDialect::Css,
+        "p.css",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    assert!(outcome.facts.rewrites.v_bind);
+    assert!(outcome.facts.rewrites.css_modules);
+    assert!(outcome.facts.rewrites.scoped_selector);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        3,
+        "every applicable stage genuinely changing costs exactly 3, matching S"
+    );
+}
+
+// @ai-generated - the cascade must express a stage-specific partial failure
+// itself (no second, per-stage-independent orchestrator): a v-bind edit that
+// already applied does not stop the modules stage from running against
+// v-bind's rewritten bytes, and a hard modules-stage failure clears the
+// final output and skips the scoped-selector stage entirely rather than
+// running it against unsafe, already-cleared bytes.
+#[test]
+fn style_pipeline_module_stage_failure_clears_output_and_skips_scoping() {
+    let input = AuthoredStyleInput::new(
+        ".good { color: v-bind(c); } .bad { color red; }",
+        CssDialect::Css,
+        "p.css",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+
+    assert!(
+        outcome.facts.rewrites.v_bind,
+        "the v-bind stage itself must still have rewritten .good's v-bind() call"
+    );
+    assert_eq!(
+        outcome.stage_failures.len(),
+        1,
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::UntrustedRewriteTarget
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::PostPreprocessModules
+    );
+    assert_eq!(
+        outcome.code, "",
+        "a hard modules-stage failure must clear the final output, matching \
+         running each stage independently"
+    );
+    assert!(
+        !outcome.facts.rewrites.scoped_selector,
+        "the scoped-selector stage must be skipped once the output is \
+         cleared by the modules stage's failure"
+    );
+}
+
+// @ai-generated - A hard v-bind-stage failure alone does not clear the
+// output: the modules/scoped-selector stages below it still run against the
+// original authored bytes, matching running each stage independently.
+#[test]
+fn style_pipeline_v_bind_stage_failure_does_not_clear_output() {
+    let input = AuthoredStyleInput::new(
+        ".a { color: v-bind(#{$x}); }",
+        CssDialect::Scss,
+        "p.scss",
+        "space:p",
+        "artifact:p",
+    );
+    let outcome = run_vue_style_cascade(input, "sc1", false, false);
+
+    assert_eq!(
+        outcome.stage_failures.len(),
+        1,
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::AuthoredVBind
+    );
+    assert_eq!(
+        outcome.code, ".a { color: v-bind(#{$x}); }",
+        "a v-bind-stage failure alone must not clear the accumulated output"
+    );
+}
+
+// @ai-generated - A10i must hold through the REAL production compile()
+// entry point, not just the standalone `run_vue_style_cascade` orchestrator:
+// a `<style scoped module>` block where only the LAST stage (scoped) rewrites
+// anything must cost exactly 1 parse end-to-end. Before production routed
+// through the cascade, `compile()` called `transform_vue_v_bind`/
+// `transform_vue_css_modules`/`transform_vue_scoped_css` independently, each
+// re-parsing the same content identity — 3 parses for this fixture, not 1.
+#[test]
+fn production_compile_reuses_parsed_style_ir_across_cascade_stages() {
+    reset_parse_ir_invocation_count();
+    let result = compile_style("<style scoped module>\nbody { color: red; }\n</style>");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "the real compile() entry point must hand its retained IR across the \
+         v-bind/module/scoped stages when only the last stage rewrites \
+         anything (A10i), not re-parse independently per stage"
+    );
+}
+
+// @ai-generated - A10a's dialect-unconditional CSS-Modules class analysis
+// must be wired into the real production compile() entry point, not just
+// exist as a standalone function: an SCSS `<style module>` block's `$style`
+// classes must be analyzed end to end even though the byte-level class-name
+// *rewrite* stays CSS-only (row 19, `css/modules.rs`, untouched — the
+// emitted code still contains the unrewritten authored class name).
+#[test]
+fn production_compile_analyzes_module_classes_for_scss_dialect() {
+    let result = compile_style("<style lang=\"scss\" module>\n.active { color: red; }\n</style>");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let style = result.styles.first().expect("one style block");
+    assert_eq!(
+        style.module_classes.len(),
+        1,
+        "SCSS module block must analyze its authored classes: {:?}",
+        style.module_classes
+    );
+    assert_eq!(style.module_classes[0].0, "active");
+    assert_ne!(
+        style.module_classes[0].1, "active",
+        "hashed class name must not pass the authored name through unhashed"
+    );
+    assert!(
+        style.code.contains(".active"),
+        "the byte-level rewrite stays CSS-only; SCSS output is left for \
+         external preprocessing: {}",
+        style.code
+    );
 }
