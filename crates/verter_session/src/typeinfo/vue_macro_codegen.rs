@@ -1182,17 +1182,18 @@ impl VerterHost {
                     let Some(member_name) = member.published_name() else {
                         continue;
                     };
-                    let type_text = if let Some(import_form) = cross_file_namespace_import_type(
-                        ctx,
-                        dispatch,
-                        member.value,
-                        owner_canonical,
-                        scope_inventory,
-                    ) {
-                        TscSpliceText::new(import_form)
+                    let (type_text, degraded) = if let Some(import_form) =
+                        cross_file_namespace_import_type(
+                            ctx,
+                            dispatch,
+                            member.value,
+                            owner_canonical,
+                            scope_inventory,
+                        ) {
+                        (TscSpliceText::new(import_form), None)
                     } else {
-                        match render_tsc_node(ctx, member.value, counters) {
-                            Ok(text) => text,
+                        match render_tsc_testing_node(ctx, member.value, counters) {
+                            Ok(rendered) => rendered,
                             Err(failure) => return failure.tsc(),
                         }
                     };
@@ -1201,6 +1202,7 @@ impl VerterHost {
                         optional: member.optional,
                         type_text,
                         anchor: member_anchor(mac, payload_index, member_name.as_ref()),
+                        degraded,
                     });
                 }
                 let scope = match tsc_scope_requirements(
