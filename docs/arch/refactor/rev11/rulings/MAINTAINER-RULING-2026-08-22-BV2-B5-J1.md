@@ -12,7 +12,7 @@ contradicts: []
 
 # Maintainer ruling — BV2, B5 and J1
 
-**Status:** ADOPTED by the maintainer, 2026-08-22.
+**Status:** RATIFIED by the maintainer, 2026-08-22.
 
 ## Why this ruling exists
 
