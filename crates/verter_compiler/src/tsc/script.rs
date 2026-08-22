@@ -1463,18 +1463,36 @@ struct TscMacroState {
     /// Owner-qualified values referenced directly by macro type arguments.
     direct_owner_value_dependencies: Vec<(u32, TscOwnerValueDependency)>,
 
-    /// Top-level compiler syntax index of a runtime-object
-    /// `defineExpose({ ... })` call, when one is present. `defineExpose`
-    /// only ever has ONE call per SFC, so this is a single optional slot
-    /// rather than a `Vec` — unlike [`Self::semantic_slots`], it is a
-    /// BEST-EFFORT correlation key, not a mandatory authoritative demand:
+    /// Per-call correlation for every runtime-object `defineExpose({ ... })`
+    /// call in the file. An SFC may legally author MORE THAN ONE
+    /// `defineExpose` call (nothing in the parser/compiler path rejects
+    /// it), and each call's [`AuthoredMemberOrdinal`]s restart at zero — so
+    /// a single global `Option<u32>` cannot address a specific call's
+    /// members. `base_ordinal` is this call's own members' starting offset
+    /// into the shared, file-global [`Self::expose_entries`] (all calls'
+    /// members are appended into that one `Vec` in source order by
+    /// [`process_expose`]); `member_count` is how many members this call
+    /// contributed, used to reject an authored ordinal outside THIS call's
+    /// own range rather than silently indexing into a neighboring call's
+    /// entries. Unlike [`Self::semantic_slots`], this is a BEST-EFFORT
+    /// correlation key, not a mandatory authoritative demand:
     /// `apply_tsc_bundle` enriches matching `state.expose_entries` when the
     /// bundle carries a matching row and otherwise leaves the syntax-derived
     /// fallback [`process_expose`] already computed untouched. A caller that
-    /// asserts [`MacroTscInput::NotRequired`] for a file with only a
-    /// runtime-object `defineExpose` (no type-based codegen macro) keeps
-    /// working exactly as before this field existed.
-    expose_syntax_index: Option<u32>,
+    /// asserts [`MacroTscInput::NotRequired`] for a file with only
+    /// runtime-object `defineExpose` calls (no type-based codegen macro)
+    /// keeps working exactly as before this field existed.
+    expose_macros: Vec<ExposeMacroCorrelation>,
+}
+
+/// One runtime-object `defineExpose({ ... })` call's correlation key —
+/// see [`TscMacroState::expose_macros`].
+#[derive(Clone, Copy)]
+struct ExposeMacroCorrelation {
+    syntax_index: u32,
+    macro_index: u32,
+    base_ordinal: usize,
+    member_count: usize,
 }
 
 impl TscMacroState {
@@ -3667,12 +3685,16 @@ fn build_macro_state<'a>(
                 // Best-effort correlation for the runtime-object form only —
                 // the type-argument form stays fully compiler-local (see
                 // `process_expose`) and never correlates with a bundle row.
-                if type_params.is_none()
-                    && object_arg
-                        .as_ref()
-                        .is_some_and(|obj| !obj.properties.is_empty())
-                {
-                    state.expose_syntax_index = Some(current_syntax_index);
+                if type_params.is_none() {
+                    if let Some(obj) = object_arg.as_ref().filter(|obj| !obj.properties.is_empty())
+                    {
+                        state.expose_macros.push(ExposeMacroCorrelation {
+                            syntax_index: current_syntax_index,
+                            macro_index: payload_macro_index,
+                            base_ordinal: state.expose_entries.len(),
+                            member_count: obj.properties.len(),
+                        });
+                    }
                 }
                 process_expose(
                     type_params.as_ref(),
@@ -3836,7 +3858,11 @@ fn apply_tsc_bundle(
         {
             continue;
         }
-        if state.expose_syntax_index == Some(entry.syntax_index) {
+        if state
+            .expose_macros
+            .iter()
+            .any(|correlation| correlation.syntax_index == entry.syntax_index)
+        {
             continue;
         }
         return Err(TscGenerationError::UnexpectedEntry {
@@ -3846,54 +3872,184 @@ fn apply_tsc_bundle(
     Ok(())
 }
 
-/// Best-effort enrichment of a runtime-object `defineExpose`'s syntax-only
-/// `declaration_fallback` entries with the DTO's authoritative resolved
-/// types, when the bundle carries a row for it.
+/// Best-effort enrichment of every runtime-object `defineExpose`'s
+/// syntax-only `declaration_fallback` entries with the DTO's authoritative
+/// resolved types, for each call the bundle carries a row for.
 ///
 /// UNLIKE [`apply_scope_requirements`]'s callers above, this is not gated by
 /// a mandatory [`TscSemanticSlot`]: a runtime-object `defineExpose` has no
-/// macro type argument, so it never participated in the strict
-/// slot/`MissingEntry`/`DuplicateEntry` demand contract the type-based roles
-/// use, and it must not start requiring one now — a caller that asserts
-/// [`MacroTscInput::NotRequired`] for a file with only a runtime-object
-/// `defineExpose` keeps working exactly as it did before this producer
-/// existed (`build_macro_state` never sets `expose_syntax_index` unless the
+/// macro type argument, so it never participates in the strict
+/// slot/`MissingEntry` demand contract the type-based roles use, and must
+/// not require one — a caller that asserts [`MacroTscInput::NotRequired`]
+/// for a file with only runtime-object `defineExpose` calls is unaffected
+/// (`build_macro_state` never populates `expose_macros` unless the
 /// runtime-object form is present, and `MacroTscInput::NotRequired`'s own
-/// early return never reaches this function). A `Partial`/`Unresolved`/
-/// `Unsupported`/`Invalid` outcome, a missing entry, or a per-member
-/// `Unavailable` row all leave [`ExposeEntry::declaration_fallback`]
+/// early return never reaches this function). A genuinely missing entry, a
+/// `Partial`/`Unresolved`/`Unsupported`/`Invalid` outcome whose own
+/// `macro_index` matches this call's `macro_index`, or a per-member
+/// `Unavailable` row, leaves [`ExposeEntry::declaration_fallback`]
 /// untouched — the honest syntax-derived answer [`process_expose`] already
-/// computed, never overwritten with a fabricated success.
+/// computed, never overwritten with a fabricated success. Every other shape
+/// IS treated as a corrupt authoritative answer, not a degraded one, and
+/// fails loudly rather than being silently dropped, reattached by name, or
+/// partially applied: a `DuplicateEntry` for one `syntax_index` (mirroring
+/// `apply_tsc_bundle`'s semantic-slot loop), an entry — of ANY outcome
+/// shape, degraded included — whose own `macro_index` does not match this
+/// call's `macro_index` (`MacroIdentityMismatch`, same rationale as
+/// `apply_tsc_bundle`'s own pre-outcome-match identity check), a `Complete`
+/// outcome wrapping the wrong projection variant (`RoleMismatch`, same
+/// rationale), a member row whose anchor is malformed for this call, and a
+/// `Complete` row set that does not cover exactly this call's own
+/// `0..member_count` ordinals once with no gaps or duplicates (see the
+/// per-check comments below).
 fn apply_expose_bundle_entry(
     state: &mut TscMacroState,
     bundle: &MacroTscBundle,
 ) -> Result<(), TscGenerationError> {
-    let Some(expose_syntax_index) = state.expose_syntax_index else {
-        return Ok(());
-    };
-    let Some(entry) = bundle
-        .entries
-        .iter()
-        .find(|entry| entry.syntax_index == expose_syntax_index)
-    else {
-        return Ok(());
-    };
-    let MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) = &entry.outcome else {
-        return Ok(());
-    };
-    for member in &expose.members {
-        let TscExposeMemberType::Resolved(text) = &member.member_type else {
+    for correlation in state.expose_macros.clone() {
+        // Mirror `apply_tsc_bundle`'s semantic-slot loop: a bundle producer
+        // that emitted two entries for the same `syntax_index` is corrupt —
+        // silently taking the first (via `.find()`) could hide a later
+        // `Complete`/corrupt entry behind an earlier `Unresolved` one, or vice
+        // versa. Reject outright rather than pick a winner.
+        let mut matching = bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.syntax_index == correlation.syntax_index);
+        let Some(entry) = matching.next() else {
             continue;
         };
-        if let Some(target) = state
-            .expose_entries
-            .iter_mut()
-            .find(|entry| entry.name == member.name)
-        {
+        if matching.next().is_some() {
+            return Err(TscGenerationError::DuplicateEntry {
+                subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+            });
+        }
+        // Mirror `apply_tsc_bundle`'s semantic-slot loop: validate the
+        // entry's own `macro_index` against this call's `macro_index`
+        // BEFORE branching on `entry.outcome`. A degraded outcome
+        // (`Partial`/`Unresolved`/`Unsupported`/`Invalid`) that happens to
+        // share this call's `syntax_index` but carries a DIFFERENT call's
+        // `macro_index` is not a legitimate "no answer for this call" — it
+        // is identity-corrupt bundle data that must hard-error rather than
+        // silently fall through to the (correct-looking but coincidental)
+        // syntax-derived fallback.
+        if entry.macro_index != correlation.macro_index {
+            return Err(TscGenerationError::MacroIdentityMismatch {
+                subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+            });
+        }
+        let expose = match &entry.outcome {
+            MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) => expose,
+            // A `Complete` outcome wrapping the WRONG projection variant is a
+            // real complete answer of the wrong shape — corrupt bundle data,
+            // not "no answer". This is the same failure
+            // `apply_tsc_bundle`'s semantic-slot loop raises via
+            // `RoleMismatch` for props/emits/model/slots; expose must not be
+            // silently treated as absent.
+            MacroTscOutcome::Complete(_) => {
+                return Err(TscGenerationError::RoleMismatch {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                });
+            }
+            // Genuinely no complete answer — the syntax-derived fallback
+            // stands.
+            _ => continue,
+        };
+        // Tracks which of this call's own authored ordinals a bundle row has
+        // actually covered, so a corrupt row set that duplicates one ordinal
+        // while omitting another cannot pass as complete just because the
+        // outcome variant claims `Complete`.
+        let mut covered = vec![false; correlation.member_count];
+        for member in &expose.members {
+            // The row's anchor must decode to THIS call's own authored
+            // position — never by name. Two authored members may share a
+            // name (`defineExpose({ dup: a, dup: b })`); matching by name
+            // would apply the LAST resolved row to the FIRST entry sharing
+            // that name and leave the other entry's syntax-derived fallback
+            // untouched. Every failure below means the DTO claims a
+            // `Complete` outcome whose own row identity does not cohere
+            // with the syntax it claims to describe — that is corruption in
+            // an authoritative answer, so it hard-errors instead of falling
+            // back to the honest-but-stale syntax-derived text. This
+            // identity check runs BEFORE branching on `member_type`: a
+            // `Complete` outcome's `Unavailable` rows are still its own
+            // authoritative rows, and a row with the wrong anchor/
+            // macro_index/ordinal/name is corrupt regardless of whether its
+            // type happened to resolve.
+            let MacroAnchor::Authored {
+                macro_index,
+                member_ordinal,
+            } = member.anchor
+            else {
+                return Err(TscGenerationError::InvalidMacroAnchor {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                });
+            };
+            if macro_index != entry.macro_index || macro_index != correlation.macro_index {
+                return Err(TscGenerationError::InvalidMacroAnchor {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                });
+            }
+            let ordinal = member_ordinal.get() as usize;
+            // Bounded against THIS call's own `member_count`, not the
+            // shared `expose_entries` vec's total length — an ordinal that
+            // is in-bounds only because it spills into a later call's
+            // entries is exactly the cross-call corruption this call's
+            // range exists to catch.
+            if ordinal >= correlation.member_count {
+                return Err(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                    member_ordinal: member_ordinal.get(),
+                });
+            }
+            let target_index = correlation.base_ordinal + ordinal;
+            let Some(target) = state.expose_entries.get_mut(target_index) else {
+                return Err(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                    member_ordinal: member_ordinal.get(),
+                });
+            };
+            if target.name != member.name {
+                return Err(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                    member_ordinal: member_ordinal.get(),
+                });
+            }
+            // Identity is proven. Two DISTINCT rows resolving to the same
+            // ordinal is corruption too — the second would otherwise
+            // silently overwrite the first's splice. Reject at the point the
+            // (now-identity-proven) row would be applied.
+            if covered[ordinal] {
+                return Err(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                    subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                    member_ordinal: member_ordinal.get(),
+                });
+            }
+            covered[ordinal] = true;
+            // Only now does the outcome type decide whether there is
+            // anything to splice. A genuinely `Unavailable` member leaves
+            // the syntax-derived fallback untouched, but it still counts as
+            // covering its ordinal above.
+            let TscExposeMemberType::Resolved(text) = &member.member_type else {
+                continue;
+            };
             target.declaration_fallback = Some(text.as_str().to_string());
         }
+        // A `Complete` outcome promises one row per authored member
+        // (`TscExposeProjection::members` doc contract). A row set that
+        // covers fewer than `member_count` ordinals made an incomplete
+        // promise — the uncovered members would otherwise silently keep
+        // their syntax-derived fallback, indistinguishable from "this call
+        // has no bundle row at all".
+        if let Some(missing_ordinal) = covered.iter().position(|is_covered| !is_covered) {
+            return Err(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                subject: TscFailureSubject::macro_syntax(correlation.syntax_index),
+                member_ordinal: missing_ordinal as u32,
+            });
+        }
+        apply_scope_requirements(state, &expose.scope, correlation.syntax_index)?;
     }
-    apply_scope_requirements(state, &expose.scope, expose_syntax_index)
+    Ok(())
 }
 
 fn validate_no_tsc_slots(input: MacroTscInput<'_>) -> Result<(), TscGenerationError> {

@@ -5987,6 +5987,47 @@ defineExpose({ count })
 }
 
 #[test]
+fn declaration_mode_expose_partial_outcome_with_wrong_macro_index_is_rejected() {
+    // A degraded (`Partial`) outcome that coincidentally shares this call's
+    // `syntax_index` but carries a DIFFERENT call's `macro_index` is not a
+    // legitimate "no answer for this call" — it is identity-corrupt bundle
+    // data. Before round 5, the degraded-outcome arm (`_ => continue`) never
+    // checked `entry.macro_index` at all, so this fell through to the
+    // syntax-derived fallback and was silently accepted as if the DTO had
+    // genuinely produced no answer. It must hard-error instead, exactly like
+    // `apply_tsc_bundle`'s own pre-outcome-match identity check.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            // Differs from the single call's real macro_index (0) — this
+            // row belongs to a DIFFERENT call, not this one.
+            macro_index: 1,
+            outcome: MacroTscOutcome::Partial(MacroFailure::new(
+                MacroPartialReason::IncompleteTraversal,
+                Some("partial detail".to_owned()),
+            )),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "a Partial outcome whose macro_index mismatches this call's own must hard-error, not silently fall through to the syntax-derived fallback",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::MacroIdentityMismatch {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
 fn declaration_mode_expose_runtime_object_retains_referenced_local_type_declaration() {
     // The resolved type text can reference a LOCAL declaration (`Box`) — the
     // scope requirements the DTO row carries must retain it so the spliced
@@ -6044,6 +6085,521 @@ defineExpose({ count })
     assert!(
         decl.contains("count: unknown"),
         "with no bundle at all, the syntax-derived fallback applies unchanged, got:\n{decl}"
+    );
+}
+
+fn expose_bundle_two_authored_rows(first: (&str, &str), second: (&str, &str)) -> MacroTscBundle {
+    MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![
+                    TscExposeMemberRow {
+                        name: first.0.to_owned(),
+                        member_type: TscExposeMemberType::Resolved(TscSpliceText::new(first.1)),
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(0),
+                        },
+                    },
+                    TscExposeMemberRow {
+                        name: second.0.to_owned(),
+                        member_type: TscExposeMemberType::Resolved(TscSpliceText::new(second.1)),
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(1),
+                        },
+                    },
+                ],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    }
+}
+
+#[test]
+fn declaration_mode_expose_duplicate_authored_names_apply_by_position_not_name() {
+    // Two members share the authored name `dup` at distinct source
+    // positions (`dup: a` then `dup: b`). Each DTO row carries its own
+    // `member_ordinal`. Consuming by name collapses both rows onto the
+    // FIRST entry sharing that name; consuming by the row's own ordinal
+    // must apply each row to its OWN entry instead.
+    let sfc = r#"<script setup lang="ts">
+const a = 1
+const b = "two"
+defineExpose({ dup: a, dup: b })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = expose_bundle_two_authored_rows(("dup", "FirstType"), ("dup", "SecondType"));
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("authoritative expose bundle must apply")
+        .code;
+
+    assert!(
+        decl.contains("dup: FirstType") && decl.contains("dup: SecondType"),
+        "each duplicate-named member must apply its OWN row by position, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_malformed_anchor_row_is_rejected_not_applied_by_name() {
+    // A row anchored to an out-of-bounds authored position claims a
+    // `Complete` outcome whose own row identity does not cohere with the
+    // syntax it describes — that is corruption in an authoritative answer,
+    // not a degraded one. It must hard-error rather than silently falling
+    // back to matching by name (or being dropped and letting a corrupt
+    // `Complete` DTO pass as valid).
+    let sfc = r#"<script setup lang="ts">
+function bump(step) {
+  return step + 1
+}
+defineExpose({ bump })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: "bump".to_owned(),
+                    member_type: TscExposeMemberType::Resolved(TscSpliceText::new(
+                        "(step: number) => number",
+                    )),
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: AuthoredMemberOrdinal::new(7),
+                    },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "an out-of-bounds authored ordinal must hard-error, not silently apply by name or drop",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::InvalidAuthoredMemberOrdinal {
+            subject: macro_subject(0),
+            member_ordinal: 7,
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_unavailable_member_with_wrong_macro_index_is_rejected() {
+    // A `Complete` outcome whose ONLY member is `Unavailable` still claims to
+    // be this call's own authoritative row. If that row's anchor names a
+    // DIFFERENT `macro_index` than the call it was returned under, the row's
+    // identity does not cohere with the syntax it claims to describe — the
+    // same corruption `declaration_mode_expose_malformed_anchor_row_is_rejected_not_applied_by_name`
+    // catches for a `Resolved` member. An all-`Unavailable` member set must
+    // not let that check be skipped: identity is validated BEFORE branching
+    // on whether the member resolved, so this must hard-error rather than
+    // silently falling through as "nothing to splice".
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: "count".to_owned(),
+                    member_type: TscExposeMemberType::Unavailable(
+                        TscDeclarationFailureReason::Unresolved(
+                            UnresolvedReason::MissingDeclaration,
+                        ),
+                    ),
+                    anchor: MacroAnchor::Authored {
+                        // Wrong macro_index: the call this entry/correlation
+                        // belongs to is macro_index 0, not 1.
+                        macro_index: 1,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "an Unavailable member with a mismatched macro_index must hard-error, not be silently skipped",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_anchor_matches_correlation_but_not_entry_is_rejected() {
+    // `entry.macro_index` (7) mismatches `correlation.macro_index` (0, the
+    // single call's real macro_index) even though the MEMBER row's own
+    // anchor happens to match correlation (0). Since round 5, this is caught
+    // by the per-call entry-identity check that now runs immediately after
+    // resolving the unique bundle entry — BEFORE the outcome is even
+    // matched, let alone the member loop reached — so it hard-errors as
+    // `MacroIdentityMismatch`, mirroring `apply_tsc_bundle`'s own
+    // pre-outcome-match identity check. (Previously, with no such earlier
+    // gate, this input reached the member loop's own
+    // `macro_index != entry.macro_index || macro_index != correlation.macro_index`
+    // check and hard-errored there instead, as `InvalidMacroAnchor`.)
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            // Differs from the anchor's macro_index (0) below, independent
+            // of correlation.macro_index (also 0).
+            macro_index: 7,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: "count".to_owned(),
+                    member_type: TscExposeMemberType::Resolved(TscSpliceText::new("number")),
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "a mismatch between entry.macro_index and correlation.macro_index must hard-error",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::MacroIdentityMismatch {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_anchor_matches_entry_but_not_correlation_is_rejected() {
+    // The member's own anchor matches `entry.macro_index` (5), but
+    // `entry.macro_index` itself (5) mismatches `correlation.macro_index`
+    // (0, the single call's real macro_index). Since round 5 this is caught
+    // by the earlier per-call entry-identity check (same as the previous
+    // test) before the outcome — and so the member loop — is ever reached:
+    // `entry.macro_index != correlation.macro_index` alone is sufficient,
+    // independent of what the member row's own anchor says.
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            // Matches the anchor's macro_index (5) below.
+            macro_index: 5,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: "count".to_owned(),
+                    member_type: TscExposeMemberType::Resolved(TscSpliceText::new("number")),
+                    anchor: MacroAnchor::Authored {
+                        // Differs from correlation.macro_index (0, the
+                        // single call's real macro_index).
+                        macro_index: 5,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "a mismatch between entry.macro_index and correlation.macro_index must hard-error",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::MacroIdentityMismatch {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_complete_wrong_projection_is_role_mismatch() {
+    // A `Complete` outcome for this call's `syntax_index` that wraps the
+    // WRONG projection variant (`Props` instead of `Expose`) is a real
+    // complete answer of the wrong shape — corrupt bundle data, not "no
+    // answer". It must hard-error the same way `apply_tsc_bundle`'s
+    // semantic-slot loop hard-errors on a role mismatch for props/emits/
+    // model, not fall through as if the outcome were merely absent.
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+                public: TscPublicPropsProjection::AuthoredArgument {
+                    anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                },
+                testing_rows: Vec::new(),
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "a Complete outcome wrapping the wrong projection variant must hard-error as a role mismatch",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::RoleMismatch {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_duplicate_bundle_entry_for_one_call_is_rejected() {
+    // Two bundle entries claim the SAME `syntax_index`. Picking the first
+    // (as `.find()` used to) can silently hide a later corrupt/valid entry
+    // behind an earlier one. This must hard-error exactly like
+    // `apply_tsc_bundle`'s semantic-slot loop does for the equivalent shape.
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+defineExpose({ count })
+</script>
+<template><div>hi</div></template>"#;
+    let one_row = |resolved: &str| {
+        MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+            members: vec![TscExposeMemberRow {
+                name: "count".to_owned(),
+                member_type: TscExposeMemberType::Resolved(TscSpliceText::new(resolved)),
+                anchor: MacroAnchor::Authored {
+                    macro_index: 0,
+                    member_ordinal: AuthoredMemberOrdinal::new(0),
+                },
+            }],
+            scope: TscScopeRequirements::default(),
+        }))
+    };
+    let bundle = MacroTscBundle {
+        entries: vec![
+            MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: one_row("FirstType"),
+            },
+            MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: one_row("SecondType"),
+            },
+        ],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "two bundle entries for one syntax_index must hard-error, not silently pick the first",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::DuplicateEntry {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_complete_row_set_missing_an_ordinal_is_rejected() {
+    // `defineExpose({ count, extra })` has TWO authored members, but the
+    // `Complete` bundle row set supplies only ordinal 0. The DTO doc
+    // contract promises "one row per runtime-object member" — a `Complete`
+    // outcome that covers fewer than `member_count` ordinals made an
+    // incomplete promise. Ordinal 1 must not silently keep its
+    // syntax-derived fallback as if this call had no bundle row at all.
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+const extra = "two"
+defineExpose({ count, extra })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![TscExposeMemberRow {
+                    name: "count".to_owned(),
+                    member_type: TscExposeMemberType::Resolved(TscSpliceText::new("number")),
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect_err("a Complete row set covering fewer than member_count ordinals must hard-error");
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::InvalidAuthoredMemberOrdinal {
+            subject: macro_subject(0),
+            member_ordinal: 1,
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_complete_row_set_duplicate_ordinal_is_rejected() {
+    // `defineExpose({ count, extra })` has two authored members, but the
+    // `Complete` bundle row set carries TWO rows both anchored to ordinal 0
+    // — the second would silently overwrite the first's splice, and ordinal
+    // 1 is never covered either way. This must hard-error at the point the
+    // second (now-identity-proven) row would apply.
+    let sfc = r#"<script setup lang="ts">
+const count = 1
+const extra = "two"
+defineExpose({ count, extra })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(TscExposeProjection {
+                members: vec![
+                    TscExposeMemberRow {
+                        name: "count".to_owned(),
+                        member_type: TscExposeMemberType::Resolved(TscSpliceText::new("number")),
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(0),
+                        },
+                    },
+                    TscExposeMemberRow {
+                        name: "count".to_owned(),
+                        member_type: TscExposeMemberType::Resolved(TscSpliceText::new("string")),
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(0),
+                        },
+                    },
+                ],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+
+    let error = generate_with_bundle(sfc, TscMode::Declaration, &bundle).expect_err(
+        "two Complete rows anchored to the same ordinal must hard-error, not silently overwrite",
+    );
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::InvalidAuthoredMemberOrdinal {
+            subject: macro_subject(0),
+            member_ordinal: 0,
+        }
+    );
+}
+
+#[test]
+fn declaration_mode_expose_two_calls_apply_each_by_its_own_range() {
+    // Two `defineExpose` calls in one SFC — nothing in the parser/compiler
+    // path forbids it. Each call's `AuthoredMemberOrdinal`s restart at
+    // zero, so the second call's row at ordinal 0 must resolve to the
+    // SECOND call's first member, not the first call's.
+    let sfc = r#"<script setup lang="ts">
+const a = 1
+const b = "two"
+defineExpose({ a })
+defineExpose({ b })
+</script>
+<template><div>hi</div></template>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![
+            MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(
+                    TscExposeProjection {
+                        members: vec![TscExposeMemberRow {
+                            name: "a".to_owned(),
+                            member_type: TscExposeMemberType::Resolved(TscSpliceText::new(
+                                "number",
+                            )),
+                            anchor: MacroAnchor::Authored {
+                                macro_index: 0,
+                                member_ordinal: AuthoredMemberOrdinal::new(0),
+                            },
+                        }],
+                        scope: TscScopeRequirements::default(),
+                    },
+                )),
+            },
+            MacroTscEntry {
+                syntax_index: 1,
+                macro_index: 1,
+                outcome: MacroTscOutcome::Complete(MacroTscProjection::Expose(
+                    TscExposeProjection {
+                        members: vec![TscExposeMemberRow {
+                            name: "b".to_owned(),
+                            member_type: TscExposeMemberType::Resolved(TscSpliceText::new(
+                                "string",
+                            )),
+                            anchor: MacroAnchor::Authored {
+                                macro_index: 1,
+                                member_ordinal: AuthoredMemberOrdinal::new(0),
+                            },
+                        }],
+                        scope: TscScopeRequirements::default(),
+                    },
+                )),
+            },
+        ],
+    };
+
+    let decl = generate_with_bundle(sfc, TscMode::Declaration, &bundle)
+        .expect("two runtime-object defineExpose calls must both apply their own bundle row")
+        .code;
+
+    assert!(
+        decl.contains("a: number"),
+        "the first call's `a` must resolve from the first call's own row, got:\n{decl}"
+    );
+    assert!(
+        decl.contains("b: string"),
+        "the second call's `b` must resolve from the second call's own row (ordinal 0 within its own range), not the first call's, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("b: number") && !decl.contains("a: string"),
+        "each call's row must never cross-apply to the other call's member, got:\n{decl}"
     );
 }
 

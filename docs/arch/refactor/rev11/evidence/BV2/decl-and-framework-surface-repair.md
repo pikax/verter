@@ -381,22 +381,20 @@ unconditionally. Two independently-reachable real trigger shapes were confirmed:
   `"step: number"` already contains the substring `"number"`) — a non-discriminating assertion that
   masked the same defect class inside an already-landed, already-green test.
 
-**Fix.** `project_expose_runtime_object` (`crates/verter_session/src/typeinfo/vue_macro_codegen.rs`)
-now screens every `Ok(text)` from `render_tsc_node` through a new shared predicate,
-`compat_spelling::text_embeds_unmaterialized_sentinel` (`crates/verter_session/src/semantic_query/compat_spelling.rs`
-— the existing single owner of the legacy sentinel-spelling family). The predicate checks for a
-STANDALONE-TOKEN embedded occurrence (never a substring of a longer identifier) of any spelling in
-the exact `QueryError` "unmaterialized-sentinel" class — deliberately EXCLUDING the
-"materialized-placeholder" family (`RaiseMiss`, `TypeParamCycle`, `RecursiveRef`,
-`ValueDomainMismatch`, `DeclPlaceholder`, `Other`), which is legitimate by-design tree content, not a
-leak. A match routes the member to `TscExposeMemberType::Unavailable(Unresolved(MissingDeclaration))`
-— the same honest degradation the pre-existing `Err`/`QueryResult::Error` arms already produce —
-instead of publishing the leaked text. This is a narrow, local guard at the ONE producer that
-publishes this DTO row; it does not attempt to fix the deeper raise-pipeline gap (bubbling every
-nested miss through `render_tsc_node` as a proper `Err` for all callers), which is recorded here as a
-named, legitimate DEFER — a pre-existing defect this round's new code path made newly reachable and
-newly publishable, not something this round introduced, and not safely fixable inside this producer's
-own scope.
+**Fix.** The deferred raise-pipeline gap named above was closed, not left as a per-producer textual
+screen. `render_node_display_with_ctx` (`crates/verter_session/src/typeinfo/raise.rs`) now returns a
+`RenderedNodeDisplay { text, degraded }`: `degraded` is the typed
+`OutputTypeExpr::has_degradation()` fact carried alongside the rendered text by the sealed
+materialization sidecar, set whenever a nested resolver miss (`QueryError::Miss`,
+`UnmodeledPosition`, `BudgetExceeded`, …) failed to bubble up as an `Err` and was instead baked into
+the text. The shared TSC-text funnel every macro-codegen producer calls, `render_tsc_node`
+(`crates/verter_session/src/typeinfo/vue_macro_codegen/tsc_projection.rs`), rejects on
+`rendered.degraded` — routing to `ProjectionFailure::Unsupported(SemanticConstruct)` — without ever
+inspecting the text itself. This is the ONE place the decision is made: no individual macro-kind call
+site, including `project_expose_runtime_object`, carries its own textual sentinel screen, and the
+former `compat_spelling::text_embeds_unmaterialized_sentinel` string-matching predicate is deleted.
+The remaining legacy-spelling matcher in `compat_spelling` is confined to JSDoc display sanitization,
+not this control-flow decision.
 
 **Tests** (TDD, mutation-confirmed: reverting the guard makes exactly these three go red with the
 leaked text visible in the panic message, restoring makes them green again):
@@ -471,3 +469,175 @@ run clean: `verter_compiler` `tsc::`, `verter_session` `typeinfo::`, `verter_ses
 `verter_semantic` (full), `verter_macro_dto` (full), `verter_napi` (full). `cargo clippy` over every
 touched crate (`verter_session`, `verter_compiler`, `verter_semantic`, `verter_macro_dto`,
 `verter_napi`) and `cargo fmt --all -- --check` are both clean.
+
+## Third fix pass — multi-call `defineExpose` addressing and malformed-row corruption
+
+A later review found the name-based `declaration_fallback` lookup this pass had replaced with a
+single `Option<u32>` correlation (`expose_syntax_index`, plus raw `member_ordinal` indexing into
+`expose_entries`) was itself wrong on two counts: (1) an SFC with MORE THAN ONE runtime-object
+`defineExpose` call — nothing rejects this — has authored member ordinals that restart at zero per
+call, so the second call's ordinal 0 could apply its resolved type to the FIRST call's member; the
+`Option<u32>` also remembered only the LAST call's syntax index, so the first call's bundle entry hit
+`UnexpectedEntry` and hard-failed generation. (2) `apply_expose_bundle_entry` silently `continue`d on
+a malformed member row (non-`Authored` anchor, wrong `macro_index`, out-of-bounds ordinal, or a name
+mismatch) inside an otherwise `Complete`/`Resolved` bundle entry — accepting corrupt authoritative
+data as valid instead of failing loudly.
+
+**Fix.** `TscMacroState::expose_syntax_index: Option<u32>` was replaced with
+`expose_macros: Vec<ExposeMacroCorrelation>` — one `{ syntax_index, macro_index, base_ordinal,
+member_count }` entry per runtime-object `defineExpose` call, `base_ordinal` being that call's own
+starting offset into the shared `expose_entries` vec. `apply_expose_bundle_entry` now iterates every
+call's correlation, resolves a member row's `(macro_index, member_ordinal)` to
+`base_ordinal + member_ordinal` bounds-checked against THAT call's own `member_count` (never the
+global vec length), and returns the existing typed `InvalidMacroAnchor` /
+`InvalidAuthoredMemberOrdinal` errors instead of silently dropping a malformed `Resolved` row.
+Missing entries and non-`Complete` outcomes remain best-effort (untouched syntax-derived fallback),
+unchanged. At this point in the pass the identity checks (anchor shape, `macro_index`, ordinal
+bound, name match) still ran only after matching `member.member_type` against
+`TscExposeMemberType::Resolved` — a malformed row whose member type was `Unavailable` skipped every
+identity check and was silently dropped, unchanged from before this pass. That gap was closed in the
+next fix pass below.
+
+**Tests:** `declaration_mode_expose_malformed_anchor_row_is_rejected_not_applied_by_name`
+(`crates/verter_compiler/src/tsc/tests.rs`) inverted to assert the typed
+`InvalidAuthoredMemberOrdinal` error instead of a silently-surviving fallback; a new
+`declaration_mode_expose_two_calls_apply_each_by_its_own_range` proves two `defineExpose` calls each
+apply their own bundle row. Both confirmed red against the pre-fix `script.rs` (the two-call case
+hit `UnexpectedEntry`; the malformed-anchor case returned `Ok` with the fallback text) and green
+after. Full `verter_compiler` `tsc::` (212 passed, 1 pre-existing unrelated ignore) ran clean.
+
+## Fourth fix pass — identity validated before branching on member outcome
+
+A subsequent review found the previous pass's identity checks (anchor shape, `macro_index` match,
+ordinal bound, name match) ran only inside the `TscExposeMemberType::Resolved` arm — every
+`Unavailable` member row was skipped via an early `continue` before any of those checks ran. A
+`Complete` outcome whose only member row was `Unavailable`, but whose anchor named the wrong
+`macro_index` (or an out-of-bounds ordinal, or a mismatched name), passed through unrejected: the
+same corruption the third fix pass closed for `Resolved` rows, surviving through the `Unavailable`
+arm instead.
+
+**Fix.** `apply_expose_bundle_entry`'s member loop now validates anchor shape, `macro_index`,
+ordinal bound, and name match unconditionally, before branching on `member.member_type`. Only after
+identity is proven does the loop match on `Resolved` vs. `Unavailable` to decide whether there is a
+type to splice; a genuinely `Unavailable` member with a *correct* identity still leaves the
+syntax-derived fallback untouched, unchanged from every prior pass.
+
+**Tests:** new `declaration_mode_expose_unavailable_member_with_wrong_macro_index_is_rejected`
+(`crates/verter_compiler/src/tsc/tests.rs`) — a `Complete` outcome with one `Unavailable` member
+anchored to the wrong `macro_index` — asserts the typed `InvalidMacroAnchor` error. Confirmed red
+against the pre-fix code (returned `Ok` with the syntax-derived fallback, silently swallowing the
+mismatched identity) and green after.
+
+## Fifth fix pass — bundle-level corruption doors and a non-discriminating regression test
+
+A subsequent review found `apply_expose_bundle_entry`'s per-member identity checks (landed in the
+fourth pass) were sound, but three bundle-level doors remained through which a corrupt
+authoritative answer was silently discarded or misapplied instead of hard-erroring, plus a test
+gap in the fourth pass's own regression test:
+
+1. **Wrong-role `Complete` outcome silently treated as absent.** The single
+   `let MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) = &entry.outcome else { continue }`
+   covered both a genuinely unavailable outcome (`Partial`/`Unresolved`/`Unsupported`/`Invalid`) and
+   a `Complete` outcome wrapping the WRONG projection variant (`Props`/`Emits`/`Model` at a
+   `syntax_index` this function correlated as an expose call). The latter is a real complete answer
+   of the wrong shape — corrupt bundle data — not "no answer"; `apply_tsc_bundle`'s semantic-slot
+   loop already hard-errors the equivalent shape via `RoleMismatch`, but expose silently fell back
+   to the syntax-derived text instead.
+2. **Duplicate bundle entries for one call silently resolved by `.find()`.** Two bundle entries
+   claiming the same `syntax_index` — the same corruption `apply_tsc_bundle`'s semantic-slot loop
+   already rejects via `DuplicateEntry` — silently picked the first match for the expose path,
+   which could hide a later corrupt/valid `Complete` entry behind an earlier `Unresolved` one (or
+   vice versa).
+3. **`Complete(Expose)` row-set completeness was never checked.** The DTO doc comment
+   (`TscExposeProjection::members`, `crates/verter_macro_dto/src/lib.rs:383-385`) promises "one row
+   per runtime-object member, in authored declaration order" for a `Complete` outcome. Nothing
+   verified this: a row set covering fewer than `correlation.member_count` ordinals left the
+   uncovered members silently on their syntax-derived fallback (indistinguishable from "this call
+   has no bundle row"), and two rows resolving to the same ordinal silently let the second
+   overwrite the first.
+4. **Test gap:** `declaration_mode_expose_unavailable_member_with_wrong_macro_index_is_rejected`
+   (added in the fourth pass) set `entry.macro_index == correlation.macro_index` (both `0`) while
+   only the anchor differed (`1`), so it could not tell the production check's two `||` operands
+   (`macro_index != entry.macro_index || macro_index != correlation.macro_index`) apart — either
+   comparison alone would fail that test even if the other were silently removed.
+
+**Fix.** `apply_expose_bundle_entry` now: (1) matches `entry.outcome` in three arms —
+`Complete(Expose(..))` (proceed), `Complete(_)` (hard-error `RoleMismatch`), everything else
+(`continue`, unchanged best-effort fallback); (2) selects the bundle entry via `.filter(...)` +
+count instead of `.find()`, hard-erroring `DuplicateEntry` when more than one entry claims the same
+`syntax_index` (mirrors `apply_tsc_bundle`'s existing pattern exactly); (3) tracks a
+`covered: Vec<bool>` sized to `correlation.member_count`, erroring `InvalidAuthoredMemberOrdinal`
+the instant a second identity-proven row targets an already-covered ordinal, and once more after
+the member loop if any ordinal in `0..member_count` was never covered — both reuse the existing
+ordinal-shape error rather than a new variant, since both are "an authored member ordinal this
+`Complete` outcome's row set does not honor". `Unavailable` rows still count as covering their
+ordinal (they are still an authoritative row for that position); only `Resolved` rows still splice
+`declaration_fallback`.
+
+**Tests:** six new tests in `crates/verter_compiler/src/tsc/tests.rs` —
+`declaration_mode_expose_complete_wrong_projection_is_role_mismatch`,
+`declaration_mode_expose_duplicate_bundle_entry_for_one_call_is_rejected`,
+`declaration_mode_expose_complete_row_set_missing_an_ordinal_is_rejected`,
+`declaration_mode_expose_complete_row_set_duplicate_ordinal_is_rejected` (all four confirmed red
+against the pre-fix `script.rs` — reverted to the parent commit in-place, reran, restored — and
+green after), plus `declaration_mode_expose_anchor_matches_correlation_but_not_entry_is_rejected`
+and `declaration_mode_expose_anchor_matches_entry_but_not_correlation_is_rejected`, which isolate
+each `||` operand of the pre-existing `macro_index` identity check independently (both pass on
+both trees, as expected — that check itself was not the defect, only its test coverage was).
+`cargo test --package verter_compiler tsc::tests -- --test-threads=4`: against `script.rs` reverted
+to the pre-fix parent commit, 207 passed, 4 failed (exactly the four listed above), 1 pre-existing
+unrelated ignore; with the fix restored, 211 passed, 0 failed, 1 pre-existing unrelated ignore.
+
+## Sixth fix pass — degraded-outcome entries skipped the identity check entirely
+
+A subsequent review found `apply_expose_bundle_entry`'s `entry.outcome` match still had one open
+door: the degraded-outcome arm — `_ => continue`, covering `Partial`/`Unresolved`/`Unsupported`/
+`Invalid` — ran BEFORE any check of `entry.macro_index`. `entry.macro_index` was compared only
+inside the `Complete(Expose)` member loop (against each member's own anchor), which a degraded
+outcome never reaches. A bundle entry that matched this call's `syntax_index` (by coincidence or
+corruption) but actually carried a DIFFERENT call's `macro_index`, with a degraded outcome, was
+silently accepted as "this call's own degraded answer" and fell through to the untouched
+syntax-derived fallback — identity-corrupt data treated as honest absence, the same corruption
+class every earlier pass closed for the other doors in this function.
+
+Confirmed the parallel established fix already in the same file: `apply_tsc_bundle`'s semantic-slot
+loop (`crates/verter_compiler/src/tsc/script.rs:3744-3748`) validates
+`entry.macro_index != slot.effective_macro_index` immediately after resolving the unique entry and
+BEFORE matching on `entry.outcome`, for every outcome variant. Also confirmed a legitimate producer
+cannot emit a mismatched `macro_index` for a given `syntax_index` on any outcome shape:
+`crates/verter_session/src/typeinfo/vue_macro_codegen.rs:930-931` computes `syntax_index` and
+`macro_index` once per macro-loop iteration, and both `MacroRuntimeEntry` (line 1086-1090) and
+`MacroTscEntry` (line 1120-1124) pushes for that same iteration reuse those same two values
+regardless of what `outcome` resolves to — so the check cannot introduce a false hard-error on real
+degraded output.
+
+**Fix.** `apply_expose_bundle_entry` now validates `entry.macro_index != correlation.macro_index`
+immediately after resolving the unique bundle entry (mirroring `apply_tsc_bundle`'s ordering) and
+BEFORE branching on `entry.outcome` — hard-erroring `MacroIdentityMismatch` for every outcome
+shape, degraded included, not just `Complete`.
+
+This changed the observed error variant (not the pass/fail outcome) for two pre-existing tests:
+`declaration_mode_expose_anchor_matches_correlation_but_not_entry_is_rejected` and
+`declaration_mode_expose_anchor_matches_entry_but_not_correlation_is_rejected` both construct
+`entry.macro_index != correlation.macro_index`, which the new earlier check now intercepts before
+the member loop's own `InvalidMacroAnchor` check is reached. Both tests were updated in place to
+assert `MacroIdentityMismatch` instead, with their doc comments corrected to describe the new
+ordering; neither test's input or intent (a real identity mismatch must hard-error) changed.
+
+**Tests:** new `declaration_mode_expose_partial_outcome_with_wrong_macro_index_is_rejected`
+(`crates/verter_compiler/src/tsc/tests.rs`) — a `Partial` outcome with the correct `syntax_index`
+but a `macro_index` differing from the correlation's own — asserts `MacroIdentityMismatch`.
+Confirmed red against the pre-fix `script.rs` (reverted in-place via patch, reran, restored) —
+returned `Ok` with the syntax-derived fallback (`count: unknown`), silently accepting the
+identity-corrupt row — and green after.
+`cargo test --package verter_compiler tsc::tests -- --test-threads=4`: 212 passed, 0 failed, 1
+pre-existing unrelated ignore.
+
+**Second item (row-set ordering doc comment).** `TscExposeProjection::members`'s doc comment
+claimed rows arrive "in authored declaration order," but completeness is checked by ordinal SET
+coverage (the `covered` tracker), not by vec position, and every row is addressed by its own
+`anchor.member_ordinal` rather than its position in the vec — a row set out of vec-position order
+does not misapply any type. Enforcing vec-position-equals-ordinal would over-constrain a producer
+with no correctness benefit, since addressing never depends on position. Narrowed the doc comment
+(`crates/verter_macro_dto/src/lib.rs:386-389`) to describe the actual guarantee — ordinal-addressed,
+not position-ordered — instead of leaving an unenforced claim in place.

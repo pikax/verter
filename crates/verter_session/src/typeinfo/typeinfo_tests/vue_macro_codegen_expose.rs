@@ -328,3 +328,79 @@ defineExpose({ doubled })
         }
     }
 }
+
+#[test]
+fn runtime_object_expose_member_typed_via_a_user_type_named_exactly_semantic_miss_still_resolves() {
+    // Discriminates the typed degradation carrier from a textual heuristic.
+    // The user's OWN recursive type alias is spelled exactly `semanticMiss`
+    // — the same standalone-token spelling `compat_spelling::SEMANTIC_MISS`
+    // reserves for the terminal compat-projection sentinel — and its
+    // self-reference renders as the bare identifier text `"semanticMiss"`
+    // nested inside an otherwise fully-materialized, non-degraded shape (a
+    // `RecursiveRef` is a legitimate, deliberately-materialised placeholder,
+    // never a resolver miss). A text-scanning screen over the rendered
+    // declaration cannot tell that apart from a genuinely leaked sentinel
+    // and downgrades the whole member to `Unavailable`; the typed
+    // `has_degradation` carrier this producer now reads instead never
+    // looks at rendered text, so the real, non-degraded resolution
+    // survives.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/Expose.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+interface semanticMiss { value: number; self: semanticMiss }
+declare const seed: semanticMiss
+const thing = seed
+defineExpose({ thing })
+</script>"#,
+    );
+
+    let output = produce(&host, FILE, VueMacroCodegenDemand::Tsc);
+    let expose = expose_projection(&output);
+
+    let verter_macro_dto::TscExposeMemberType::Resolved(text) = member(expose, "thing") else {
+        panic!(
+            "a genuinely-resolved member typed via a recursive user alias named \
+             `semanticMiss` must survive as Resolved, got: {expose:?}"
+        );
+    };
+    assert!(
+        text.as_str().contains("value"),
+        "member `thing` resolves its real user-authored shape, not a degraded Unavailable: {text:?}"
+    );
+}
+
+#[test]
+fn runtime_object_expose_duplicate_authored_names_receive_distinct_anchors() {
+    // Two `defineExpose` members share the authored name `dup` at distinct
+    // source positions. Each row's anchor must encode its OWN authored
+    // position — a name-based re-scan resolves both occurrences to the
+    // position of the FIRST match, collapsing two distinct members onto one
+    // anchor.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/Expose.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+const a = 1
+const b = "two"
+defineExpose({ dup: a, dup: b })
+</script>"#,
+    );
+
+    let output = produce(&host, FILE, VueMacroCodegenDemand::Tsc);
+    let expose = expose_projection(&output);
+    let dups: Vec<_> = expose.members.iter().filter(|m| m.name == "dup").collect();
+    assert_eq!(
+        dups.len(),
+        2,
+        "both duplicate-named members must be published as distinct rows, got: {expose:?}"
+    );
+    assert_ne!(
+        dups[0].anchor, dups[1].anchor,
+        "duplicate authored names must not collapse onto the same anchor: {expose:?}"
+    );
+}

@@ -383,7 +383,10 @@ pub enum MacroTscProjection {
 /// Closed runtime-object `defineExpose` TSC projection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct TscExposeProjection {
-    /// One row per runtime-object member, in authored declaration order.
+    /// One row per runtime-object member. Each row is addressed by its own
+    /// `anchor`'s `member_ordinal` — the consumer never relies on the row's
+    /// position within this vec, so producers are not required to emit rows
+    /// in authored declaration order (though most do, incidentally).
     pub members: Vec<TscExposeMemberRow>,
     /// Typed scope requirements referenced by resolved member type text.
     pub scope: TscScopeRequirements,

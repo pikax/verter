@@ -547,25 +547,33 @@ pub(super) fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &st
 /// its authored source-order position among the macro's own `expose_fields`
 /// — the same authored-member-ordinal scheme [`member_anchor`] uses for
 /// `defineProps`.
+///
+/// Takes the field's own POSITION in `expose_fields`, not its name: two
+/// authored members may legally share a name (`defineExpose({ dup: a, dup: b
+/// })`), and a name-based re-scan would resolve both to the position of the
+/// FIRST match, collapsing distinct members onto one anchor.
 pub(super) fn expose_member_anchor(
     mac: &AnalyzedMacro,
     payload_index: usize,
-    name: &str,
+    field_index: usize,
 ) -> MacroAnchor {
-    let Some(ordinal) = mac
-        .expose_fields
+    let is_owned = mac.expose_fields[field_index]
+        .span
+        .is_some_and(|span| span_is_owned_by_macro(span, mac.span));
+    if !is_owned {
+        return MacroAnchor::MacroArgument {
+            macro_index: macro_index(payload_index),
+        };
+    }
+    let ordinal = mac.expose_fields[..=field_index]
         .iter()
         .filter(|field| {
             field
                 .span
                 .is_some_and(|span| span_is_owned_by_macro(span, mac.span))
         })
-        .position(|field| field.name == name)
-    else {
-        return MacroAnchor::MacroArgument {
-            macro_index: macro_index(payload_index),
-        };
-    };
+        .count()
+        - 1;
     MacroAnchor::Authored {
         macro_index: macro_index(payload_index),
         member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
