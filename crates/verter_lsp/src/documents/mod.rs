@@ -519,6 +519,51 @@ impl DocumentRegistry {
             .unwrap_or_else(|| self.host.language_classifier().classify(canonical_id))
     }
 
+    /// Re-establish the host/VFS overlay for `canonical_id` from the OPEN
+    /// document's own live buffer — never disk.
+    ///
+    /// A destructive background reload (`VerterHost::remove` followed by
+    /// `ensure_loaded`) is designed for a genuinely closed dependency: the
+    /// `remove` clears the workspace overlay
+    /// (`FilesystemWorkspace::notify_delete`), and the subsequent
+    /// `ensure_loaded` intentionally falls through to disk to force a fresh
+    /// read. When the SAME canonical id also happens to be open in the
+    /// editor, that fallthrough silently substitutes disk content (or
+    /// whatever a foreign writer left there) for the open buffer's unsaved
+    /// edits — and the open document's OWN identity never moves (no edit
+    /// occurred), so a pin captured against that identity cannot detect the
+    /// substitution: it is checking "has the document moved", not "did the
+    /// compile consume the document's own bytes".
+    ///
+    /// A caller driving a destructive reload MUST call this immediately
+    /// after `host.remove` and before the reload's own `ensure_loaded` /
+    /// compile, whenever the target canonical id might be open — mirroring
+    /// exactly what `did_open`/`did_change` do to establish the overlay in
+    /// the first place. Returns `false` (no-op) when the file is not
+    /// currently open, in which case the reload's disk fallthrough is
+    /// correct and untouched.
+    pub(crate) fn reestablish_host_overlay_from_open_buffer(&self, canonical_id: &str) -> bool {
+        let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
+            return false;
+        };
+        let Some(document) = self.documents.get(uri.as_str()) else {
+            return false;
+        };
+        let source = Arc::clone(&document.source);
+        let file_language = self.document_file_language(&document.language_id, canonical_id);
+        drop(document);
+        let _ = self.host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: source.clone(),
+            file_language,
+            aliases: vec![],
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host.notify_upsert(canonical_id, source);
+        true
+    }
+
     /// Handle a document being opened in the editor.
     pub fn did_open(&self, params: &TextDocumentItem) -> HostUpdateResult {
         let uri_str = params.uri.as_str().to_string();
@@ -905,6 +950,24 @@ impl DocumentRegistry {
     /// before calling back into the registry.
     pub fn get(&self, uri: &Uri) -> Option<dashmap::mapref::one::Ref<'_, String, DocumentState>> {
         self.documents.get(uri.as_str())
+    }
+
+    /// Capture the open-document URI + exact revision for `canonical_id`, if
+    /// any is open — the pin every IDE-compile call site captures BEFORE
+    /// compiling (never after), so a later fenced record
+    /// (`record_carrier_ide_surface_fenced`) can never falsely pair
+    /// freshly-compiled bytes with a source they were not compiled from: a
+    /// racing edit can only advance the live identity past this pin, which
+    /// makes the fenced record's later current-identity check MISS (fail
+    /// closed), never falsely match. Returns `(None, _)` for a closed
+    /// carrier — there is no live document to race there.
+    pub(crate) fn open_compile_pin(
+        &self,
+        canonical_id: &str,
+    ) -> (Option<Uri>, Option<DocumentSnapshotIdentity>) {
+        let uri = self.canonical_id_to_uri(canonical_id);
+        let revision = uri.as_ref().and_then(|uri| self.snapshot_identity(uri));
+        (uri, revision)
     }
 
     /// Capture the exact open-document revision that an asynchronous operation

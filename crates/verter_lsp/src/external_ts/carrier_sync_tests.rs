@@ -545,6 +545,7 @@ fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
         &host,
         canonical,
         &mut companions,
+        None,
     );
 
     let receipt = PendingProviderReady::authorize(
@@ -1436,6 +1437,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         canonical_id: &source,
         is_jsx: false,
         ide: None,
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
@@ -1564,6 +1566,7 @@ async fn owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_p
         canonical_id: &source,
         is_jsx: false,
         ide: None,
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
@@ -1682,6 +1685,7 @@ async fn cold_bootstrap_defer_propagates_a_failed_retract_instead_of_not_ready()
         canonical_id: &source,
         is_jsx: false,
         ide: None,
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
@@ -1790,6 +1794,7 @@ async fn terminal_owner_loss_propagates_a_failed_retract_instead_of_pending() {
         canonical_id: &source,
         is_jsx: false,
         ide: None,
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
@@ -1872,6 +1877,7 @@ async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_ope
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coordinator,
             provider_delivery: CarrierProviderDelivery::DirectOpen,
@@ -2206,6 +2212,7 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
@@ -2326,6 +2333,7 @@ async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
         canonical_id: &source,
         is_jsx: false,
         ide: None,
+        open_pin: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,

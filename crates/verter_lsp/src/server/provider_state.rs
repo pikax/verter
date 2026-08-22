@@ -12,7 +12,6 @@
 //! visibility widening.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use tower_lsp_server::ls_types::Uri;
 
@@ -119,20 +118,27 @@ impl VerterLanguageServer {
     /// pairs the synced offsets with a source map produced against drifted
     /// content. Called ONLY after a SUCCESSFUL provider sync (fail-closed:
     /// a failed sync records nothing).
+    ///
+    /// Returns whether the surface was actually recorded — the structural
+    /// backstop in `record_carrier_ide_snapshot_inner` can refuse (`false`)
+    /// even here, when the document turns out open despite no pin having
+    /// been captured. Callers whose retry/requeue discipline depends on the
+    /// record having actually happened must check this, not assume success.
+    #[must_use]
     pub(super) fn record_carrier_ide_snapshot(
         &self,
         canonical_id: &str,
         ide_path: &str,
         ide_code: &str,
         source_map_json: Option<&str>,
-    ) {
-        let _ = self.record_carrier_ide_snapshot_inner(
+    ) -> bool {
+        self.record_carrier_ide_snapshot_inner(
             None,
             canonical_id,
             ide_path,
             ide_code,
             source_map_json,
-        );
+        )
     }
 
     /// Record retained IDE output only if `revision` is still the live open
@@ -148,6 +154,31 @@ impl VerterLanguageServer {
     ) -> bool {
         self.record_carrier_ide_snapshot_inner(
             Some((uri, revision)),
+            canonical_id,
+            ide_path,
+            ide_code,
+            source_map_json,
+        )
+    }
+
+    /// Dispatch to whichever of [`Self::record_carrier_ide_snapshot_if_current`]
+    /// / [`Self::record_carrier_ide_snapshot`] applies, based on whether the
+    /// caller captured a pin. THE single entry a call site with a caller-
+    /// supplied `open_pin` (captured before ITS OWN compile — see
+    /// `DocumentRegistry::open_compile_pin`) should use, instead of choosing
+    /// manually between the two — a manual choice is exactly how a confirmed-
+    /// open call site ended up passing `None` and falling through to the
+    /// unfenced path. Returns whether the surface was actually recorded.
+    pub(super) fn record_carrier_ide_snapshot_with_pin(
+        &self,
+        open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) -> bool {
+        self.record_carrier_ide_snapshot_inner(
+            open_pin,
             canonical_id,
             ide_path,
             ide_code,
@@ -209,22 +240,15 @@ impl VerterLanguageServer {
             );
             return false;
         };
-        if let Some((uri, revision)) = retained {
-            return self
-                .documents
-                .with_current_snapshot_identity(uri, revision, |document| {
-                    crate::provider_surface_store::record_carrier_ide_surface_with_source(
-                        store,
-                        canonical_id,
-                        ide_path,
-                        &delivered,
-                        map_json,
-                        Arc::clone(&document.source),
-                    );
-                })
-                .is_some();
-        }
-        crate::provider_surface_store::record_carrier_ide_surface(
+        // Route both the retained (`Some`) and unretained (`None`) arms through
+        // the SAME fenced choke point every other carrier-sync site uses: a
+        // `None` retained pin is refused when the carrier turns out to be open
+        // anyway (a close→open mid-flight transition, or a caller — like a
+        // background-file path reached with an unexpectedly-open document —
+        // that never captured a pin), never falls through to an unguarded
+        // record. See `record_carrier_ide_surface_fenced`'s doc comment for the
+        // full pin-before-compile invariant.
+        crate::provider_surface_store::record_carrier_ide_surface_fenced(
             store,
             Some(&self.documents),
             host,
@@ -232,8 +256,8 @@ impl VerterLanguageServer {
             ide_path,
             &delivered,
             map_json,
-        );
-        true
+            retained,
+        )
     }
 
     /// The bytes of the carrier's CURRENT public-API projection — the identity
@@ -766,11 +790,24 @@ impl VerterLanguageServer {
     /// the provider-state transition + the sealed receipt that gates the commit. This
     /// is the server-side wrapper every interactive/background carrier-sync entry uses
     /// (it builds the engine membership context from `self`).
+    ///
+    /// `open_pin`, when the caller compiled `ide` against a currently-open
+    /// document, MUST have been captured by the CALLER before that compile
+    /// ran (never after — see `DocumentRegistry::open_compile_pin`). This
+    /// function does NOT self-capture: the compile always happens in the
+    /// caller, sometimes several statements or another async call before this
+    /// is reached, so a pin captured HERE would reproduce the exact
+    /// compile-to-identity gap the fenced record is meant to close (the pin
+    /// would observe whatever the identity is at THIS call, not what produced
+    /// `ide`). `None` when the caller had no live document to pin (a closed
+    /// carrier, or a call site that genuinely never compiles against an open
+    /// buffer).
     pub(super) async fn reconcile_carrier_via_gateway(
         &self,
         canonical_id: &str,
         is_jsx: bool,
         ide: Option<&verter_session::IdeResponse>,
+        open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) -> crate::external_ts::CarrierSyncDecision {
         let Some(snapshot) = self.published_resolver() else {
             // No published snapshot yet (bootstrap): nothing to advertise/commit — a
@@ -816,6 +853,7 @@ impl VerterLanguageServer {
                 canonical_id,
                 is_jsx,
                 ide,
+                open_pin,
                 membership,
                 admission: &self.carrier_transaction_coordinator,
                 reason: crate::external_ts::ReconcileReason::SourceSynced,
@@ -987,8 +1025,7 @@ impl VerterLanguageServer {
                             None,
                         )
                     } else {
-                        self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
-                        true
+                        self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None)
                     };
                     if !recorded {
                         self.needs_ide_sync.insert(canonical_id.to_string());

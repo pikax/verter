@@ -22,6 +22,9 @@ pub(super) async fn reconcile_unowned_carrier_buffer(
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     ide: Option<&verter_session::IdeResponse>,
+    // The open-document revision `ide` was compiled against, captured by the
+    // CALLER before that compile ran — see `DocumentRegistry::open_compile_pin`.
+    open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ownership_ready: bool,
     context: &str,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
@@ -39,6 +42,7 @@ pub(super) async fn reconcile_unowned_carrier_buffer(
             canonical_id,
             is_jsx,
             ide,
+            open_pin,
             carrier_coordinator,
         )
         .await;
@@ -76,6 +80,9 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
     snapshot: &crate::server::PublishedResolverSnapshot,
     canonical_id: &str,
     ide: Option<&verter_session::IdeResponse>,
+    // The open-document revision `ide` was compiled against, captured by the
+    // CALLER before that compile ran — see `DocumentRegistry::open_compile_pin`.
+    open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     context: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
@@ -108,6 +115,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
             canonical_id,
             is_jsx,
             ide,
+            open_pin,
             membership,
             admission: carrier_coordinator,
             reason: crate::external_ts::ReconcileReason::SourceSynced,
@@ -130,6 +138,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
                         provider_sync_states,
                         canonical_id,
                         ide,
+                        open_pin,
                         snapshot.ownership_ready,
                         context,
                         carrier_coordinator,
@@ -144,6 +153,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
                         provider_sync_states,
                         canonical_id,
                         ide,
+                        open_pin,
                         snapshot.ownership_ready,
                         context,
                         carrier_coordinator,
