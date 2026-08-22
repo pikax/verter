@@ -207,7 +207,7 @@ sha256 = "7933e3d99d4a7a31f3ddeda719f02992a85fad9fcd6fcc8edc042cbecd5c0249"
 id = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
 kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS-amendment.md"
-sha256 = "a5431e67ca638a96a43c1948e8171c851245f02a1a04d8794182d4c47e1891cf"
+sha256 = "7d3ae3b7a5c7a0b0176facb247fe74a20cbfbdc68b09c759fd182c027cbb83b8"
 
 
 # -- Authorizations --------------------------------------------------------

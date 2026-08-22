@@ -29,14 +29,18 @@ capability.
 One thing on the current branch is directly load-bearing and is what later work
 would be built on top of:
 
-`source_projection_map()` returns a JSON **string** at the assembly boundary —
-consumed as `PositionMapper::from_json(... .unwrap_or(""))`
-(`crates/verter_lsp/tests/cases/kebab_tag_mapping_full_columns.rs:65`,
-`crates/verter_tsc/src/checker.rs:411`). Semantic projection is therefore
-string-encoded today. A typed compact `SourceProjectionMap` must replace it
-before a correct TypeScript span-map adapter can exist, and every consumer built
-against the string form in the meantime is built against a shape that must
-change.
+`source_projection_map()` returns a JSON **string**, and that string is parsed
+back at roughly eight PRODUCTION sites — `provider_surface_store/producers.rs:684`
+and `:957`, `server/rename_plan.rs:518`, `documents/mod.rs:652`, `:1068`, `:1161`,
+`:1240`, `:1317`, and `server/aux_features.rs:1427`. Separately,
+`verter_tsc/src/checker.rs:411` base64-encodes the same string into a
+`sourceMappingURL`.
+
+Semantic projection is therefore string-encoded across the live IDE surface, not
+merely at one boundary. No correct TypeScript span-map adapter can be built on
+that, and work written against the string shape meanwhile is written against a
+shape that must change. That migration — TCM1 — is the load-bearing element; the
+rest sequences behind it.
 
 That migration is the ASAP element. The rest of the integration is sequenced
 behind it.
