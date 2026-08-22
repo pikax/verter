@@ -1,7 +1,7 @@
 {
   "slug": "nest-hex-lit-id-uq-snip-ext-nest-n",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

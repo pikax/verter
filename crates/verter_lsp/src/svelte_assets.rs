@@ -789,13 +789,13 @@ mod tests {
 
     /// A Svelte 5 install Verter can use: correct name, major 5, and both the
     /// `.` and `./elements` type exports pointing at declarations that exist.
-    const USABLE_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+    const USABLE_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.10","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
 
     /// The exact defect shape: a `svelte` package that EXISTS (so a stat-only
     /// owner probe calls it installed) but publishes NO `./elements` type
     /// export, which the carrier's validator rejects. A patched, aliased, or
     /// future-layout install lands here.
-    const NO_ELEMENTS_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
+    const NO_ELEMENTS_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.10","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
 
     /// A `svelte` package of an unsupported major — the second validation
     /// failure class, proving the report names the reason rather than a single

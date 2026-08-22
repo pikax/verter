@@ -23,7 +23,7 @@
 // Every row is a REAL divergence proven by `known_divergences_are_real` (a stale
 // row that no longer diverges fails that guard). This file is DERIVED from the
 // discovery pass (`enumerate_divergences_discovery`, run with --ignored) over the
-// pinned svelte@5.56.3 compiler — re-run the discovery pass + the data emitter when
+// pinned svelte@5.56.10 compiler — re-run the discovery pass + the data emitter when
 // the IR projection or corpus changes.
 //
 // Included by `diff_oracle_tests.rs` via `include!`.

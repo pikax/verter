@@ -4,7 +4,7 @@
  *
  * Verter compiles a Svelte SFC to byte-faithful `svelte/internal/client` JS. The
  * parity bar is FINITE BYTE-PARITY: for every shape in the declared codegen surface,
- * Verter's emitted module must equal the OFFICIAL pinned-`svelte@5.56.3` module
+ * Verter's emitted module must equal the OFFICIAL pinned-`svelte@5.56.10` module
  * byte-for-byte (modulo the cosmetic whitespace the shared normalizer collapses).
  * Hand-auditing the per-edge byte tail "failed to create a stopping rule" (the
  * codegen architect's ruling), so this generator mechanically ENUMERATES the native client's

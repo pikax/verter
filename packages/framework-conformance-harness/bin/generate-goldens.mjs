@@ -2,7 +2,7 @@
 /**
  * Generator — official-core conformance goldens (BF2 harness).
  *
- * Runs the PINNED official Vue 3.6.0-rc.5 / Svelte 5.56.8 compilers over
+ * Runs the PINNED official Vue 3.6.0-rc.5 / Svelte 5.56.10 compilers over
  * every independently-authored fixture under `fixtures/` and publishes
  * IMMUTABLE golden records under `goldens/` through ONE atomic commit point
  * (content-addressed records + an atomically-renamed manifest — see

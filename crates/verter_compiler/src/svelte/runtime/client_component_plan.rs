@@ -25,7 +25,7 @@ use super::ir::{
 use super::unsupported::UnsupportedSvelteRuntimeSurface;
 use verter_span::Span;
 
-/// The official per-call `Memoizer` (svelte@5.56.3 client `shared/utils.js`): mints the
+/// The official per-call `Memoizer` (svelte@5.56.10 client `shared/utils.js`): mints the
 /// ordered `let $N = $.derived(() => <expr>);` hoist statements and hands back the
 /// `$.get($N)` read for each memoized value. The `$N` numbering restarts per memoizer
 /// instance — one per component call (`CallBuild`), one per `<slot>` outlet, and one

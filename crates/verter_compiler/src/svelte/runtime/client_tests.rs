@@ -1,7 +1,7 @@
 //! Integration tests for the Svelte client (`svelte/internal/client`) emission.
 //!
 //! These drive the full pipeline (parse → lower → plan → topology → emit) and pin
-//! the emitted-JS shape against the official `svelte@5.56.3` output captured via
+//! the emitted-JS shape against the official `svelte@5.56.10` output captured via
 //! the oracle. Each test is discriminating with negative assertions; the
 //! fail-closed family asserts the precise typed surface + diagnostic id (never a
 //! silent empty module, never a panic).
@@ -274,7 +274,7 @@ fn pure_single_interpolation_has_no_nullish_coalesce() {
         "update:\n{js}"
     );
     // F11: the pure-interp text child carries the `is_text` flag `$.child(button,
-    // true)`. Verified against svelte@5.56.3.
+    // true)`. Verified against svelte@5.56.10.
     assert!(
         js.contains("$.child(button, true)"),
         "a pure-interp text child carries the is_text flag:\n{js}"
@@ -297,7 +297,7 @@ fn reactive_mixed_text_run_without_entities_is_unchanged() {
 fn comment_after_interp_does_not_truncate_the_reactive_text_run() {
     // A `<!--x-->` comment between an interpolation and trailing static text must
     // NOT break the run: `clean_nodes` DROPS comments, so `a {c}<!--x--> b` is one
-    // text run. Official svelte@5.56.3 emits `\`a ${$.get(c) ?? ''} b\``. RED
+    // text run. Official svelte@5.56.10 emits `\`a ${$.get(c) ?? ''} b\``. RED
     // pre-fix: `owning_text_run` reconstructed the run from RAW children and treated
     // the comment as a run break, dropping the trailing static " b".
     let src = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>a {c}<!--x--> b</button>\n";
@@ -420,7 +420,7 @@ fn pure_interp_text_child_emits_is_text_flag() {
 #[test]
 fn mixed_text_run_child_has_no_is_text_flag() {
     // F11 NEGATIVE: a MIXED text run (`<p>x {count}</p>`) does NOT carry the is_text
-    // flag — `$.child(p)`. Verified against svelte@5.56.3 (the §1.2 `<h1>Hello
+    // flag — `$.child(p)`. Verified against svelte@5.56.10 (the §1.2 `<h1>Hello
     // {name}!</h1>` mixed run is `$.child(h1)`). Discriminates a builder that would
     // flag every text child.
     let src = "<script>let count = $state(0);</script>\n<p>x {count}</p>\n<button onclick={() => count++}>y</button>\n";
@@ -435,7 +435,7 @@ fn mixed_text_run_child_has_no_is_text_flag() {
 fn sibling_to_pure_interp_text_forces_explicit_offset_and_is_text() {
     // F11: a sibling descent landing on a pure-interp text node forces the explicit
     // offset (even 1) + the trailing true: `$.sibling($.child(div), 1, true)`.
-    // Verified against svelte@5.56.3. The static sibling is an allowlisted `<p>` (a
+    // Verified against svelte@5.56.10. The static sibling is an allowlisted `<p>` (a
     // `<span>` is out of the §1.2 element allowlist).
     let src = "<script>let count = $state(0);</script>\n<div><p></p>{count}</div>\n<button onclick={() => count++}>z</button>\n";
     let js = emit(src, "App.svelte");
@@ -455,7 +455,7 @@ fn static_no_dynamic_fragment_emits_next_between_clone_and_append() {
     // the static fragment with `$.next()` between the clone frame and `$.append`
     // (`var fragment = root(); $.next(); $.append(...)`). CSR-mount works without it,
     // but hydration records the WRONG end node — a helper-topology divergence.
-    // Verified against svelte@5.56.3. RED against the pre-fix walk (which emitted
+    // Verified against svelte@5.56.10. RED against the pre-fix walk (which emitted
     // `var fragment = root();` directly followed by `$.append`, no `$.next()`). The
     // `$state` declarator makes it runes-mode (a bare `<p>a</p><p>b</p>` is legacy,
     // refused as legacy mode) but `c` is unused so it stays a pure-static template.
@@ -483,7 +483,7 @@ fn static_no_dynamic_fragment_emits_next_between_clone_and_append() {
 #[test]
 fn static_three_root_fragment_emits_next_with_count() {
     // Three trailing static roots → official emits `$.next(2)` (the `skipped - 1`
-    // count, with the literal present when > 1). Verified against svelte@5.56.3.
+    // count, with the literal present when > 1). Verified against svelte@5.56.10.
     // DISCRIMINATING: a builder that always emits a bare `$.next()` (count 1) would
     // record the wrong cursor offset for 3+ static roots.
     let src = "<script>let c = $state(0);</script>\n<p>a</p><p>b</p><p>c</p>\n";
@@ -509,7 +509,7 @@ fn root_leading_text_before_dynamic_emits_pre_clone_next() {
     // `is_text_first` case — official emits a PRE-CLONE `$.next();` BEFORE
     // `var fragment = root();` (skipping the inserted leading anchor), then descends to
     // the button via `$.sibling($.first_child(fragment))`. Verified against
-    // svelte@5.56.3. RED against the pre-fix emitter (which cloned first with NO
+    // svelte@5.56.10. RED against the pre-fix emitter (which cloned first with NO
     // pre-clone `$.next()`).
     let src = "<script>let c = $state(0);</script>\nx<button onclick={() => c++}>{c}</button>\n";
     let js = emit(src, "App.svelte");
@@ -604,7 +604,7 @@ fn module_scope_root_var_collides_with_user_binding_renames_to_root_1() {
     // (`var root = $.from_html(...)`). Official `scope.generate` reserves the
     // component-declared `root` GLOBALLY (across the module + function scopes), so the
     // template var is renamed to `root_1` and the clone frame calls `root_1()`. Verified
-    // against svelte@5.56.3. RED against the pre-fix tree (which hard-coded `var root`).
+    // against svelte@5.56.10. RED against the pre-fix tree (which hard-coded `var root`).
     // The colliding `root` is a supported `$state` signal (shape-1); the
     // allocator seeds from EVERY top-level declared name (incl. `$state`), so the
     // collision fires for a signal binding too.
@@ -774,7 +774,7 @@ fn trailing_static_after_dynamic_fragment_emits_next() {
     // A dynamic node followed by TWO trailing static roots: official walks to the
     // dynamic node, then advances the cursor past the trailing static run with
     // `$.next(2)` (emitted AFTER the dynamic node's reset, BEFORE the text effect).
-    // Verified against svelte@5.56.3 (`$.reset(button); $.next(2);`). RED against the
+    // Verified against svelte@5.56.10 (`$.reset(button); $.next(2);`). RED against the
     // pre-fix walk (which emitted no `$.next()` for the trailing static run).
     let src = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button><p>a</p><p>b</p>\n";
     let js = emit(src, "App.svelte");
@@ -814,7 +814,7 @@ fn static_single_element_root_has_no_next() {
 fn static_then_dynamic_fragment_has_no_trailing_next() {
     // NEGATIVE: a static root FOLLOWED BY a dynamic node (no trailing static) emits
     // NO `$.next()` — official walks to the dynamic node via `$.sibling` and the
-    // trailing-static `skipped` count is 0. Verified against svelte@5.56.3
+    // trailing-static `skipped` count is 0. Verified against svelte@5.56.10
     // (`var button = $.sibling($.first_child(fragment));` with no `$.next()`).
     let src =
         "<script>let c = $state(0);</script>\n<p>a</p><button onclick={() => c++}>{c}</button>\n";
@@ -846,7 +846,7 @@ fn props_no_default_reads_off_props_member() {
 #[test]
 fn prop_method_call_in_attr_value_is_a_read_not_a_written_prop() {
     // A METHOD CALL on a prop in a template VALUE (`id={p.toString()}`) is a READ of the
-    // prop receiver, NOT a write — official `svelte@5.56.3` compiles it to a plain
+    // prop receiver, NOT a write — official `svelte@5.56.10` compiles it to a plain
     // `$$props.p.toString()` read inside a `$.template_effect`, with `$.push`/`$.pop` for
     // context. A method call must NOT be misclassified as a `DeepMutate` write (which
     // would refuse it as a "written prop"). DISCRIMINATING: RED against the pre-fix
@@ -867,7 +867,7 @@ fn prop_method_call_in_attr_value_is_a_read_not_a_written_prop() {
 #[test]
 fn props_alias_no_default_reads_source_key_off_props() {
     // F6: `let { foo: bar } = $props()` (no default) reads `$$props.foo` (the SOURCE
-    // key) — NOT `$$props.bar`. Verified against svelte@5.56.3. THE discriminating
+    // key) — NOT `$$props.bar`. Verified against svelte@5.56.10. THE discriminating
     // alias regression: RED against the emitter that read `$$props.<local>`.
     let src = "<script>let { foo: bar } = $props();</script>\n<p>{bar}</p>\n";
     let js = emit(src, "App.svelte");
@@ -891,7 +891,7 @@ fn props_default_referencing_a_sibling_prop_lowers_getter_carrier() {
     // `let { a = 1, b = a } = $props()` — the sibling-reference default lowers via
     // the official prop-source path: the default reads the sibling GETTER, and the
     // zero-arg getter call collapses to the bare getter as the LAZY carrier
-    // (`$.prop($$props, 'b', 19, a)`). Verified against svelte@5.56.3.
+    // (`$.prop($$props, 'b', 19, a)`). Verified against svelte@5.56.10.
     let src = "<script>let { a = 1, b = a } = $props();</script>\n<p>{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -919,7 +919,7 @@ fn props_default_referencing_a_sibling_prop_lowers_getter_carrier() {
 fn props_default_referencing_a_no_default_sibling_lowers_props_member_thunk() {
     // `let { a, b = a } = $props()` — the referenced sibling has NO default (a
     // `$$props.a` member read), so the default is the LAZY member thunk
-    // `$.prop($$props, 'b', 19, () => $$props.a)`. Verified against svelte@5.56.3.
+    // `$.prop($$props, 'b', 19, () => $$props.a)`. Verified against svelte@5.56.10.
     let src = "<script>let { a, b = a } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -941,7 +941,7 @@ fn props_default_referencing_a_no_default_sibling_lowers_props_member_thunk() {
 #[test]
 fn props_non_literal_default_lowers_lazy_thunk() {
     // A non-simple `$props()` default (`[]`) is the LAZY flag-19 thunk form
-    // (`$.prop($$props, 'a', 19, () => [])`). Verified against svelte@5.56.3.
+    // (`$.prop($$props, 'a', 19, () => [])`). Verified against svelte@5.56.10.
     let src = "<script>let { a = [] } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -964,7 +964,7 @@ fn props_non_literal_default_lowers_lazy_thunk() {
 fn props_literal_default_lowers_eager_flag_3_prop_source() {
     // A CONSTANT-LITERAL `$props()` default (`{ a = 1 }`) is the eager flag-3
     // `$.prop($$props, 'a', 3, 1)` form, read via the `a()` getter. Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -991,7 +991,7 @@ fn props_literal_default_lowers_eager_flag_3_prop_source() {
 fn primitive_state_reassigned_to_proxiable_rhs_gets_trailing_true() {
     // F9: a PRIMITIVE `$state(0)` (a `$.state` signal, NOT a StateProxy) reassigned
     // to a PROXIABLE RHS (`{ a: 1 }`) carries the trailing `, true` —
-    // `$.set(o, { a: 1 }, true)`. Verified against svelte@5.56.3 (the gate is
+    // `$.set(o, { a: 1 }, true)`. Verified against svelte@5.56.10 (the gate is
     // `should_proxy(rhs)`, NOT `is_state_proxy(binding)`). RED against the
     // binding-keyed gate (which only added `, true` for a StateProxy binding).
     let src =
@@ -1725,7 +1725,7 @@ fn regen_client_breadth_smoke_fixtures() {
 #[test]
 fn animate_only_child_check_ignores_const_and_declaration_tags() {
     // The official `animate:` "only child of a keyed each" check IGNORES `{@const}`
-    // and the `{const …}` / `{let …}` declaration tags (svelte@5.56.3
+    // and the `{const …}` / `{let …}` declaration tags (svelte@5.56.10
     // `2-analyze/visitors/shared/element.js`) — a keyed each whose body is a
     // declaration tag + ONE animated element is ACCEPTED. (The `{@const}` variant
     // also READS the binding — the `lifecycle/animate_keyed_const` golden shape;
@@ -1779,7 +1779,7 @@ fn use_action_effect_wraps_each_nondelegated_event() {
     // A `use:` action co-located with LEGACY `on:` events wraps EACH event
     // registration in its OWN `$.effect(() => $.event(…))`, emitted in the INIT
     // domain after `$.action` and before `$.transition` — the official
-    // action-triggered effect wrap (svelte@5.56.3). The wrap trigger is the
+    // action-triggered effect wrap (svelte@5.56.10). The wrap trigger is the
     // LEGACY origin + the action host: a MODERN non-delegated event beside
     // `use:` stays a BARE `$.event` (the `lifecycle/use_modern_nondelegated_event`
     // golden + `lifecycle_event_origin_gates_effect_wrap_and_directive_batch_order`).
@@ -1842,7 +1842,7 @@ fn use_action_effect_wraps_non_this_bind() {
     // A non-`this` DOM bind on a `use:` action host wraps its registration in its
     // OWN `$.effect(() => $.bind_*(...))` in the INIT domain at the bind's
     // attribute source position — after the source-first `$.action` (official
-    // svelte@5.56.3 `RegularElement.js` under `has_use`). `bind:this` is NEVER
+    // svelte@5.56.10 `RegularElement.js` under `has_use`). `bind:this` is NEVER
     // wrapped (`lifecycle/use_bind_this` pins the unwrapped inline interleave).
     let js = emit(
         "<script>let v = $state(\"\");</script>\n<input use:foo bind:value={v} />\n",
@@ -1874,7 +1874,7 @@ fn use_action_effect_wraps_non_this_bind() {
 fn transition_and_bind_preserve_source_order_in_batch() {
     // A non-`this` bind on a lifecycle host WITHOUT `use:` joins the element's
     // after-update DIRECTIVE BATCH, source-ordered with `$.transition` — BARE,
-    // never effect-wrapped, in BOTH source directions (official svelte@5.56.3
+    // never effect-wrapped, in BOTH source directions (official svelte@5.56.10
     // batches the bind with `other_directives`).
     let first = emit(
         "<script>let v = $state(\"\");</script>\n<input transition:fade bind:value={v} />\n",
@@ -2099,7 +2099,7 @@ fn euler_parent_transition_precedes_after_child_modern_event() {
     // PARENT's transition (its own directive batch) merges at the parent's EXIT
     // rank — every descendant position precedes the parent's exit, so the child's
     // `$.event` emits BEFORE the parent's `$.transition` even though the
-    // transition is authored first (official svelte@5.56.3:
+    // transition is authored first (official svelte@5.56.10:
     // `$.event('mouseenter', input, …)` then `$.transition(3, div, …)`).
     let js = emit(
         "<script>let c = $state(0);</script>\n<div transition:fade><input onmouseenter={() => c++} /></div>\n",
@@ -2134,7 +2134,7 @@ fn euler_parent_transition_precedes_after_child_modern_event() {
 fn euler_parent_bind_emits_after_child_modern_event() {
     // Euler-tour nesting, bind × modern event: the PARENT's non-`this` bind
     // (`bind:clientWidth` — its directive batch) merges at the parent's EXIT
-    // rank, AFTER the child's ENTER-ranked modern event (official svelte@5.56.3:
+    // rank, AFTER the child's ENTER-ranked modern event (official svelte@5.56.10:
     // `$.event('mouseenter', input, …)` then
     // `$.bind_element_size(div, 'clientWidth', …)`).
     let js = emit(
@@ -2170,7 +2170,7 @@ fn euler_parent_modern_event_precedes_child_transition() {
     // the stream at the parent's ENTER rank — BEFORE every child position — while
     // the CHILD's transition merges at the child's EXIT rank, so the parent's
     // `$.event` emits FIRST even though a child's batch beats a PARENT's batch
-    // (official svelte@5.56.3: `$.event('mouseenter', div, …)` then
+    // (official svelte@5.56.10: `$.event('mouseenter', div, …)` then
     // `$.transition(3, span, …)`).
     let js = emit(
         "<script>let c = $state(0);</script>\n<div onmouseenter={() => c++}><span transition:fade></span></div>\n",
@@ -2200,7 +2200,7 @@ fn euler_sibling_transition_precedes_sibling_modern_event() {
     // Euler-tour SIBLINGS keep document order: the first sibling's transition
     // (its EXIT rank) precedes the second sibling's modern event (its ENTER rank)
     // — enter/exit pairs of disjoint subtrees never interleave (official
-    // svelte@5.56.3: `$.transition(3, span, …)` then
+    // svelte@5.56.10: `$.transition(3, span, …)` then
     // `$.event('mouseenter', input, …)`). A phase-split model that hoists every
     // modern event before every batch item would reverse this.
     let js = emit(
@@ -2765,7 +2765,7 @@ fn html_prop_call_payload_does_not_elide_and_thunks_the_rewritten_member() {
     // elide: the callee rewrites to the member `$$props.render`, so the official form is
     // the THUNK over the rewritten whole expression — `$.html(div, () => $$props.render(),
     // true)`. Elision applies ONLY when the rewritten callee equals the bare name (a plain
-    // / local / demoted id). Pinned svelte@5.56.3.
+    // / local / demoted id). Pinned svelte@5.56.10.
     let js = emit(
         "<script>let { render } = $props()</script>\n<div>{@html render()}</div>\n",
         "App.svelte",
@@ -2818,7 +2818,7 @@ fn spread_payload_sequence_stays_one_wrapped_value() {
 fn html_object_literal_payload_wraps_arrow_body_as_object() {
     // An OBJECT-LITERAL `{@html}` payload wraps the concise-arrow body in one paren pair so
     // `() => { … }` is an OBJECT expression, not a block body returning `undefined`. Pinned
-    // svelte@5.56.3: `{@html {a:1}}` → `$.html(div, () => ({ a: 1 }), true)`. Without the wrap
+    // svelte@5.56.10: `{@html {a:1}}` → `$.html(div, () => ({ a: 1 }), true)`. Without the wrap
     // the body parses as a block (`{ a: 1 }` is a labeled statement) and returns `undefined` —
     // a SILENT behavioral miscompile (the markup goes blank), exactly like the sequence wrap is
     // behavioral.
@@ -2847,7 +2847,7 @@ fn html_member_of_object_literal_payload_reparses_as_valid_js() {
     // A MEMBER access ON an object literal (`{@html {html:'x'}.html}`) is the NON-PARSING case:
     // without the wrap the body is `() => {html:'x'}.html` — a block statement followed by a
     // stray `.html`, which is INVALID JS (a hard syntax error, not just a wrong value). The wrap
-    // makes it `() => ({ html: 'x' }).html`, valid and correct. Pinned svelte@5.56.3.
+    // makes it `() => ({ html: 'x' }).html`, valid and correct. Pinned svelte@5.56.10.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div>{@html {html:\"<b>x</b>\"}.html}</div>\n",
         "App.svelte",
@@ -2884,7 +2884,7 @@ fn html_optional_chain_object_literal_payload_wraps_arrow_body() {
     // the whole concise-arrow body must wrap. Without the wrap the body is `() => {html:'x'}?.html`
     // — a block statement followed by a stray `?.html`, which is INVALID JS (a hard syntax error,
     // not just a wrong value). The wrap makes it `() => ({ html: 'x' })?.html`, valid and correct.
-    // Pinned svelte@5.56.3.
+    // Pinned svelte@5.56.10.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div>{@html {html:\"<b>x</b>\"}?.html}</div>\n",
         "App.svelte",
@@ -2926,7 +2926,7 @@ fn html_ts_wrapper_object_payload_wraps_arrow_body_unconditionally() {
     // is parenthesized and returns correctly — complete-by-construction, no shape predicate.
     //
     // This is a PLAIN-`<script>` form on purpose (NOT a corpus cell): the `lang="ts"` variant
-    // panics Verter's parse-domain TS-strip gate, and official svelte@5.56.3
+    // panics Verter's parse-domain TS-strip gate, and official svelte@5.56.10
     // REJECTS the plain-`<script>` TS-in-template form (no golden) while Verter ACCEPTS it (the
     // template expr parses as TSX and the rewriter strips the TS skin) — so it can only be locked
     // by a unit test on the accepted form, never an official-golden corpus row.
@@ -2978,7 +2978,7 @@ fn html_ts_wrapper_object_payload_wraps_arrow_body_unconditionally() {
 fn spread_payload_identifier_collision_renames_the_dom_var() {
     // A `<p {...p}>` collides: the DOM-var stem `p` clashes with the free spread-payload
     // identifier `p`. Official renames the DOM local to `p_1` so the `...p` payload still
-    // refers to the binding, not the element node. Pinned svelte@5.56.3:
+    // refers to the binding, not the element node. Pinned svelte@5.56.10:
     // `var p_1 = ...; $.attribute_effect(p_1, () => ({ ...p }))`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<p {...p}></p>\n",
@@ -3004,7 +3004,7 @@ fn spread_payload_identifier_collision_renames_the_dom_var() {
 fn style_directive_static_text_value_quotes_the_string() {
     // A `style:color="red"` (a static-TEXT directive value) folds the value as the QUOTED
     // string literal `{ color: 'red' }` — NOT a bare identifier `{ color: red }` (an
-    // undefined reference). Only `style:` accepts a text value. Pinned svelte@5.56.3:
+    // undefined reference). Only `style:` accepts a text value. Pinned svelte@5.56.10:
     // `$.set_style(div, '', {}, { color: 'red' })`.
     let js = emit(
         "<script>let x = $state(0);</script>\n<div style:color=\"red\" onclick={() => x++}></div>\n",
@@ -3025,7 +3025,7 @@ fn style_directive_static_text_value_quotes_the_string() {
 #[test]
 fn style_directive_static_text_value_in_a_spread_fold_quotes_the_string() {
     // The same static-text style directive INSIDE a spread fold folds as the quoted
-    // `[$.STYLE]: { color: 'red' }`. Pinned svelte@5.56.3:
+    // `[$.STYLE]: { color: 'red' }`. Pinned svelte@5.56.10:
     // `$.attribute_effect(div, () => ({ ...p, [$.STYLE]: { color: 'red' } }))`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div {...p} style:color=\"red\"></div>\n",
@@ -3051,7 +3051,7 @@ fn valueless_attribute_in_a_spread_fold_emits_raw_true_not_an_empty_string() {
     // boolean `disabled: true` — NOT the empty-string `disabled: ''`. The IR carries the
     // value as `Option<StaticAttrValue>` where `None` is a valueless attribute; the fold
     // emits the bare `true` token for `None` (an empty-string value is a DIFFERENT IR
-    // shape — `Some("")` — covered below). Pinned svelte@5.56.3:
+    // shape — `Some("")` — covered below). Pinned svelte@5.56.10:
     // `$.attribute_effect(input, () => ({ ...props, disabled: true }), …, true)`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<input {...props} disabled />\n",
@@ -3076,7 +3076,7 @@ fn present_empty_string_attribute_in_a_spread_fold_stays_an_empty_string() {
     // A PRESENT-but-empty attribute (`disabled=""`, IR `Some(StaticAttrValue{value:""})`)
     // is DISTINCT from a valueless attribute: it folds as the empty-string `disabled: ''`,
     // NOT `disabled: true`. This pins the `None`-vs-`Some("")` boundary the valueless fix
-    // must preserve. Pinned svelte@5.56.3:
+    // must preserve. Pinned svelte@5.56.10:
     // `$.attribute_effect(input, () => ({ ...props, disabled: '' }), …, true)`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<input {...props} disabled=\"\" />\n",
@@ -3102,7 +3102,7 @@ fn input_spread_with_a_default_value_reset_attr_suppresses_the_trailing_tail() {
     // void 0, void 0, true`). The official compiler SUPPRESSES that tail when the input
     // carries an authored plain attribute named EXACTLY `defaultValue` (camelCase): the
     // reset attribute opts the element out of the value/defaultValue reset behavior the
-    // tail encodes. Pinned svelte@5.56.3:
+    // tail encodes. Pinned svelte@5.56.10:
     // `$.attribute_effect(input, () => ({ ...$$props.p, defaultValue: 'x' }));` (NO tail).
     let js = emit(
         "<script>let { p } = $props();</script>\n<input {...p} defaultValue=\"x\" />\n",
@@ -3125,7 +3125,7 @@ fn input_spread_with_a_default_value_reset_attr_suppresses_the_trailing_tail() {
 #[test]
 fn input_spread_with_a_default_checked_reset_attr_suppresses_the_trailing_tail() {
     // The same reset rule for a valueless `defaultChecked` (camelCase). Pinned
-    // svelte@5.56.3: `$.attribute_effect(input, () => ({ ...$$props.p, defaultChecked:
+    // svelte@5.56.10: `$.attribute_effect(input, () => ({ ...$$props.p, defaultChecked:
     // true }));` (NO tail).
     let js = emit(
         "<script>let { p } = $props();</script>\n<input {...p} defaultChecked />\n",
@@ -3147,7 +3147,7 @@ fn input_spread_with_a_default_checked_reset_attr_suppresses_the_trailing_tail()
 #[test]
 fn input_spread_with_a_lowercase_defaultvalue_keeps_the_trailing_tail() {
     // The reset-attribute match is CASE-SENSITIVE on the RAW authored name: a lowercase
-    // `defaultvalue` is NOT a reset attribute, so the tail STAYS. Pinned svelte@5.56.3:
+    // `defaultvalue` is NOT a reset attribute, so the tail STAYS. Pinned svelte@5.56.10:
     // `$.attribute_effect(input, () => ({ ...$$props.p, defaultvalue: 'x' }), void 0,
     // void 0, void 0, void 0, true);` (tail KEPT).
     let js = emit(
@@ -3167,7 +3167,7 @@ fn input_spread_with_a_lowercase_defaultvalue_keeps_the_trailing_tail() {
 fn input_spread_with_a_value_attr_keeps_the_trailing_tail() {
     // NEGATIVE control: a plain `value` attribute is NOT a reset attribute, so the tail
     // STAYS (only the camelCase `defaultValue` / `defaultChecked` suppress it). Pinned
-    // svelte@5.56.3 keeps the 7-argument tail.
+    // svelte@5.56.10 keeps the 7-argument tail.
     let js = emit(
         "<script>let { p } = $props();</script>\n<input {...p} value=\"x\" />\n",
         "App.svelte",
@@ -3186,7 +3186,7 @@ fn input_default_value_with_bind_value_emits_property_write_before_bind() {
     // A static `defaultValue` CO-LOCATED with a `bind:value` on an `<input>` IS a
     // supported surface: official emits the `input.defaultValue = 'x'` property write
     // BEFORE the bind, and the default attribute SUPPRESSES the `$.remove_input_defaults`
-    // prelude (the default is set explicitly). Verified against svelte@5.56.3:
+    // prelude (the default is set explicitly). Verified against svelte@5.56.10:
     //   input.defaultValue = 'x';
     //   $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value));
     // RED against the pre-fix classifier, which fell `defaultValue` through to the
@@ -3223,7 +3223,7 @@ fn input_default_value_with_bind_value_emits_property_write_before_bind() {
 fn input_default_value_after_bind_still_emits_property_write_before_bind() {
     // Source attribute ORDER does not matter: `<input bind:value={v} defaultValue="x">`
     // (default attr AFTER the bind in source) still emits `input.defaultValue = 'x'` BEFORE
-    // the `$.bind_value` call. Verified against svelte@5.56.3 (identical output to the
+    // the `$.bind_value` call. Verified against svelte@5.56.10 (identical output to the
     // before-order case). RED would be an order-sensitive emission that placed the write
     // after the bind.
     let js = emit(
@@ -3244,7 +3244,7 @@ fn input_default_value_after_bind_still_emits_property_write_before_bind() {
 fn input_default_checked_with_bind_checked_emits_property_write_before_bind() {
     // A valueless static `defaultChecked` CO-LOCATED with a `bind:checked` on a
     // checkbox `<input>` IS supported: official emits `input.defaultChecked = true` BEFORE
-    // the bind, suppressing `$.remove_input_defaults`. Verified against svelte@5.56.3:
+    // the bind, suppressing `$.remove_input_defaults`. Verified against svelte@5.56.10:
     //   input.defaultChecked = true;
     //   $.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value));
     // RED against the pre-fix classifier (refused `defaultChecked` at the static-attr gate).
@@ -3277,7 +3277,7 @@ fn input_default_checked_with_bind_checked_emits_property_write_before_bind() {
 #[test]
 fn textarea_default_value_with_bind_value_emits_property_write_and_keeps_child_clear() {
     // A static `defaultValue` co-located with `bind:value` on a `<textarea>` IS
-    // supported. Verified against svelte@5.56.3: the `$.remove_textarea_child` prelude is
+    // supported. Verified against svelte@5.56.10: the `$.remove_textarea_child` prelude is
     // NOT suppressed (only `$.remove_input_defaults` is), and the property write lands
     // between the child-clear and the bind:
     //   $.remove_textarea_child(textarea);
@@ -3320,7 +3320,7 @@ fn standalone_default_value_without_bind_still_fails_closed() {
 fn standalone_default_checked_without_bind_still_fails_closed() {
     // F3 NEGATIVE control (DEFER-NEW, D-27): a standalone `defaultChecked` with NO matching
     // `bind:checked` STAYS fail-closed at the static-attr allowlist (`DynamicAttribute { name:
-    // "defaultChecked" }`). Official svelte@5.56.3 ACCEPTS it (oracle-verified: emits
+    // "defaultChecked" }`). Official svelte@5.56.10 ACCEPTS it (oracle-verified: emits
     // `input.defaultChecked = true;`), but standalone form-default PROPERTY-attribute emission
     // is OUT of the DOM-bind backend's ordinary-DOM `bind:*` charter (D-27). The acceptance is gated on a
     // co-located MATCHING bind, so a bare `<input defaultChecked>` is NOT whitelisted. RED
@@ -3379,7 +3379,7 @@ fn html_paren_member_callee_emits_source_preserving_thunk() {
 fn html_bare_identifier_call_elides_to_the_bare_callee() {
     // A bare-identifier `{@html render()}` (a direct, non-optional, zero-arg identifier call
     // whose callee rewrites UNCHANGED) ELIDES the `() => …` thunk to the bare callee `render`.
-    // Pinned svelte@5.56.3: `$.html(div, render, true)`.
+    // Pinned svelte@5.56.10: `$.html(div, render, true)`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div>{@html render()}</div>\n",
         "App.svelte",
@@ -3475,7 +3475,7 @@ fn valueless_class_base_in_set_class_emits_raw_true_not_an_empty_string() {
     // A VALUELESS `class` attribute consumed as the `$.set_class` BASE value (`<div class
     // class:on={x}>`) emits the RAW boolean `true` as the base argument — NOT `''`. The
     // valueless `class` carries `value: None`, so the base is `true`, mirroring the spread
-    // fold. Pinned svelte@5.56.3:
+    // fold. Pinned svelte@5.56.10:
     // `$.set_class(div, 1, true, null, classes, { on: $.get(x) })`.
     let js = emit(
         "<script>let x = $state(0);</script>\n<div class class:on={x} onclick={() => x++}></div>\n",
@@ -3499,7 +3499,7 @@ fn valueless_class_base_in_set_class_emits_raw_true_not_an_empty_string() {
 fn valueless_style_base_in_set_style_emits_raw_true_not_an_empty_string() {
     // A VALUELESS `style` attribute consumed as the `$.set_style` BASE value (`<div style
     // style:color={x}>`) emits the RAW boolean `true` as the base argument — NOT `''`.
-    // Pinned svelte@5.56.3: `$.set_style(div, true, styles, { color: $.get(x) })`.
+    // Pinned svelte@5.56.10: `$.set_style(div, true, styles, { color: $.get(x) })`.
     let js = emit(
         "<script>let x = $state(0);</script>\n<div style style:color={x} onclick={() => x++}></div>\n",
         "App.svelte",
@@ -3522,7 +3522,7 @@ fn html_paren_wrapped_direct_call_payload_elides_the_thunk_to_the_bare_callee() 
     // transparent author parens) STILL elides the thunk to the bare callee `render` — the
     // parens are peeled off the OXC `ParenthesizedExpression` callee before the
     // identifier-call check (the same transparent-paren peel the spread-operand path does).
-    // Pinned svelte@5.56.3: `$.html(div, render, true)` (parens gone).
+    // Pinned svelte@5.56.10: `$.html(div, render, true)` (parens gone).
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div>{@html (render)()}</div>\n",
         "App.svelte",
@@ -3542,7 +3542,7 @@ fn html_paren_wrapped_direct_call_payload_elides_the_thunk_to_the_bare_callee() 
 #[test]
 fn html_double_paren_wrapped_direct_call_payload_elides_the_thunk() {
     // A `{@html ((render))()}` (a doubly-paren-wrapped callee) ALSO elides — the peel
-    // walks through EVERY transparent `ParenthesizedExpression`. Pinned svelte@5.56.3:
+    // walks through EVERY transparent `ParenthesizedExpression`. Pinned svelte@5.56.10:
     // `$.html(div, render, true)`.
     let js = emit(
         "<script>let __rune = $state(0);</script>\n<div>{@html ((render))()}</div>\n",
@@ -3566,7 +3566,7 @@ fn html_paren_wrapped_prop_call_payload_thunks_the_rewritten_callee_without_auth
     // elide (the callee rewrites to the member `$$props.render`), so it stays a THUNK — but
     // the thunk renders the REWRITTEN CALLEE CALL `() => $$props.render()`, NOT the blind
     // whole-source rewrite `() => ($$props.render)()` (which would keep the author parens).
-    // Pinned svelte@5.56.3: `$.html(div, () => $$props.render(), true)`.
+    // Pinned svelte@5.56.10: `$.html(div, () => $$props.render(), true)`.
     let js = emit(
         "<script>let { render } = $props()</script>\n<div>{@html (render)()}</div>\n",
         "App.svelte",
@@ -3594,7 +3594,7 @@ fn class_directive_static_text_value_refuses_as_invalid_directive_value() {
     // A `class:on="x"` (a static-TEXT CLASS directive value) is an OFFICIAL COMPILE ERROR
     // (`directive_invalid_value`): a directive value must be a JS expression in curly
     // braces; ONLY `style:` accepts a static-text value. Verter must REFUSE on the
-    // official-reject rail (never emit `{ on: 'x' }`). Pinned svelte@5.56.3 throws
+    // official-reject rail (never emit `{ on: 'x' }`). Pinned svelte@5.56.10 throws
     // `directive_invalid_value` at the parse phase.
     let err = emit_result(
         "<script>let x = $state(0);</script>\n<div class:on=\"x\" onclick={() => x++}></div>\n",
@@ -3671,7 +3671,7 @@ fn props_rest_element_spread_lowers_to_attribute_effect() {
     // the element-spread `$.attribute_effect(div, () => ({ ...rest }))` fold, with
     // the hoisted `rest_excludes` Set (prefix + `a`). The bare `rest` flows through
     // the spread verbatim (a real local), and an element SPREAD opens NO context
-    // frame. Verified against svelte@5.56.3.
+    // frame. Verified against svelte@5.56.10.
     let js = emit(
         "<script>let { a, ...rest } = $props()</script>\n<div {...rest}></div>\n",
         "App.svelte",
@@ -3774,7 +3774,7 @@ fn spread_element_with_event_still_refuses() {
 
 #[test]
 fn no_value_radio_group_bind_still_declares_binding_group() {
-    // FIX 3: a `bind:group` WITHOUT a `value` attr. Official svelte@5.56.3 STILL
+    // FIX 3: a `bind:group` WITHOUT a `value` attr. Official svelte@5.56.10 STILL
     // declares `const binding_group = []` and calls `$.bind_group(binding_group,
     // [], input, get, set)` (verified against the pinned compiler). Verter declared
     // `binding_group` ONLY when `group_values` was non-empty (the static-value
@@ -3878,7 +3878,7 @@ fn radio_group_bind_emits_component_fn_scoped_binding_group_and_per_input_value(
 fn quoted_bind_value_function_pair_still_emits_bind_value() {
     // A QUOTED single-expression function-pair (`bind:value="{get, set}"`, a `Mixed`
     // value) is official-VALID and emits `$.bind_value(input, get, set)` (verified
-    // svelte@5.56.3) — the bind-expr lowering unwraps the quoted single-`{…}` inner, so
+    // svelte@5.56.10) — the bind-expr lowering unwraps the quoted single-`{…}` inner, so
     // the function-pair classification is identical to the bare form. This is the
     // POSITIVE CONTROL for FIX 1: the Mixed-aware group-reject gate + the defensive
     // identifier/member-only classifier check must NOT over-refuse a NON-group quoted
@@ -3904,7 +3904,7 @@ fn bind_group_accumulator_renames_on_user_binding_collision() {
     // FIX 2: the `bind:group` accumulator must be allocated through the SAME seeded,
     // collision-aware name allocator the DOM-var stems use — NOT a hardcoded
     // `binding_group` constant. When the user declares their OWN `binding_group`,
-    // official svelte@5.56.3 renames the accumulator to `binding_group_1` (keeping the
+    // official svelte@5.56.10 renames the accumulator to `binding_group_1` (keeping the
     // user's `binding_group`); verified shape:
     //   let binding_group = 0;
     //   const binding_group_1 = [];
@@ -3976,7 +3976,7 @@ fn bind_group_accumulator_keeps_binding_group_without_collision() {
 #[test]
 fn independent_bind_groups_get_distinct_accumulators_in_source_order() {
     // FIX 1 (R3c): two INDEPENDENT radio groups (`bind:group={a}` ×2, `bind:group={b}` ×2)
-    // must each get their OWN accumulator. Official svelte@5.56.3 emits `const binding_group =
+    // must each get their OWN accumulator. Official svelte@5.56.10 emits `const binding_group =
     // []` AND `const binding_group_1 = []` — ONE accumulator per DISTINCT bound group target,
     // allocated in SOURCE ORDER (the first-appearing group is `binding_group`, the next
     // `binding_group_1`); inputs sharing a target share one. The `a`-inputs reference
@@ -4070,7 +4070,7 @@ fn bind_group_keypath_is_whitespace_and_operator_insensitive() {
     // WHITESPACE-insensitive), NOT a raw-source compare. Two computed-member group
     // targets with a NON-TRIVIAL index that the previous `target_keypath` could not
     // serialize (`g[i+j]`) fell back to the trimmed SOURCE, so a whitespace or
-    // operator difference split them into TWO accumulators. Official svelte@5.56.3
+    // operator difference split them into TWO accumulators. Official svelte@5.56.10
     // shares ONE accumulator for `g[i+j]` / `g[i + j]` (whitespace) AND `g[i+j]` /
     // `g[i*j]` (operators are not part of the identifier keypath `g.i.j`).
     //
@@ -4122,7 +4122,7 @@ fn bind_group_keypath_is_whitespace_and_operator_insensitive() {
 fn bind_group_keypath_distinguishes_static_member_from_computed_string() {
     // Finding A (R4): the structural keypath PRESERVES the distinctions official keeps.
     // `a.x` (static member, keypath `a.x`) and `a["x"]` (computed string index, keypath
-    // `a.["x"]`) are DISTINCT group identities in svelte@5.56.3 → TWO accumulators. The
+    // `a.["x"]`) are DISTINCT group identities in svelte@5.56.10 → TWO accumulators. The
     // keypath must NOT canonicalize the two member forms together.
     let js = emit(
         "<script>let a = $state(0);</script>\n\
@@ -4149,7 +4149,7 @@ fn bind_group_keypath_distinguishes_static_member_from_computed_string() {
 #[test]
 fn element_bind_this_function_pair_emits_direct_bind_this() {
     // Finding C (R4): an INTRINSIC element `bind:this={get, set}` (a getter/setter
-    // function-pair) is IN the DOM-bind backend's scope. Official svelte@5.56.3 accepts it and emits
+    // function-pair) is IN the DOM-bind backend's scope. Official svelte@5.56.10 accepts it and emits
     // `$.bind_this(div, <set>, <get>)` — the user-supplied get/set passed DIRECTLY (setter
     // slot FIRST, getter slot SECOND), NO synthesized `($$value) =>` / `() =>` thunk wrapper.
     //
@@ -4247,7 +4247,7 @@ fn component_bind_this_function_pair_emits_get_set_args() {
 #[test]
 fn shared_bind_group_target_shares_one_accumulator() {
     // FIX 1 (R3c): two inputs binding the SAME group target (`bind:group={g}` ×2) share ONE
-    // accumulator — official svelte@5.56.3 emits a single `const binding_group = []` and both
+    // accumulator — official svelte@5.56.10 emits a single `const binding_group = []` and both
     // `$.bind_group` calls reference it. The distinct-group key is the structural bind target +
     // scope, so the same target collapses to one slot (the positive control that the per-group
     // accumulator does NOT over-split a shared target).
@@ -4296,7 +4296,7 @@ fn independent_bind_groups_renumber_past_a_user_binding_group_collision() {
     // FIX 1 (R3c) × FIX-R3b: with a user-declared `binding_group` AND two INDEPENDENT groups,
     // the collision-aware/seeded allocator bumps BOTH accumulators (`binding_group_1` /
     // `binding_group_2`) past the user's `binding_group`, each group still wired to its own.
-    // Verified against svelte@5.56.3:
+    // Verified against svelte@5.56.10:
     //   const binding_group_1 = [];
     //   const binding_group_2 = [];
     //   let binding_group = 0;
@@ -4349,7 +4349,7 @@ fn radio_group_bind_entity_decodes_the_static_value_attr() {
     // The static `bind:group` `value` attribute is ENTITY-DECODED before the
     // `input.value = input.__value` write — official runs the static value through the
     // attribute-value entity decoder, exactly like every other static attribute. Verified
-    // against svelte@5.56.3 for `value="a&amp;b"`:
+    // against svelte@5.56.10 for `value="a&amp;b"`:
     //   input.value = input.__value = 'a&b';
     // RED against the pre-fix tree, which stored the RAW attribute span and quoted it
     // directly as `'a&amp;b'` (the entity left un-decoded).
@@ -4371,7 +4371,7 @@ fn radio_group_bind_entity_decodes_the_static_value_attr() {
 #[test]
 fn checked_bind_now_emits_remove_input_defaults_and_bind_checked() {
     // DOM-bind backend — `bind:checked` on an `<input type="checkbox">` EMITS (it used to fail
-    // closed). The pinned svelte@5.56.3 shape (oracle CASE `checked`) is
+    // closed). The pinned svelte@5.56.10 shape (oracle CASE `checked`) is
     // `$.remove_input_defaults(input)` then `$.bind_checked(input, () => $.get(c),
     // ($$value) => $.set(c, $$value))`. RED against the pre-DOM-bind tree (which refused it).
     let js = emit(
@@ -4397,7 +4397,7 @@ fn checked_bind_now_emits_remove_input_defaults_and_bind_checked() {
 // ── FIX 2: official HOST-ATTRIBUTE gates (typed-IR driven) ─────────────────────
 //
 // Several binds are valid ONLY when the host element carries a specific STATIC
-// attribute; official svelte@5.56.3 raises a COMPILE ERROR otherwise. The runtime
+// attribute; official svelte@5.56.10 raises a COMPILE ERROR otherwise. The runtime
 // router only sees `(name, tag)`, so it would accept these invalid binds and emit
 // a divergent / runtime-broken module. The classifier now inspects the host's
 // typed `ElementIr` attributes (NEVER a source-text scan) to enforce the gates.
@@ -4524,7 +4524,7 @@ fn bind_inner_html_with_static_contenteditable_value_still_emits() {
 fn bind_select_value_with_dynamic_multiple_fails_closed() {
     // Official: "'multiple' attribute must be static if select uses two-way
     // binding". A DYNAMIC `<select multiple={m} bind:value>` fails closed,
-    // independent of the value type (verified against svelte@5.56.3 with a string
+    // independent of the value type (verified against svelte@5.56.10 with a string
     // `$state` value). A primitive `$state('')` value reaches the bind gate (an
     // array `$state` would fail at the script gate first); the dynamic `multiple`
     // is the surface under test. RED before the fix (Verter accepted it — routing
@@ -4538,7 +4538,7 @@ fn bind_select_value_with_dynamic_multiple_fails_closed() {
 #[test]
 fn bind_select_value_with_static_multiple_still_emits() {
     // POSITIVE: a STATIC `multiple` with `bind:value` is valid — official emits
-    // `$.bind_select_value` (verified against svelte@5.56.3 with a string value).
+    // `$.bind_select_value` (verified against svelte@5.56.10 with a string value).
     // The gate must not over-refuse the static form.
     let js = emit(
         "<script>let v = $state(\"\");</script>\n<select multiple bind:value={v}><option>a</option></select>\n",
@@ -4565,7 +4565,7 @@ fn bind_select_value_single_still_emits() {
 
 // ── official `<input type>` requirement for EVERY input bind (typed-IR driven) ──
 //
-// official svelte@5.56.3: "'type' attribute must be a static text value if input
+// official svelte@5.56.10: "'type' attribute must be a static text value if input
 // uses two-way binding". For an `<input>` bind, a `type` attribute — when PRESENT —
 // must be a STATIC TEXT VALUE (`Static(Some)`). A valueless `type` (`Static(None)`)
 // is invalid for EVERY input bind; a DYNAMIC `type={t}` is invalid for every input
@@ -4635,7 +4635,7 @@ fn bind_indeterminate_with_valueless_type_fails_closed() {
 fn bind_value_with_dynamic_type_still_emits() {
     // POSITIVE control: `<input type={t} bind:value={v}>` (DYNAMIC type) → OK
     // (official emits `$.bind_value`). A dynamic type is ALLOWED for `bind:value`
-    // specifically; the gate must not over-refuse it. Verified against svelte@5.56.3.
+    // specifically; the gate must not over-refuse it. Verified against svelte@5.56.10.
     let js = emit(
         "<script>let v = $state(\"\"); let t = $state(\"text\");</script>\n<input type={t} bind:value={v} />\n",
         "App.svelte",
@@ -4664,7 +4664,7 @@ fn bind_value_with_no_type_still_emits() {
 fn bind_group_with_static_radio_type_still_emits() {
     // POSITIVE control: `<input type="radio" bind:group={g} value="a">` (STATIC
     // type) → OK (official emits `$.bind_group`). The gate must not over-refuse the
-    // valid static-type form. Verified against svelte@5.56.3.
+    // valid static-type form. Verified against svelte@5.56.10.
     let js = emit(
         "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n",
         "App.svelte",
@@ -4689,7 +4689,7 @@ fn bind_checked_with_entity_encoded_checkbox_type_still_emits() {
     // POSITIVE: `<input type="check&#98;ox" bind:checked={c}>` → the static `type`
     // decodes to `"checkbox"`, so official ACCEPTS it and emits `$.bind_checked`.
     // RED before the fix (the raw compare `"check&#98;ox" == "checkbox"` fails
-    // closed). Verified against svelte@5.56.3.
+    // closed). Verified against svelte@5.56.10.
     let js = emit(
         "<script>let c = $state(false);</script>\n<input type=\"check&#98;ox\" bind:checked={c} />\n",
         "App.svelte",
@@ -4798,7 +4798,7 @@ fn bind_value_uninitialized_plain_local_ident_emits_plain_ident_lvalue() {
     // An UNINITIALIZED plain-local bind target (`let v;`, never a rune) is a
     // supported DOM-bind target — official keeps the bare local verbatim and emits the
     // plain read/write closures `$.bind_value(input, () => v, ($$value) => v = $$value)`,
-    // identical to the initialized plain-local shape. Verified against svelte@5.56.3:
+    // identical to the initialized plain-local shape. Verified against svelte@5.56.10:
     //   let v;
     //   $.bind_value(input, () => v, ($$value) => v = $$value);
     // RED against the pre-fix tree, which admitted a no-init `let` ONLY for `bind:this`
@@ -4893,7 +4893,7 @@ fn bind_select_value_with_array_state_emits_proxy_signal() {
     // target. Once the object/array `$state` gate opens, the array `$state([])` is a
     // reassigned `StateProxy` (the two-way bind writes back the bare identifier), so it
     // emits `let v = $.state($.proxy([]))` + `$.bind_select_value(select, () => $.get(v),
-    // ($$value) => $.set(v, $$value))` — verified against svelte@5.56.3.
+    // ($$value) => $.set(v, $$value))` — verified against svelte@5.56.10.
     let js = emit(
         "<script>let v = $state([]);</script>\n<select multiple bind:value={v}><option>a</option></select>\n",
         "App.svelte",
@@ -4936,7 +4936,7 @@ fn bind_group_function_pair_refuses_while_non_group_function_pairs_emit() {
     // F1: `bind:group` is the SOLE identifier/member-only bind. A function-pair
     // (SequenceExpression) target on `bind:group` is the official `bind_group_invalid_expression`
     // reject — `bind:group` can only bind to an Identifier or MemberExpression (verified
-    // svelte@5.56.3: `<input type="radio" bind:group={() => g, (x) => g = x}>` →
+    // svelte@5.56.10: `<input type="radio" bind:group={() => g, (x) => g = x}>` →
     // `bind_group_invalid_expression`). RED before the fix: `bind:group` fail-OPENED, accepting
     // the function-pair as a clean FunctionPair like every other DOM bind. The exact official
     // code is asserted, not just "an error".
@@ -4987,7 +4987,7 @@ fn bind_value_named_function_pair_lowers_decls_and_passes_idents() {
     // `bind:x={get,set}` on DOM hosts. The function declarations are ADMITTED (their names
     // are exactly the function-pair-referenced set) and LOWERED with body signal reads /
     // writes rewritten; the bind passes the function IDENTS directly. Verified against
-    // svelte@5.56.3:
+    // svelte@5.56.10:
     //   function get() { return $.get(value); }
     //   function set(next) { $.set(value, next, true); }
     //   $.bind_value(input, get, set);
@@ -5024,7 +5024,7 @@ fn bind_value_named_function_pair_full_module_matches_official_structure() {
     // Full-module structural golden for the named-function-pair surface. Asserts the
     // load-bearing facts in source order: the state decl, BOTH lowered function
     // declarations (bodies rewritten), the `remove_input_defaults` prelude, and the
-    // `$.bind_value(input, get, set)` ident-passing call. Verified against svelte@5.56.3:
+    // `$.bind_value(input, get, set)` ident-passing call. Verified against svelte@5.56.10:
     //   let value = $.state(0);
     //   function get() { return $.get(value); }
     //   function set(next) { $.set(value, next, true); }
@@ -5151,7 +5151,7 @@ fn bind_open_inline_function_pair_passes_property_set_then_get() {
 #[test]
 fn bind_value_function_pair_with_ts_as_on_getter_fails_closed() {
     // A function-pair element carrying a TS `as` operator (`{get as any, set}`) is a
-    // plain-`.svelte` PARSE ERROR in official svelte@5.56.3 (`Expected token }`) — the
+    // plain-`.svelte` PARSE ERROR in official svelte@5.56.10 (`Expected token }`) — the
     // template expression is parsed as plain JS, so a TS operator anywhere in either
     // element fails. Verter parses the element with TSX leniency and would silently
     // STRIP the `as any`, accepting a form official rejects; the function-pair TS gate
@@ -5225,7 +5225,7 @@ fn bind_value_function_pair_with_nested_ts_in_arrow_body_fails_closed() {
 fn bind_value_function_pair_with_generic_arrow_param_fails_closed() {
     // A function-pair whose SETTER arrow carries a GENERIC type-parameter list with a
     // TRAILING comma (`<T,>(x) => …`) is a plain-`.svelte` PARSE ERROR in official
-    // svelte@5.56.3 (`Unexpected token`) — a type-parameter declaration is TS syntax.
+    // svelte@5.56.10 (`Unexpected token`) — a type-parameter declaration is TS syntax.
     // A CONSTRAINT-LESS `<T,>` carries NO `TSType` inside it (the param has no
     // `constraint`/`default`), so the type-`TSType` hook alone misses it; the gate must
     // flag the `TSTypeParameterDeclaration` node directly. RED before the
@@ -5264,7 +5264,7 @@ fn bind_value_function_pair_with_multi_generic_arrow_param_fails_closed() {
 #[test]
 fn bind_value_function_pair_with_optional_setter_param_fails_closed() {
     // A function-pair whose SETTER arrow has an OPTIONAL parameter (`(x?) => …`) is a
-    // plain-`.svelte` PARSE ERROR in official svelte@5.56.3 (`Unexpected token`) — the
+    // plain-`.svelte` PARSE ERROR in official svelte@5.56.10 (`Unexpected token`) — the
     // `?` optional marker is TS-only param syntax. OXC parses it CLEANLY under TSX
     // leniency (`optional = true`, NO recovery diagnostic), so the element reaches the
     // function-pair TS scan and would otherwise be silently accepted with the `?`
@@ -5291,7 +5291,7 @@ fn bind_value_function_pair_with_optional_getter_param_fails_closed() {
 #[test]
 fn bind_value_function_pair_with_readonly_param_fails_closed() {
     // A function-pair whose setter arrow has a `readonly` param-property MODIFIER
-    // (`(readonly x) => …`) is a plain-`.svelte` PARSE ERROR in official svelte@5.56.3
+    // (`(readonly x) => …`) is a plain-`.svelte` PARSE ERROR in official svelte@5.56.10
     // (`Unexpected token`) — a param modifier is TS parameter-property syntax. OXC does
     // NOT parse it cleanly: it recovers the node WITH a `'readonly' modifier cannot
     // appear on a parameter` diagnostic, so the template expression fails closed EARLY
@@ -5320,7 +5320,7 @@ fn bind_value_function_pair_with_readonly_param_fails_closed() {
 #[test]
 fn bind_value_function_pair_with_default_param_stays_accepted() {
     // POSITIVE CONTROL: a DEFAULT param (`(x = 1) => …`) is plain JS — official ACCEPTS
-    // it (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value), (x = 1) =>
+    // it (verified svelte@5.56.10: `$.bind_value(input, () => $.get(value), (x = 1) =>
     // $.set(value, x, true))`). The new `visit_formal_parameter` override must NOT
     // over-reject it (a default is the `initializer` field, not a TS field). The pair
     // stays accepted and emits the directly-passed rewritten get/set.
@@ -5337,7 +5337,7 @@ fn bind_value_function_pair_with_default_param_stays_accepted() {
 #[test]
 fn bind_value_function_pair_with_rest_param_stays_accepted() {
     // POSITIVE CONTROL: a REST param (`(...x) => …`) is plain JS — official ACCEPTS it
-    // (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value), (...x) =>
+    // (verified svelte@5.56.10: `$.bind_value(input, () => $.get(value), (...x) =>
     // $.set(value, x[0], true))`). The override must NOT over-reject it (rest is a
     // plain `pattern`, not a TS field).
     let js = emit(
@@ -5353,7 +5353,7 @@ fn bind_value_function_pair_with_rest_param_stays_accepted() {
 #[test]
 fn bind_value_function_pair_with_destructured_param_stays_accepted() {
     // POSITIVE CONTROL: a DESTRUCTURED param (`({a}) => …`) is plain JS — official
-    // ACCEPTS it (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value),
+    // ACCEPTS it (verified svelte@5.56.10: `$.bind_value(input, () => $.get(value),
     // ({ a }) => $.set(value, a, true))`). The override must NOT over-reject it
     // (destructuring is a plain `pattern`, not a TS field). Verter passes the setter
     // through with its own carrier whitespace (`({a})` vs official's `({ a })`) — an
@@ -5375,7 +5375,7 @@ fn bind_value_clean_inline_function_pair_stays_accepted_control() {
     // inline function-pair (no TS construct in either element) MUST stay accepted and
     // emit the directly-passed rewritten get/set — the TS gate (including the new
     // type-parameter-declaration flag) must NOT over-refuse a plain pair. Verified
-    // against svelte@5.56.3: `$.bind_value(input, () => $.get(v), ($$value) => $.set(v,
+    // against svelte@5.56.10: `$.bind_value(input, () => $.get(v), ($$value) => $.set(v,
     // $$value))` for a bare `value = x` setter.
     let js = emit(
         "<script>let v = $state(\"\");</script>\n<input bind:value={() => v, (x) => v = x} />\n",
@@ -5400,8 +5400,8 @@ fn bind_value_clean_inline_function_pair_stays_accepted_control() {
 // plain Svelte JS (`SourceType::mjs()`), the exact two-element sequence shape is
 // validated, and a strict official-delta scan refuses the OXC-mjs-over-Acorn residual
 // (TS-only class/member fields + decorators + implements/type-params + accessor) that
-// official svelte@5.56.3 REJECTS but OXC's plain-JS parse tolerates. Every outcome below
-// is oracle-verified against pinned svelte@5.56.3.
+// official svelte@5.56.10 REJECTS but OXC's plain-JS parse tolerates. Every outcome below
+// is oracle-verified against pinned svelte@5.56.10.
 
 /// Assert a function-pair bind source FAILS CLOSED (no module emitted), via the typed
 /// `Binding` unsupported-surface — the form reached the bind classifier (it parses
@@ -5424,7 +5424,7 @@ fn assert_function_pair_binding_refused(source: &str) {
 /// Assert a function-pair bind source FAILS CLOSED via the upstream expr-parse channel —
 /// the element is a plain-`.svelte` PARSE ERROR even under OXC's tsx leniency (e.g.
 /// `abstract` in an expression-position class), so the template expression fails at the
-/// `svelte-runtime-expr-parse` gate BEFORE the bind classifier. Official svelte@5.56.3
+/// `svelte-runtime-expr-parse` gate BEFORE the bind classifier. Official svelte@5.56.10
 /// likewise REJECTS it (`Expected token }` / `Unexpected token`).
 fn assert_function_pair_expr_parse_refused(source: &str) {
     match emit_result(source) {
@@ -5445,7 +5445,7 @@ fn assert_function_pair_expr_parse_refused(source: &str) {
 fn bind_value_function_pair_with_class_accessibility_field_getter_fails_closed() {
     // A function-pair GETTER carrying a class with a TS accessibility modifier
     // (`{class C { public x = 1 }, set}`) is a plain-`.svelte` PARSE ERROR in official
-    // svelte@5.56.3 (`Unexpected token`) — `public`/`private`/`protected` are TS-only
+    // svelte@5.56.10 (`Unexpected token`) — `public`/`private`/`protected` are TS-only
     // class-member syntax. OXC's plain-JS (`mjs`) parse TOLERATES it (populating
     // `PropertyDefinition.accessibility`) WITHOUT a `TSType` node, so the pre-fix
     // enumerated scan (which only watched `TSType`/`TSNonNull`/type-param/formal-param
@@ -5592,7 +5592,7 @@ fn bind_value_function_pair_with_abstract_member_fails_closed() {
 #[test]
 fn bind_value_function_pair_with_plain_class_getter_stays_accepted() {
     // POSITIVE CONTROL: a plain `class C {}` with NO TS modifiers is plain JS — official
-    // ACCEPTS it (verified svelte@5.56.3: `$.bind_value(input, class C {}, (x) =>
+    // ACCEPTS it (verified svelte@5.56.10: `$.bind_value(input, class C {}, (x) =>
     // $.set(v, x, true))`). The strict-delta scan must NOT over-reject a clean class
     // (the carrier-stop is for TS-only fields, not the class construct itself). The pair
     // stays accepted; the class getter passes through the plain-JS rewrite lane
@@ -5632,7 +5632,7 @@ fn bind_value_function_pair_with_plain_class_members_stays_accepted() {
 #[test]
 fn bind_value_function_pair_with_optional_chaining_getter_stays_accepted() {
     // POSITIVE CONTROL: optional chaining (`a?.b`) is plain JS — official ACCEPTS it
-    // (verified svelte@5.56.3: `$.bind_value(input, a?.b, (x) => $.set(v, x, true))`).
+    // (verified svelte@5.56.10: `$.bind_value(input, a?.b, (x) => $.set(v, x, true))`).
     // The strict-delta scan must NOT confuse the JS optional-chaining `?.` operator
     // (a `MemberExpression.optional` field) with the TS optional-member `?` marker
     // (a `PropertyDefinition.optional` field) — only the latter is flagged.
@@ -5670,7 +5670,7 @@ fn bind_value_function_pair_tag_type_arg_is_not_ts_stripped() {
     // ``tag<string>`x` `` as a tagged template whose `<string>` is TS type arguments;
     // the TS strip then removes them, corrupting the expression to ``tag`x` `` — a
     // BEHAVIORAL change (a relational compare becomes a tagged-template call). Official
-    // svelte@5.56.3 parses it as plain JS and emits the RELATIONAL form
+    // svelte@5.56.10 parses it as plain JS and emits the RELATIONAL form
     // (`$.bind_value(input, tag < string > `x`, …)`), keeping the `<string>` operands.
     // The plain-JS rewrite lane must reproduce that (Verter keeps the author's
     // no-whitespace bytes `tag<string>`x``), and MUST NOT emit the stripped ``tag`x` ``.
@@ -5698,7 +5698,7 @@ fn bind_value_function_pair_tag_type_arg_is_not_ts_stripped() {
 
 #[test]
 fn bind_value_member_of_import_admitted_with_frame() {
-    // A MEMBER of an import is an ACCEPTED bind lvalue — official svelte@5.56.3
+    // A MEMBER of an import is an ACCEPTED bind lvalue — official svelte@5.56.10
     // emits the plain member closures `$.bind_value(input, () => store.x,
     // ($$value) => store.x = $$value)` AND the member read opens the component
     // context frame (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
@@ -6393,7 +6393,7 @@ fn import_redeclaration_rejects_with_official_parse_parity() {
 fn cross_script_redeclaration_rejects_with_exact_official_codes() {
     // A binding declared in BOTH `<script>` slots — the per-body parse probe cannot
     // see it (each body parses clean alone), so it is the component-level
-    // DeclarationDuplicate scan's. Official svelte@5.56.3 rejects each with an EXACT
+    // DeclarationDuplicate scan's. Official svelte@5.56.10 rejects each with an EXACT
     // code (oracle-probed): an instance value declaration over a MODULE import is
     // `declaration_duplicate_module_import`; an instance import colliding with a
     // module-slot binding is `declaration_duplicate` (the binder hoists the instance
@@ -6636,7 +6636,7 @@ fn component_prop_value_from_import_emits_the_getter_form() {
     // A component-prop value reading an IMPORT (`b={x}`) `has_state` (imports are
     // live bindings, not statically known), so official emits the GETTER accessor
     // `get b() { return x; }` — never the plain init `b: x` (oracle-verified
-    // against svelte@5.56.3).
+    // against svelte@5.56.10).
     let js = emit(
         "<script>import Child from './Child.svelte'; import { x } from './m.js'; let c = $state(0);</script>\n<Child b={x} />\n<button onclick={() => c++}>{c}</button>\n",
         "App.svelte",
@@ -6655,7 +6655,7 @@ fn component_prop_value_from_import_emits_the_getter_form() {
 fn dynamic_attr_from_import_joins_the_template_effect() {
     // `disabled={x}` from an import is REACTIVE (imports are live bindings): the
     // property write joins the `$.template_effect`, read plain — never a one-shot
-    // init, never `$.get` (oracle-verified against svelte@5.56.3).
+    // init, never `$.get` (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<script>import { x } from './m.js'; let c = $state(0);</script>\n<button disabled={x} onclick={() => c++}>{c}</button>\n",
         "App.svelte",
@@ -6758,7 +6758,7 @@ fn svelte_self_special_emits_a_recursive_call() {
 
 #[test]
 fn render_spread_argument_fails_closed_for_every_callee() {
-    // Official `svelte@5.56.3` HARD-ERRORS on a SPREAD argument in a `{@render …}` tag
+    // Official `svelte@5.56.10` HARD-ERRORS on a SPREAD argument in a `{@render …}` tag
     // (`render_tag_invalid_spread_argument`: "cannot use spread arguments in {@render
     // ...} tags"). Verter must FAIL CLOSED with the typed component/snippet refusal —
     // never silently DROP the spread and emit a wrong-arity `$.snippet(node, () => row)`
@@ -6813,7 +6813,7 @@ fn render_non_spread_argument_still_emits_a_snippet_call() {
 #[test]
 fn render_parenthesized_whole_call_spread_fails_closed() {
     // The render-spread refusal is closed over OUTER author parentheses wrapping the WHOLE
-    // call: official `svelte@5.56.3` HARD-ERRORS on the spread
+    // call: official `svelte@5.56.10` HARD-ERRORS on the spread
     // (`render_tag_invalid_spread_argument`) no matter how many parens wrap the call, so a
     // parenthesized whole call must FAIL CLOSED exactly like the bare form — never peel to a
     // non-call node and silently DROP the spread into a wrong-arity `$.snippet(node, () =>
@@ -6881,7 +6881,7 @@ fn render_array_internal_spread_argument_still_emits() {
 
 #[test]
 fn svelte_self_root_placement_fails_closed() {
-    // Official `svelte@5.56.3` HARD-ERRORS on a `<svelte:self>` with NO allowed enclosing
+    // Official `svelte@5.56.10` HARD-ERRORS on a `<svelte:self>` with NO allowed enclosing
     // context (`svelte_self_invalid_placement`: it may only exist inside {#if}/{#each}/
     // {#snippet} blocks or slots passed to components). A ROOT `<svelte:self>` — bare OR
     // `bind:this` — must FAIL CLOSED with the typed component/snippet refusal, never emit
@@ -7075,7 +7075,7 @@ fn a_member_bind_rooted_at_an_each_item_is_accepted_for_a_component_bind() {
     // The COMPONENT-bind sibling of `a_member_bind_rooted_at_an_each_item_is_accepted_by_official`:
     // official ACCEPTS a member-rooted bind on a custom component the same way it accepts one on
     // a DOM element — `<Child bind:value={item.x}/>` inside an `{#each}` is a plain deep-write
-    // through the item's own referenced value (oracle-verified against svelte@5.56.8, cosmetic
+    // through the item's own referenced value (oracle-verified against svelte@5.56.10, cosmetic
     // formatting aside):
     //   get value() { return item.x; }
     //   set value($$value) { item.x = $$value; }
@@ -7103,7 +7103,7 @@ fn a_member_bind_rooted_at_an_each_item_is_accepted_for_a_component_bind() {
 fn a_member_bind_rooted_at_a_snippet_param_is_accepted() {
     // A member bind rooted at a `{#snippet}` PARAMETER (`item`) is a plain deep-write
     // through the parameter's own referenced value — official ACCEPTS
-    // `bind:value={item.x}` (oracle-verified against svelte@5.56.8).
+    // `bind:value={item.x}` (oracle-verified against svelte@5.56.10).
     let js = emit_result(
         "<script>let items = $state([{x:'a'}]);</script>\n{#snippet row(item)}<input bind:value={item.x}/>{/snippet}\n{@render row(items[0])}\n",
     )
@@ -7127,7 +7127,7 @@ fn a_member_bind_rooted_at_a_snippet_param_is_accepted() {
 fn a_member_bind_rooted_at_an_each_destructured_field_is_accepted() {
     // A member bind rooted at an `{#each items as {x}}` DESTRUCTURED FIELD (`x`) is a
     // plain deep-write through the field's own referenced value — official ACCEPTS
-    // `bind:value={x.y}` (oracle-verified against svelte@5.56.8).
+    // `bind:value={x.y}` (oracle-verified against svelte@5.56.10).
     let js = emit_result(
         "<script>let items = $state([{x:{y:'a'}}]);</script>\n{#each items as {x}}<input bind:value={x.y}/>{/each}\n",
     )
@@ -7147,7 +7147,7 @@ fn a_member_bind_rooted_at_an_each_destructured_field_is_accepted() {
 fn a_member_bind_rooted_at_an_await_then_binding_is_accepted() {
     // A member bind rooted at an `{#await p then item}` binding is a plain deep-write
     // through the item's own referenced value — official ACCEPTS `bind:value={item.x}`
-    // (oracle-verified against svelte@5.56.8).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit_result(
         "<script>let p = Promise.resolve({x:'a'});</script>\n{#await p then item}<input bind:value={item.x}/>{/await}\n",
     )
@@ -7169,7 +7169,7 @@ fn a_member_bind_rooted_at_an_await_then_binding_is_accepted() {
 fn a_member_bind_rooted_at_a_legacy_const_derived_binding_is_accepted() {
     // A member bind rooted at a `{@const alias = item}` derived local is a plain
     // deep-write through the alias's own referenced value — official ACCEPTS
-    // `bind:value={alias.x}` (oracle-verified against svelte@5.56.8).
+    // `bind:value={alias.x}` (oracle-verified against svelte@5.56.10).
     let js = emit_result(
         "<script>let items = $state([{x:'a'}]);</script>\n{#each items as item}{@const alias = item}<input bind:value={alias.x}/>{/each}\n",
     )
@@ -7195,7 +7195,7 @@ fn a_member_bind_rooted_at_a_derived_binding_is_accepted() {
     // $.derived(() => $$slotProps.item)`, `BindingRuntimeKind::SlotPropDerived` — the
     // same signal-read shape as a genuine `$derived(...)` rune declarator's `Derived`
     // kind, but a distinct kind at the bare-Identifier bind-writability gate —
-    // oracle-verified against svelte@5.56.8, `runes: true`):
+    // oracle-verified against svelte@5.56.10, `runes: true`):
     //   $.bind_value(input, () => $.get(item).x, ($$value) => $.get(item).x = $$value)
     // The exact same `$.get(root).field` shape already implemented for `AwaitSignal` /
     // `LegacyConstDerived` roots in this classifier.
@@ -7246,7 +7246,7 @@ fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
     // form, this construct DOES reach the Member-bind classifier carrying a real
     // `$derived(...)` rune, not a `let:`-slot-prop stand-in.
     //
-    // Oracle-verified against svelte@5.56.8, `runes: true` (`$state` in the same component
+    // Oracle-verified against svelte@5.56.10, `runes: true` (`$state` in the same component
     // forces runes mode): official ACCEPTS `bind:value={doubled.x}` and emits the identical
     // `$.get(root).field` read/write shape as the `let:` slot-prop and `{@const}` cases:
     //   $.bind_value(input, () => $.get(doubled).x, ($$value) => $.get(doubled).x = $$value)
@@ -7261,7 +7261,7 @@ fn a_member_bind_rooted_at_a_declaration_tag_derived_rune_is_accepted() {
         "a member bind on a declaration-tag $derived rune must read/write through $.get(doubled).x:\n{js}"
     );
     // POSITIVE: official also ACCEPTS a bare declaration-tag `$derived`-root identifier
-    // bind (svelte@5.56.8) and emits Svelte 5's "overridable derived" shape:
+    // bind (svelte@5.56.10) and emits Svelte 5's "overridable derived" shape:
     //   $.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))
     // This is the genuine-rune `Derived` kind, distinct from the `let:` slot-prop's
     // `SlotPropDerived` kind (which stays refused here — see
@@ -7281,7 +7281,7 @@ fn a_member_bind_rooted_at_an_import_is_accepted_for_a_component_bind() {
     // The COMPONENT-bind sibling of `bind_value_member_of_import_admitted_with_frame`:
     // official ACCEPTS `<Child bind:value={store.x}/>` the same way it accepts
     // `<input bind:value={store.x}/>` — a plain deep-write through the imported value's
-    // own referenced value (oracle-verified against svelte@5.56.8). Before the fix this
+    // own referenced value (oracle-verified against svelte@5.56.10). Before the fix this
     // REFUSED because `component_bind_root_is_writable`'s Member arm never ported the
     // DOM-bind Member arm's `root_is_import` OR-clause.
     //
@@ -7676,7 +7676,7 @@ fn svelte_element_class_directive_takes_set_class_fast_path() {
     // The official lone-class fast path fires WITH co-located `class:` directives: a
     // `<svelte:element class="card" class:active={x}>` emits the directive-object form
     // `$.set_class($$element, 0, 'card', null, {}, { active: x })` (verified against
-    // pinned svelte@5.56.3), NOT an `$.attribute_effect` fold with a `[$.CLASS]` entry.
+    // pinned svelte@5.56.10), NOT an `$.attribute_effect` fold with a `[$.CLASS]` entry.
     let js = emit(
         "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class=\"card\" class:active={x}>hi</svelte:element>\n",
         "App.svelte",
@@ -7719,7 +7719,7 @@ fn svelte_element_class_directive_takes_set_class_fast_path() {
 fn svelte_element_pure_class_directive_synthesizes_empty_class_base() {
     // A `class:` directive with NO class attribute synthesizes the empty class base
     // (official's analyze-phase empty-class synthesis): `$.set_class($$element, 0, '',
-    // null, {}, { active: x })` — verified against pinned svelte@5.56.3. NOT a bare
+    // null, {}, { active: x })` — verified against pinned svelte@5.56.10. NOT a bare
     // `[$.CLASS]` attribute_effect fold.
     let js = emit(
         "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class:active={x}>hi</svelte:element>\n",
@@ -7744,7 +7744,7 @@ fn svelte_element_reactive_class_directive_uses_accumulator_effect() {
     // A LIVE-signal `class:` directive on the fast path — official wraps the call in the
     // accumulator effect: `let classes;` + `$.template_effect(() => classes =
     // $.set_class($$element, 0, 'card', null, classes, { active: $.get(x) }))` (verified
-    // against pinned svelte@5.56.3), with the legacy `on:` registration AFTER the effect.
+    // against pinned svelte@5.56.10), with the legacy `on:` registration AFTER the effect.
     let js = emit(
         "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class=\"card\" class:active={x} on:click={() => (x = !x)}>hi</svelte:element>\n",
         "App.svelte",
@@ -7781,7 +7781,7 @@ fn svelte_element_mixed_case_class_takes_set_class_fast_path() {
     // Official matches the plain `class` attribute NAME case-insensitively
     // (`SvelteElement.js`: `attributes[0].name.toLowerCase() === 'class'`), so a
     // mixed-case `<svelte:element CLASS="card">` takes the lone-class fast path
-    // `$.set_class($$element, 0, 'card')` — verified against pinned svelte@5.56.3 —
+    // `$.set_class($$element, 0, 'card')` — verified against pinned svelte@5.56.10 —
     // NOT an `$.attribute_effect` fold carrying a case-preserved `CLASS: 'card'`.
     let js = emit(
         "<script>let tag = $state('div');</script>\n<svelte:element this={tag} CLASS=\"card\">hi</svelte:element>\n",
@@ -7836,7 +7836,7 @@ fn regular_element_mixed_case_class_merges_into_set_class_base() {
     // `normalize_attribute` before routing): `<div CLASS="card" class:active={x}>`
     // emits `$.set_class(div, 1, 'card', null, {}, { active: x })` with the class
     // PULLED OUT of the skeleton (`<div>hi</div>`) — verified against pinned
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let js = emit(
         "<script>let x = $state(false);</script>\n<div CLASS=\"card\" class:active={x}>hi</div>\n",
         "App.svelte",
@@ -7861,7 +7861,7 @@ fn regular_element_mixed_case_class_merges_into_set_class_base() {
 
 #[test]
 fn regular_element_uppercase_dynamic_class_pins_divergent_emission() {
-    // PINS A DIVERGENCE: official svelte@5.56.3 normalizes the HTML attribute name
+    // PINS A DIVERGENCE: official svelte@5.56.10 normalizes the HTML attribute name
     // (`get_attribute_name` → `normalize_attribute`, lowercase) BEFORE routing, so a
     // lone `<div CLASS={k}>` emits a SINGLE `$.set_class(div, 1, k)` — with NO
     // `$.clsx` (the clsx wrap is case-dependent: lowercase `class={k}` gets it,
@@ -7912,7 +7912,7 @@ fn regular_element_uppercase_dynamic_class_pins_divergent_emission() {
 
 #[test]
 fn regular_element_uppercase_static_lone_class_pins_fail_closed() {
-    // PINS A DIVERGENCE: official svelte@5.56.3 ACCEPTS a static lone uppercase
+    // PINS A DIVERGENCE: official svelte@5.56.10 ACCEPTS a static lone uppercase
     // `<div CLASS="card">` and bakes the LOWERCASED `class="card"` into the static
     // skeleton (`<div class="card">hi</div>`). Verter's static-attribute allowlist is
     // case-SENSITIVE, so the unrecognized uppercase spelling falls through to the
@@ -7958,7 +7958,7 @@ fn svelte_element_mixed_case_style_attr_suppresses_empty_style_synthesis() {
     // `<svelte:element STYLE="background: blue" style:color={c}>` folds WITHOUT a
     // synthesized `style: ''` entry: `$.attribute_effect($$element, () => ({ STYLE:
     // 'background: blue', [$.STYLE]: { color: c } }))` — the generic entry keeps the
-    // authored case — verified against pinned svelte@5.56.3.
+    // authored case — verified against pinned svelte@5.56.10.
     let js = emit(
         "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} STYLE=\"background: blue\" style:color={c}>hi</svelte:element>\n",
         "App.svelte",
@@ -8029,7 +8029,7 @@ fn svelte_element_style_directive_synthesizes_empty_style_fold_entry() {
     // analyze-phase synthesis), which routes the element to the FOLD even when the only
     // real attribute is a static-text class: `$.attribute_effect($$element, () => ({
     // class: 'x', style: '', [$.STYLE]: { color: c } }))` — verified against pinned
-    // svelte@5.56.3. The lone-class set_class fast path must NOT fire.
+    // svelte@5.56.10. The lone-class set_class fast path must NOT fire.
     let js = emit(
         "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} class=\"x\" style:color={c}>hi</svelte:element>\n",
         "App.svelte",
@@ -8068,7 +8068,7 @@ fn svelte_element_bind_this_precedes_the_attribute_fold() {
     // Official `<svelte:element>` setup order: `bind:this` is a REF CAPTURE pushed into
     // the init body DURING the attribute loop, so it precedes the `$.attribute_effect`
     // fold; measurement/property binds are `after_update` and FOLLOW the fold (verified
-    // against pinned svelte@5.56.3).
+    // against pinned svelte@5.56.10).
     let js = emit(
         "<script>let tag = $state('div');let w = $state(1);let el = $state(null);</script>\n<svelte:element this={tag} data-x={w} bind:this={el}>hi</svelte:element>\n",
         "App.svelte",
@@ -8267,7 +8267,7 @@ fn svelte_boundary_hoists_nonspecial_snippet_above_call() {
     // Official hoists ALL of a boundary's `{#snippet}` decls into the wrapping `{ … }` block
     // ABOVE the `$.boundary(...)` call — only `failed`/`pending` are boundary PROPS; every
     // other snippet (`foo`) is a hoisted const referenced from the body (`foo($$anchor)`),
-    // NOT a body-local const and NOT a prop. Verified against pinned svelte@5.56.3. The
+    // NOT a body-local const and NOT a prop. Verified against pinned svelte@5.56.10. The
     // unrelated `$state` pins runes mode.
     let js = emit(
         "<script>let k = $state(0);</script>\n<svelte:boundary>{#snippet failed(err)}<p>oops</p>{/snippet}{#snippet foo()}<span>F</span>{/snippet}{@render foo()}</svelte:boundary>\n",
@@ -8351,7 +8351,7 @@ fn svelte_boundary_member_rooted_attribute_emits_getter_prop() {
     // `failed={obj.failed}` over a PLAIN-LOCAL object (admitted as a DOM bind-target
     // root) — the MEMBER-ROOT half of official's `has_state` (`MemberExpression.js`
     // `!is_pure`): a member rooted at ANY declared binding is state-bearing, so the
-    // prop emits the GETTER member (verified against pinned svelte@5.56.3:
+    // prop emits the GETTER member (verified against pinned svelte@5.56.10:
     // `get failed() { return obj.failed; }`), NOT the plain `failed: obj.failed`
     // init. The unrelated `$state` pins runes mode.
     let js = emit(
@@ -8397,7 +8397,7 @@ fn svelte_boundary_mutation_attribute_emits_getter_prop() {
     // WRITE half of official's `has_state`: an assignment/update in the `failed={…}` value
     // is a mutation ⇒ has_state ⇒ the prop emits the GETTER accessor, not the plain init —
     // for a member target (`obj.x = 1`), a bare-local target (`plain = 1`), and an update
-    // (`obj.x++`). Verified against pinned svelte@5.56.3 (all three → `get failed()`).
+    // (`obj.x++`). Verified against pinned svelte@5.56.10 (all three → `get failed()`).
     // The unrelated `$state` pins runes mode; the `bind:value` inputs admit the plain
     // locals `obj` / `plain` as DOM bind-target roots (the plain-let admission gate).
     for (expr, label) in [
@@ -8429,7 +8429,7 @@ fn svelte_boundary_mutation_attribute_emits_getter_prop() {
 fn svelte_boundary_global_mutation_attribute_stays_plain_init() {
     // Over-fire guard at the boundary prop site: a GLOBAL-target write in `failed={…}` is
     // PURE ⇒ a PLAIN init (`failed: globalThis.x = 1`), NOT a `get failed()` getter.
-    // Verified against pinned svelte@5.56.3
+    // Verified against pinned svelte@5.56.10
     // (`$.boundary(node, { failed: globalThis.x = 1 }, …)`).
     let js = emit(
         "<script>let k = $state(0);</script>\n<svelte:boundary failed={globalThis.x = 1}><p>hi</p></svelte:boundary>\n",
@@ -8453,7 +8453,7 @@ fn dynamic_attribute_mutation_is_stateful_only_for_binding_targets() {
     // `has_state ? template_effect : init`). A binding-rooted write joins
     // `$.template_effect(() => $.set_attribute(div, 'data-x', …))`; a GLOBAL-target write
     // stays a one-shot bare `$.set_attribute(div, 'data-x', …)` init. Verified against
-    // pinned svelte@5.56.3. The `bind:value` inputs admit `obj`/`plain` as plain-let DOM
+    // pinned svelte@5.56.10. The `bind:value` inputs admit `obj`/`plain` as plain-let DOM
     // bind-target roots (the plain-let admission gate); the binds themselves emit no
     // `$.template_effect`, so the wrapped-set_attribute discriminator is exact.
     let pre = "<script>let k = $state(0);\nlet obj = { x: 0 };\nlet plain = 0;</script>\n<input bind:value={obj.x} />\n<input bind:value={plain} />\n";
@@ -8494,7 +8494,7 @@ fn component_member_rooted_prop_emits_getter_not_init() {
     // `<C x={obj.y}>` with `obj` a PLAIN LOCAL (admitted as a DOM bind-target root) —
     // the SAME shared `prop_value_has_state` predicate drives the `Component.js`
     // getter-vs-init decision, so the member-rooted value emits the GETTER
-    // `get x() { return obj.y; }` (verified against pinned svelte@5.56.3), NOT the
+    // `get x() { return obj.y; }` (verified against pinned svelte@5.56.10), NOT the
     // plain `x: obj.y` init. Locks the shared predicate on the component surface. The
     // unrelated `$state` pins runes mode.
     let js = emit(
@@ -8511,7 +8511,7 @@ fn component_member_rooted_prop_emits_getter_not_init() {
         "a member-rooted component prop must NOT stay a plain init:\n{js}"
     );
     // INVERSE: a member read DEFERRED inside an arrow prop value stays the plain init
-    // (verified against pinned svelte@5.56.3: `C(node, { x: () => obj.y })`).
+    // (verified against pinned svelte@5.56.10: `C(node, { x: () => obj.y })`).
     let js2 = emit(
         "<script>import C from './C.svelte';\nlet k = $state(0);\nlet obj = { y: '' };</script>\n<input bind:value={obj.y} />\n<C x={() => obj.y} />\n",
         "App.svelte",
@@ -8861,7 +8861,7 @@ fn props_rest_basic_lowers_rest_props_capture_with_delocalized_named_read() {
     // `rest_excludes` Set (fixed prefix + the source key `name`) + the instance
     // `let rest = $.rest_props($$props, rest_excludes)` capture; the bare `{name}`
     // read de-localizes to `$$props.name` and — being a BARE named read — opens NO
-    // component context frame. Verified against svelte@5.56.3.
+    // component context frame. Verified against svelte@5.56.10.
     let js = emit(
         "<script>let { name, ...rest } = $props();</script>\n<p>{name}</p>\n",
         "App.svelte",
@@ -8891,7 +8891,7 @@ fn props_rest_basic_lowers_rest_props_capture_with_delocalized_named_read() {
 }
 
 // ── native Svelte client `$props()` rest + whole-object capture ──
-// Emission POSITIVES (each pinned against svelte@5.56.3; discriminating with a
+// Emission POSITIVES (each pinned against svelte@5.56.10; discriminating with a
 // NEGATIVE assertion), then the §10a malformed-sibling fail-closed enumeration.
 
 #[test]
@@ -9132,7 +9132,7 @@ fn props_named_members_and_rest_share_one_declarator_plan() {
     // `$$props.b`), AND a rest binding drives ALL THREE consumers off the ONE
     // `PropsDeclaratorPlan` — the read forms, the `$.rest_props` hoist (excludes
     // derived from the SAME named members), and the `$.prop` destructure
-    // lowering — coherently. Behavior-preserving; oracle `svelte@5.56.3`:
+    // lowering — coherently. Behavior-preserving; oracle `svelte@5.56.10`:
     // `new Set(['$$slots','$$events','$$legacy','a','b'])`, `let a = $.prop(...)`,
     // `$$props.b`, `a()`, `rest.c` → `$$props.c`.
     let js = emit(
@@ -9283,7 +9283,7 @@ fn props_rest_call_with_spread_arg_fails_closed() {
 #[test]
 fn props_whole_object_computed_key_member_stays_local() {
     // A COMPUTED member on the whole-object binding (`all['x']`, in a state-write
-    // handler) stays the verbatim real local — EXACT oracle svelte@5.56.3 parity,
+    // handler) stays the verbatim real local — EXACT oracle svelte@5.56.10 parity,
     // NOT a deferral: the key-aware de-localization is STATIC-member-only, and the
     // oracle likewise keeps a computed member (`all['x']`) verbatim even with a
     // static string-literal key (de-localizing a computed member would REGRESS
@@ -9308,7 +9308,7 @@ fn props_whole_object_computed_key_member_stays_local() {
 fn props_rest_parenthesized_member_read_delocalizes() {
     // FIX-1: author parens around the IMMEDIATE member object are transparent —
     // `(rest).x` / `((rest)).x` / `(all).a` de-localize to `$$props.KEY` exactly
-    // like the bare form. Oracle svelte@5.56.3: `$$props.x` / `$$props.a`. RED at
+    // like the bare form. Oracle svelte@5.56.10: `$$props.x` / `$$props.a`. RED at
     // c0c2ff2aa (the Identifier guard blocked the paren, leaving `(rest).x`).
     let rest = emit(
         "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).x + ((rest)).z}>x</button>\n",
@@ -9360,7 +9360,7 @@ fn props_rest_member_write_target_stays_verbatim() {
     // verbatim `rest.KEY`. RED at c0c2ff2aa (which de-localized the write LHS to
     // `$$props.x = 1`).
     //
-    // First-hand oracle re-probe (svelte@5.56.3): EVERY row is emitted FULLY
+    // First-hand oracle re-probe (svelte@5.56.10): EVERY row is emitted FULLY
     // verbatim, including the compound/logical forms:
     //   `rest.x += 1` → `rest.x += 1`   `rest.x ??= 1` → `rest.x ??= 1`
     // svelte's `build_assignment_value` pre-rewrite (`+=` → `rest.x = rest.x + 1`,
@@ -9420,7 +9420,7 @@ fn props_rest_deep_lvalue_root_member_delocalizes() {
     // FIX-2 deep lvalue: for `rest.x.y = 1` the DIRECT write target is `rest.x.y`
     // (verbatim), but its ROOT member `rest.x` is a READ sub-expression that
     // de-localizes — so the whole lvalue lowers to `$$props.x.y = 1`. Oracle
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let js = emit(
         "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => { rest.x.y = 1; sink += 1; }}>x</button>\n",
         "App.svelte",
@@ -9438,14 +9438,14 @@ fn props_rest_deep_lvalue_root_member_delocalizes() {
 #[test]
 fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
     // FIX-6: the oracle's `rest`→`$$props` de-localization is a COARSE,
-    // position-based guard (svelte@5.56.3 `Identifier.js`): the `rest` identifier
+    // position-based guard (svelte@5.56.10 `Identifier.js`): the `rest` identifier
     // rewrites to `$$props` only when `grand_parent.type !== 'AssignmentExpression'
     // && grand_parent.type !== 'UpdateExpression'`. A single static `rest.KEY`
     // that is the ENTIRE right-hand side of a PLAIN `=` therefore stays VERBATIM —
     // the `=` operator returns `right` unchanged from `build_assignment_value`, so
     // the member's grand-parent stays the AssignmentExpression and the guard fails.
     // Paren-transparent (official ESTree has no paren node) and LHS-agnostic (the
-    // guard never inspects the target). First-hand oracle svelte@5.56.3:
+    // guard never inspects the target). First-hand oracle svelte@5.56.10:
     // `sink = rest.y` → `$.set(sink, rest.y, true)`. RED at ba4af31bc (Verter's
     // read/write split over-de-localized the bare-RHS READ to `$$props.y`).
 
@@ -9537,7 +9537,7 @@ fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
 
 #[test]
 fn props_rest_optional_member_read_preserves_optional_chain() {
-    // Oracle svelte@5.56.3: `rest?.x` → `$$props?.x` (attr AND handler); the CONTROL
+    // Oracle svelte@5.56.10: `rest?.x` → `$$props?.x` (attr AND handler); the CONTROL
     // `rest.x` → `$$props.x` (dotted). RED at ff1ca89a1: whole-member replacement
     // emitted the `?.`-dropped `$$props.x` for the optional form.
     let opt = emit(
@@ -9578,7 +9578,7 @@ fn props_rest_optional_member_read_preserves_optional_chain() {
 #[test]
 fn props_whole_object_optional_member_preserves_optional_chain() {
     // Whole-object capture `let all = $props()` behaves identically: `all?.x` →
-    // `$$props?.x`. Oracle svelte@5.56.3. RED at ff1ca89a1 (dropped to `$$props.x`).
+    // `$$props?.x`. Oracle svelte@5.56.10. RED at ff1ca89a1 (dropped to `$$props.x`).
     let js = emit(
         "<script>let all = $props();</script>\n<div title={all?.x}></div>\n",
         "App.svelte",
@@ -9606,7 +9606,7 @@ fn props_whole_object_optional_member_preserves_optional_chain() {
 fn props_rest_optional_member_chain_preserves_every_optional_hop() {
     // A downstream chain stays verbatim from source: `rest?.x.y` → `$$props?.x.y`
     // (the inner `?.x` de-localizes the ROOT, `.y` verbatim); a CHAINED optional
-    // `rest?.x?.y` → `$$props?.x?.y` keeps BOTH `?.`. Oracle svelte@5.56.3. RED at
+    // `rest?.x?.y` → `$$props?.x?.y` keeps BOTH `?.`. Oracle svelte@5.56.10. RED at
     // ff1ca89a1 (dropped the first `?.`: `$$props.x.y` / `$$props.x?.y`).
     let mixed = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x.y}></div>\n",
@@ -9640,7 +9640,7 @@ fn props_rest_optional_member_chain_preserves_every_optional_hop() {
 fn props_rest_optional_receiver_call_preserves_optional_chain() {
     // §10a sibling — an optional-RECEIVER call `rest?.x()` in ATTR context (the
     // handler-statement form hits the pre-existing NonDelegatedEvent deferral, out of
-    // scope) de-localizes the callee to `$$props?.x()`. Oracle svelte@5.56.3:
+    // scope) de-localizes the callee to `$$props?.x()`. Oracle svelte@5.56.10:
     // `$$props?.x()`. RED at ff1ca89a1 (emitted `$$props.x()`).
     let js = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x()}></div>\n",
@@ -9660,7 +9660,7 @@ fn props_rest_optional_receiver_call_preserves_optional_chain() {
 fn props_rest_optional_computed_member_stays_verbatim() {
     // §10a boundary control — an OPTIONAL COMPUTED member `rest?.['x']` is NOT the
     // static-member path (a distinct AST node), so it stays the verbatim real local,
-    // EXACTLY like the non-optional computed `rest['x']`. Oracle svelte@5.56.3:
+    // EXACTLY like the non-optional computed `rest['x']`. Oracle svelte@5.56.10:
     // `rest?.['x']` verbatim. Guards the fix against leaking into the computed path.
     let js = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.['x']}></div>\n",
@@ -9681,7 +9681,7 @@ fn props_rest_optional_computed_member_stays_verbatim() {
 fn props_rest_optional_excluded_member_stays_verbatim() {
     // §10a boundary control — an EXCLUDED key under `?.` (`rest?.a` where `a` is a
     // named prop the rest binding excludes) stays the verbatim `rest?.a` via the
-    // untouched `!excludes.contains(key)` guard. Oracle svelte@5.56.3: `rest?.a`.
+    // untouched `!excludes.contains(key)` guard. Oracle svelte@5.56.10: `rest?.a`.
     let js = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.a}></div>\n",
         "App.svelte",
@@ -9700,7 +9700,7 @@ fn props_rest_optional_excluded_member_stays_verbatim() {
 fn props_rest_optional_illegal_name_member_fails_closed() {
     // §10a sibling — a `$$`-prefixed member under `?.` (`rest?.$$slots` / `all?.$$slots`)
     // is the reserved magic namespace: an OFFICIAL compile error fired ABOVE the
-    // rewrite regardless of the optional axis. Oracle svelte@5.56.3: reject
+    // rewrite regardless of the optional axis. Oracle svelte@5.56.10: reject
     // `props_illegal_name`. The `?.` does not relax the refuse.
     for src in [
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.$$slots}></div>\n",
@@ -9730,7 +9730,7 @@ fn props_rest_optional_illegal_name_member_fails_closed() {
 fn props_rest_optional_write_target_fails_closed() {
     // §10a sibling — an optional-chain expression is NOT a valid assignment target in
     // JavaScript, so `rest?.x = 1` / `rest?.x += 1` are JS PARSE ERRORS that never
-    // reach the rewriter. Oracle svelte@5.56.3: `js_parse_error`. Verter fails closed
+    // reach the rewriter. Oracle svelte@5.56.10: `js_parse_error`. Verter fails closed
     // through the template-expression parse channel (`svelte-runtime-expr-parse`),
     // never a silent module.
     for stmt in ["rest?.x = 1", "rest?.x += 1"] {
@@ -9768,7 +9768,7 @@ fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
     // verbatim record to a compound/logical `OP=` when `classify_target(left) ∈
     // {PlainIdent, Member}`. RED at 82580a74a (Verter gated the verbatim record on
     // `operator == Assign` ONLY, so it over-de-localized every compound/logical RHS to
-    // `$$props.KEY` regardless of target). First-hand oracle svelte@5.56.3 confirms
+    // `$$props.KEY` regardless of target). First-hand oracle svelte@5.56.10 confirms
     // every positive below stays verbatim and every control below de-localizes.
 
     // (1) $state MEMBER target, compound `+=` — svelte does NOT re-wrap a member
@@ -10058,7 +10058,7 @@ fn props_bindable_default_lowers_prop_source_with_context_frame() {
     // valid position): a read-only `$bindable(0)` default in a `$props()`
     // destructure is the flag-11 prop source (`IMMUTABLE|RUNES|BINDABLE`), read via
     // the getter, with the component context frame (`$.push($$props, true)` /
-    // `$.pop()`) the `$bindable` call forces. Verified against svelte@5.56.3.
+    // `$.pop()`) the `$bindable` call forces. Verified against svelte@5.56.10.
     let src = "<script>let { value = $bindable(0) } = $props();</script>\n<p>{value}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -10738,7 +10738,7 @@ fn injected_css_mode_option_inlines_css_and_produces_no_external_artifact() {
 
 // ─── the SCOPED `<svelte:element>` dynamic-element injection family ─────────
 //
-// Official svelte@5.56.3 scopes a dynamic element exactly like a regular
+// Official svelte@5.56.10 scopes a dynamic element exactly like a regular
 // element: the analyze pass synthesizes an empty `class` for a scoped node
 // with no spread and no class attribute (`phases/2-analyze/index.js`), the
 // lone synthetic class routes to `$.set_class($$element, 0, …)` with the hash
@@ -11760,7 +11760,7 @@ fn custom_element_string_prop_key_quotes_prop_object_and_accessor_names() {
     // A NON-identifier `$props()` source key under a customElement must emit
     // QUOTED JS everywhere the key surfaces — the official `b.key(name)` rule
     // (identifier-safe names stay bare, anything else becomes a string-literal
-    // key). Oracle-adjudicated against pinned `svelte@5.56.3`, which emits:
+    // key). Oracle-adjudicated against pinned `svelte@5.56.10`, which emits:
     //   let dataId = $.prop($$props, 'data-id', 7);
     //   var $$exports = { get 'data-id'() { … }, set 'data-id'($$value) { … } };
     //   customElements.define('x-id', $.create_custom_element(App, { 'data-id': {} }, …));
@@ -11805,7 +11805,7 @@ fn custom_element_aliased_string_key_explicit_prop_quotes_both_entries() {
     // source key, and the inferred remainder loop (which skips only members
     // whose EMITTED key equals a RAW explicit-entry name — the official
     // `if (ce_props[key]) continue`) appends the quoted inferred `{}` entry
-    // too. Pinned `svelte@5.56.3` emits BOTH (a valid ES2015+ duplicate-key
+    // too. Pinned `svelte@5.56.10` emits BOTH (a valid ES2015+ duplicate-key
     // object literal, last-wins at runtime):
     //   { 'data-id': { reflect: true }, 'data-id': {} }
     let js = emit_result(
@@ -11838,7 +11838,7 @@ fn custom_element_aliased_string_key_explicit_prop_quotes_both_entries() {
 #[test]
 fn custom_element_aliased_explicit_prop_double_emits_like_official() {
     // F2 adjudication (oracle-grounded): an explicit descriptor entry named by
-    // the LOCAL binding of an ALIASED member. Pinned `svelte@5.56.3` emits the
+    // the LOCAL binding of an ALIASED member. Pinned `svelte@5.56.10` emits the
     // explicit metadata under the SOURCE key AND the inferred `{}` remainder for
     // the same key — the inferred loop checks the member's emitted key against
     // the RAW explicit-entry names (`if (ce_props[key]) continue`), which the
@@ -11886,7 +11886,7 @@ fn custom_element_explicit_raw_source_key_covers_the_aliased_member() {
     // binding `bar` exists, so the explicit entry emits under its own name; the
     // inferred loop then SKIPS the member (its emitted key `bar` IS a raw
     // explicit-entry name) — a SINGLE entry, official parity (oracle-verified
-    // against pinned `svelte@5.56.3`).
+    // against pinned `svelte@5.56.10`).
     let js = emit_result(
         "<svelte:options customElement={{ tag: 'x-raw', props: { bar: { reflect: true } } }} />\n<script>\n\tlet { bar: foo } = $props();\n</script>\n\n<p>{foo}</p>\n",
     )
@@ -11913,7 +11913,7 @@ fn custom_element_explicit_raw_source_key_covers_the_aliased_member() {
 fn custom_element_multi_entry_prop_object_preserves_source_order_alias_and_duplicates() {
     // The prop-definition object is emitted in DESCRIPTOR SOURCE ORDER (never
     // sorted, never deduplicated) with the alias + duplicate-key semantics
-    // intact — oracle-verified against pinned `svelte@5.56.3`, which emits
+    // intact — oracle-verified against pinned `svelte@5.56.10`, which emits
     // exactly: `{ zb: { reflect: true }, aa: { type: 'Number' },
     // bar: { attribute: 'f' }, bar: {}, mm: {} }` for this fixture:
     //   - `zb` (no matching local) emits under its own name, FIRST (source
@@ -11954,7 +11954,7 @@ fn custom_element_multi_entry_prop_object_preserves_source_order_alias_and_dupli
 
 #[test]
 fn custom_element_empty_attribute_string_omits_the_field() {
-    // An EMPTY `attribute: ""` descriptor value: pinned `svelte@5.56.3` emits
+    // An EMPTY `attribute: ""` descriptor value: pinned `svelte@5.56.10` emits
     // `{ a: {} }` — the `attribute` field is OMITTED entirely (the official
     // transform pushes the field only for a truthy string), never
     // `attribute: ''`. Sibling fields on the same entry survive the omission
@@ -11995,7 +11995,7 @@ fn custom_element_empty_attribute_string_omits_the_field() {
 fn custom_element_non_empty_attribute_string_still_emits() {
     // The non-empty twin: `attribute: "foo"` KEEPS the field —
     // `{ a: { attribute: 'foo' } }` (oracle-verified against pinned
-    // `svelte@5.56.3`). Locks the empty-attribute omission to the EMPTY
+    // `svelte@5.56.10`). Locks the empty-attribute omission to the EMPTY
     // string only.
     let js = emit_result(
         "<svelte:options customElement={{ tag: 'x-attr', props: { a: { attribute: \"foo\" } } }} />\n<script>\n\tlet { a } = $props();\n</script>\n\n<p>{a}</p>\n",
@@ -12059,7 +12059,7 @@ fn custom_element_host_call_in_handler_lowers_to_props_host() {
 
 #[test]
 fn custom_element_bare_host_alone_fails_closed_as_official_degenerate() {
-    // ORACLE NOTE (pinned `svelte@5.56.3`, first-hand): a customElement whose
+    // ORACLE NOTE (pinned `svelte@5.56.10`, first-hand): a customElement whose
     // SOLE `$host()` use is BARE (result discarded), with NO real props binder
     // (`$props()` / `$bindable(...)` / legacy prop), NO `needs_context` reason,
     // and NO member access on the `$host()` call result itself, emits the
@@ -12105,7 +12105,7 @@ fn custom_element_host_member_read_binds_props_and_context() {
     // A DIRECT member read on the `$host()` call result (`$host().foo`) with no
     // other binder: official BINDS `$$props` AND opens the component context
     // (the member-on-call-result expression is not a "safe identifier", so
-    // `needs_context` fires). Pinned `svelte@5.56.3` emits
+    // `needs_context` fires). Pinned `svelte@5.56.10` emits
     // `$.event('focus', button, () => $$props.$$host.foo);` under
     // `function App($$anchor, $$props)` + `$.push($$props, true)`.
     let js = emit_result(
@@ -12199,7 +12199,7 @@ fn custom_element_host_method_call_binds_props() {
     // A METHOD call on the `$host()` result (`$host().focus()`) with NO `new`
     // expression anywhere: the member access itself is the trigger — official
     // binds `$$props` and pushes, emitting
-    // `() => $$props.$$host.focus()` (pinned `svelte@5.56.3`).
+    // `() => $$props.$$host.focus()` (pinned `svelte@5.56.10`).
     let js = emit_result(
         "<svelte:options customElement=\"x-mc\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host().focus()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
     )
@@ -12317,7 +12317,7 @@ fn custom_element_bare_host_with_instance_effect_needs_context_accepts() {
     // user effect sets `needs_context` — that alone BINDS the props parameter
     // (official: `function App($$anchor, $$props)` + `$.push($$props, true)` +
     // `$.user_effect(() => { $$props.$$host; })`, first-hand pinned
-    // `svelte@5.56.3`). The bare host use itself is NOT the trigger.
+    // `svelte@5.56.10`). The bare host use itself is NOT the trigger.
     let js = emit_result(
         "<svelte:options customElement=\"x-fxb\" />\n<script>\n\tlet c = $state(0);\n\t$effect(() => { $host(); });\n</script>\n<button onclick={() => c++}>{c}</button>\n",
     )
@@ -12376,7 +12376,7 @@ fn custom_element_inspect_with_admits_bare_host() {
 fn custom_element_template_only_host_member_infers_runes_and_binds_props() {
     // MODE-INFERENCE completion: a customElement whose ONLY rune is a
     // TEMPLATE-expression `$host()` (NO script at all — nothing masks the
-    // inference with a script rune). Official `svelte@5.56.3` treats the
+    // inference with a script rune). Official `svelte@5.56.10` treats the
     // template `$host` reference as a runes-mode indicator
     // (`metadata.runes === true`) and, because the host use is
     // member-accessed, binds `$$props` and pushes the frame:
@@ -12432,7 +12432,7 @@ fn custom_element_host_in_instance_effect_binds_props() {
     // top-level `$effect(fn)` body. The `$host` usage FACT must come from the
     // instance script too (not only template expressions): `$$props` is bound,
     // and the effect body lowers the call to `$$props.$$host` (pinned
-    // `svelte@5.56.3` emits `$.user_effect(() => { $$props.$$host.dispatchEvent(…); })`
+    // `svelte@5.56.10` emits `$.user_effect(() => { $$props.$$host.dispatchEvent(…); })`
     // with the `$$props` parameter present).
     let js = emit_result(
         "<svelte:options customElement=\"x-fx\" />\n<script>\n\tlet c = $state(0);\n\t$effect(() => { $host().dispatchEvent(new CustomEvent('tick')); });\n</script>\n<button onclick={() => c++}>{c}</button>\n",
@@ -12462,7 +12462,7 @@ fn custom_element_host_in_instance_effect_binds_props() {
 // NORMALLY: a member/call/`new`-rooted callee (`$host().snip`, `imported.snip`,
 // `(new Date())`) opens the component context frame exactly as the same
 // expression would in a handler. Oracle-pinned first-hand against
-// `svelte@5.56.3`: UNSAFE render callees emit `$.push($$props, true)` …
+// `svelte@5.56.10`: UNSAFE render callees emit `$.push($$props, true)` …
 // `$.pop()` and bind the `$$props` parameter; SAFE callees (identifier /
 // ternary-of-identifiers / member rooted at a local) stay frame-free. These
 // e2e assertions live in THIS `*_tests.rs` sibling — not a scanner-pin module
@@ -12477,7 +12477,7 @@ fn render_dynamic_callee_host_member_frames_and_binds_props() {
     // `{@render $host().snip()}` under an active customElement: the peeled
     // callee `$host().snip` is a member rooted at a call result — never a
     // "safe identifier" — so `needs_context` fires: official
-    // `svelte@5.56.3` binds `$$props` AND opens the component context frame
+    // `svelte@5.56.10` binds `$$props` AND opens the component context frame
     // (`$.push($$props, true)` … `$.pop()`) around the snippet render.
     let js = emit_result("<svelte:options customElement=\"x-rc\" />\n{@render $host().snip()}\n")
         .expect("a render-dynamic-callee $host() member compiles");
@@ -12565,7 +12565,7 @@ fn render_dynamic_callee_new_expression_frames_and_binds_props() {
     // A NON-`$host` unsafe render callee, no customElement anywhere:
     // `{@render (new Date())()}` — the peeled callee contains a
     // `NewExpression`, the unconditional `needs_context` trigger. Official
-    // `svelte@5.56.3` binds `$$props` and opens the frame.
+    // `svelte@5.56.10` binds `$$props` and opens the frame.
     let js = emit_result(
         "<script>let __r = $state(0);</script>\n{@render (new Date())()}\n<button onclick={() => __r++}>{__r}</button>\n",
     )
@@ -12621,7 +12621,7 @@ fn render_dynamic_callee_children_optional_stays_frame_free() {
     // `{@render children?.()}` — the peeled callee is the bare identifier
     // `children`; an identifier read is NEVER a `needs_context` trigger even
     // though `children` is a prop (the OUTER snippet call is excluded from the
-    // unsafe-call check). Official `svelte@5.56.3` emits NO frame; `$$props`
+    // unsafe-call check). Official `svelte@5.56.10` emits NO frame; `$$props`
     // is bound by the REAL props binder alone.
     let js = emit_result("<script>let { children } = $props();</script>\n{@render children?.()}\n")
         .expect("an optional prop render callee compiles");
@@ -13089,7 +13089,7 @@ fn effect_pre_toplevel_lowers_with_frame() {
     // INVERTED (was `effect_pre_fails_closed`): a top-level `$effect.pre(fn)`
     // statement lowers to `$.user_pre_effect` and forces the runes frame
     // (`$.push($$props, true)` / `$.pop()` + the `$$props` param), matching
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let js = emit(
         "<script>let c = $state(0); $effect.pre(() => console.log(c));</script>\n<button onclick={() => c++}>{c}</button>\n",
         "App.svelte",
@@ -13144,7 +13144,7 @@ fn state_snapshot_in_handler_expression_rewrites_to_dollar_snapshot() {
 #[test]
 fn inspect_standalone_elided() {
     // A top-level `$inspect(x);` statement is production-ELIDED: official
-    // `svelte@5.56.3` (`dev:false`) removes the whole statement (leaving only a
+    // `svelte@5.56.10` (`dev:false`) removes the whole statement (leaving only a
     // cosmetic `;;` empty-statement residue). Verter emits NO helper, NO import,
     // NO dev form, and the statement forces NO component frame — the signature
     // stays `App($$anchor)`. RED against the pre-elision fail-closed arm
@@ -13183,7 +13183,7 @@ fn inspect_with_elided_forces_frame() {
     // `$inspect(x).with(fn);` — the chain is ELIDED like the plain form, BUT the
     // `.with(...)` FORCES the component frame in official production output:
     // `App($$anchor, $$props)` + `$.push($$props, true)` first + `$.pop()` last
-    // (verified first-hand against svelte@5.56.3, even for an empty `() => {}`
+    // (verified first-hand against svelte@5.56.10, even for an empty `() => {}`
     // callback). RED against the pre-elision fail-closed arm.
     let js = emit(
         "<script>let c = $state(0); $inspect(c).with(console.log);</script>\n<button onclick={() => c++}>{c}</button>\n",
@@ -13339,7 +13339,7 @@ fn inspect_trace_first_statement_drops() {
     // (b) INVERTED (the `$effect` arm was an orthogonal fail-closed fixture while
     // `$effect` was refused wholesale): a first-statement trace in an `$effect`
     // arrow body is the ONE legal trace position — oracle-verified
-    // (svelte@5.56.3, `dev:false`): the trace call is DROPPED in place and the
+    // (svelte@5.56.10, `dev:false`): the trace call is DROPPED in place and the
     // surrounding effect is KEPT (`$.user_effect(() => { $.update(c); });`).
     let js = emit(
         "<script>let c = $state(0); $effect(() => { $inspect.trace(); c++; });</script>\n<p>{c}</p>\n",
@@ -13382,7 +13382,7 @@ fn inspect_trace_first_statement_drops() {
 #[test]
 fn inspect_trace_parenthesized_first_statement_drops() {
     // A PARENTHESIZED first-statement trace (`($inspect.trace());`) is the SAME
-    // legal position — official svelte@5.56.3 ACCEPTS and drops it under
+    // legal position — official svelte@5.56.10 ACCEPTS and drops it under
     // `dev:false`. The whole statement (parens included) is dropped in place; the
     // rest of the handler body lowers. RED before the fix: false-rejected as
     // `inspect_trace_invalid_placement` (the allow-set required a bare call).
@@ -13421,7 +13421,7 @@ fn inspect_trace_parenthesized_first_statement_drops() {
 #[test]
 fn inspect_trace_object_parenthesized_first_statement_drops() {
     // Parens around the `$inspect` RECEIVER (`($inspect).trace();`) are equally
-    // transparent — official svelte@5.56.3 ACCEPTS and drops it as a first statement.
+    // transparent — official svelte@5.56.10 ACCEPTS and drops it as a first statement.
     // The whole statement drops in place; the rest of the handler body lowers. RED
     // before the fix: the trace shape-check required a BARE `$inspect` member object, so
     // `($inspect).trace()` was not recognised — the `$inspect` reference failed closed
@@ -13453,7 +13453,7 @@ fn inspect_trace_object_parenthesized_first_statement_drops() {
 #[test]
 fn inspect_trace_param_shadow_local_call_survives() {
     // A `$inspect` PARAMETER shadows the rune: `$inspect.trace()` under it is an
-    // ORDINARY local method call. Official svelte@5.56.3 ACCEPTS
+    // ORDINARY local method call. Official svelte@5.56.10 ACCEPTS
     // `($inspect) => { c++; $inspect.trace(); }` and EMITS the call FAITHFULLY
     // (oracle-verified: `.trace(` survives in the official output). The
     // scope-aware pipeline must NOT drop it as a production-elided rune trace, and must
@@ -14195,7 +14195,7 @@ fn mixed_class_call_module_matches_the_committed_jsdom_smoke_fixture() {
 // ── DOM-hosted bind behavioral fixtures ────────────────────────────────────────
 //
 // Each fixture below mounts the EMITTED §1.2 module (its `.client.mjs`, kept in
-// lockstep by these tests) against the REAL pinned `svelte@5.56.3` runtime in the
+// lockstep by these tests) against the REAL pinned `svelte@5.56.10` runtime in the
 // happy-dom behavioral spec (`svelte-client-bind-smoke.spec.ts`). The emitted
 // module was verified to match the pinned-official compiler STRUCTURALLY (helper
 // sequence + imports + templates) at authoring; this lockstep test keeps it from
@@ -14282,7 +14282,7 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
 #[test]
 fn destructured_state_object_fails_closed_not_panic() {
     // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
-    // Official 5.56.3 supports it (temp + proxy); Verter does not lower
+    // Official 5.56.10 supports it (temp + proxy); Verter does not lower
     // destructured state yet, so a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
@@ -14325,7 +14325,7 @@ fn props_nested_destructure_fails_closed_not_partial() {
 #[test]
 fn props_string_literal_key_reads_via_bracket_access() {
     // R7a: a no-default string-literal-key prop reads via BRACKET access, not the
-    // invalid `$$props.foo-bar`. Verified against svelte@5.56.3
+    // invalid `$$props.foo-bar`. Verified against svelte@5.56.10
     // (`$$props['foo-bar']`).
     let js = emit(
         "<script>let { \"foo-bar\": bar } = $props();</script>\n<p>{bar}</p>\n",
@@ -14343,7 +14343,7 @@ fn props_string_literal_key_reads_via_bracket_access() {
 }
 #[test]
 fn bind_value_to_call_expression_rejects_with_exact_bind_invalid_expression() {
-    // F2: `bind:value={foo()}` is not a valid lvalue / 2-element pair — official svelte@5.56.3
+    // F2: `bind:value={foo()}` is not a valid lvalue / 2-element pair — official svelte@5.56.10
     // rejects it with the EXACT code `bind_invalid_expression`. This is bind-target SHAPE
     // validation (the same class as `bind_group_invalid_expression` / `bind_invalid_parens`),
     // so Verter rejects it on the OFFICIAL-reject rail with the exact code — NOT the
@@ -14370,7 +14370,7 @@ fn bind_value_to_call_expression_rejects_with_exact_bind_invalid_expression() {
 #[test]
 fn parenthesized_identifier_bind_value_binds_typed_signal_root() {
     // F6: `bind:value={(v)}` — author parens around a SINGLE identifier (NOT a sequence).
-    // Official svelte@5.56.3 ACCEPTS it and binds on the identifier ROOT `v`, IDENTICALLY
+    // Official svelte@5.56.10 ACCEPTS it and binds on the identifier ROOT `v`, IDENTICALLY
     // to the unparenthesized `{v}` (oracle-verified). Verter must derive the identifier root
     // from the typed `BindTargetFact.root_ident` (`v`), NOT `source.trim()` (`"(v)"`, which
     // is not a resolvable binding name and previously made the bind REFUSE). `v` is a
@@ -14434,7 +14434,7 @@ fn parenthesized_sequence_bind_value_still_rejected() {
 
 #[test]
 fn bind_group_dynamic_value_emits_tracked_template_effect_update() {
-    // F4: a DYNAMIC `value={label}` on a reactive `bind:group` radio. Official svelte@5.56.3
+    // F4: a DYNAMIC `value={label}` on a reactive `bind:group` radio. Official svelte@5.56.10
     // emits (oracle-verified): a `var input_value;` change-tracker, a guarded
     // `$.template_effect` writing `input.value = (input.__value = $.get(label)) ?? ''` (single
     // value → OUTER `?? ''`) BEFORE the `$.bind_group`, and the group getter reads the
@@ -14583,7 +14583,7 @@ fn ts_wrapped_dom_bind_target_in_plain_script_fails_closed() {
     // E (lvalue-widening boundary): a TS-WRAPPED DOM-bind target (`bind:value={v!}` /
     // `{v as string}`) on an ordinary DOM host stays CLOSED — the canonical-lvalue-
     // from-TS strip is a deferral (owned by the future `lang="ts"`-script block, NOT
-    // the DOM-bind backend). Oracle determination (svelte@5.56.3): official PARSE-REJECTS this exact
+    // the DOM-bind backend). Oracle determination (svelte@5.56.10): official PARSE-REJECTS this exact
     // form in a PLAIN `<script>` (`Expected token }`); it is only valid under
     // `lang="ts"`, which Verter refuses ENTIRELY as `TypeScript` upstream. Verter's
     // plain-script parser is TSX-LENIENT, so it accepts `v!` syntactically and REACHES
@@ -14636,7 +14636,7 @@ fn ts_wrapped_dom_bind_target_in_plain_script_fails_closed() {
 fn nested_ts_anywhere_in_bind_target_lvalue_fails_closed() {
     // F1: a TS-ONLY operator ANYWHERE in an accepted bind-target lvalue — a member-spine
     // non-null (`o!.x`), a computed-index cast (`a[x as T]`), or a computed-index non-null
-    // (`a[x!]`) — FAILS CLOSED. Official svelte@5.56.3 PARSE-REJECTS each in a plain
+    // (`a[x!]`) — FAILS CLOSED. Official svelte@5.56.10 PARSE-REJECTS each in a plain
     // `<script>` (`expected_token` / `js_parse_error`, oracle-verified), so Verter must NOT
     // accept-and-strip them to valid JS (the prior fail-OPEN). The structural
     // "TS-anywhere-in-lvalue" fact (`BindTargetFact.lvalue_contains_ts`) walks the member
@@ -14689,7 +14689,7 @@ fn bind_target_index_with_type_arg_call_fails_closed() {
     // `<input bind:value={arr[g<a,b>(c)]}>` (an OXC `CallExpression` with `type_arguments`) —
     // FAILS CLOSED via the structural `lvalue_contains_ts` fact. Under TSX the index parses as
     // a call with `<a,b>` type arguments; the TS-strip lane would DELETE them, emitting the
-    // divergent index `arr[g(c)]` (a function call). Official svelte@5.56.3 instead parses the
+    // divergent index `arr[g(c)]` (a function call). Official svelte@5.56.10 instead parses the
     // same source as plain JS — the relational/comma `arr[(g < a, b > c)]` (a boolean) — so
     // accept-and-strip would be a BEHAVIORAL divergence. Failing closed (a never-wrong
     // under-accept via the SAME `value` Binding channel as a bare instantiation —
@@ -14722,7 +14722,7 @@ fn bind_target_type_argument_forms_fail_closed_plain_forms_accepted() {
     // index — a CALL, a NEW, or a TAGGED-TEMPLATE carrying `type_arguments` — FAILS CLOSED via
     // the structural `lvalue_contains_ts` fact (the SAME `value` Binding channel as a bare
     // instantiation). The TSX-strip lane would otherwise DELETE the type arguments and emit a
-    // divergent index (`arr[g<a,b>(c)]` -> `arr[g(c)]`), whereas official svelte@5.56.3 parses
+    // divergent index (`arr[g<a,b>(c)]` -> `arr[g(c)]`), whereas official svelte@5.56.10 parses
     // the same source as plain JS (the relational/comma `arr[(g < a, b > c)]`). The fix is
     // PRECISE: only a type-argument-bearing node fails closed; a plain call / member / index
     // lvalue stays accepted and is emitted verbatim. The EXACT diagnostic-code parity stays
@@ -14832,7 +14832,7 @@ fn bind_target_ts_in_index_subexpression_fails_closed() {
     // `lvalue_contains_ts` fact. The index sub-expression is otherwise valid JS, so the TSX
     // parser accepts it and the TS-strip lane would DELETE the type annotation and emit a
     // DIVERGENT setter (e.g. `arr[((x: number) => x)(0)]` -> `arr[((x) => x)(0)]`), whereas
-    // official svelte@5.56.3 parses the source as plain JS and PARSE-REJECTS the TS. The scan
+    // official svelte@5.56.10 parses the source as plain JS and PARSE-REJECTS the TS. The scan
     // is a WHOLESALE plain-Svelte-JS-faithfulness check (any TS / non-ECMAScript node fails
     // closed), so the class is closed by construction — not an enumerated per-form arm. The
     // EXACT diagnostic-code parity stays D-26. `arr` is a declared writable root.
@@ -14892,7 +14892,7 @@ fn bind_target_ts_in_index_subexpression_fails_closed() {
 fn bare_instantiation_bind_target_stays_fail_closed() {
     // A BARE instantiation bind target — `arr[g<T>]` (instantiation INDEX) / `f<T>`
     // (instantiation ROOT), each an OXC `TSInstantiationExpression` with NO trailing call —
-    // FAILS CLOSED via the structural `lvalue_contains_ts` fact. Official svelte@5.56.3 ALSO
+    // FAILS CLOSED via the structural `lvalue_contains_ts` fact. Official svelte@5.56.10 ALSO
     // rejects both in a plain `<script>` (`js_parse_error` — they do not parse as plain Svelte
     // JS), so the fail-close AGREES with official. This is the SAFETY value of the
     // instantiation arm: dropping it would classify `arr[g<T>]` as a clean Member lvalue and
@@ -14922,8 +14922,8 @@ fn bare_instantiation_bind_target_stays_fail_closed() {
 #[test]
 fn group_single_value_provably_defined_omits_outer_coalesce() {
     // A `bind:group` SINGLE value whose expression is PROVABLY DEFINED omits the outer
-    // `?? ''` coercion — official svelte@5.56.3 gates the coercion on `evaluated.is_defined`,
-    // NOT on single-vs-mixed. Oracle-verified (svelte@5.56.3) over the SUPPORTED DOM-bind value
+    // `?? ''` coercion — official svelte@5.56.10 gates the coercion on `evaluated.is_defined`,
+    // NOT on single-vs-mixed. Oracle-verified (svelte@5.56.10) over the SUPPORTED DOM-bind value
     // sources: a demoted `$state(5)`, a literal `5`, and a literal `false` all emit
     // `input.value = input.__value = V;` (NO outer `?? ''`). (A bare `let n = 5` is an
     // unsupported instance-script item in the DOM-bind backend, so a demoted `$state` is the identifier vehicle.)
@@ -14961,7 +14961,7 @@ fn group_single_value_provably_defined_omits_outer_coalesce() {
 fn group_single_value_not_provably_defined_keeps_outer_coalesce() {
     // NEGATIVE CONTROL: a `bind:group` SINGLE value that is NOT provably defined KEEPS the
     // outer `?? ''` (official keeps it for a null / undefined / reactive value). Oracle-verified
-    // (svelte@5.56.3) over SUPPORTED DOM-bind value sources: a literal `null` emits
+    // (svelte@5.56.10) over SUPPORTED DOM-bind value sources: a literal `null` emits
     // `input.value = (input.__value = null) ?? '';`, and a demoted `$state(null)` emits
     // `input.value = (input.__value = n) ?? '';`. This guards against over-suppression — GREEN
     // before AND after the fix (a control that the definedness gate is not blanket-applied).
@@ -14987,7 +14987,7 @@ fn group_single_value_not_provably_defined_keeps_outer_coalesce() {
 fn name_host_attr_invalid_intrinsic_binds_fail_closed_via_unsupported_channel() {
     // The four name/host/host-attr-invalid intrinsic binds whose TARGET is also shape-invalid
     // must fail closed via the UNSUPPORTED channel (`Binding`) — NOT a confidently-WRONG
-    // `OfficialReject` shape code. Official svelte@5.56.3 reports a name/host/host-attr error
+    // `OfficialReject` shape code. Official svelte@5.56.10 reports a name/host/host-attr error
     // for each (`bind_invalid_name` / `bind_invalid_target` / `attribute_contenteditable_missing`
     // / `attribute_invalid_multiple`); Verter defers those exact codes (D-29) and routes the
     // refusal through the existing unsupported channel. RED before the fix: the official-reject
@@ -15037,7 +15037,7 @@ fn name_host_attr_invalid_intrinsic_binds_fail_closed_via_unsupported_channel() 
 fn reactive_text_bare_signal_read_stays_inline() {
     // R4 NEGATIVE (§1.2 preservation): a bare signal read (`{count}`, no call) stays
     // the INLINE `$.set_text(text, $.get(count))` form — the memoizer is NOT used.
-    // Verified against svelte@5.56.3. `count` is reassigned (a real signal), so the
+    // Verified against svelte@5.56.10. `count` is reassigned (a real signal), so the
     // read is `$.get(count)`.
     let src = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
     let js = emit(src, "App.svelte");
@@ -15059,7 +15059,7 @@ fn reactive_text_bare_signal_read_stays_inline() {
 // vertical, and (where the prior emit-by-default emitted divergent / invalid JS)
 // is RED against the pre-refactor tree.
 
-// @ai-generated - D-35 live/static interpolation parity against pinned Svelte 5.56.3.
+// @ai-generated - D-35 live/static interpolation parity against pinned Svelte 5.56.10.
 #[test]
 fn interpolation_expression_families_lower_through_the_shared_rewriter() {
     let cases = [
@@ -15128,7 +15128,7 @@ fn interpolation_expression_families_lower_through_the_shared_rewriter() {
     }
 }
 
-// @ai-generated - D-35 static interpolation topology against pinned Svelte 5.56.3.
+// @ai-generated - D-35 static interpolation topology against pinned Svelte 5.56.10.
 #[test]
 fn static_interpolation_uses_text_content_or_node_value_without_an_effect() {
     let sole = emit(
@@ -15433,7 +15433,7 @@ fn textarea_bind_value_with_static_text_fallback_child_emits() {
     // A `<textarea bind:value={v}>fallback</textarea>` — a `bind:value` host with a
     // STATIC-TEXT fallback child — IS a supported surface: the existing
     // `$.remove_textarea_child` prelude clears the baked static child at runtime, so the
-    // bind is unaffected. Verified against svelte@5.56.3 (the static text is baked into
+    // bind is unaffected. Verified against svelte@5.56.10 (the static text is baked into
     // the cloned skeleton, then stripped):
     //   var root = $.from_html(`<textarea>fallback</textarea>`);
     //   $.remove_textarea_child(textarea);
@@ -15697,7 +15697,7 @@ fn strip_redundant_arrow_parens(s: &str) -> String {
 
 // ── dynamic attributes + boolean DOM props + class/style ─────────────
 //
-// Every form is pinned BYTE-FAITHFULLY (modulo cosmetics) to svelte@5.56.3 client
+// Every form is pinned BYTE-FAITHFULLY (modulo cosmetics) to svelte@5.56.10 client
 // output via the live-compiler probe. Each test is discriminating with a negative
 // assertion (the misform that must be ABSENT). The cross-cut: a reactive dynamic
 // attr/class/style joins the SAME combined `$.template_effect` as reactive text, in
@@ -16523,7 +16523,7 @@ fn named_slot_on_regular_element_emits_dollar_slots_entry() {
     // component child is the official NAMED-SLOT form: the element becomes the
     // `$$slots: { 'foo-bar': ($$anchor, $$slotProps) => {…} }` callback region and the
     // `slot` attribute BAKES into the cloned skeleton (`<span slot="foo-bar"> </span>`),
-    // exactly the pinned svelte@5.56.3 output.
+    // exactly the pinned svelte@5.56.10 output.
     let js = emit_result(
         "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo-bar\">{x}</span></Child>\n",
     )
@@ -16666,7 +16666,7 @@ fn entity_encoded_static_slot_name_decodes_to_the_official_key() {
     // Official decodes attribute values at parse (`decode_character_references`), so a
     // `slot="foo&amp;bar"` child names the slot `foo&bar` — the slot name is a DECODED
     // semantic key, never the raw escape bytes — and the emitted `$$slots` entry key is
-    // the quoted `'foo&bar'` (matching svelte@5.56.3; pinned corpus-wide by the
+    // the quoted `'foo&bar'` (matching svelte@5.56.10; pinned corpus-wide by the
     // `components/named_slot_entity` oracle golden).
     let js = emit_result(
         "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo&amp;bar\">{x}</span></Child>\n",
@@ -16712,7 +16712,7 @@ fn entity_encoded_static_component_prop_value_decodes() {
     // The static-prop entity decode is GENERAL, not slot-specific: official decodes
     // attribute values at parse (`decode_character_references`), so ANY static
     // component prop carrying an entity emits its DECODED value. Verified against
-    // svelte@5.56.3: `<Child label="foo&amp;bar" />` → `Child($$anchor, { label:
+    // svelte@5.56.10: `<Child label="foo&amp;bar" />` → `Child($$anchor, { label:
     // 'foo&bar' })`. This pins the non-slot path of the same decoder the `$$slots`
     // key / retained `slot` prop use.
     let js = emit_result(
@@ -16799,7 +16799,7 @@ fn slot_default_named_child_routes_to_children_prop() {
 
 // ─── Component / `<svelte:*>`-special `slot=` disposition (official three-class rule) ───
 //
-// Official `svelte@5.56.3` (`validate_slot_attribute`, `is_component = true` for the
+// Official `svelte@5.56.10` (`validate_slot_attribute`, `is_component = true` for the
 // Component / SvelteComponent / SvelteSelf hosts):
 // - A STATIC `slot` on a DIRECT component-family child routes the filler into the
 //   parent's `$$slots.NAME` AND keeps the `slot` prop on the child call.
@@ -16850,7 +16850,7 @@ fn slot_on_direct_component_child_keeps_sibling_props_in_source_order() {
 #[test]
 fn entity_slot_name_decodes_retained_prop_consistently_with_slots_key() {
     // Class-A filler: `<Child><Inner slot="foo&amp;bar"/></Child>` — official
-    // (svelte@5.56.3) entity-decodes the slot name ONCE at parse and emits BOTH the
+    // (svelte@5.56.10) entity-decodes the slot name ONCE at parse and emits BOTH the
     // `$$slots` grouping key AND the retained `slot:` prop as the decoded `foo&bar`:
     //   Child($$anchor, { $$slots: { 'foo&bar': ($$anchor, $$slotProps) => {
     //     Inner($$anchor, { slot: 'foo&bar' }); } } });
@@ -17280,7 +17280,7 @@ fn default_slot_conflict_matches_official_exemption_rule() {
 
 #[test]
 fn static_slot_on_element_snippet_child_bakes_into_skeleton() {
-    // `{#snippet foo()}<span slot="x">hi</span>{/snippet}` — official svelte@5.56.3
+    // `{#snippet foo()}<span slot="x">hi</span>{/snippet}` — official svelte@5.56.10
     // validates a `{#snippet}` direct child as component-owned placement
     // (`is_component = true` in `validate_slot_attribute`), so a STATIC `slot` on an
     // element snippet child is ACCEPTED and bakes into the cloned skeleton verbatim.
@@ -17402,7 +17402,7 @@ fn static_slot_on_svelte_element_snippet_child_folds_into_attribute_effect() {
 fn dynamic_slot_on_direct_snippet_child_fails_closed() {
     // THE false-accept regression: the plain-prop shortcut ACCEPTED a dynamic
     // `slot={x}` on a component-family direct snippet child and quietly emitted
-    // `Inner($$anchor, {slot: x()})` — official svelte@5.56.3 hard-errors
+    // `Inner($$anchor, {slot: x()})` — official svelte@5.56.10 hard-errors
     // (`slot_attribute_invalid`: the slot attribute must be a static value; the rule
     // fires at `owner === parent`, and a `{#snippet}` body IS the owner). The dynamic
     // source is a snippet PARAM (an instance `let` is refused as InstanceScriptItem).
@@ -17464,7 +17464,7 @@ fn dynamic_slot_on_direct_snippet_child_fails_closed() {
 
 #[test]
 fn valueless_slot_on_element_snippet_child_fails_closed() {
-    // Official svelte@5.56.3 accepts the snippet-child `slot` ONLY as a single
+    // Official svelte@5.56.10 accepts the snippet-child `slot` ONLY as a single
     // static TEXT-VALUED attribute (`is_text_attribute`): a valueless / boolean
     // `slot` (`<span slot>`) is the `slot_attribute_invalid` compile error. Pre-fix
     // Verter FALSE-ACCEPTED this shape and baked `slot=""` into the cloned skeleton;
@@ -17562,7 +17562,7 @@ fn valueless_slot_on_component_snippet_child_fails_closed() {
 fn valueless_slot_on_toplevel_component_class_b_still_accepts() {
     // POSITIVE CONTROL (scope lock): a valueless `slot` on a TOP-LEVEL component
     // (`<Inner slot/>` — NOT a snippet child, NOT a direct component child) is a
-    // GENUINE official svelte@5.56.3 ACCEPT — the Class B plain prop,
+    // GENUINE official svelte@5.56.10 ACCEPT — the Class B plain prop,
     // `Inner($$anchor, {slot: true})`. The valueless-reject fix is SNIPPET-ONLY;
     // this test pins that no whole-class valueless guard leaked into the plain-prop
     // path (it passes both PRE-fix and POST-fix — a fail here means the fix was
@@ -18216,7 +18216,7 @@ fn nonprimitive_state_array_init_emits_proxy_and_hoists_render_spread() {
     // INVERTED (was `nonprimitive_state_array_init_fails_closed_at_rune_gate`): a
     // `$state([1])` ARRAY init now compiles as a deep-reactive `$.proxy([1])` (a
     // never-reassigned `BareProxy`), and the `{@render row([...xs])}` spread arg hoists
-    // into a local `$.derived` memo read via `$.get` — matching svelte@5.56.3 (modulo a
+    // into a local `$.derived` memo read via `$.get` — matching svelte@5.56.10 (modulo a
     // cosmetic paren around the spread).
     let js = emit(
         "<script>let xs = $state([1]);</script>\n{#snippet row(items)}<p>{items}</p>{/snippet}\n{@render row([...xs])}\n",
@@ -18383,7 +18383,7 @@ fn component_arrow_prop_stays_plain_init() {
 fn boundary_spread_attr_prop_emits_getter() {
     // `<svelte:boundary failed={[...xs]}>` (xs a prop) — the boundary attr-prop rides
     // the SAME `prop_value_has_state` decision: spread presence ⇒ the getter accessor.
-    // Official svelte@5.56.3 emits the identical UNMEMOIZED getter (`get failed() {
+    // Official svelte@5.56.10 emits the identical UNMEMOIZED getter (`get failed() {
     // return [...$$props.xs]; }` — boundary props are never `$.derived`-hoisted),
     // pinned full-module by the committed `special/svelte_boundary_spread` oracle
     // golden (`svelte_client_emit_topology.rs`).
@@ -18582,14 +18582,14 @@ fn directive_batch_emit_panics_loudly_when_its_target_rank_is_missing() {
 // The STATE FAMILY: the deep-reactive object/array `$state` declarator (BareProxy /
 // StateProxy), the `$state.raw` opt-out (RawStateSignal / PlainLet), the raw-aware
 // reassignment flag (Q6), and the `$state.snapshot(x)` → `$.snapshot(x)` expression
-// rewrite. Every emitted shape verified against pinned `svelte@5.56.3`.
+// rewrite. Every emitted shape verified against pinned `svelte@5.56.10`.
 
 #[test]
 fn state_raw_object_reassign_emits_state_no_proxy_no_flag() {
     // MANDATORY object discriminator + Q6 trap: a `$state.raw({ a: 1 })` that is
     // REASSIGNED lowers to `let o = $.state({ a: 1 })` — NO `$.proxy` wrapper — and
     // the reassign is `$.set(o, { a: 2 })` with NO trailing `, true` (raw NEVER
-    // proxies its RHS). Verified against svelte@5.56.3.
+    // proxies its RHS). Verified against svelte@5.56.10.
     let js = emit(
         "<script>let o = $state.raw({ a: 1 });</script>\n<button onclick={() => o = { a: 2 }}>x</button>\n",
         "App.svelte",
@@ -18900,7 +18900,7 @@ fn called_state_snapshot_still_rewrites_after_uncalled_gate() {
 fn state_snapshot_zero_args_fails_closed_as_rune() {
     // G1 (fail-open fix): `$state.snapshot()` with ZERO arguments is the official
     // `rune_invalid_arguments_length` compile error ("`$state.snapshot` must be called
-    // with exactly one argument" — oracle-verified against `svelte@5.56.3`). Only the
+    // with exactly one argument" — oracle-verified against `svelte@5.56.10`). Only the
     // WELL-FORMED single-non-spread-arg form rewrites to `$.snapshot(<expr>)`. Before G1
     // the rune scan exempted EVERY called `$state.snapshot(...)` form and the rewriter
     // rewrote the callee unconditionally, so this emitted a raw `$.snapshot()`
@@ -18933,7 +18933,7 @@ fn state_snapshot_two_args_fails_closed_as_rune() {
 fn state_snapshot_spread_arg_fails_closed_as_rune() {
     // G1 (fail-open fix): `$state.snapshot(...o)` with a SPREAD argument is the official
     // `rune_invalid_spread` compile error ("`$state.snapshot` cannot be called with a
-    // spread argument" — oracle-verified against `svelte@5.56.3`). Before G1 this emitted
+    // spread argument" — oracle-verified against `svelte@5.56.10`). Before G1 this emitted
     // a raw `$.snapshot(...o)` (a fail-open miscompile). It MUST fail closed as an
     // advanced rune.
     assert_fail_closed(
@@ -18997,7 +18997,7 @@ fn state_snapshot_in_instance_script_call_initializer_is_rewritten() {
 fn paren_receiver_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
     // Receiver parens are TRANSPARENT to official (its ESTree AST has no paren
     // nodes): `($state).snapshot(o)` compiles to `$.snapshot(o)` exactly like the
-    // plain spelling (oracle-verified against svelte@5.56.3). The scan's
+    // plain spelling (oracle-verified against svelte@5.56.10). The scan's
     // well-formed-call exemption and the rewriter agree on the peeled receiver,
     // and the rewrite overwrites the paren-INCLUSIVE callee member span, so no
     // receiver-paren residue survives into the emission.
@@ -19020,7 +19020,7 @@ fn paren_receiver_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
 #[test]
 fn paren_receiver_state_snapshot_malformed_fails_closed_as_rune() {
     // A MALFORMED `($state).snapshot(...)` call — zero args / two args (official
-    // `rune_invalid_arguments_length`, oracle-verified against svelte@5.56.3 for
+    // `rune_invalid_arguments_length`, oracle-verified against svelte@5.56.10 for
     // the parenthesized spelling too) or a spread argument (official
     // `rune_invalid_spread`) — refuses under the SAME `$state.snapshot` label as
     // the plain spellings, never the coarse bare-`$state` position refusal the
@@ -19053,7 +19053,7 @@ fn paren_receiver_state_snapshot_malformed_fails_closed_as_rune() {
 fn paren_callee_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
     // Whole-CALLEE parens are TRANSPARENT to official (its ESTree AST has no paren
     // nodes): `($state.snapshot)(o)` compiles to `$.snapshot(o)` exactly like the
-    // plain spelling — oracle-verified against svelte@5.56.3 for every nesting:
+    // plain spelling — oracle-verified against svelte@5.56.10 for every nesting:
     // single, doubled, receiver-parens-inside-callee-parens, and a whole-call
     // wrapper around the paren-callee call. The scan's well-formed-call exemption
     // and the rewriter peel the SAME callee, and the rewrite overwrites the
@@ -19099,7 +19099,7 @@ fn paren_callee_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
 fn double_paren_receiver_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
     // DOUBLED receiver parens `(($state)).snapshot(o)` — the shared peel is a
     // loop, so every nesting depth reports the same member surface as the plain
-    // spelling (oracle-verified accept against svelte@5.56.3: `$.snapshot(o)`).
+    // spelling (oracle-verified accept against svelte@5.56.10: `$.snapshot(o)`).
     let js = emit(
         "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state)).snapshot(o)}>x</button>\n",
         "App.svelte",
@@ -19120,7 +19120,7 @@ fn whole_call_paren_state_snapshot_stays_accepted() {
     // Parens around the WHOLE call `($state.snapshot(o))` — the wrapper is a
     // transparent expression the walk descends through, so the call exemption and
     // the callee rewrite own the inner call unchanged (oracle-verified accept
-    // against svelte@5.56.3; official prints `$.snapshot(o)` — a surviving
+    // against svelte@5.56.10; official prints `$.snapshot(o)` — a surviving
     // behavior-preserving wrapper paren is cosmetic, never contract).
     let js = emit(
         "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot(o))}>x</button>\n",
@@ -19141,7 +19141,7 @@ fn whole_call_paren_state_snapshot_stays_accepted() {
 fn paren_callee_state_snapshot_malformed_fails_closed_as_rune() {
     // A MALFORMED snapshot call at EVERY paren position — zero args / two args
     // (official `rune_invalid_arguments_length`) or a spread argument (official
-    // `rune_invalid_spread`), oracle-verified against svelte@5.56.3 for the
+    // `rune_invalid_spread`), oracle-verified against svelte@5.56.10 for the
     // whole-callee-paren, doubled-receiver-paren, and whole-call-paren spellings —
     // refuses under the SAME `$state.snapshot` label as the plain spellings; the
     // paren transparency must never let a malformed form slip past the exemption
@@ -19190,7 +19190,7 @@ fn paren_callee_state_snapshot_malformed_fails_closed_as_rune() {
 fn uncalled_paren_state_snapshot_value_position_fails_closed_as_rune() {
     // An UNCALLED parenthesized `($state.snapshot)` / `(($state.snapshot))` in a
     // VALUE position — official `rune_missing_parentheses` (oracle-verified against
-    // svelte@5.56.3). The wrapper parens are transparent: there is no enclosing
+    // svelte@5.56.10). The wrapper parens are transparent: there is no enclosing
     // call to exempt the member, so the member handler still owns the uncalled
     // value position and records the precise `$state.snapshot` refusal.
     let cases: &[(&str, &str)] = &[
@@ -19346,7 +19346,7 @@ fn state_over_plain_local_undefined_shadow_emits() {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // The native effect family: plain `$effect` + `$effect.pre` + `$effect.root` +
-// `$effect.tracking` (position parity with svelte@5.56.3 — `$effect` /
+// `$effect.tracking` (position parity with svelte@5.56.10 — `$effect` /
 // `$effect.pre` are STATEMENT-ONLY (`effect_invalid_placement`), `.root` /
 // `.tracking` are expression-valued; non-call / malformed / unknown-member /
 // value-position forms stay fail-closed).
@@ -19519,7 +19519,7 @@ fn paren_receiver_effect_pending_fails_closed_experimental_async() {
 #[test]
 fn paren_receiver_effect_unknown_member_fails_closed_via_generic_fallback() {
     // `($effect).foo()` is the same unknown member as `$effect.foo()` (official
-    // `rune_invalid_name` — oracle-verified against svelte@5.56.3 for the
+    // `rune_invalid_name` — oracle-verified against svelte@5.56.10 for the
     // parenthesized spelling too): the generic `$effect.<member>` fallback owns
     // it, not the coarse bare-`$effect` position refusal.
     assert_fail_closed(
@@ -19533,7 +19533,7 @@ fn paren_receiver_effect_family_uncalled_members_fail_closed() {
     // UNCALLED family members behind a parenthesized receiver refuse under the
     // SAME precise member labels as the plain spellings (official
     // `rune_missing_parentheses` for every one of them — oracle-verified against
-    // svelte@5.56.3), never the coarse bare-`$effect` position refusal.
+    // svelte@5.56.10), never the coarse bare-`$effect` position refusal.
     let cases: &[(&str, &str, &str)] = &[
         (
             "paren_uncalled_pre_member",
@@ -19565,7 +19565,7 @@ fn paren_receiver_advanced_root_member_fails_closed_via_generic_fallback() {
     // A member access on a parenthesized ADVANCED-only rune root (`($host).foo`,
     // `($bindable).foo`) refuses through the generic `$rune.<member>` fallback —
     // exactly like the plain spellings (official `rune_invalid_name`,
-    // oracle-verified against svelte@5.56.3). These roots have no bare-position
+    // oracle-verified against svelte@5.56.10). These roots have no bare-position
     // refusal of their own, so without the member-form classification the
     // parenthesized spelling would slip the scan entirely.
     let cases: &[(&str, &str)] = &[
@@ -19591,7 +19591,7 @@ fn paren_receiver_advanced_root_member_fails_closed_via_generic_fallback() {
 fn paren_receiver_effect_pre_statement_call_still_accepts() {
     // The ACCEPT control for the member-receiver paren transparency: a
     // statement-position `($effect).pre(fn)` call is the SAME statement as
-    // `$effect.pre(fn)` to official (oracle-verified: svelte@5.56.3 emits
+    // `$effect.pre(fn)` to official (oracle-verified: svelte@5.56.10 emits
     // `$.user_pre_effect` with the component frame) and must keep lowering —
     // the member-form refusal classification owns ONLY uncalled references,
     // never an admitted family call (whose callee the call visitor consumes).
@@ -19618,7 +19618,7 @@ fn paren_receiver_effect_pre_statement_call_still_accepts() {
 
 #[test]
 fn effect_value_positions_fail_closed_statement_gate() {
-    // Official svelte@5.56.3 rejects EVERY value-position `$effect(...)` /
+    // Official svelte@5.56.10 rejects EVERY value-position `$effect(...)` /
     // `$effect.pre(...)` with `effect_invalid_placement` ("`$effect()` can only
     // be used as an expression statement") — the user-effect members are
     // STATEMENT-ONLY. Each value position below must FAIL CLOSED under the
@@ -19800,7 +19800,7 @@ fn effect_tracking_const_attribute_read_joins_template_effect() {
     // be static-folded (`Identifier.js` `!is_known`), so its read is
     // `has_state`. The read stays PLAIN (`t`, never `$.get`) — the same
     // disposition the text path (`{t}`) already has. Oracle-verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let js = emit(
         "<script>\n\tconst t = $effect.tracking();\n</script>\n<input disabled={t} />\n",
         "App.svelte",
@@ -19849,7 +19849,7 @@ fn effect_tracking_inline_attribute_memoizes_into_template_effect() {
     // `is_pure` explicitly special-cases `$effect.tracking` as IMPURE, so the
     // call is `has_call` (and re-evaluates INSIDE the tracking context — a
     // construction-time one-shot would return a DIFFERENT boolean, a SEMANTIC
-    // divergence, never acceptable). Oracle-verified against svelte@5.56.3.
+    // divergence, never acceptable). Oracle-verified against svelte@5.56.10.
     let js = emit(
         "<script>\n\tconst t = $effect.tracking();\n</script>\n<input disabled={$effect.tracking()} />\n",
         "App.svelte",
@@ -19970,7 +19970,7 @@ fn shadowed_effect_binding_is_not_the_rune() {
 fn effect_toplevel_statement_lowers_with_frame() {
     // A top-level `$effect(fn);` statement is a supported instance-script item:
     // it lowers to `$.user_effect(fn)` with the body rewritten and forces the
-    // runes frame, matching svelte@5.56.3 (the `matrix/effect_arrow` topology).
+    // runes frame, matching svelte@5.56.10 (the `matrix/effect_arrow` topology).
     let js = emit(
         "<script>\n\tlet count = $state(0);\n\t$effect(() => { console.log(count); });\n</script>\n<button onclick={() => count++}>{count}</button>\n",
         "App.svelte",
@@ -19999,7 +19999,7 @@ fn effect_root_is_assignable_expression_with_nested_effects_and_cleanup() {
     // preserves the `stop` binding; a nested `$effect` / `$effect.pre` inside the
     // root callback lowers through the IDENTICAL callee rewrite (no separate
     // root-recursion gate); the `return () => {};` cleanup flows through
-    // verbatim. Oracle-verified against svelte@5.56.3.
+    // verbatim. Oracle-verified against svelte@5.56.10.
     let js = emit(
         "<script>\n\tlet c = $state(0);\n\tconst stop = $effect.root(() => {\n\t\t$effect(() => console.log(c));\n\t\treturn () => {};\n\t});\n</script>\n<button onclick={() => c++}>{c}</button>\n",
         "App.svelte",
@@ -20327,7 +20327,7 @@ fn effect_family_async_await_re_homes_to_experimental_async() {
 
 #[test]
 fn effect_family_paren_statement_forms_lower_normalized() {
-    // Official svelte@5.56.3 parses with an ESTree AST that has NO
+    // Official svelte@5.56.10 parses with an ESTree AST that has NO
     // parenthesized-expression nodes, so author parens around a WHOLE
     // effect-family call statement are transparent (oracle-verified: all four
     // members accept) and the emitted helper call carries NO wrapping parens.
@@ -20642,7 +20642,7 @@ fn paren_wrapped_non_family_call_statements_stay_plain() {
 
 #[test]
 fn effect_family_optional_call_root_tracking_lower_normalized() {
-    // Official svelte@5.56.3 ACCEPTS an optional-CALL `$effect.root?.(...)` /
+    // Official svelte@5.56.10 ACCEPTS an optional-CALL `$effect.root?.(...)` /
     // `$effect.tracking?.()` in statement AND init positions and NORMALIZES the
     // `?.` away (`$.effect_root(...)` / `$.effect_tracking()` — plain, no `?.`)
     // — oracle-verified. A `$.effect_root?.(...)` emission would be a structural
@@ -20721,7 +20721,7 @@ fn effect_family_optional_call_root_tracking_lower_normalized() {
 
 #[test]
 fn effect_family_optional_member_receivers_lower_normalized() {
-    // Official svelte@5.56.3 ACCEPTS the optional MEMBER receiver forms
+    // Official svelte@5.56.10 ACCEPTS the optional MEMBER receiver forms
     // (`$effect?.root(...)` / `$effect?.tracking()`) for the expression-valued
     // members and normalizes the `?.` away (oracle-verified) — the `?.` sits
     // inside the replaced callee span. (The user-effect members REJECT every
@@ -20807,7 +20807,7 @@ fn effect_family_head_rewrites_preserve_comment_trivia() {
     // `/*#__PURE__*/` would ANNOTATE the emitted helper call (a minifier may
     // then drop the effect registration as pure), and a leading `//` line
     // comment after `return` arms ASI against the emitted call. Official
-    // svelte@5.56.3 reattaches these comments to unrelated neighboring nodes
+    // svelte@5.56.10 reattaches these comments to unrelated neighboring nodes
     // (esrap trivia reattachment) — matching that placement would be
     // cosmetic-carrier mimicry; INERT call-internal survival is the contract.
     //
@@ -21418,7 +21418,7 @@ fn effect_family_carrier_asi_tail_trivia_survives() {
     // carrier tail is LEXICAL: same-line trailing comments after the call end
     // collect up to an explicit `;`, an ASI line terminator, or EOF —
     // license-class trailing comments stay in contract (oracle-verified:
-    // svelte@5.56.3 preserves every shape below).
+    // svelte@5.56.10 preserves every shape below).
     //
     // Statement carrier, ASI at EOF: `$effect.root(fn) /*!license*/`.
     let js = emit(
@@ -21821,7 +21821,7 @@ fn effect_family_later_line_wrapper_close_asi_tail_trivia_survives() {
     // ASI statement terminator (the expression is not complete until the
     // wrapper `)`), so a semicolon-less carrier's genuinely-trailing same-line
     // comment AFTER the wrapper close must still collect into the tail —
-    // license-class comments stay in contract (oracle-verified: svelte@5.56.3
+    // license-class comments stay in contract (oracle-verified: svelte@5.56.10
     // emits `$.effect_root(…); /*!license*/`). Only a line terminator at or
     // after the span end is a real ASI boundary.
     //
@@ -22096,7 +22096,7 @@ fn effect_tracking_in_delegated_handler_lowers_without_frame() {
 fn props_id_hoists_const_with_zero_arg_helper() {
     // `let uid = $props.id();` → hoisted body-top `const uid = $.props_id();`
     // (the source `let` still emits `const`), a zero-arg helper. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let uid = $props.id();</script>\n<p>{uid}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22133,7 +22133,7 @@ fn props_id_splits_multi_declarator_and_hoists_above_siblings() {
     // `const a = 1, uid = $props.id();` splits: the uid const hoists to the
     // FUNCTION-BODY TOP (above every other body statement), the literal sibling
     // stays a separate declaration in its source slot with its source keyword.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let s = $state(0); const a = 1, uid = $props.id();</script>\n<button onclick={() => s = 2}>{uid}{s}</button>\n";
     let js = emit(src, "App.svelte");
     let uid = js.find("const uid = $.props_id();").expect("uid hoist");
@@ -22155,7 +22155,7 @@ fn props_id_splits_multi_declarator_and_hoists_above_siblings() {
 fn props_id_coexists_with_props_destructure() {
     // `$props.id()` is independent of the `$props()` destructure: the signature
     // carries `$$props` (from the destructure), `$.props_id()` stays zero-arg, and
-    // no context frame opens. Verified against svelte@5.56.3.
+    // no context frame opens. Verified against svelte@5.56.10.
     let src = "<script>let { a } = $props(); const uid = $props.id();</script>\n<p>{a}{uid}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22186,7 +22186,7 @@ fn props_id_coexists_with_props_destructure() {
 fn props_id_hoists_above_context_frame_and_prop_sources() {
     // With a bindable present the hoist ordering is: `const uid = $.props_id();`
     // FIRST, then `$.push($$props, true);`, then the `$.prop` declarations.
-    // Verified against svelte@5.56.3 (the id const hoists above the frame push).
+    // Verified against svelte@5.56.10 (the id const hoists above the frame push).
     let src = "<script>let { v = $bindable('hi') } = $props(); const uid = $props.id();</script>\n<p>{v}{uid}</p>\n";
     let js = emit(src, "App.svelte");
     let uid = js.find("const uid = $.props_id();").expect("uid hoist");
@@ -22428,7 +22428,7 @@ fn props_id_non_literal_sibling_declarator_fails_closed() {
 fn props_bindable_assigned_lowers_flag_15_setter_call() {
     // A reassigned bindable (`v = 9`) is the flag-15 prop source
     // (`IMMUTABLE|RUNES|UPDATED|BINDABLE`) and the write is the SETTER CALL
-    // `v(9)`. Verified against svelte@5.56.3.
+    // `v(9)`. Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable(0) } = $props();</script>\n<button onclick={() => v = 9}>{v}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22451,7 +22451,7 @@ fn props_bindable_assigned_lowers_flag_15_setter_call() {
 #[test]
 fn props_bindable_update_lowers_update_prop_helper() {
     // `v++` on a bindable prop source lowers to `$.update_prop(v)` (the prop
-    // update helper, not `$.update`). Verified against svelte@5.56.3.
+    // update helper, not `$.update`). Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable(0) } = $props();</script>\n<button onclick={() => v++}>{v}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22474,7 +22474,7 @@ fn props_bindable_update_lowers_update_prop_helper() {
 fn props_bindable_lazy_object_default_readonly_lowers_flag_27_proxy_thunk() {
     // A read-only bindable OBJECT default is the LAZY flag-27 proxy thunk
     // (`() => $.proxy({ a: 1 })`) — the `$.proxy` wrap is BINDABLE-only.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable({ a: 1 }) } = $props();</script>\n<p>{v}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22492,7 +22492,7 @@ fn props_bindable_lazy_object_default_readonly_lowers_flag_27_proxy_thunk() {
 fn props_bindable_lazy_object_default_mutated_lowers_flag_31_mutation_call() {
     // A deep-MUTATED bindable object default is flag-31, and the member mutation
     // wraps in the setter with the mutation flag (`v(v().a++, true)`). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { v = $bindable({ a: 1 }) } = $props();</script>\n<button onclick={() => v.a++}>{v}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22511,7 +22511,7 @@ fn props_bindable_readonly_no_default_emits_no_prop_source() {
     // `is_prop_source` — a read-only bindable with NO default is NOT a prop
     // source: NO `$.prop` anywhere; reads go DIRECT `$$props.value`; the context
     // frame still opens (the `$bindable` call forces it). Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { value = $bindable() } = $props();</script>\n<p>{value}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22533,7 +22533,7 @@ fn props_bindable_readonly_no_default_emits_no_prop_source() {
 fn props_bindable_no_default_assigned_lowers_flag_15_without_default_arg() {
     // A no-default bindable that IS reassigned becomes a prop source with NO
     // default argument: `$.prop($$props, 'v', 15)`. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { v = $bindable() } = $props();</script>\n<button onclick={() => v = 1}>{v}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22547,7 +22547,7 @@ fn props_bindable_no_default_assigned_lowers_flag_15_without_default_arg() {
 #[test]
 fn props_bindable_aliased_uses_source_key() {
     // `{ value: local = $bindable(0) }` keys the prop by its SOURCE key
-    // (`'value'`) bound as the LOCAL (`local`). Verified against svelte@5.56.3.
+    // (`'value'`) bound as the LOCAL (`local`). Verified against svelte@5.56.10.
     let src = "<script>let { value: local = $bindable(0) } = $props();</script>\n<p>{local}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22571,7 +22571,7 @@ fn props_bindable_ident_default_proxies_lazily() {
     // A bindable IDENTIFIER default that does not resolve to a known
     // non-proxiable initializer proxies lazily (`() => $.proxy(base)`, flag 27) —
     // the official scope-follow defaults to proxiable. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { v = $bindable(base) } = $props();</script>\n<p>{v}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22786,7 +22786,7 @@ fn bindable_shadowed_handler_param_is_not_a_rune_reference() {
 fn props_plain_mutated_default_lowers_flag_7() {
     // A mutated plain default (`a++`) sets UPDATED: flags 7, `$.update_prop(a)`,
     // and NO context frame (a plain prop write never forces it). Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src =
         "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a++}>{a}</button>\n";
     let js = emit(src, "App.svelte");
@@ -22808,7 +22808,7 @@ fn props_plain_mutated_default_lowers_flag_7() {
 #[test]
 fn props_plain_prefix_decrement_lowers_update_pre_prop() {
     // `--a` (prefix) lowers to `$.update_pre_prop(a, -1)` — the prefix prop
-    // update helper with the decrement literal. Verified against svelte@5.56.3.
+    // update helper with the decrement literal. Verified against svelte@5.56.10.
     let src =
         "<script>let { a = 1 } = $props();</script>\n<button onclick={() => --a}>{a}</button>\n";
     let js = emit(src, "App.svelte");
@@ -22822,7 +22822,7 @@ fn props_plain_prefix_decrement_lowers_update_pre_prop() {
 #[test]
 fn props_plain_compound_assign_lowers_getter_setter_form() {
     // `a += 1` lowers to the getter/setter compound form `a(a() + 1)`. Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src =
         "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a += 1}>{a}</button>\n";
     let js = emit(src, "App.svelte");
@@ -22836,7 +22836,7 @@ fn props_plain_compound_assign_lowers_getter_setter_form() {
 #[test]
 fn props_plain_object_default_thunk_parenthesizes_object_body() {
     // An OBJECT default thunk parenthesizes its body (`() => ({ x: 1 })`) — the
-    // required arrow-body syntax. Verified against svelte@5.56.3.
+    // required arrow-body syntax. Verified against svelte@5.56.10.
     let src = "<script>let { a = { x: 1 } } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22855,7 +22855,7 @@ fn props_plain_object_default_thunk_parenthesizes_object_body() {
 fn props_zero_arg_call_default_collapses_to_bare_callee() {
     // `{ a = foo() }` — the zero-arg identifier-callee default collapses to the
     // BARE callee as the lazy carrier (`$.prop($$props, 'a', 19, foo)`), never a
-    // thunk. Verified against svelte@5.56.3.
+    // thunk. Verified against svelte@5.56.10.
     let src = "<script>let { a = foo() } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22875,7 +22875,7 @@ fn props_getter_call_sibling_default_thunks_the_call() {
     // the getter (`a()`), so the rewritten call is `a()()` and must ride a FULL
     // thunk (the zero-arg collapse applies only to a bare identifier callee).
     // The prop-rooted call also forces the context frame (the official unsafe-call
-    // rule). Verified against svelte@5.56.3.
+    // rule). Verified against svelte@5.56.10.
     let src = "<script>let { a = 1, b = a() } = $props();</script>\n<p>{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22914,7 +22914,7 @@ fn props_mixed_getter_and_member_reads_split_per_member() {
 fn props_no_default_mutated_lowers_flag_7_without_default_arg() {
     // A NO-default plain prop that is written becomes a prop source (`updated`)
     // with NO default argument: `$.prop($$props, 'a', 7)`; reads flip to the
-    // getter. Verified against svelte@5.56.3.
+    // getter. Verified against svelte@5.56.10.
     let src = "<script>let { a } = $props();</script>\n<button onclick={() => a++}>{a}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22937,7 +22937,7 @@ fn props_no_default_deep_mutated_plain_prop_stays_raw_member_write() {
     // A PLAIN (non-bindable) prop deep-mutation (`a.x++`) keeps the RAW member
     // write over the getter base (`a().x++`) — the setter-with-mutation-flag wrap
     // is bindable-only — and the member root forces the context frame. Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a } = $props();</script>\n<button onclick={() => a.x++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22965,7 +22965,7 @@ fn props_object_default_single_member_update_locks_flag_23() {
     // A SINGLE-LEVEL member update over an object default (`a.x++`) pins the
     // full UPDATED | LAZY flag composition: exactly 23 (3 | 4 | 16), with the
     // parenthesized thunk and the getter-based member write. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = { x: 1 } } = $props();</script>\n<button onclick={() => a.x++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -22992,7 +22992,7 @@ fn props_object_default_single_member_update_locks_flag_23() {
 fn props_plain_default_nested_member_update_sets_updated_flag_7() {
     // A NESTED member update (`a.b.c++`, depth ≥ 2) is a DEEP MUTATION of the
     // ROOT prop `a` exactly like an immediate one (`a.x++`): UPDATED is set,
-    // flags 7 with the raw simple default. Verified against svelte@5.56.3.
+    // flags 7 with the raw simple default. Verified against svelte@5.56.10.
     let src = "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a.b.c++}>{a}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23015,7 +23015,7 @@ fn props_plain_default_nested_member_update_sets_updated_flag_7() {
 fn props_object_default_nested_member_update_sets_updated_flag_23() {
     // A nested member update over an OBJECT default keeps the parenthesized
     // thunk AND sets UPDATED: flags 23 (3 | UPDATED 4 | LAZY 16). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = { b: { c: 0 } } } = $props();</script>\n<button onclick={() => a.b.c++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23038,7 +23038,7 @@ fn props_object_default_nested_member_update_sets_updated_flag_23() {
 fn props_bindable_object_default_nested_member_update_sets_updated_flag_31() {
     // A nested member update of a BINDABLE prop sets UPDATED on top of
     // BINDABLE | LAZY (flags 31) and keeps the bindable setter-with-mutation
-    // wrap `v(v().b.c++, true)`. Verified against svelte@5.56.3.
+    // wrap `v(v().b.c++, true)`. Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable({ b: { c: 0 } }) } = $props();</script>\n<button onclick={() => v.b.c++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23061,7 +23061,7 @@ fn props_bindable_object_default_nested_member_update_sets_updated_flag_31() {
 fn props_object_default_nested_member_assignment_sets_updated_flag_23() {
     // The nested ASSIGNMENT form (`a.b.c = 1`) is the same deep mutation of the
     // root prop as the update form: UPDATED set, flags 23. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = { b: { c: 0 } } } = $props();</script>\n<button onclick={() => a.b.c = 1}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23085,7 +23085,7 @@ fn props_computed_root_nested_update_sets_updated_and_keeps_key_read() {
     // A COMPUTED link inside the mutation chain (`a[k].c++`) still attributes
     // the deep mutation to the ROOT `a` (flags 23), while the computed KEY `k`
     // stays a READ: `k` keeps flags 3 and its reference rewrites to the getter
-    // (`a()[k()].c++`). Verified against svelte@5.56.3.
+    // (`a()[k()].c++`). Verified against svelte@5.56.10.
     let src = "<script>let { a = { b: { c: 0 } }, k = 'b' } = $props();</script>\n<button onclick={() => a[k].c++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23116,7 +23116,7 @@ fn props_computed_root_nested_update_sets_updated_and_keeps_key_read() {
 fn props_computed_leaf_nested_update_sets_updated_and_keeps_key_read() {
     // A computed OUTERMOST member (`a.b[k]++`) roots the deep mutation at `a`
     // (flags 23) through the static link, and the computed key `k` stays a
-    // getter READ (`a().b[k()]++`). Verified against svelte@5.56.3.
+    // getter READ (`a().b[k()]++`). Verified against svelte@5.56.10.
     let src = "<script>let { a = { b: { c: 0 } }, k = 'c' } = $props();</script>\n<button onclick={() => a.b[k]++}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23144,7 +23144,7 @@ fn props_sequence_default_thunk_parenthesizes_sequence_body() {
     // A SEQUENCE-expression default (`= (1, 2)`) embeds as ONE parenthesized
     // thunk body — `() => (1, 2)` — so the comma expression stays a single
     // `$.prop` argument and the thunk returns the sequence value (2). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = (1, 2) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     // The FULL call text pins the arity: exactly four `$.prop` arguments.
@@ -23165,7 +23165,7 @@ fn props_sequence_default_thunk_parenthesizes_sequence_body() {
 fn props_bindable_sequence_default_proxy_parenthesizes_sequence_argument() {
     // A BINDABLE sequence default (`$bindable((1, { x: 1 }))`) parenthesizes
     // the sequence inside the proxy call — `$.proxy((1, { x: 1 }))` — keeping
-    // `$.proxy` a ONE-argument call. Verified against svelte@5.56.3.
+    // `$.proxy` a ONE-argument call. Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable((1, { x: 1 })) } = $props();</script>\n<p>{v}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23183,7 +23183,7 @@ fn props_bindable_sequence_default_proxy_parenthesizes_sequence_argument() {
 #[test]
 fn props_string_key_default_quotes_source_key() {
     // `{ 'a-b': ab = 1 }` — the non-identifier SOURCE key stays the quoted prop
-    // key. Verified against svelte@5.56.3.
+    // key. Verified against svelte@5.56.10.
     let src = "<script>let { 'a-b': ab = 1 } = $props();</script>\n<p>{ab}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23197,7 +23197,7 @@ fn props_string_key_default_quotes_source_key() {
 fn props_arrow_default_is_simple_and_passes_raw() {
     // An ARROW default is a SIMPLE expression (official `is_simple_expression`):
     // it passes RAW with NO lazy bit (`3, () => 1`). Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { cb = () => 1 } = $props();</script>\n<p>{cb}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23214,7 +23214,7 @@ fn props_arrow_default_is_simple_and_passes_raw() {
 #[test]
 fn props_binary_default_is_simple_and_passes_raw() {
     // A literal BINARY default (`1 + 2`) is simple → raw, flags 3. Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = 1 + 2 } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23227,7 +23227,7 @@ fn props_binary_default_is_simple_and_passes_raw() {
 #[test]
 fn props_template_literal_default_is_lazy() {
     // A TEMPLATE-LITERAL default is NOT simple (official excludes it): lazy thunk,
-    // flags 19. Verified against svelte@5.56.3.
+    // flags 19. Verified against svelte@5.56.10.
     let src = "<script>let { a = `x` } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23240,7 +23240,7 @@ fn props_template_literal_default_is_lazy() {
 #[test]
 fn props_undefined_default_passes_raw() {
     // `{ a = undefined }` — the `undefined` identifier is simple → raw, flags 3
-    // (the initial argument survives). Verified against svelte@5.56.3.
+    // (the initial argument survives). Verified against svelte@5.56.10.
     let src = "<script>let { a = undefined } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23254,7 +23254,7 @@ fn props_undefined_default_passes_raw() {
 fn props_parenthesized_default_peels_transparently() {
     // `{ a = (1) }` — author parens around a default VALUE are transparent
     // (official's ESTree has no paren nodes): simple → raw, flags 3, emitted `1`.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let { a = (1) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23272,7 +23272,7 @@ fn props_parenthesized_default_peels_transparently() {
 fn props_signal_reading_default_thunks_the_getter_read() {
     // A default reading a LIVE `$state` signal rewrites the read (`$.get(s)`)
     // and rides the lazy thunk; the declarations keep source order. Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let s = $state(1); let { a = s } = $props();</script>\n<button onclick={() => s = 2}>{a}</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23425,7 +23425,7 @@ fn props_instance_script_prop_write_stays_fail_closed() {
 
 // ── TS-only syntax in a prop-rooted template WRITE chain — fail-closed ─────────
 //
-// Official svelte@5.56.3 PARSE-REJECTS TypeScript syntax in a plain-`<script>`
+// Official svelte@5.56.10 PARSE-REJECTS TypeScript syntax in a plain-`<script>`
 // component's template (`expected_token`), so a template write whose member
 // chain carries a TS-only wrapper (`v!.a++` / `(v as any).a++`) must never
 // emit. Verter's TypeScript stripper can lower the same structural target for a
@@ -23490,7 +23490,7 @@ fn props_bindable_ts_as_cast_member_update_fails_closed() {
 // The fail-closed classification inspects the WHOLE member lvalue, not just the
 // object spine: a COMPUTED KEY anywhere along a prop-rooted write target
 // (`v[k as any]++` / `v[k!].b++`) carries the same officially-parse-rejected
-// TypeScript syntax (svelte@5.56.3 `expected_token` in a plain-`<script>`
+// TypeScript syntax (svelte@5.56.10 `expected_token` in a plain-`<script>`
 // component's template), and accepting it would strip the wrapper and emit a
 // write official never compiles. The key inspection is RECURSIVE — a TS node
 // nested at any depth inside the key (`v[f(k as any)]++`) fails closed too —
@@ -23574,7 +23574,7 @@ fn props_bindable_plain_computed_key_update_keeps_key_read() {
 // A `#private`-field member write whose target roots at a `$props()` prop
 // (`v.#x++` / `v.#x = 1` inside a template-handler class body — the only
 // position where a private name is in scope) is the SAME deep mutation of the
-// root binding as a static/computed member write: official svelte@5.56.3 sets
+// root binding as a static/computed member write: official svelte@5.56.10 sets
 // the UPDATED flag bit and applies the bindable setter-with-mutation wrap
 // (`v(v().#x++, true)`) identically to `v.x++`. The reference collector must
 // classify the private-field target arm through the same root-walked
@@ -23589,7 +23589,7 @@ fn props_bindable_plain_computed_key_update_keeps_key_read() {
 fn props_bindable_private_field_update_sets_updated_flag_31() {
     // `v.#x++` through a bindable prop, inside a handler-declared class body.
     // Official: flags 31 (IMMUTABLE|RUNES|UPDATED|BINDABLE|LAZY), proxied
-    // thunk, and the setter mutation wrap. Verified against svelte@5.56.3.
+    // thunk, and the setter mutation wrap. Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable({}) } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { v.#x++; } } C.m(); }}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23616,7 +23616,7 @@ fn props_bindable_private_field_update_sets_updated_flag_31() {
 fn props_bindable_private_field_assignment_sets_updated_flag_31() {
     // The ASSIGNMENT form (`v.#x = 1`) is the same deep mutation of the root
     // prop as the update form: flags 31 and the wrap `v(v().#x = 1, true)`.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable({}) } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { v.#x = 1; } } C.m(); }}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23639,7 +23639,7 @@ fn props_bindable_private_field_assignment_sets_updated_flag_31() {
 fn props_plain_default_private_field_update_sets_updated_flag_23() {
     // `a.#x++` through a PLAIN object-default prop (no `$bindable`): official
     // sets UPDATED — flags 23 (3 | UPDATED 4 | LAZY 16) — and the write reads
-    // through the getter base (`a().#x++`). Verified against svelte@5.56.3.
+    // through the getter base (`a().#x++`). Verified against svelte@5.56.10.
     let src = "<script>let { a = {} } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { a.#x++; } } C.m(); }}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23663,7 +23663,7 @@ fn props_private_field_write_to_local_root_keeps_prop_read_only_flag_19() {
     // CONTROL: the SAME class/private-field shape mutating a handler LOCAL
     // (`o.#x++`) attributes nothing to the prop — `a` stays a read-only lazy
     // default (flags 19, no UPDATED), the local write stays raw, and the prop
-    // read stays the getter call. Verified against svelte@5.56.3.
+    // read stays the getter call. Verified against svelte@5.56.10.
     let src = "<script>let { a = {} } = $props();</script>\n<button onfocus={() => { const o = { n: 0 }; class C { static #x = 0; static m() { o.#x++; } } C.m(); console.log(a); }}>x</button>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23689,7 +23689,7 @@ fn props_private_field_write_to_local_root_keeps_prop_read_only_flag_19() {
 #[test]
 fn props_bindable_ts_nonnull_private_field_update_fails_closed() {
     // CONTROL: `v!.#x++` — a TS non-null wrapper on the private-field target's
-    // OBJECT spine, rooting at a bindable prop. Official svelte@5.56.3
+    // OBJECT spine, rooting at a bindable prop. Official svelte@5.56.10
     // parse-rejects the TS syntax in a plain-`<script>` component's template
     // (`js_parse_error`); the shared member-write funnel keeps the TS-wrapped
     // reactive write fail-closed — the private-field arm must not widen it.
@@ -23705,7 +23705,7 @@ fn props_bindable_ts_nonnull_private_field_update_fails_closed() {
 // (the write rewrites through the prop setter/getter), so the `updated` flag
 // axis (bit 4) and the `is_prop_source` flip must observe them exactly like
 // template-expression writes. Every expectation below is oracle-pinned against
-// svelte@5.56.3.
+// svelte@5.56.10.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -23713,7 +23713,7 @@ fn props_self_assign_default_sets_updated_flag_23() {
     // `let { a = (a = 1) }` — the self-assignment INSIDE the default rewrites
     // through the setter (`a(1)`) AND sets UPDATED: flags 23 (3 | 4 | 16), no
     // context frame (a plain reassign never forces `$.push`). Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = (a = 1) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23737,7 +23737,7 @@ fn props_self_assign_default_sets_updated_flag_23() {
 fn props_self_update_default_sets_updated_flag_23() {
     // `let { a = (a++, 2) }` — the self-update inside the default rewrites to
     // `$.update_prop(a)` and sets UPDATED: flags 23. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = (a++, 2) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23760,7 +23760,7 @@ fn props_default_sibling_member_write_marks_written_sibling_not_writer() {
     // `let { a = (b.x++), b = { x: 0 } }` — the member write inside `a`'s
     // default deep-mutates the SIBLING `b`: `b` gains UPDATED (flags 23), the
     // WRITER `a` stays read-only-lazy (flags 19), and the prop-rooted member
-    // write forces the context frame. Verified against svelte@5.56.3.
+    // write forces the context frame. Verified against svelte@5.56.10.
     let src = "<script>let { a = (b.x++), b = { x: 0 } } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23791,7 +23791,7 @@ fn props_default_sibling_member_write_marks_written_sibling_not_writer() {
 fn props_default_sibling_member_write_marks_sibling_writer_second() {
     // The SAME sibling member write with the member order swapped
     // (`let { b = { x: 0 }, a = (b.x++) }`) — the mark is order-independent:
-    // `b` is 23, `a` is 19, frame present. Verified against svelte@5.56.3.
+    // `b` is 23, `a` is 19, frame present. Verified against svelte@5.56.10.
     let src = "<script>let { b = { x: 0 }, a = (b.x++) } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23818,7 +23818,7 @@ fn props_default_sibling_reassign_marks_sibling_flag_7_without_frame() {
     // `let { a = (b = 5), b = 0 }` — a PLAIN sibling reassign inside a default
     // sets UPDATED on `b` (flags 7 — its own default `0` is simple/raw, no
     // LAZY) and, unlike a member write, never forces the context frame.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let { a = (b = 5), b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23845,7 +23845,7 @@ fn props_default_write_to_no_default_sibling_makes_it_prop_source_flag_7() {
     // `let { a = (b = 5), b }` — the sibling reassign makes the NO-default `b`
     // a PROP SOURCE (`is_prop_source` = updated): it emits `$.prop($$props,
     // 'b', 7)` with NO default argument and its reads flip to the getter (no
-    // direct `$$props.b` read survives). Verified against svelte@5.56.3.
+    // direct `$$props.b` read survives). Verified against svelte@5.56.10.
     let src = "<script>let { a = (b = 5), b } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23872,7 +23872,7 @@ fn props_bindable_self_assign_default_sets_updated_flag_31() {
     // `let { a = $bindable(a = 1) }` — the self-assign inside the bindable
     // default sets UPDATED on top of BINDABLE | LAZY: flags 31 (3 | 4 | 8 |
     // 16), with the proxied setter rewrite; `$bindable` itself forces the
-    // context frame. Verified against svelte@5.56.3.
+    // context frame. Verified against svelte@5.56.10.
     let src = "<script>let { a = $bindable(a = 1) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23895,7 +23895,7 @@ fn props_bindable_default_sibling_member_write_marks_sibling_flag_23() {
     // `let { a = $bindable(b.x++), b = { x: 0 } }` — the member write inside
     // the BINDABLE default deep-mutates the plain sibling `b`: `b` gains
     // UPDATED (flags 23) while the bindable writer stays un-updated (flags
-    // 27), frame present. Verified against svelte@5.56.3.
+    // 27), frame present. Verified against svelte@5.56.10.
     let src =
         "<script>let { a = $bindable(b.x++), b = { x: 0 } } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
@@ -23924,7 +23924,7 @@ fn props_self_member_write_default_sets_updated_and_context_frame() {
     // default deep-mutates `a`: UPDATED set (flags 23), the write reads
     // through the getter base, and the prop-rooted member forces the context
     // frame (`$.push($$props, true)` / `$.pop()`). Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = a.x++ ?? { x: 0 } } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23950,7 +23950,7 @@ fn props_self_member_write_default_sets_updated_and_context_frame() {
 fn props_self_member_assign_default_sets_updated_and_context_frame() {
     // `let { a = (a.x = 1) }` — the self member ASSIGNMENT variant: flags 23,
     // getter-based member assign, context frame present. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = (a.x = 1) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23972,7 +23972,7 @@ fn props_self_member_assign_default_sets_updated_and_context_frame() {
 fn props_aliased_local_self_assign_default_sets_updated_flag_23() {
     // `let { a: local = (local = 1) }` — the updated axis keys on the LOCAL
     // binding name under aliasing: flags 23 on source key 'a' with the aliased
-    // setter rewrite. Verified against svelte@5.56.3.
+    // setter rewrite. Verified against svelte@5.56.10.
     let src = "<script>let { a: local = (local = 1) } = $props();</script>\n<p>{local}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -23993,7 +23993,7 @@ fn props_default_shadowed_param_write_keeps_prop_read_only_flag_19() {
     // stays read-only-lazy (flags 19, no UPDATED). The IIFE's non-identifier
     // callee root still forces the context frame (official
     // `is_safe_identifier` returns false for a non-identifier leaf). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = ((a) => (a = 1))(0) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24019,7 +24019,7 @@ fn props_default_shadowed_param_write_keeps_prop_read_only_flag_19() {
 
 // ── Destructuring-assignment WRITES inside `$props()` defaults — fail-closed ──
 //
-// PINS A DELIBERATE BOUNDARY: official svelte@5.56.3 ACCEPTS a destructuring-
+// PINS A DELIBERATE BOUNDARY: official svelte@5.56.10 ACCEPTS a destructuring-
 // assignment WRITE inside a `$props()` default and lowers the write through
 // the prop SETTER inside an UPDATED (flags 23) IIFE thunk. Verter deliberately
 // fails EVERY destructuring-assignment write closed — the single shared
@@ -24033,7 +24033,7 @@ fn props_default_shadowed_param_write_keeps_prop_read_only_flag_19() {
 
 #[test]
 fn props_default_object_destructuring_write_fails_closed() {
-    // `let { a = ({ a } = { a: 1 }) } = $props();` — official svelte@5.56.3
+    // `let { a = ({ a } = { a: 1 }) } = $props();` — official svelte@5.56.10
     // ACCEPTS the OBJECT-pattern destructuring-assignment write inside the
     // default, assigning through the prop setter (oracle-verified emit):
     //   let a = $.prop($$props, 'a', 23, () => (($$value) => {
@@ -24059,7 +24059,7 @@ fn props_default_object_destructuring_write_fails_closed() {
 #[test]
 fn props_default_array_destructuring_write_fails_closed() {
     // `let { a = ([a] = [1]) } = $props();` — the ARRAY-pattern form. Official
-    // svelte@5.56.3 ACCEPTS it, assigning through the prop setter over the
+    // svelte@5.56.10 ACCEPTS it, assigning through the prop setter over the
     // destructured array (oracle-verified emit):
     //   let a = $.prop($$props, 'a', 23, () => (($$value) => {
     //       var $$array = $.to_array($$value, 1);
@@ -24088,7 +24088,7 @@ fn props_default_array_destructuring_write_fails_closed() {
 // initial (no LAZY bit) even when its body carries rewrites (the outer node
 // kind survives visiting), while a rewritten identifier LEAF (a getter call /
 // `$$props` member / signal read) breaks simplicity. Every expectation below
-// is oracle-pinned against svelte@5.56.3.
+// is oracle-pinned against svelte@5.56.10.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -24098,7 +24098,7 @@ fn props_arrow_default_with_inner_self_write_stays_raw_simple_flag_7() {
     // (3 | 4 — the deferred write sets UPDATED, NO LAZY bit) with the single
     // rewritten arrow. Official prints `() => a(1)`; Verter's source-
     // preserving carrier keeps the author's body parens (`() => (a(1))`) — a
-    // waived cosmetic difference. Verified against svelte@5.56.3.
+    // waived cosmetic difference. Verified against svelte@5.56.10.
     let src = "<script>let { a = () => (a = 1) } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24127,7 +24127,7 @@ fn props_function_expression_default_with_inner_self_read_stays_raw_flag_3() {
     // `let { a = function () { return a; } }` — a FUNCTION-EXPRESSION default
     // is simple over the visited node: the inner prop READ rewrites to the
     // getter inside the body while the initial passes RAW — flags 3 (a read
-    // never sets UPDATED). Verified against svelte@5.56.3.
+    // never sets UPDATED). Verified against svelte@5.56.10.
     let src = "<script>let { a = function () { return a; } } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24146,7 +24146,7 @@ fn props_function_expression_default_with_inner_self_write_stays_raw_flag_7() {
     // `let { a = function () { a = 1; } }` — the deferred write inside the
     // function body sets UPDATED and rewrites through the setter; the
     // function-expression initial stays RAW (flags 7, no LAZY). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let src = "<script>let { a = function () { a = 1; } } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24165,7 +24165,7 @@ fn props_arrow_default_referencing_sibling_stays_raw_with_getter_body() {
     // `let { a = () => b, b = 0 }` — the sibling GETTER rewrite lands INSIDE
     // the arrow body; the arrow default stays a RAW simple initial (flags 3,
     // `() => b()`), never the lazy thunk over it. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { a = () => b, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24189,7 +24189,7 @@ fn props_bindable_arrow_default_with_inner_self_write_stays_raw_flag_15() {
     // FALSE for a function literal, so the bindable arrow default skips the
     // `$.proxy` wrap AND stays a raw simple initial: flags 15 (3 | 4 | 8 —
     // UPDATED from the deferred write, BINDABLE, no LAZY), single rewritten
-    // arrow. Verified against svelte@5.56.3.
+    // arrow. Verified against svelte@5.56.10.
     let src = "<script>let { v = $bindable(() => (v = 1)) } = $props();</script>\n<p>{v}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24216,7 +24216,7 @@ fn props_bindable_arrow_default_stays_raw_unproxied_flag_11() {
     // CONTROL (green pre-fix): `let { v = $bindable(() => 1) }` — official
     // `should_proxy` is false for a function literal and the arrow is simple:
     // raw initial, flags 11 (3 | 8), no `$.proxy`, no LAZY. Verified against
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     let src = "<script>let { v = $bindable(() => 1) } = $props();</script>\n<p>{v}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24235,7 +24235,7 @@ fn props_conditional_default_with_function_part_stays_raw_flag_7() {
     // `let { a = 1 ? () => (a = 1) : 0 }` — a conditional over SIMPLE parts is
     // itself simple; the arrow PART is opaque-simple (its inner rewrite never
     // changes the part's node kind), so the whole initial stays RAW — flags 7.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let src = "<script>let { a = 1 ? () => (a = 1) : 0 } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24254,7 +24254,7 @@ fn props_conditional_default_with_unrewritten_leaf_and_function_part_stays_raw_f
     // `let { a = undefined ? () => (a = 1) : 0 }` — the identifier leaf
     // `undefined` never rewrites; the arrow part is opaque-simple even though
     // its body carries the setter rewrite: the visited conditional stays
-    // simple → RAW, flags 7. Verified against svelte@5.56.3.
+    // simple → RAW, flags 7. Verified against svelte@5.56.10.
     let src =
         "<script>let { a = undefined ? () => (a = 1) : 0 } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
@@ -24273,7 +24273,7 @@ fn props_conditional_default_with_unrewritten_leaf_and_function_part_stays_raw_f
 fn props_logical_default_with_function_part_stays_raw_flag_7() {
     // `let { a = (() => (a = 1)) || null }` — a logical over SIMPLE parts
     // (arrow, null literal) stays simple over the visited node: RAW initial,
-    // flags 7 (the inner write sets UPDATED). Verified against svelte@5.56.3.
+    // flags 7 (the inner write sets UPDATED). Verified against svelte@5.56.10.
     let src = "<script>let { a = (() => (a = 1)) || null } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24293,7 +24293,7 @@ fn props_conditional_default_with_rewritten_leaf_stays_lazy_flag_19() {
     // leaf `b` REWRITES to the getter call, so the visited conditional is NOT
     // simple: LAZY thunk, flags 19. Discriminates the visited-node decision
     // from one keyed on the ORIGINAL node kind alone (which would wrongly pass
-    // `b() ? 1 : 2` raw). Verified against svelte@5.56.3.
+    // `b() ? 1 : 2` raw). Verified against svelte@5.56.10.
     let src = "<script>let { a = b ? 1 : 2, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24312,7 +24312,7 @@ fn props_conditional_default_with_rewritten_leaf_and_function_part_stays_lazy_fl
     // CONTROL (green pre-fix): `let { a = b ? () => 1 : 0, b = 0 }` — a
     // function PART cannot rescue a conditional whose leaf `b` rewrites: the
     // visited test is a getter CALL, so the initial rides the LAZY thunk
-    // (flags 19). Verified against svelte@5.56.3.
+    // (flags 19). Verified against svelte@5.56.10.
     let src = "<script>let { a = b ? () => 1 : 0, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24330,7 +24330,7 @@ fn props_conditional_default_with_rewritten_leaf_and_function_part_stays_lazy_fl
 fn props_array_default_with_sibling_getter_stays_lazy_flag_19() {
     // CONTROL (green pre-fix): `let { a = [b], b = 0 }` — an ARRAY default is
     // structurally non-simple regardless of rewrites: LAZY thunk with the
-    // sibling getter inside (flags 19). Verified against svelte@5.56.3.
+    // sibling getter inside (flags 19). Verified against svelte@5.56.10.
     let src = "<script>let { a = [b], b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24348,7 +24348,7 @@ fn props_array_default_with_sibling_getter_stays_lazy_flag_19() {
 fn props_logical_default_with_unrewritten_ident_leaf_stays_raw_flag_3() {
     // CONTROL (green pre-fix): `let { a = undefined ?? 1 }` — the identifier
     // leaf `undefined` never rewrites, so the visited logical stays simple:
-    // raw initial, flags 3. Verified against svelte@5.56.3.
+    // raw initial, flags 3. Verified against svelte@5.56.10.
     let src = "<script>let { a = undefined ?? 1 } = $props();</script>\n<p>{a}</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -24482,7 +24482,7 @@ fn store_class_local_emits_class_verbatim_and_subscribes() {
     // (reached from the `const c = new S()` source of the `$c` subscription) and
     // emitted VERBATIM; `$c` subscribes identically to any other store. This was
     // the class-based local store edge (`InstanceScriptItem{construct:"class"}`) —
-    // now SUPPORTED (oracle-verified against svelte@5.56.3: the class frames the
+    // now SUPPORTED (oracle-verified against svelte@5.56.10: the class frames the
     // store via `new`).
     let js = emit(
         "<script>class S { subscribe(fn) { fn(1); return () => {}; } } const c = new S();</script>\n<p>{$c}</p>\n",
@@ -24527,7 +24527,7 @@ fn store_class_local_emits_class_verbatim_and_subscribes() {
 
 #[test]
 fn paren_wrapped_handler_is_passed_by_reference() {
-    // `onclick={(inc)}` — official svelte@5.56.3 ACCEPTS a parenthesized-but-plain
+    // `onclick={(inc)}` — official svelte@5.56.10 ACCEPTS a parenthesized-but-plain
     // handler (classifies `(inc)` as a `FunctionReference` and passes `inc` by
     // reference). The typed handler classifier peels the parentheses while retaining
     // the authored source at emission.
@@ -24556,7 +24556,7 @@ fn paren_wrapped_handler_is_passed_by_reference() {
 fn store_class_with_inner_reactive_reference_is_rewritten() {
     // A local store CLASS whose method body carries an INNER `$`-store reactive
     // reference (`class S { m() { return $a; } }` over a top-level store `a`):
-    // official svelte@5.56.3 REWRITES the inner `$a` read to `$a()` (and an inner
+    // official svelte@5.56.10 REWRITES the inner `$a` read to `$a()` (and an inner
     // `$a = v` write to `$.store_set(a, v)`) inside class method/getter/setter
     // bodies, field initializers, and static blocks. The canonical statement
     // rewriter applies the same binding-aware edits inside the class body.
@@ -24600,7 +24600,7 @@ fn store_plus_custom_element_uses_pre_return_pop_finalizer_slot() {
     // finalizer edge (refused as `HostOrCustomElement{surface:"store
     // subscription"}` with a FACTUALLY-WRONG "no post-return finalizer slot"
     // rationale) — now SUPPORTED
-    // (oracle-verified against svelte@5.56.3).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<svelte:options customElement=\"my-el\" />\n<script>import { writable } from 'svelte/store'; const c = writable(0); let { label } = $props();</script>\n<p>{$c}{label}</p>\n",
         "App.svelte",
@@ -24666,7 +24666,7 @@ fn store_write_to_derived_store_lowers_to_store_set() {
 fn store_accessor_order_is_first_subscription_order_not_declaration_order() {
     // DISCRIMINATING: `{$b}` before `{$a}` (declarations a-then-b) mints the
     // `$b` accessor FIRST — reference order, not declaration order
-    // (oracle-verified against svelte@5.56.3).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<script>import { writable } from 'svelte/store'; const a = writable(1); const b = writable(2);</script>\n<p>{$b}</p>\n<p>{$a}</p>\n",
         "App.svelte",
@@ -24766,7 +24766,7 @@ fn runes_named_function_handler_is_passed_by_reference() {
     // INVERTED (was the `event_local_function_ident` fail row): a bare-identifier
     // handler naming a top-level function declaration passes the reference
     // through, with the function body rewritten by the shared rewriter
-    // (oracle-verified against svelte@5.56.3).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<script>let c = $state(0); function inc() { c++; }</script>\n<button onclick={inc}>{c}</button>\n",
         "App.svelte",
@@ -24823,9 +24823,9 @@ fn store_compound_writes_pin_all_four_helper_shapes() {
 #[test]
 fn nonconst_store_source_declaration_kind_is_supported() {
     // A `$store` base whose top-level declaration is `let` — NOT the single-declarator
-    // `const NAME = init` store-source form Verter admits. svelte@5.56.3 ACCEPTS this and
+    // `const NAME = init` store-source form Verter admits. svelte@5.56.10 ACCEPTS this and
     // emits the `const $c = () => $.store_get(c, '$c', $$stores)` accessor path
-    // (oracle-probed against svelte@5.56.3, 2026-07-06). Verter admits a store SOURCE only
+    // (oracle-probed against svelte@5.56.10, 2026-07-06). Verter admits a store SOURCE only
     // as a single-declarator `const`, so the `let` declaration falls through to the
     // instance-script `plain let with call init` gate and fails CLOSED — never an admitted
     // (mis-emitted) subscription. `assert_fail_closed` panics on ANY emitted module, so it
@@ -24851,7 +24851,7 @@ fn nonconst_store_source_declaration_kind_is_supported() {
 
 #[test]
 fn runes_mode_export_let_is_the_official_legacy_export_invalid_reject() {
-    // Under EXPLICIT runes mode an `export let` is the official svelte@5.56.3
+    // Under EXPLICIT runes mode an `export let` is the official svelte@5.56.10
     // COMPILE ERROR `legacy_export_invalid` — never an unsupported-feature
     // refusal and never the incidental static-interpolation misattribution.
     let err = emit_result(
@@ -24884,7 +24884,7 @@ fn runes_mode_export_let_is_the_official_legacy_export_invalid_reject() {
 
 #[test]
 fn in_source_runes_option_overrides_the_runes_compile_option() {
-    // Official svelte@5.56.3: an in-source `<svelte:options runes={…}>` wins
+    // Official svelte@5.56.10: an in-source `<svelte:options runes={…}>` wins
     // over the caller's `runes` compile option in BOTH directions (oracle-
     // adjudicated). The `export let` legacy surface discriminates the mode.
 
@@ -24972,7 +24972,7 @@ fn runes_mode_reactive_statement_is_the_official_reject_explicit_and_inferred() 
 fn legacy_export_let_props_lower_through_the_prop_source_substrate() {
     // A bare legacy `export let` is a prop source with base flags 8 (BINDABLE —
     // legacy props are bindable by default) and reads as the accessor CALL
-    // (oracle-verified against svelte@5.56.3).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<script>\nexport let label;\n</script>\n<p>{label}</p>\n",
         "App.svelte",
@@ -25088,7 +25088,7 @@ fn legacy_export_let_sibling_default_lowers_lazy_getter_carrier() {
     // `let { a = 1, b = a } = $props()` destructure default), never an
     // instance-script prop usage. The sibling read rewrites to the getter and
     // collapses to the BARE getter as the LAZY carrier: flags 24 (BINDABLE 8 |
-    // LAZY 16). Verified against svelte@5.56.3.
+    // LAZY 16). Verified against svelte@5.56.10.
     let result = emit_result(
         "<script>\nexport let a = 1;\nexport let b = a;\n</script>\n<p>{a}</p>\n<p>{b}</p>\n",
     );
@@ -25534,7 +25534,7 @@ fn legacy_template_read_only_let_static_folds_to_text_content() {
 //
 // The `$:` labeled statement lowers to `$.legacy_pre_effect(<deps>, <body>)`
 // registrations plus ONE trailing `$.legacy_pre_effect_reset()` (oracle-verified
-// against svelte@5.56.3). Every accepted form's malformed / edge sibling has a
+// against svelte@5.56.10). Every accepted form's malformed / edge sibling has a
 // fail-closed OR correct-behavior discriminating test here; each asserts BOTH
 // what SHOULD appear and what should NOT.
 
@@ -25673,7 +25673,7 @@ fn reactive_dependency_cycle_is_the_official_reject() {
     // `$: a = b + x; $: b = a + 1;` — a dependency cycle among reactive
     // statements is the OFFICIAL compile error `reactive_declaration_cycle`
     // ("Cyclical dependency detected: a → b → a" — probed first-hand against
-    // svelte@5.56.3), routed through the official-reject channel.
+    // svelte@5.56.10), routed through the official-reject channel.
     let err = emit_result(
         "<script>let x = 0; $: a = b + x; $: b = a + 1;</script>\n<p>{a}</p>\n<button onclick={() => x++}>b</button>\n",
     )
@@ -25737,7 +25737,7 @@ fn reactive_prop_store_combined_wraps_each_dep_by_binding_kind() {
     // wrappers in one thunk: a legacy PROP dep deep-reads the getter call
     // (`$.deep_read_state(p())`), a STORE dep is the bare accessor call
     // (`$c()`), and the frame carries `$.init()` (the store factory call is an
-    // unsafe imported call). Oracle-pinned against svelte@5.56.3.
+    // unsafe imported call). Oracle-pinned against svelte@5.56.10.
     let js = emit(
         "<script>import { writable } from 'svelte/store'; export let p; const c = writable(0); $: y = p + $c + 1;</script>\n<p>{y}</p>\n",
         "App.svelte",
@@ -25802,7 +25802,7 @@ fn reactive_prop_write_composes_updated_onto_the_legacy_prop_flags() {
     // declaration composes UPDATED (+4) onto the legacy base 8 → 12, the
     // effect body writes through the SETTER call (`p($.get(x))`), and no
     // colliding cell synthesizes for the already-declared prop target
-    // (oracle-verified against svelte@5.56.3).
+    // (oracle-verified against svelte@5.56.10).
     let js = emit(
         "<script>export let p; let x = 0; $: p = x;</script>\n<p>{p}</p>\n<button onclick={() => x++}>b</button>\n",
         "App.svelte",
@@ -25837,7 +25837,7 @@ fn reactive_prop_write_composes_updated_onto_the_legacy_prop_flags() {
 fn reactive_parenthesized_assignment_still_synthesizes_the_target() {
     // `$: (y = x + 1)` — a PARENTHESIZED reactive assignment is the same
     // implicit-target declaration as the bare form (standard JS paren
-    // semantics; official svelte@5.56.3 accepts it and synthesizes `y`): the
+    // semantics; official svelte@5.56.10 accepts it and synthesizes `y`): the
     // zero-arg `const y = $.mutable_source();` cell, the `$.set(y, …)` body
     // write, and the signal template read.
     let js = emit(
@@ -25873,7 +25873,7 @@ fn reactive_for_of_loop_local_shadows_the_outer_dep() {
     // `let i = 0; $: for (const i of [1, 2]) { console.log(i); }` — the for-of
     // HEAD binding shadows the outer reactive `i` across the whole statement,
     // so the dep thunk is EMPTY and the body's loop-local reads stay bare
-    // (oracle-verified against svelte@5.56.3: `() => {}`).
+    // (oracle-verified against svelte@5.56.10: `() => {}`).
     let js = emit(
         "<script>let i = 0; $: for (const i of [1, 2]) { console.log(i); }</script>\n<p>{i}</p>\n<button onclick={() => i++}>b</button>\n",
         "App.svelte",
@@ -25942,7 +25942,7 @@ fn reactive_for_head_and_catch_param_scopes_shadow_outer_deps() {
 fn reactive_empty_statement_registers_an_empty_effect() {
     // `$:;` — official compiles the empty labeled statement to an effect with
     // an empty dep thunk and an empty body (probed first-hand against
-    // svelte@5.56.3); it is handled, not fail-closed.
+    // svelte@5.56.10); it is handled, not fail-closed.
     let js = emit(
         "<script>let x = 0; $:;</script>\n<p>{x}</p>\n<button onclick={() => x++}>b</button>\n",
         "App.svelte",
@@ -26336,7 +26336,7 @@ fn two_named_slots_walk_sibling_anchors() {
 fn slot_before_trailing_static_sibling_advances_the_hydration_cursor() {
     // `<div><slot name="n"><p>fb</p></slot><span>after</span></div>`: the slot is
     // the last NAMED position; the trailing static `<span>` advances the cursor
-    // (`$.next();`) before `$.reset(div)` — oracle-pinned svelte@5.56.3.
+    // (`$.next();`) before `$.reset(div)` — oracle-pinned svelte@5.56.10.
     let js = emit(
         "<div><slot name=\"n\"><p>fb</p></slot><span>after</span></div>\n",
         "App.svelte",
@@ -26482,7 +26482,7 @@ fn slot_duplicate_attribute_rejects_as_attribute_duplicate() {
 #[test]
 fn slot_let_unbound_fails_closed_with_dedicated_diagnostic() {
     // `<slot let:x>` (the producer-side provider `let:` binding) is
-    // official-ACCEPTED, but the pinned svelte@5.56.3 compiler ITSELF emits
+    // official-ACCEPTED, but the pinned svelte@5.56.10 compiler ITSELF emits
     // BROKEN output for it — a component-instance-scope
     // `const x = $.derived_safe_equal(() => $$slotProps.x);` reading an
     // UNDECLARED `$$slotProps` (`$$slotProps` is bound only inside a component
@@ -26525,7 +26525,7 @@ fn slot_let_unbound_fails_closed_with_dedicated_diagnostic() {
         verter_span::Span::new(start, start + "let:x".len() as u32),
         "the refusal reports the authored directive span"
     );
-    // PINNED oracle evidence (svelte@5.56.3 over this exact fixture): the
+    // PINNED oracle evidence (svelte@5.56.10 over this exact fixture): the
     // official client module reads `$$slotProps` exactly once and never
     // declares it — the upstream bug this refusal diverges from. If a future
     // re-pin changes this output, this pin fails and the divergence must be
@@ -26550,7 +26550,7 @@ fn slot_let_unbound_fails_closed_with_dedicated_diagnostic() {
 }
 
 // ── The LEGACY value memo topology (`$.derived_safe_equal` + the official ────
-// `build_expression` deep-read/untrack wrap — svelte@5.56.3
+// `build_expression` deep-read/untrack wrap — svelte@5.56.10
 // `shared/utils.js` `build_expression` + `Memoizer.deriveds(runes)`).
 //
 // The shared `DerivedMemoizer` picks the helper BY MODE (runes → `$.derived`,
@@ -26617,7 +26617,7 @@ fn legacy_component_member_prop_wraps_untracked_getter_without_memo() {
 
 #[test]
 fn legacy_wrap_deps_include_nested_function_captures() {
-    // Oracle parity (svelte@5.56.3): nested fn/arrow bodies do NOT set the sync
+    // Oracle parity (svelte@5.56.10): nested fn/arrow bodies do NOT set the sync
     // wrap trigger, but their free bindings REMAIN `metadata.references`
     // dependencies when another part of the expression triggers the wrap.
     // `<Comp foo={(a.x, () => b.y)} />` — the sync member `a.x` triggers; the
@@ -26641,7 +26641,7 @@ fn legacy_wrap_deps_include_nested_function_captures() {
 
 #[test]
 fn legacy_iife_call_deps_include_arrow_captured_prop() {
-    // Oracle parity (svelte@5.56.3): an IIFE `(() => obj.x)()` fires the
+    // Oracle parity (svelte@5.56.10): an IIFE `(() => obj.x)()` fires the
     // `has_call` trigger; its ONLY reference (`obj`) sits inside the arrow body
     // yet still joins the deps. Oracle:
     //   ($.deep_read_state(obj()), $.untrack(() => (() => obj().x)()))
@@ -27391,7 +27391,7 @@ fn maybe_runes_attr_call_dep_stays_raw() {
 
 #[test]
 fn legacy_dispatcher_component_emits_push_init_pop_topology() {
-    // The oracle topology (svelte@5.56.3): the authored `svelte` import stays in
+    // The oracle topology (svelte@5.56.10): the authored `svelte` import stays in
     // the INSTANCE import slot (after the runtime namespace), the dispatcher
     // declaration + the handler function emit as PLAIN statements, and the
     // imported call sets `needs_context` — `$.push($$props, false)` … `$.init()`
@@ -27472,7 +27472,7 @@ fn unused_dispatcher_import_emits_no_frame_and_no_init() {
 fn runes_dispatcher_frames_without_legacy_init() {
     // A RUNES-mode dispatcher component: the same preserved import + plain
     // declaration, the runes frame (`$.push($$props, true)`), and NO legacy
-    // `$.init()` (oracle-verified against svelte@5.56.3 with the fn-ref handler).
+    // `$.init()` (oracle-verified against svelte@5.56.10 with the fn-ref handler).
     let js = emit(
         "<script>import { createEventDispatcher } from 'svelte';\nlet n = $state(0);\nconst dispatch = createEventDispatcher();\nfunction fire() { dispatch('go', n); }</script>\n<button onclick={fire}>go</button>\n",
         "App.svelte",
@@ -27504,7 +27504,7 @@ fn runes_dispatcher_frames_without_legacy_init() {
 // remaining `build_expression` consumers: class/style bases, `style:` inner
 // values, attribute-effect folds (+ `<svelte:element>`), block heads, `{@html}`,
 // `{@const}`, `{@attach}`, `<title>` chunks. Every oracle line below is a
-// direct pinned `svelte@5.56.3` compile of the same fixture.
+// direct pinned `svelte@5.56.10` compile of the same fixture.
 
 const LEGACY_OBJ: &str = "<script>export let obj;</script>\n";
 

@@ -97,7 +97,7 @@ fn collect_node_ops(
             }
             // A GLOBAL host special (`<svelte:window|document|body>`): its event listeners
             // target the global the element represents (Window/Document/Body), NOT the node —
-            // verified against svelte@5.56.3 (`$.window` / `$.document` / `$.document.body`).
+            // verified against svelte@5.56.10 (`$.window` / `$.document` / `$.document.body`).
             let event_target = special_event_target(&s, node_id);
             collect_attr_ops(node_id, &s.attrs, event_target, ops, local);
             for child in s.children {

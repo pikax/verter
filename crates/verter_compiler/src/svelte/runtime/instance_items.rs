@@ -137,7 +137,7 @@ pub(super) enum SupportedInstanceScriptItem {
     },
     /// A top-level `$inspect(...);` / `$inspect(...).with(...);` expression
     /// STATEMENT — the production-ELIDED `$inspect` family. Official
-    /// `svelte@5.56.3` (`dev:false`) removes the whole statement (leaving only a
+    /// `svelte@5.56.10` (`dev:false`) removes the whole statement (leaving only a
     /// cosmetic `;;` empty-statement residue); Verter lowers it to NOTHING (no
     /// client-body item, no helper, no import, no dev form), so the variant
     /// carries no payload. A `.with(...)` chain still FORCES the component
@@ -893,7 +893,7 @@ fn classify_class_declaration(
         return Err(refuse());
     }
     // A class body carrying an inner `$`-store/rune reactive reference cannot be
-    // lowered VERBATIM: official `svelte@5.56.3` rewrites an inner `$a` read to
+    // lowered VERBATIM: official `svelte@5.56.10` rewrites an inner `$a` read to
     // `$a()` and an inner `$a = v` write to `$.store_set(a, v)` inside class
     // method / getter/setter bodies, field initializers, and static blocks — a
     // rewrite the verbatim `StoreClassDecl` emit does not perform. Fail closed on

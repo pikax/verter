@@ -59,7 +59,7 @@ pub struct ParsedSvelte {
     /// ORDER of the offending tag; empty for a well-formed component.
     pub close_tag_violations: Vec<CloseTagViolation>,
     /// The STRICT-PARSE errors observed and silently recovered from — markup Verter's
-    /// forgiving parser accepts but the official `svelte@5.56.3` STRICT parser rejects
+    /// forgiving parser accepts but the official `svelte@5.56.10` STRICT parser rejects
     /// (a raw `<` in text, a close tag with a trailing token, an empty attribute value,
     /// a nameless close, an unterminated tag / raw block / quoted value). The
     /// official-reject gate fails closed on a non-empty list (the single
@@ -257,7 +257,7 @@ pub enum ScriptBodyGrammar {
 }
 
 /// Compute the SINGLE parser-wide script-body grammar for a whole component `source`,
-/// mirroring upstream `svelte@5.56.3`'s `Parser` constructor EXACTLY
+/// mirroring upstream `svelte@5.56.10`'s `Parser` constructor EXACTLY
 /// (`phases/1-parse/index.js`):
 ///
 /// ```js
@@ -597,7 +597,7 @@ fn is_custom_element_tag_name_char(c: char) -> bool {
 }
 
 /// One CLOSE-TAG well-formedness violation observed by the parser, mirroring the
-/// official `svelte@5.56.3` parse-phase close-tag errors restricted to the close-tag
+/// official `svelte@5.56.10` parse-phase close-tag errors restricted to the close-tag
 /// universe (an HTML element open / stray-or-mismatched close / void-content close).
 /// A `<svelte:*>` special element / component does NOT participate (its closing is a
 /// distinct concern) — only HTML/intrinsic-element close-tag balance is modeled.
@@ -651,7 +651,7 @@ pub enum CloseTagViolationKind {
 pub struct SvelteParseRejectFact {
     /// The kind of parse-domain reject (which official class it mirrors).
     pub kind: SvelteParseRejectKind,
-    /// The exact official `svelte@5.56.3` diagnostic code this reject mirrors (e.g.
+    /// The exact official `svelte@5.56.10` diagnostic code this reject mirrors (e.g.
     /// `script_reserved_attribute`, `script_invalid_attribute_value`,
     /// `element_invalid_closing_tag_autoclosed`). A multi-code class (the script
     /// `context` vs valued-`module` site) carries its EXACT site code here.
@@ -1283,7 +1283,7 @@ pub struct SvelteParseDiagnostic {
 }
 
 /// One STRICT-PARSE-error fact: a markup form Verter's forgiving/recovery-based parser
-/// silently ACCEPTS but the official `svelte@5.56.3` STRICT parser REJECTS as a
+/// silently ACCEPTS but the official `svelte@5.56.10` STRICT parser REJECTS as a
 /// compile error.
 ///
 /// The parser is intentionally infallible (it always produces a faithful tree, never a
@@ -1305,7 +1305,7 @@ pub struct SvelteStrictParseError {
     /// error in document order (mirroring official, which stops at the first parse
     /// error).
     pub span: Span,
-    /// The exact official `svelte@5.56.3` diagnostic code this recovery point mirrors
+    /// The exact official `svelte@5.56.10` diagnostic code this recovery point mirrors
     /// (e.g. `tag_invalid_name`, `expected_token`, `element_unclosed`). Carried so the
     /// refusal — and the parse-parity freshness corpus — pin the precise official code.
     pub official_code: &'static str,
@@ -1359,7 +1359,7 @@ pub enum SvelteStrictParseErrorKind {
 }
 
 impl SvelteStrictParseErrorKind {
-    /// The exact official `svelte@5.56.3` diagnostic code this kind mirrors.
+    /// The exact official `svelte@5.56.10` diagnostic code this kind mirrors.
     #[must_use]
     pub fn official_code(self) -> &'static str {
         match self {

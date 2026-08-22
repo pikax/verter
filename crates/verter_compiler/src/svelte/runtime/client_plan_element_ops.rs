@@ -329,7 +329,7 @@ impl<'a> SupportedClientIr<'a> {
                 AttrIr::Mixed { name, parts } if name.eq_ignore_ascii_case("class") => {
                     // A MIXED-string class (`class="a {x} b"`) is already a string
                     // template — official `needs_clsx` is FALSE for it, so it is NOT
-                    // wrapped in `$.clsx` (verified against svelte@5.56.3). The
+                    // wrapped in `$.clsx` (verified against svelte@5.56.10). The
                     // structured value memoizes each EXPRESSION PART at emit time, not
                     // the whole rendered template.
                     let (mixed, st) =

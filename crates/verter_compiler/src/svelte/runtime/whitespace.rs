@@ -1,6 +1,6 @@
 //! The Svelte `clean_nodes` whitespace + run-partition core, namespace-aware.
 //!
-//! A faithful port of `svelte@5.56.3`'s `clean_nodes`
+//! A faithful port of `svelte@5.56.10`'s `clean_nodes`
 //! (`phases/3-transform/utils.js`) plus the `process_children` / `flush_sequence`
 //! run partition (`phases/3-transform/client/visitors/shared/fragment.js`). It is
 //! the SINGLE whitespace + run-partition authority the runtime HTML serializer and
@@ -210,7 +210,7 @@ pub(super) enum CleanItem {
 /// Apply the official `clean_nodes` + `process_children`/`flush_sequence` partition
 /// to a SIBLING sequence, returning the cleaned DOM-position sequence.
 ///
-/// This is faithful to `svelte@5.56.3` (`clean_nodes`, `process_children`,
+/// This is faithful to `svelte@5.56.10` (`clean_nodes`, `process_children`,
 /// `flush_sequence`):
 ///
 /// 1. Drop non-rendering / hoisted nodes (`{@const}` / `{@debug}` / `{#snippet}`
@@ -244,7 +244,7 @@ pub(super) enum CleanItem {
 /// This is the SINGLE drop-set authority both [`clean_nodes`] (the skeleton + DOM
 /// walk) and the reactive-text run reconstruction key on, so a comment cannot
 /// break a text run in one path while being dropped in the other. Mirrors the
-/// `svelte@5.56.3` `clean_nodes` step-1 filter (whose comment drop is gated on
+/// `svelte@5.56.10` `clean_nodes` step-1 filter (whose comment drop is gated on
 /// `options.preserveComments`).
 pub(super) fn is_dropped_from_clean_sequence(node: &IrNode, preserve_comments: bool) -> bool {
     (matches!(node, IrNode::Comment { .. }) && !preserve_comments)
@@ -503,7 +503,7 @@ pub(super) fn cleaned_text_run_parts(
 /// The whitespace-cleaned text for each node in a REGULAR (already hoisted-filtered)
 /// sibling sequence, aligned to `regular` (`None` for a non-text node OR a
 /// fully-dropped whitespace-only text node). A faithful port of the `clean_nodes`
-/// whitespace rules (`svelte@5.56.3`, `preserve_whitespace = false`). An
+/// whitespace rules (`svelte@5.56.10`, `preserve_whitespace = false`). An
 /// interpolation is the official `ExpressionTag`, so whitespace adjacent to it is
 /// preserved (not collapsed). A text reduced to exactly `" "` is dropped ENTIRELY
 /// when [`CleanContext::can_remove_entirely`] holds (the table-family / SVG rule).
@@ -606,20 +606,20 @@ fn replace_trailing_ws(s: &str, repl: &str) -> String {
     }
 }
 
-/// Whether `tag` is an SVG element name (the vendored `svelte@5.56.3` `SVG_ELEMENTS`
+/// Whether `tag` is an SVG element name (the vendored `svelte@5.56.10` `SVG_ELEMENTS`
 /// set). Used by [`determine_namespace_for_children`] so the namespace propagates
 /// into an `<svg>` subtree for the `can_remove_entirely` whitespace rule.
 pub(super) fn is_svg_element(tag: &str) -> bool {
     SVG_ELEMENTS.binary_search(&tag).is_ok()
 }
 
-/// Whether `tag` is a MathML element name (the vendored `svelte@5.56.3`
+/// Whether `tag` is a MathML element name (the vendored `svelte@5.56.10`
 /// `MATHML_ELEMENTS` set).
 pub(super) fn is_mathml_element(tag: &str) -> bool {
     MATHML_ELEMENTS.binary_search(&tag).is_ok()
 }
 
-/// The vendored `svelte@5.56.3` `SVG_ELEMENTS` set, SORTED for binary search.
+/// The vendored `svelte@5.56.10` `SVG_ELEMENTS` set, SORTED for binary search.
 /// (`scripts/generate-svelte-entities.mjs` is the entity table's generator; this
 /// element set is small + stable, vendored inline as a sorted literal.)
 const SVG_ELEMENTS: &[&str] = &[
@@ -711,7 +711,7 @@ const SVG_ELEMENTS: &[&str] = &[
     "vkern",
 ];
 
-/// The vendored `svelte@5.56.3` `MATHML_ELEMENTS` set, SORTED for binary search.
+/// The vendored `svelte@5.56.10` `MATHML_ELEMENTS` set, SORTED for binary search.
 const MATHML_ELEMENTS: &[&str] = &[
     "annotation",
     "annotation-xml",

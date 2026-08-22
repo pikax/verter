@@ -1,7 +1,7 @@
 {
   "slug": "type-named-lit-attr-q-dynel-ext-plain-u",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

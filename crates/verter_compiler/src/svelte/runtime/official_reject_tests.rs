@@ -20,7 +20,7 @@ fn gate_full(source: &str) -> Option<OfficialRejection> {
 #[test]
 fn bind_group_function_pair_target_rejects_with_exact_code() {
     // `<input type="radio" bind:group={get, set}>` — a two-element function-pair on
-    // `bind:group`. Official svelte@5.56.3 rejects it with `bind_group_invalid_expression`
+    // `bind:group`. Official svelte@5.56.10 rejects it with `bind_group_invalid_expression`
     // (`bind:group` accepts only an Identifier or MemberExpression). RED before the fix:
     // Verter fail-OPENED (the function-pair was accepted as a clean FunctionPair for
     // every DOM bind). The EXACT code is asserted, not just "an error".
@@ -64,7 +64,7 @@ fn bind_group_identifier_target_passes_the_gate() {
 fn non_group_function_pair_binds_pass_the_gate() {
     // POSITIVE CONTROL: the identifier/member-only policy is `bind:group`-ONLY. A
     // function-pair on a NON-group bind (`bind:value` / `bind:checked`) is official-VALID
-    // (verified svelte@5.56.3 emits `$.bind_value` / `$.bind_checked`), so the gate must
+    // (verified svelte@5.56.10 emits `$.bind_value` / `$.bind_checked`), so the gate must
     // NOT reject it. A regression that broadened the policy to all binds would RED here.
     assert_eq!(
         gate("<input bind:value={() => v, (x) => v = x}>"),
@@ -82,7 +82,7 @@ fn non_group_function_pair_binds_pass_the_gate() {
 fn bind_group_quoted_function_pair_target_rejects_with_exact_code() {
     // `<input type="radio" bind:group="{get, set}">` — a QUOTED single-expression
     // function-pair: a `SvelteAttributeValue::Mixed` value (`"{…}"`), NOT a bare
-    // `Expression`. Official svelte@5.56.3 rejects it IDENTICALLY to the bare form with
+    // `Expression`. Official svelte@5.56.10 rejects it IDENTICALLY to the bare form with
     // `bind_group_invalid_expression`. RED before the fix: the policy scan matched ONLY
     // `SvelteAttributeValue::Expression`, SKIPPING the quoted `Mixed` form, so the quoted
     // group fail-OPENED (classified as a clean function-pair → wrong `$.bind_group`
@@ -109,7 +109,7 @@ fn bind_group_quoted_function_pair_target_rejects_with_exact_code() {
 fn quoted_non_group_function_pair_binds_pass_the_gate() {
     // POSITIVE CONTROL: the Mixed-aware policy scan stays `bind:group`-ONLY. A QUOTED
     // function-pair on a NON-group bind (`bind:value="{get,set}"`) is official-VALID
-    // (verified svelte@5.56.3 emits `$.bind_value`), so the gate must NOT reject it. A
+    // (verified svelte@5.56.10 emits `$.bind_value`), so the gate must NOT reject it. A
     // regression that rejected ALL Mixed function-pairs (over-broad Mixed scan) would
     // RED here. A quoted group identifier (`bind:group="{g}"`) is likewise NOT a
     // sequence and must pass the gate.
@@ -130,7 +130,7 @@ fn quoted_non_group_function_pair_binds_pass_the_gate() {
 #[test]
 fn bind_value_parenthesized_function_pair_rejects_with_exact_code() {
     // Finding B (R4): `<input bind:value={(get, set)}>` — author PARENS around a
-    // function-pair sequence. Official svelte@5.56.3 rejects it with the EXACT code
+    // function-pair sequence. Official svelte@5.56.10 rejects it with the EXACT code
     // `bind_invalid_parens` (a `(` between `{` and the sequence start). RED before the fix:
     // Verter fail-OPENED (the author parens were transparently unwrapped → the pair was
     // accepted as a clean `FunctionPair` → wrong `$.bind_value(el, get, set)` emission).
@@ -219,7 +219,7 @@ fn bare_function_pair_and_parenthesized_non_sequence_pass_the_paren_gate() {
 #[test]
 fn bind_value_call_expression_rejects_with_exact_code() {
     // `<input bind:value={f()}>` — a CALL is neither a valid lvalue (Identifier/Member) nor a
-    // 2-element function-pair. Official svelte@5.56.3 rejects it with the EXACT code
+    // 2-element function-pair. Official svelte@5.56.10 rejects it with the EXACT code
     // `bind_invalid_expression` (the same bind-SHAPE class as bind_group / bind_parens, NOT
     // D-26 TS grammar parity). RED before the scan: the gate returned None (the call fell
     // through to the runtime classifier's generic Binding refusal).
@@ -250,7 +250,7 @@ fn bind_value_three_element_sequence_rejects_with_exact_code() {
 #[test]
 fn bind_invalid_expression_covers_literal_binary_optional_chain_and_member_call() {
     // The non-lvalue family — a literal, a binary, an optional-chain member, a member-call —
-    // all `bind_invalid_expression` (oracle-verified svelte@5.56.3). An optional chain
+    // all `bind_invalid_expression` (oracle-verified svelte@5.56.10). An optional chain
     // (`obj?.x`) is NOT an assignable lvalue, so it joins the family.
     for src in [
         "<input bind:value={1}>",
@@ -348,7 +348,7 @@ fn ts_wrapped_bind_target_is_not_bind_invalid_expression() {
 #[test]
 fn invalid_name_intrinsic_bind_does_not_mint_a_shape_code() {
     // `<div bind:foo={f()}>` — `foo` is not a valid intrinsic DOM bind name. Official
-    // svelte@5.56.3 rejects it `bind_invalid_name` (a NAME error) BEFORE expression-shape
+    // svelte@5.56.10 rejects it `bind_invalid_name` (a NAME error) BEFORE expression-shape
     // validation. The exact name/host/attr codes are deferred (D-29); such a bind fails
     // closed via the unsupported channel — so the shape scan must NOT mint the wrong
     // `bind_invalid_expression`. RED before the fix: the call-shape scan fired
@@ -433,7 +433,7 @@ fn dynamic_multiple_select_bind_does_not_mint_a_shape_code() {
 #[test]
 fn valid_intrinsic_name_host_attr_binds_still_mint_shape_codes() {
     // POSITIVE CONTROL: a VALID name/host/host-attr intrinsic bind STILL reaches the shape
-    // scans (official carries it to expression validation). Verified svelte@5.56.3 — each
+    // scans (official carries it to expression validation). Verified svelte@5.56.10 — each
     // rejects `bind_invalid_expression`:
     //  - `<input bind:value={f()}>` (valid name/host, type absent);
     //  - `<select bind:value={f()}>` (valid host, `multiple` absent → static-OK);
@@ -459,7 +459,7 @@ fn component_bind_shape_codes_are_preserved() {
     // The name/host/host-attr gate is INTRINSIC-only: a COMPONENT bind has no DOM
     // name/host/host-attr check (official carries every component bind straight to expression
     // validation), so a shape-invalid component bind STILL mints its shape code — verified
-    // svelte@5.56.3: `<Foo bind:value={f()}>` → bind_invalid_expression, `<Foo
+    // svelte@5.56.10: `<Foo bind:value={f()}>` → bind_invalid_expression, `<Foo
     // bind:value={(g, s)}>` → bind_invalid_parens. A regression that gated the shape scan to
     // DOM-only validity would RED here (it would drop the correct component shape code).
     assert_eq!(
@@ -735,7 +735,7 @@ fn instance_import_over_module_binding_is_declaration_duplicate() {
 #[test]
 fn official_accepted_cross_script_combinations_pass_the_gate() {
     // NEGATIVE (over-reject controls): every cross-script combination official
-    // ACCEPTS must pass the gate (oracle-probed vs pinned svelte@5.56.3):
+    // ACCEPTS must pass the gate (oracle-probed vs pinned svelte@5.56.10):
     // - distinct names (the plain two-slot import prelude surface),
     // - a module lexical / `var` binding + an instance value declaration (the
     //   instance scope is a CHILD scope — it shadows),
@@ -1032,7 +1032,7 @@ fn ts_only_cross_script_forms_do_not_mint_declaration_duplicate() {
 #[test]
 fn inspect_trace_non_first_statement_is_invalid_placement() {
     // A trace call as a NON-first statement of an `$effect` arrow body — official
-    // svelte@5.56.3 hard-errors `inspect_trace_invalid_placement` ("must be the first
+    // svelte@5.56.10 hard-errors `inspect_trace_invalid_placement` ("must be the first
     // statement of a function body"). RED before the fix: Verter silently DROPPED the
     // statement (over-acceptance).
     assert_eq!(
@@ -1143,7 +1143,7 @@ fn inspect_trace_first_statement_positions_pass_the_gate() {
 fn inspect_trace_parenthesized_first_statement_passes_the_gate() {
     // NEGATIVE: a PARENTHESIZED first-statement trace — `($inspect.trace());` /
     // `(($inspect.trace()));` as `statements[0]` of a handler arrow body. The paren
-    // wrapper is transparent: official svelte@5.56.3 ACCEPTS (and drops) both. RED
+    // wrapper is transparent: official svelte@5.56.10 ACCEPTS (and drops) both. RED
     // before the fix: the allow-set required a BARE `CallExpression`, so the inner
     // call span was collected as illegal (a false reject of valid Svelte).
     assert_eq!(
@@ -1172,7 +1172,7 @@ fn inspect_trace_parenthesized_first_statement_passes_the_gate() {
 
 #[test]
 fn inspect_trace_param_shadow_is_local_not_rune() {
-    // A `$inspect` PARAMETER is VALID Svelte — svelte@5.56.3 ACCEPTS `($inspect) => {
+    // A `$inspect` PARAMETER is VALID Svelte — svelte@5.56.10 ACCEPTS `($inspect) => {
     // ... }` and `function get($inspect) { ... }` (a `$`-prefixed PARAM is legal; only a
     // `const $inspect` LOCAL is `dollar_prefix_invalid`). Under that param
     // `$inspect.trace()` is an ORDINARY local method call, NOT the rune trace. The
@@ -1210,7 +1210,7 @@ fn inspect_trace_param_shadow_is_local_not_rune() {
 
 #[test]
 fn inspect_trace_in_generator_body_is_invalid_placement() {
-    // A GENERATOR function is NOT a legal trace host — official svelte@5.56.3 rejects a
+    // A GENERATOR function is NOT a legal trace host — official svelte@5.56.10 rejects a
     // generator-body first-statement `$inspect.trace()` with `inspect_trace_generator`
     // (a SEPARATE official rule); Verter rejects it via the placement rule (both
     // fail-closed). RED before the fix: the allow-set admitted a generator body's first
@@ -1236,7 +1236,7 @@ fn inspect_trace_in_generator_body_is_invalid_placement() {
 #[test]
 fn inspect_trace_in_block_head_is_invalid_placement() {
     // A `$inspect.trace()` in a block HEAD / clause / key expression is not a
-    // function-body first statement — official svelte@5.56.3 rejects
+    // function-body first statement — official svelte@5.56.10 rejects
     // `inspect_trace_invalid_placement`. RED before the fix: the shared
     // template-expression collection walked block/clause CHILDREN but skipped the block
     // head / clause / `{#await}` subject / `{#key}` expression, so the trace scan never
@@ -1259,7 +1259,7 @@ fn inspect_trace_in_block_head_is_invalid_placement() {
 #[test]
 fn inspect_trace_object_parenthesized_is_placement_aware() {
     // `($inspect).trace()` — parens around the member OBJECT. The paren wrapper is
-    // transparent: official svelte@5.56.3 ACCEPTS (and drops) it as a first statement
+    // transparent: official svelte@5.56.10 ACCEPTS (and drops) it as a first statement
     // and REJECTS it non-first. RED before the fix: the trace-shape check required a
     // BARE `$inspect` identifier as the member object, so `($inspect).trace()` was not
     // recognised as the rune trace at all (a first-statement one failed closed in the
@@ -1282,7 +1282,7 @@ fn inspect_trace_object_parenthesized_is_placement_aware() {
 
 #[test]
 fn await_then_catch_dollar_bindings_are_not_global_references() {
-    // `{:then $foo}` / `{:catch $err}` bind a `$`-prefixed name — official svelte@5.56.3
+    // `{:then $foo}` / `{:catch $err}` bind a `$`-prefixed name — official svelte@5.56.10
     // ACCEPTS these await-clause bindings (they are BINDINGS, not references). The block
     // head-expression collection must NOT feed a `{:then}` / `{:catch}` BINDING span into
     // the global-`$`-reference scan (only an `{:else if}` CONDITION is an expression). RED
@@ -1311,7 +1311,7 @@ fn await_then_catch_dollar_bindings_are_not_global_references() {
 fn inspect_trace_in_each_key_is_invalid_placement() {
     // `{#each list as item (KEY)}` — the KEY is an EXPRESSION position stored SEPARATELY
     // from the block head (`SvelteBlockKind::Each { key }`), not in `head_expr`. Official
-    // svelte@5.56.3 rejects a `$inspect.trace()` in the each-key with
+    // svelte@5.56.10 rejects a `$inspect.trace()` in the each-key with
     // `inspect_trace_invalid_placement`. RED before the fix: the each-key span was not
     // collected, so the trace escaped the exact placement code (generic refusal only).
     assert_eq!(

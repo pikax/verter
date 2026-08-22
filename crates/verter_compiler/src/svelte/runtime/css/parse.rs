@@ -1,5 +1,5 @@
 //! The span-bearing Svelte CSS parser — a faithful AST-building port of the
-//! official `svelte@5.56.3` CSS body reader (`phases/1-parse/read/style.js` +
+//! official `svelte@5.56.10` CSS body reader (`phases/1-parse/read/style.js` +
 //! the `Parser` byte primitives in `phases/1-parse/index.js`).
 //!
 //! The byte cursor mirrors the validation-only reader in

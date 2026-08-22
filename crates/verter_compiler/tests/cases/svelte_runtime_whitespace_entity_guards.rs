@@ -1,7 +1,7 @@
 //! Static guards pinning the official-algorithm invariants in the Svelte runtime
 //! HTML serializer (`crates/verter_compiler/src/svelte/runtime/`).
 //!
-//! Two invariants, each ported wholesale from `svelte@5.56.3` and easy to silently
+//! Two invariants, each ported wholesale from `svelte@5.56.10` and easy to silently
 //! regress with an innocuous-looking `.trim()` / `is_ascii_alphanumeric()`:
 //!
 //! - `html_whitespace_classification_uses_html_ws_not_trim` — the runtime HTML

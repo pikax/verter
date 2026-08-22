@@ -3,7 +3,7 @@
 //! Consumes the runtime IR ([`SvelteRuntimeIr`]), the static-template plan
 //! ([`StaticTemplatePlan`]), and the client topology ([`ClientTopologyPlan`])
 //! and emits the executable client module — the `import * as $ from
-//! 'svelte/internal/client'` shape the official `svelte@5.56.3` compiler
+//! 'svelte/internal/client'` shape the official `svelte@5.56.10` compiler
 //! produces. It owns the four output regions:
 //!
 //! 1. module imports (`import 'svelte/internal/disclose-version'` + the runtime
@@ -50,7 +50,7 @@ pub use super::unsupported::{
 /// scope — module scope would share binding-group selection state across every
 /// component instance, a correctness bug) and passed as the first argument to every
 /// `$.bind_group(binding_group, [], el, get, set)` call. Matches the pinned
-/// `svelte@5.56.3` emit (oracle CASE `group`).
+/// `svelte@5.56.10` emit (oracle CASE `group`).
 ///
 /// `pub(super)` (the minimum widening): the `bind:group` emit body
 /// ([`ClientEmitter::format_dom_bind`]) lives in the sibling `client_bind` module,
@@ -224,7 +224,7 @@ pub(super) enum RegionFrame {
     /// A TEXT-FIRST region: the whole cleaned body is a SINGLE text run (a lone static
     /// text, or one-or-more accepted interpolations, with no element/block sibling). It
     /// is emitted INLINE in the closure (`var text = $.text(<seed>)`) — NO module hoist
-    /// and NO clone-factory call, matching official `svelte@5.56.3`. The official text
+    /// and NO clone-factory call, matching official `svelte@5.56.10`. The official text
     /// NODE is created in-body and `$.append`ed, never a hoisted `$.text(...)` called as
     /// a clone factory.
     TextNode {
@@ -497,7 +497,7 @@ impl<'a> ClientEmitter<'a> {
         }
 
         // The push FLAG is the reactivity MODE: `true` for a runes component,
-        // `false` for a legacy (non-runes) one — the official `5.56.3` shape
+        // `false` for a legacy (non-runes) one — the official `5.56.10` shape
         // (`$.push($$props, true)` runes / `$.push($$props, false)` legacy).
         // Derived from the component mode, NEVER from store presence.
         let legacy_mode = self.plan.component.mode == super::ir::SvelteMode::Legacy;
@@ -544,7 +544,7 @@ impl<'a> ClientEmitter<'a> {
 
         // The component-FUNCTION-scoped `bind:group` accumulators, declared at the TOP of
         // the body (before the state decls) — ONE `const <name> = [];` per DISTINCT group, in
-        // source order (the pinned svelte@5.56.3 shape — oracle CASE `group`: two independent
+        // source order (the pinned svelte@5.56.10 shape — oracle CASE `group`: two independent
         // groups emit `const binding_group = []` AND `const binding_group_1 = []`).
         // Component-function scope (NOT module scope) is load-bearing: module scope would
         // share binding-group selection state across every component instance, a correctness
@@ -609,7 +609,7 @@ impl<'a> ClientEmitter<'a> {
 
         // The context close + the `$store` subscription FINALIZER (`$$cleanup();`),
         // ordered per the official emission (all four combinations oracle-verified
-        // against svelte@5.56.3):
+        // against svelte@5.56.10):
         //
         // - frame, no `$$exports`, store   → `$.pop();` then `$$cleanup();`
         // - frame, `$$exports`,  no store  → `return $.pop($$exports);`

@@ -1,7 +1,7 @@
 {
   "slug": "univ-hex-lit-cls-q-dynel-ext-prune-m",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

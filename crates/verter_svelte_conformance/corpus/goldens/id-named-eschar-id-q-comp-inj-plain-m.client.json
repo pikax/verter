@@ -1,7 +1,7 @@
 {
   "slug": "id-named-eschar-id-q-comp-inj-plain-m",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "./Child.svelte",

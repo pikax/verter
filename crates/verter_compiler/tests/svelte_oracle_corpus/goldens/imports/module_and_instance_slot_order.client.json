@@ -1,7 +1,7 @@
 {
   "slug": "imports/module_and_instance_slot_order.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "./base.js",

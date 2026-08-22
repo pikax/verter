@@ -920,7 +920,7 @@ fn classify_node(
         }
         // A `{@render}` tag is the snippet-render surface — ACCEPTED (its callee + args are
         // validated + rewritten at projection), EXCEPT a render call carrying a SPREAD
-        // argument (`{@render row(...xs)}`), which official `svelte@5.56.3` HARD-ERRORS
+        // argument (`{@render row(...xs)}`), which official `svelte@5.56.10` HARD-ERRORS
         // (`render_tag_invalid_spread_argument`). It fails closed here rather than silently
         // dropping the spread and emitting a wrong-arity `$.snippet` call. A
         // CHILD-position `{@attach}` stays CLOSED via `refuse_tag` (official

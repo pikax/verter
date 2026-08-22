@@ -52,7 +52,7 @@ fn component_name_with_option(source: &str, name: &str, alloc: &Allocator) -> St
 #[test]
 fn authored_declarations_reserve_the_component_name() {
     // Every script + template declaration form reserves the component-function name:
-    // svelte@5.56.3 renders a declared `Foo` under component name `Foo` as `Foo_1`.
+    // svelte@5.56.10 renders a declared `Foo` under component name `Foo` as `Foo_1`.
     // Each row's `Foo` appears ONLY as the declaration (never template-referenced),
     // so it isolates the declaration path — not the free-reference fold.
     let alloc = Allocator::default();
@@ -145,7 +145,7 @@ fn state_lowering(ir: &super::ir::SvelteRuntimeIr, name: &str) -> Option<StateLo
 // Test 1 — the $state four/five-way classification.
 // Discriminates against: a one-decision "every $state is a signal" classifier.
 //
-// The lowering is WRITE-gated (verified against svelte@5.56.3): a $state that is
+// The lowering is WRITE-gated (verified against svelte@5.56.10): a $state that is
 // never WRITTEN (neither reassigned nor deep-mutated) collapses to a plain `let`,
 // regardless of where/whether it is read (template, $derived, $effect, a function
 // body). Only a WRITE makes a $state reactive.
@@ -191,7 +191,7 @@ fn state_classification_is_four_way_plus_raw() {
 
     // (b) written primitive (reassigned via a template handler) → StateSignal.
     // (`let count=$state(0)` read-only via `{count}` with NO write compiles to a
-    // plain `let count=0` in svelte@5.56.3 — a write is required for the signal.)
+    // plain `let count=0` in svelte@5.56.10 — a write is required for the signal.)
     let src_signal = "<script>\n\tlet count = $state(0);\n</script>\n<button onclick={() => count++}>{count}</button>";
     let ir = lower(src_signal, &alloc);
     assert_eq!(
@@ -229,7 +229,7 @@ fn state_classification_is_four_way_plus_raw() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1b — write-gated classification (svelte@5.56.3 empirical law).
+// Test 1b — write-gated classification (svelte@5.56.10 empirical law).
 //
 // F5: deep-mutated-only object (never reassigned, never read) → BareProxy.
 //     (official: `let o = $.proxy({a:1})`.) Discriminates against the predicate
@@ -245,7 +245,7 @@ fn state_classification_is_four_way_plus_raw() {
 fn deep_mutated_only_object_is_bare_proxy() {
     let alloc = Allocator::default();
     // `o` is deep-mutated in a handler, never reassigned, never read in the
-    // template. svelte@5.56.3 emits `let o = $.proxy({a:1})`. The BareProxy comes
+    // template. svelte@5.56.10 emits `let o = $.proxy({a:1})`. The BareProxy comes
     // from the PROXIABLE object-literal init (proxy is unconditional for a
     // proxiable init), NOT from the deep mutation.
     let src =
@@ -271,7 +271,7 @@ fn deep_mutated_only_object_is_bare_proxy() {
 // ---------------------------------------------------------------------------
 // G2 — the proxy decision is `should_proxy(init)` (init SHAPE), INDEPENDENT of
 // reads/writes/mutations. These cases were derived empirically against
-// svelte@5.56.3 (generate:'client', runes, non-dev) and discriminate against the
+// svelte@5.56.10 (generate:'client', runes, non-dev) and discriminate against the
 // pre-fix model (proxy gated on a `deep_mutated` flag; never-written object →
 // PlainLet; `.push()` / destructuring-reassign not detected).
 // ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ fn deep_mutated_only_object_is_bare_proxy() {
 #[test]
 fn never_written_array_state_is_still_bare_proxy() {
     let alloc = Allocator::default();
-    // `let arr = $state([1, 2])` never written anywhere. svelte@5.56.3 emits
+    // `let arr = $state([1, 2])` never written anywhere. svelte@5.56.10 emits
     // `let arr = $.proxy([1, 2])` — a proxiable init is ALWAYS proxied, even with
     // zero writes. FAILS against the pre-fix "never written object/array →
     // PlainLet" rule.
@@ -301,7 +301,7 @@ fn never_written_array_state_is_still_bare_proxy() {
 fn push_only_array_state_is_bare_proxy() {
     let alloc = Allocator::default();
     // `let items = $state([]); items.push(1)` — mutated ONLY via a method call,
-    // never reassigned, never template-read. svelte@5.56.3 emits
+    // never reassigned, never template-read. svelte@5.56.10 emits
     // `let items = $.proxy([])`. The pre-fix code mis-lowered this to PlainLet
     // (`.push()` was not detected; the array init was not unconditionally proxied).
     let src =
@@ -323,7 +323,7 @@ fn push_only_array_state_is_bare_proxy() {
 fn method_mutated_object_state_is_bare_proxy() {
     let alloc = Allocator::default();
     // `let map = $state(new Map()); map.set('a', 1)` — `new Map()` is proxiable,
-    // mutated only via a method call. svelte@5.56.3 emits `$.proxy(new Map())`.
+    // mutated only via a method call. svelte@5.56.10 emits `$.proxy(new Map())`.
     let src =
         "<script>\n\tlet map = $state(new Map());\n\tfunction add(){ map.set('a', 1); }\n</script>\n<button onclick={add}>x</button>";
     let ir = lower(src, &alloc);
@@ -338,7 +338,7 @@ fn method_mutated_object_state_is_bare_proxy() {
 fn element_write_only_array_state_is_bare_proxy() {
     let alloc = Allocator::default();
     // `arr[0] = 9` — an element (computed-member) write, never reassigned.
-    // svelte@5.56.3 emits `$.proxy([1])`.
+    // svelte@5.56.10 emits `$.proxy([1])`.
     let src =
         "<script>\n\tlet arr = $state([1]);\n\tfunction f(){ arr[0] = 9; }\n</script>\n<button onclick={f}>x</button>";
     let ir = lower(src, &alloc);
@@ -358,7 +358,7 @@ fn element_write_only_array_state_is_bare_proxy() {
 fn object_destructuring_reassign_makes_state_signal() {
     let alloc = Allocator::default();
     // `({ count } = obj)` is a REASSIGNMENT of `count`. With a PRIMITIVE init,
-    // svelte@5.56.3 emits `let count = $.state(0)` (StateSignal). FAILS against the
+    // svelte@5.56.10 emits `let count = $.state(0)` (StateSignal). FAILS against the
     // pre-fix code, which did not detect destructuring-assignment targets as
     // reassignments (so `count` stayed PlainLet).
     let src =
@@ -380,7 +380,7 @@ fn object_destructuring_reassign_makes_state_signal() {
 fn array_destructuring_reassign_of_array_state_is_state_proxy() {
     let alloc = Allocator::default();
     // `[arr] = [5]` is a REASSIGNMENT of `arr`. With a proxiable (array) init,
-    // svelte@5.56.3 emits `let arr = $.state($.proxy([1]))` (StateProxy).
+    // svelte@5.56.10 emits `let arr = $.state($.proxy([1]))` (StateProxy).
     let src =
         "<script>\n\tlet arr = $state([1]);\n\tfunction f(){ [arr] = [5]; }\n</script>\n<button onclick={f}>x</button>";
     let ir = lower(src, &alloc);
@@ -458,7 +458,7 @@ fn binary_init_state_is_not_proxiable() {
 fn raw_state_never_proxies_and_only_signals_when_reassigned() {
     let alloc = Allocator::default();
     // `$state.raw([])` never reassigned, only method-mutated → PlainLet (`let o =
-    // []`). svelte@5.56.3 never proxies a raw state and only wraps it in
+    // []`). svelte@5.56.10 never proxies a raw state and only wraps it in
     // `$.state(...)` when reassigned. FAILS against the pre-fix code, which lowered
     // ANY written (incl. deep-mutated) raw state to RawStateSignal.
     let src_plain =
@@ -490,7 +490,7 @@ fn identifier_init_one_hop_follow_to_literal_is_not_proxiable() {
     let alloc = Allocator::default();
     // `let base = 5; let x = $state(base)` — the identifier follows ONE hop to a
     // non-reassigned literal binding → not proxiable. Never written → PlainLet
-    // (`let x = base`). svelte@5.56.3 verified.
+    // (`let x = base`). svelte@5.56.10 verified.
     let src = "<script>\n\tlet base = 5;\n\tlet x = $state(base);\n</script>\n<p>hi</p>";
     let ir = lower(src, &alloc);
     assert_eq!(
@@ -515,7 +515,7 @@ fn reassigned_identifier_intermediate_blocks_proxy_follow() {
     let alloc = Allocator::default();
     // `let base = 5; base = 6; let x = $state(base)` — `base` is reassigned, so the
     // proxy follow is BLOCKED and `x`'s init stays proxiable → BareProxy
-    // (`$.proxy(base)`). svelte@5.56.3 verified.
+    // (`$.proxy(base)`). svelte@5.56.10 verified.
     let src =
         "<script>\n\tlet base = 5;\n\tbase = 6;\n\tlet x = $state(base);\n</script>\n<p>hi</p>";
     let ir = lower(src, &alloc);
@@ -529,7 +529,7 @@ fn reassigned_identifier_intermediate_blocks_proxy_follow() {
 #[test]
 fn reassigned_never_read_primitive_is_state_signal() {
     let alloc = Allocator::default();
-    // `n` is reassigned in a handler, never read anywhere. svelte@5.56.3 emits
+    // `n` is reassigned in a handler, never read anywhere. svelte@5.56.10 emits
     // `let n = $.state(0)`.
     let src =
         "<script>\n\tlet n = $state(0);\n</script>\n<button onclick={() => { n = 5; }}>x</button>";
@@ -550,7 +550,7 @@ fn reassigned_never_read_primitive_is_state_signal() {
 fn function_body_read_only_unwritten_is_plain_let() {
     let alloc = Allocator::default();
     // `n` is read only inside a non-reactive function body, never written.
-    // svelte@5.56.3 emits `let n = 0` (PlainLet) — a read does not make a $state
+    // svelte@5.56.10 emits `let n = 0` (PlainLet) — a read does not make a $state
     // reactive; only a write does.
     let src = "<script>\n\tlet n = $state(0);\n\tfunction log(){ console.log(n); }\n</script>\n<button onclick={log}>x</button>";
     let ir = lower(src, &alloc);
@@ -565,7 +565,7 @@ fn function_body_read_only_unwritten_is_plain_let() {
 fn state_written_only_inside_a_computed_member_key_is_reactive() {
     let alloc = Allocator::default();
     // A `$state` reassigned ONLY inside a computed-member KEY (`arr[count = 5] = 9`)
-    // must be detected as reassigned → a signal. Confirmed vs svelte@5.56.3:
+    // must be detected as reassigned → a signal. Confirmed vs svelte@5.56.10:
     // `count` lowers to `$.state(0)` with `$.set(count, 5)` in the key. The
     // pre-fix script use-collector never recursed into the computed key, so it
     // missed the write and (wrongly) classified `count` PlainLet.
@@ -587,7 +587,7 @@ fn state_written_only_inside_a_computed_member_key_is_reactive() {
 fn derived_or_effect_read_of_unwritten_state_is_plain_let() {
     let alloc = Allocator::default();
     // A read inside $derived / $effect of a never-written binding still collapses
-    // to a plain `let` (svelte@5.56.3).
+    // to a plain `let` (svelte@5.56.10).
     let src_d = "<script>\n\tlet n = $state(0);\n\tlet d = $derived(n + 1);\n</script>\n<p>{d}</p>";
     let ir = lower(src_d, &alloc);
     assert_eq!(
@@ -614,7 +614,7 @@ fn derived_or_effect_read_of_unwritten_state_is_plain_let() {
 // a template read resolves SCOPE-AWARELY to the right kind (a shadowing local of
 // the same name does NOT resolve to the rune binding). This is CLASSIFICATION +
 // resolution only — the read-rewrite emission ($.get / $.prop) is the client/SSR backend's concern.
-// Kinds confirmed against svelte@5.56.3: a $derived read is a $.get signal; a
+// Kinds confirmed against svelte@5.56.10: a $derived read is a $.get signal; a
 // $props destructure is $.prop / $$props.x; a $bindable is the $.prop bindable.
 // ---------------------------------------------------------------------------
 
@@ -625,7 +625,7 @@ mod rune_binding_classification {
     fn props_destructure_names_classify_as_prop() {
         let alloc = Allocator::default();
         // The corpus `runes/props.svelte` shape: `let { name = 'world', count = 0 }
-        // = $props();`. Both destructured names are Prop bindings (svelte@5.56.3
+        // = $props();`. Both destructured names are Prop bindings (svelte@5.56.10
         // lowers each to `$.prop($$props, '<name>', 3, <default>)`).
         let src = "<script>\n\tlet { name = 'world', count = 0 } = $props();\n</script>\n<p>Hello {name} ({count})</p>";
         let ir = lower(src, &alloc);
@@ -651,7 +651,7 @@ mod rune_binding_classification {
     fn derived_binding_classifies_as_derived() {
         let alloc = Allocator::default();
         // The corpus `runes/derived_and_effect.svelte` shape: `let doubled =
-        // $derived(count * 2);`. `doubled` is a Derived memo (svelte@5.56.3 lowers
+        // $derived(count * 2);`. `doubled` is a Derived memo (svelte@5.56.10 lowers
         // it to `$.derived(() => …)` read via `$.get`).
         let src = "<script>\n\tlet count = $state(0);\n\tlet doubled = $derived(count * 2);\n\t$effect(() => { console.log(doubled); });\n</script>\n<button onclick={() => count++}>{count} / {doubled}</button>";
         let ir = lower(src, &alloc);
@@ -685,7 +685,7 @@ mod rune_binding_classification {
     fn bindable_prop_classifies_as_bindable_prop() {
         let alloc = Allocator::default();
         // `let { value = $bindable(0) } = $props();` — `value` is a BindableProp
-        // (svelte@5.56.3 lowers it to the bindable `$.prop($$props, 'value', 15,
+        // (svelte@5.56.10 lowers it to the bindable `$.prop($$props, 'value', 15,
         // 0)` — the `15` flag = bindable), distinct from a plain Prop.
         let src = "<script>\n\tlet { value = $bindable(0), other } = $props();\n</script>\n<input bind:value /><p>{other}</p>";
         let ir = lower(src, &alloc);
@@ -712,7 +712,7 @@ mod rune_binding_classification {
     fn props_rest_and_whole_object_classify_as_prop() {
         let alloc = Allocator::default();
         // A `$props()` REST (`...rest`) and a WHOLE-object `let p = $props()` are
-        // both Prop bindings (svelte@5.56.3 lowers both via `$.rest_props`).
+        // both Prop bindings (svelte@5.56.10 lowers both via `$.rest_props`).
         let src_rest = "<script>\n\tlet { a, ...rest } = $props();\n</script>\n<p>{a}</p>";
         let ir = lower(src_rest, &alloc);
         assert_eq!(
@@ -864,7 +864,7 @@ fn nested_let_shadow_in_script_function_does_not_mark_outer_reassigned() {
     // Same, in a SCRIPT function body (the ScriptUseCollector path). A nested
     // `let box` reassignment must not flip the outer object $state to StateProxy.
     // The outer object $state init is PROXIABLE, so with no (un-shadowed) reassign
-    // it lowers to BareProxy (`$.proxy({a:1})`) — verified against svelte@5.56.3.
+    // it lowers to BareProxy (`$.proxy({a:1})`) — verified against svelte@5.56.10.
     // The discriminating fact is that the shadowed write does NOT promote it to
     // StateProxy (`$.state($.proxy(...))`).
     let src = "<script>\n\tlet box = $state({ a: 1 });\n\tfunction f(){ let box; box = { a: 2 }; }\n</script>\n<p>static</p>";
@@ -1006,7 +1006,7 @@ fn proxy_follow_ignores_inner_shadowed_reassignment() {
     // the top-level `let base = 5` (a literal → non-proxiable); the inner shadowed
     // `let base = 6; base = 7` reassigns the INNER binding only, so the follow is
     // NOT blocked → `x` is a NON-proxiable signal (`StateSignal`, no proxy).
-    // official svelte@5.56.3: `let x = $.state(base)`.
+    // official svelte@5.56.10: `let x = $.state(base)`.
     let src = "<script>\n\tlet base = 5;\n\tfunction f(){ let base = 6; base = 7; }\n\tlet x = $state(base);\n\tfunction g(){ x = base; }\n</script>\n<p>{x}</p>";
     let ir = lower(src, &alloc);
     assert_eq!(
@@ -1028,7 +1028,7 @@ fn proxy_follow_blocked_by_toplevel_reassignment() {
     let alloc = Allocator::default();
     // Contrast: the TOP-LEVEL `base` is reassigned (via `h`), which BLOCKS the
     // follow → `x` stays proxiable → `StateProxy` (`$.state($.proxy(base))`).
-    // official svelte@5.56.3: `let x = $.state($.proxy(base))`.
+    // official svelte@5.56.10: `let x = $.state($.proxy(base))`.
     let src = "<script>\n\tlet base = 5;\n\tfunction h(){ base = 7; }\n\tlet x = $state(base);\n\tfunction g(){ x = base; }\n</script>\n<p>{x}</p>";
     let ir = lower(src, &alloc);
     assert_eq!(
@@ -1352,7 +1352,7 @@ fn let_declaration_tag_no_initializer_parses_to_decl_local() {
 fn legacy_component_import_plan_sets_legacy_flag() {
     let alloc = Allocator::default();
     // A store-auto-subscription component uses NO runes → legacy mode → the
-    // import plan carries `legacy_flag`. official svelte@5.56.3:
+    // import plan carries `legacy_flag`. official svelte@5.56.10:
     // `import 'svelte/internal/flags/legacy'`.
     let src = "<script>\n\timport { writable } from 'svelte/store';\n\tconst count = writable(0);\n</script>\n<button>{$count}</button>";
     let ir = lower(src, &alloc);
@@ -1435,7 +1435,7 @@ fn topology_still_records_bind_helper_for_valid_group() {
     let alloc = Allocator::default();
     // POSITIVE control: a VALID `<input type="radio" bind:group>` (static type) is
     // accepted by the emitter, so the topology recorder must STILL record `BindGroup`
-    // (the gate must not over-refuse). Verified against svelte@5.56.3.
+    // (the gate must not over-refuse). Verified against svelte@5.56.10.
     let src = "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n";
     let ir = lower(src, &alloc);
     let plan = plan_static_templates(&ir, None);
@@ -1452,7 +1452,7 @@ fn topology_still_records_bind_helper_for_valid_group() {
 // override (Svelte's own forced-mode switch), shared with the IDE projector via
 // the parser-owned `forced_runes_option`. `runes={true}` forces RUNES mode even with zero
 // rune calls; `runes={false}` forces LEGACY mode even when a `$state` rune is
-// present. Derived empirically against svelte@5.56.3 (a `runes={true}` component
+// present. Derived empirically against svelte@5.56.10 (a `runes={true}` component
 // emits no `flags/legacy` import; a `runes={false}` + `$state` component emits
 // it). FAILS against the inference that only reads rune USAGE.
 // ---------------------------------------------------------------------------
@@ -1460,7 +1460,7 @@ fn topology_still_records_bind_helper_for_valid_group() {
 #[test]
 fn svelte_options_runes_true_forces_runes_mode_without_rune_calls() {
     let alloc = Allocator::default();
-    // official svelte@5.56.3: `<svelte:options runes={true} />` + a plain `let x = 1`
+    // official svelte@5.56.10: `<svelte:options runes={true} />` + a plain `let x = 1`
     // (NO rune call) compiles in RUNES mode — no `svelte/internal/flags/legacy`
     // import. The runtime IR mode must be Runes.
     let src = "<svelte:options runes={true} />\n<script>let x = 1;</script>\n<div>{x}</div>";
@@ -1482,7 +1482,7 @@ fn svelte_options_runes_true_forces_runes_mode_without_rune_calls() {
 #[test]
 fn svelte_options_runes_false_forces_legacy_mode_with_state_rune() {
     let alloc = Allocator::default();
-    // official svelte@5.56.3: `<svelte:options runes={false} />` + a `$state(0)` is
+    // official svelte@5.56.10: `<svelte:options runes={false} />` + a `$state(0)` is
     // LEGACY (the `$state` is treated as a plain local) — it emits the
     // `svelte/internal/flags/legacy` import. The runtime IR mode must be Legacy
     // even though a rune NAME appears.
@@ -1519,7 +1519,7 @@ fn svelte_options_runes_shorthand_forces_runes_mode() {
 #[test]
 fn shadowing_function_param_named_rune_keeps_component_legacy() {
     // X5 — a function parameter named `$state` SHADOWS the rune: `$state` inside
-    // `f`'s body resolves to the parameter, NOT the rune. svelte@5.56.3 keeps such
+    // `f`'s body resolves to the parameter, NOT the rune. svelte@5.56.10 keeps such
     // a component in LEGACY mode (EMPIRICALLY confirmed: the legacy flag import is
     // present). The detection must be SCOPE-AWARE — FAILS against the prior
     // any-identifier-named-`$state` detector that forced runes mode.
@@ -1580,7 +1580,7 @@ fn bare_rune_reference_without_call_still_forces_runes() {
 #[test]
 fn module_script_rune_forces_runes_mode() {
     // X5 — a rune used in the MODULE `<script module>` forces runes mode even when
-    // the instance script has none (EMPIRICALLY confirmed against svelte@5.56.3).
+    // the instance script has none (EMPIRICALLY confirmed against svelte@5.56.10).
     let alloc = Allocator::default();
     let src = "<script module>export const c = $state(0);</script>\n<script>let y = 1;</script>\n<p>{y}</p>";
     let ir = lower(src, &alloc);
@@ -1640,7 +1640,7 @@ fn same_scope_redeclaration_refuses_via_scope_facts() {
     // A same-scope redeclaration (`const a = 1; const a = 2;`) is PARSE-valid but
     // fails SemanticBuilder scope analysis, so the component-scope facts REFUSE
     // (`svelte-runtime-scope-facts`) rather than fabricate an un-deconflicted
-    // component name from partial facts. svelte@5.56.3 likewise rejects it
+    // component name from partial facts. svelte@5.56.10 likewise rejects it
     // (`Identifier 'a' has already been declared`) — the refusal is oracle-aligned.
     let src = "<script>const a = 1; const a = 2;</script>\n<p>x</p>\n";
     let errors =
@@ -2295,7 +2295,7 @@ mod mixed_attr_brace_awareness {
     #[test]
     fn mixed_attribute_literal_chunks_are_entity_decoded() {
         // X4 — a mixed-attribute LITERAL chunk is ENTITY-DECODED (the official
-        // `decode_character_references`), NOT stored raw. svelte@5.56.3:
+        // `decode_character_references`), NOT stored raw. svelte@5.56.10:
         // `title="&copy; {x} &bogus;"` → the runtime value `'© ' + x + ' &bogus;'`,
         // so the leading literal is `© ` (decoded) and the trailing is ` &bogus;`
         // (the unknown entity stays literal). FAILS against the prior raw-chunk
@@ -2322,7 +2322,7 @@ mod mixed_attr_brace_awareness {
     #[test]
     fn mixed_attribute_literal_decode_is_not_reescaped() {
         // X4 — the decode is DECODE-ONLY (no re-escape): a mixed value is a runtime
-        // STRING, never re-serialized HTML. svelte@5.56.3:
+        // STRING, never re-serialized HTML. svelte@5.56.10:
         // `title="&lt;a&gt; {x}"` → `'<a> ' + x`, so the literal decodes to `<a> `
         // and stays `<a> ` (NOT re-escaped back to `&lt;a&gt; `).
         let alloc = Allocator::default();
@@ -2337,7 +2337,7 @@ mod mixed_attr_brace_awareness {
 
     #[test]
     fn mixed_attribute_numeric_entity_literal_is_decoded() {
-        // X4 — a numeric entity in a mixed literal decodes too. svelte@5.56.3:
+        // X4 — a numeric entity in a mixed literal decodes too. svelte@5.56.10:
         // `title="&#65;{x}"` → `'A' + x`, so the leading literal is `A`.
         let alloc = Allocator::default();
         let src = "<script>let x=1;</script><div title=\"&#65;{x}\">a</div>";
@@ -2352,7 +2352,7 @@ mod mixed_attr_brace_awareness {
     #[test]
     fn mixed_attribute_amp_entity_literal_is_decoded() {
         // X4 — `&amp;` in a mixed literal decodes to a bare `&` (and stays `&`, not
-        // re-escaped). svelte@5.56.3: `title="a &amp; b {x}"` → `'a & b ' + x`.
+        // re-escaped). svelte@5.56.10: `title="a &amp; b {x}"` → `'a & b ' + x`.
         let alloc = Allocator::default();
         let src = "<script>let x=1;</script><div title=\"a &amp; b {x}\">a</div>";
         let ir = lower(src, &alloc);
@@ -3268,7 +3268,7 @@ fn multiroot_dynamic_after_static_root_descends_from_fragment_first() {
     use super::html::{NodePathStep, PathBase};
     let alloc = Allocator::default();
     // `<a/>{x}` — a static element root followed by a dynamic interpolation root.
-    // svelte@5.56.3 reaches the interpolation via `$.sibling($.first_child(frag), 1)`
+    // svelte@5.56.10 reaches the interpolation via `$.sibling($.first_child(frag), 1)`
     // — FirstChild THEN Sibling{1}. FAILS against the bare `Sibling{1}` path.
     let src = "<script>let x = $state(0);</script><a href=\"/\">link</a>{x}";
     let ir = lower(src, &alloc);
@@ -3478,7 +3478,7 @@ mod non_body_special_excluded_from_skeleton {
 
     #[test]
     fn svelte_head_before_div_produces_div_only_body_no_anchor_no_flag() {
-        // official svelte@5.56.3: `<svelte:head>…</svelte:head><div>{@html m}</div>`
+        // official svelte@5.56.10: `<svelte:head>…</svelte:head><div>{@html m}</div>`
         // → body skeleton "<div></div>" (single root, NO fragment flag, NO `<!>`
         // anchor for the head). The pre-fix code emitted "<!> <div></div>", 1.
         let src = "<script>let t=$state('x'); let m=$state('y');</script>\n<svelte:head><title>{t}</title></svelte:head>\n<div>{@html m}</div>";
@@ -3591,7 +3591,7 @@ mod non_body_special_excluded_from_skeleton {
 // content: they are not roots, not `<!>` anchors, and never shift a sibling's body
 // position or trip the multi-root fragment flag. (A `{@render}` / `{@html}` / a
 // block `{#if}`/`{#each}`/`{#await}`/`{#key}` DOES render — keeps its anchor.)
-// Derived empirically against svelte@5.56.3 (surfaced by the H8 full-corpus matrix
+// Derived empirically against svelte@5.56.10 (surfaced by the H8 full-corpus matrix
 // on `declaration_tags/const_tag` + `components/child_and_snippet`).
 // ---------------------------------------------------------------------------
 
@@ -3619,7 +3619,7 @@ mod non_rendering_construct_excluded_from_skeleton {
 
     #[test]
     fn at_const_in_each_body_emits_no_anchor() {
-        // official svelte@5.56.3: an `{@const}` before `<li>` in an `{#each}` body
+        // official svelte@5.56.10: an `{@const}` before `<li>` in an `{#each}` body
         // produces a body skeleton of just `<li> </li>` — NO `<!>` anchor for the
         // const. The pre-fix code emitted `<!><li></li>`.
         let src = "<script>let items=$state([1]);</script>\n<ul>{#each items as item}{@const t=item*2}<li>{t}</li>{/each}</ul>";
@@ -3682,7 +3682,7 @@ mod non_rendering_construct_excluded_from_skeleton {
 // content RAW (author entities `&amp;`/`&lt;` pass through, NOT double-escaped),
 // while ATTRIBUTE values are entity-AWARE escaped (`"` → `&quot;`, bare `&` →
 // `&amp;`, `<` → `&lt;`, but an already-valid `&amp;` is preserved). Derived
-// empirically against svelte@5.56.3. FAILS against the pre-fix double-escaping
+// empirically against svelte@5.56.10. FAILS against the pre-fix double-escaping
 // `escape_html_text` (`&amp;` → `&amp;amp;`).
 // ---------------------------------------------------------------------------
 
@@ -3757,7 +3757,7 @@ fn static_attribute_value_is_entity_aware_escaped() {
 // (`&#65;`/`&#x41;`) decodes to its code point; an INVALID entity (`&bogus;`) is
 // NOT a real entity, so its leading `&` is escaped (`&amp;bogus;`). TEXT content
 // stays RAW (a separate path) — only ATTRIBUTE values decode-then-reencode.
-// Derived empirically against svelte@5.56.3.
+// Derived empirically against svelte@5.56.10.
 // ---------------------------------------------------------------------------
 
 mod attribute_entity_decode {
@@ -3774,7 +3774,7 @@ mod attribute_entity_decode {
 
     #[test]
     fn valid_named_entity_decodes_to_char() {
-        // official svelte@5.56.3: `title="a&nbsp;b"` → the NBSP char (U+00A0) in the
+        // official svelte@5.56.10: `title="a&nbsp;b"` → the NBSP char (U+00A0) in the
         // skeleton (decoded), NOT the literal `&nbsp;`.
         let html = attr_skeleton("<div title=\"a&nbsp;b\">x</div>");
         assert!(
@@ -3845,7 +3845,7 @@ mod attribute_entity_decode {
     // numeric `validate_code` incl. the Windows-1252 remap), not a hand-rolled
     // ~30-entry subset. A valid named entity OUTSIDE the old subset must DECODE to
     // its char (NOT be wrong-decoded to `&amp;<name>;`); a numeric code in
-    // 128..=159 applies the Windows-1252 remap. Confirmed against svelte@5.56.3:
+    // 128..=159 applies the Windows-1252 remap. Confirmed against svelte@5.56.10:
     // `&ouml;`→`ö`, `&notin;`→`∉`, `&#128;`→`€`, `&bogus;`→`&amp;bogus;`.
 
     #[test]
@@ -3906,7 +3906,7 @@ mod attribute_entity_decode {
     #[test]
     fn legacy_no_semicolon_named_entity_decodes() {
         // The HTML5 table includes LEGACY no-semicolon named refs (`&copy` without
-        // `;`). official svelte@5.56.3 decodes `&copy` (no `;`) to `©` in an
+        // `;`). official svelte@5.56.10 decodes `&copy` (no `;`) to `©` in an
         // attribute value. (The decode-then-reescape leaves `©` as-is — not in the
         // `[&"<]` escape set.)
         let html = attr_skeleton("<div title=\"a&copy b\">x</div>");
@@ -3928,7 +3928,7 @@ mod attribute_entity_decode {
 
     #[test]
     fn attribute_entity_decode_matches_official_byte_for_byte() {
-        // EXACT parity against the pinned svelte@5.56.3 compiler output for a broad
+        // EXACT parity against the pinned svelte@5.56.10 compiler output for a broad
         // set of entity forms — the discriminating full-table + validate_code +
         // attribute-boundary check. Each `(input, official_attr_value)` row was
         // ground-truthed against the pinned compiler.
@@ -3972,7 +3972,7 @@ mod attribute_entity_decode {
     fn surrogate_numeric_code_decodes_to_nul_char() {
         // A surrogate-half numeric code is a TRUTHY code that `validate_code` maps to
         // NUL (`0`) → the NUL char (official `String.fromCodePoint(0)`), DISTINCT
-        // from a falsy `&#0;` (kept literal). Confirmed vs svelte@5.56.3:
+        // from a falsy `&#0;` (kept literal). Confirmed vs svelte@5.56.10:
         // `&#xD800;` → a single U+0000 char.
         let got = attr_value("<div title=\"&#xD800;\">x</div>");
         assert_eq!(
@@ -3987,14 +3987,14 @@ mod attribute_entity_decode {
 // (`clean_nodes`): the significant space between a text run and a nested element
 // is preserved (NOT per-node `trim()`-dropped), interior whitespace within a text
 // node is preserved, and leading/trailing fragment whitespace is trimmed. Derived
-// empirically against svelte@5.56.3. FAILS against the per-node-trim serializer
+// empirically against svelte@5.56.10. FAILS against the per-node-trim serializer
 // (`Hello <strong>` → `Hello<strong>`).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn static_whitespace_preserved_around_nested_element() {
     let alloc = Allocator::default();
-    // svelte@5.56.3: `<p>Hello <strong>world</strong> !</p>` →
+    // svelte@5.56.10: `<p>Hello <strong>world</strong> !</p>` →
     // `<p>Hello <strong>world</strong> !</p>` — both significant spaces kept.
     let src = "<p>Hello <strong>world</strong> !</p>";
     let ir = lower(src, &alloc);
@@ -4017,7 +4017,7 @@ fn static_whitespace_preserved_around_nested_element() {
 #[test]
 fn static_interior_whitespace_preserved_but_edges_trimmed() {
     let alloc = Allocator::default();
-    // svelte@5.56.3: `<p>  Hello   world  </p>` → `<p>Hello   world</p>` — the
+    // svelte@5.56.10: `<p>  Hello   world  </p>` → `<p>Hello   world</p>` — the
     // leading/trailing whitespace is trimmed, but the INTERIOR run (3 spaces) is
     // preserved verbatim (NOT collapsed to one). FAILS against `collapse_text`.
     let src = "<p>  Hello   world  </p>";
@@ -4043,13 +4043,13 @@ fn static_interior_whitespace_preserved_but_edges_trimmed() {
 // other Unicode whitespace). A literal-NBSP text node is SIGNIFICANT content (the
 // official `clean_nodes` only drops ASCII ` \t\r\n`), so it must NOT be dropped
 // from the effective-root sequence as "whitespace-only". Derived empirically
-// against svelte@5.56.3. FAILS against the `trim()`-based `is_whitespace_text`.
+// against svelte@5.56.10. FAILS against the `trim()`-based `is_whitespace_text`.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn literal_nbsp_root_is_significant_not_whitespace_dropped() {
     let alloc = Allocator::default();
-    // svelte@5.56.3: `\u{00a0}{#if …}<p>x</p>{/if}` lowers to TWO regions —
+    // svelte@5.56.10: `\u{00a0}{#if …}<p>x</p>{/if}` lowers to TWO regions —
     // `<p>x</p>` (the if-branch body) and ` <!>` (the leading NBSP text + the block
     // anchor). The leading NBSP is SIGNIFICANT (not ASCII whitespace), so the root
     // sequence keeps the NBSP text node as an effective root, yielding a multi-root
@@ -5426,7 +5426,7 @@ mod nested_region_slot_path_completeness {
 // `flush_sequence` partition): a text-run ADJACENT to an interpolation is
 // dynamic text (dropped from the static skeleton + collapsed to a single ` `
 // placeholder), never emitted as literal static text alongside a separate
-// interpolation slot. Pinned to the pinned `svelte@5.56.3` compiler output.
+// interpolation slot. Pinned to the pinned `svelte@5.56.10` compiler output.
 // ---------------------------------------------------------------------------
 
 mod mixed_element_interp_skeleton {
@@ -5457,7 +5457,7 @@ mod mixed_element_interp_skeleton {
 
     #[test]
     fn mixed_nested_element_with_trailing_text_interp_run() {
-        // official svelte@5.56.3: `<p>Hello <b>x</b> {name}!</p>` →
+        // official svelte@5.56.10: `<p>Hello <b>x</b> {name}!</p>` →
         // "<p>Hello <b>x</b> </p>" — the trailing `{name}!` text+interp run is a
         // single dynamic-text placeholder, NOT `Hello <b>x</b> {placeholder}!`.
         assert_eq!(
@@ -5554,7 +5554,7 @@ mod mixed_element_interp_skeleton {
 
     #[test]
     fn each_block_sole_child_is_controlled_no_anchor() {
-        // official svelte@5.56.3: an `{#each}` that is the SOLE (whitespace-trimmed)
+        // official svelte@5.56.10: an `{#each}` that is the SOLE (whitespace-trimmed)
         // child of an element is CONTROLLED — no `<!>` anchor in the skeleton.
         // `<ul>{#each}…{/each}</ul>` → "<ul></ul>".
         let src = format!("{STATE_PRELUDE}<ul>{{#each items as i}}<li>{{i}}</li>{{/each}}</ul>");
@@ -5597,7 +5597,7 @@ mod mixed_element_interp_skeleton {
 // interior text node is REMOVED ENTIRELY (not collapsed to a single space) inside
 // the table-family parents (select/tr/table/tbody/thead/tfoot/colgroup/datalist)
 // and in an SVG context outside a `<text>` element; a `<pre>`'s leading exact-`\n`
-// is discarded. All EMPIRICALLY pinned to svelte@5.56.3.
+// is discarded. All EMPIRICALLY pinned to svelte@5.56.10.
 // ---------------------------------------------------------------------------
 
 mod whitespace_removal_and_pre_newline {
@@ -5629,7 +5629,7 @@ mod whitespace_removal_and_pre_newline {
     fn can_remove_entirely_table_family_drops_interior_whitespace() {
         // X6 — the table-family arm: a whitespace-only text between rows/options is
         // REMOVED ENTIRELY (no single-space placeholder). Each row is EMPIRICALLY
-        // confirmed against svelte@5.56.3 (the interior `\n` collapses to nothing).
+        // confirmed against svelte@5.56.10 (the interior `\n` collapses to nothing).
         let cases: &[(&str, &str)] = &[
             (
                 "<select>\n<option>a</option>\n<option>b</option>\n</select>",
@@ -5665,7 +5665,7 @@ mod whitespace_removal_and_pre_newline {
     fn plain_div_keeps_single_space_between_elements() {
         // X6 (negative control) — a NON-table parent keeps a single space between
         // its element children (the `can_remove_entirely` arm does NOT fire).
-        // svelte@5.56.3: `<div>\n<span>a</span>\n<span>b</span>\n</div>` →
+        // svelte@5.56.10: `<div>\n<span>a</span>\n<span>b</span>\n</div>` →
         // `<div><span>a</span> <span>b</span></div>`.
         assert_eq!(
             single_skeleton("<div>\n<span>a</span>\n<span>b</span>\n</div>"),
@@ -5676,7 +5676,7 @@ mod whitespace_removal_and_pre_newline {
     #[test]
     fn svg_context_drops_interior_whitespace() {
         // X6 — the SVG arm: a whitespace-only text inside an `<svg>` (outside a
-        // `<text>` element) is removed entirely. svelte@5.56.3:
+        // `<text>` element) is removed entirely. svelte@5.56.10:
         // `<svg>\n<rect/>\n<circle/>\n</svg>` → `<svg><rect></rect><circle></circle></svg>`.
         // (NOTE: official uses `from_svg`; this runtime serializer's skeleton bytes
         // are the same element structure — the from_svg root-helper selection is the
@@ -5690,7 +5690,7 @@ mod whitespace_removal_and_pre_newline {
     #[test]
     fn svg_text_element_keeps_whitespace() {
         // X6 — the SVG `<text>` exception: whitespace INSIDE an SVG `<text>` is
-        // SIGNIFICANT and kept. svelte@5.56.3: `<svg><text>\nhello\n</text></svg>` →
+        // SIGNIFICANT and kept. svelte@5.56.10: `<svg><text>\nhello\n</text></svg>` →
         // `<svg><text>hello</text></svg>` (the leading/trailing edges of the SINGLE
         // text node are trimmed by the standard rule, but it is NOT removed entirely
         // — a `<text>` with interior content keeps it). The discriminating case is a
@@ -5704,7 +5704,7 @@ mod whitespace_removal_and_pre_newline {
     #[test]
     fn pre_leading_exact_newline_is_discarded() {
         // X9 — a `<pre>` whose FIRST child is exactly `\n` discards it (the browser
-        // would, so keeping it breaks hydration). svelte@5.56.3:
+        // would, so keeping it breaks hydration). svelte@5.56.10:
         // `<pre>\n<span>x</span></pre>` → `<pre><span>x</span></pre>`.
         assert_eq!(
             single_skeleton("<pre>\n<span>x</span></pre>"),
@@ -5717,7 +5717,7 @@ mod whitespace_removal_and_pre_newline {
         // X9 (negative control) — a `<pre>` whose first child is `\nhello` (NOT
         // exactly `\n`) keeps the newline verbatim (preserve_ws keeps all whitespace,
         // and the first-newline discard only fires for an EXACT `\n` / `\r\n`).
-        // svelte@5.56.3: `<pre>\nhello</pre>` → `<pre>\nhello</pre>`.
+        // svelte@5.56.10: `<pre>\nhello</pre>` → `<pre>\nhello</pre>`.
         assert_eq!(single_skeleton("<pre>\nhello</pre>"), "<pre>\nhello</pre>");
     }
 
@@ -5733,7 +5733,7 @@ mod whitespace_removal_and_pre_newline {
     #[test]
     fn textarea_leading_newline_is_not_discarded() {
         // X9 (negative control) — `<textarea>` does NOT discard a leading newline
-        // (only `<pre>` does). svelte@5.56.3: `<textarea>\nhello</textarea>` keeps
+        // (only `<pre>` does). svelte@5.56.10: `<textarea>\nhello</textarea>` keeps
         // the `\n`.
         assert_eq!(
             single_skeleton("<textarea>\nhello</textarea>"),
@@ -5747,7 +5747,7 @@ mod whitespace_removal_and_pre_newline {
 // `defaultChecked` are EXCLUDED from the static `from_html` skeleton and applied
 // at runtime via a `$.autofocus(...)` (autofocus) or a DOM property write (the
 // others). Modeled as the `NonStaticProperty` runtime op. All EMPIRICALLY pinned
-// to svelte@5.56.3.
+// to svelte@5.56.10.
 // ---------------------------------------------------------------------------
 
 mod non_static_property_attrs {
@@ -5794,7 +5794,7 @@ mod non_static_property_attrs {
     fn video_muted_is_excluded_from_skeleton_and_emits_property_write() {
         // X7 — `<video muted>` → `<video></video>` (no `muted` in the skeleton) +
         // a DOM property write `.muted = true`. EMPIRICALLY confirmed against
-        // svelte@5.56.3 (`from_html(\`<video></video>\`, 2)` + `video.muted = true`).
+        // svelte@5.56.10 (`from_html(\`<video></video>\`, 2)` + `video.muted = true`).
         let alloc = Allocator::default();
         let ir = lower("<video muted></video>", &alloc);
         let plan = plan_static_templates(&ir, None);
@@ -5824,7 +5824,7 @@ mod non_static_property_attrs {
     fn input_autofocus_is_excluded_and_emits_autofocus_helper() {
         // X7 — `<input autofocus>` → `<input/>` (no autofocus in the skeleton) +
         // the `$.autofocus(input, true)` helper. EMPIRICALLY confirmed against
-        // svelte@5.56.3.
+        // svelte@5.56.10.
         let alloc = Allocator::default();
         let ir = lower("<input autofocus/>", &alloc);
         assert_eq!(single_skeleton("<input autofocus/>"), "<input/>");
@@ -5845,7 +5845,7 @@ mod non_static_property_attrs {
     #[test]
     fn input_default_value_static_is_excluded_and_emits_property_write() {
         // X7 — `<input defaultValue="x">` → `<input/>` + `.defaultValue = 'x'`.
-        // EMPIRICALLY confirmed against svelte@5.56.3.
+        // EMPIRICALLY confirmed against svelte@5.56.10.
         let alloc = Allocator::default();
         let ir = lower("<input defaultValue=\"x\"/>", &alloc);
         assert_eq!(single_skeleton("<input defaultValue=\"x\"/>"), "<input/>");
@@ -5875,7 +5875,7 @@ mod non_static_property_attrs {
     fn dynamic_default_value_is_excluded_and_carries_the_expression() {
         // X7 — a DYNAMIC `<input defaultValue={x}>` is ALSO excluded from the
         // skeleton (`<input/>`) and carries the expression value
-        // (svelte@5.56.3: `.defaultValue = x`).
+        // (svelte@5.56.10: `.defaultValue = x`).
         let alloc = Allocator::default();
         let src = "<script>let x = $state(\"y\");</script><input defaultValue={x}/>";
         let ir = lower(src, &alloc);
@@ -5929,7 +5929,7 @@ mod non_static_property_attrs {
     fn ordinary_static_attribute_is_not_a_non_static_property() {
         // X7 (negative control) — an ordinary `<input value="x">` is a NORMAL
         // static attribute: it STAYS in the skeleton and emits NO NonStaticProperty
-        // op. (svelte@5.56.3: `value` is a DOM property but is settable statically —
+        // op. (svelte@5.56.10: `value` is a DOM property but is settable statically —
         // it is NOT in NON_STATIC_PROPERTIES.)
         let alloc = Allocator::default();
         let ir = lower("<input value=\"x\"/>", &alloc);
@@ -5950,7 +5950,7 @@ mod non_static_property_attrs {
 // X8 — `is_standalone`: a region whose SOLE cleaned node is a non-dynamic
 // `<Component>` (no `--css-var` attr) or a non-dynamic `{@render}` emits NO static
 // template — the runtime calls the component / renders the snippet against the
-// parent block's anchor directly. EMPIRICALLY pinned to svelte@5.56.3 (the
+// parent block's anchor directly. EMPIRICALLY pinned to svelte@5.56.10 (the
 // standalone `<Foo/>` emits `Foo($$anchor, {})` with no `from_html`).
 // ---------------------------------------------------------------------------
 
@@ -5976,7 +5976,7 @@ mod standalone_component_root {
     fn standalone_component_root_emits_no_template() {
         // X8 — a sole `<Foo/>` root is STANDALONE: NO `from_html` template at all
         // (the runtime calls `Foo($$anchor, {})`). EMPIRICALLY confirmed against
-        // svelte@5.56.3. FAILS against the prior `from_html("<!>")` for a component
+        // svelte@5.56.10. FAILS against the prior `from_html("<!>")` for a component
         // root.
         let src = "<script>let Foo = 1;</script><Foo/>";
         let fs = factories(src);
@@ -6000,7 +6000,7 @@ mod standalone_component_root {
     fn standalone_component_inside_if_body_emits_no_template() {
         // X8 — `{#if c}<Foo/>{/if}`: the if-BODY region is standalone (NO template);
         // the if-block region itself is a `$.comment()` anchor. EMPIRICALLY
-        // confirmed against svelte@5.56.3 (NO from_html, the component mounts via the
+        // confirmed against svelte@5.56.10 (NO from_html, the component mounts via the
         // if anchor). FAILS against the prior `from_html("<!>")` for the if-body.
         let src = "<script>let Foo = 1; let c = true;</script>{#if c}<Foo/>{/if}";
         let fs = factories(src);
@@ -6023,7 +6023,7 @@ mod standalone_component_root {
     #[test]
     fn component_with_css_var_is_not_standalone() {
         // X8 (negative control) — `<Foo --x="red"/>` is NOT standalone (it has a
-        // `--css-var` attribute): svelte@5.56.3 emits a `svelte-css-wrapper`
+        // `--css-var` attribute): svelte@5.56.10 emits a `svelte-css-wrapper`
         // `from_html` template. The Verter region is therefore a `from_html`, NOT a
         // Standalone factory.
         let src = "<script>let Foo = 1;</script><Foo --x=\"red\"/>";
@@ -6044,7 +6044,7 @@ mod standalone_component_root {
     fn component_with_bind_this_is_still_standalone() {
         // X8 — `<Foo bind:this={r}/>` is STILL standalone (a `bind:this` does NOT
         // break standalone — only a `--css-var` attr / HMR / dynamic does).
-        // EMPIRICALLY confirmed against svelte@5.56.3 (`Foo($$anchor, {}), …` with
+        // EMPIRICALLY confirmed against svelte@5.56.10 (`Foo($$anchor, {}), …` with
         // no from_html).
         let src = "<script>let Foo = 1; let r = $state();</script><Foo bind:this={r}/>";
         let fs = factories(src);
@@ -6064,7 +6064,7 @@ mod standalone_component_root {
     #[test]
     fn two_component_roots_are_not_standalone() {
         // X8 (negative control) — two adjacent component roots are NOT standalone
-        // (the region has 2 cleaned nodes): svelte@5.56.3 emits
+        // (the region has 2 cleaned nodes): svelte@5.56.10 emits
         // `from_html("<!><!>", 1)`. The Verter region is a multi-root from_html.
         let src = "<script>let Foo=1; let Bar=2;</script><Foo/><Bar/>";
         let fs = factories(src);
@@ -6082,7 +6082,7 @@ mod standalone_component_root {
     #[test]
     fn component_with_text_sibling_is_not_standalone() {
         // X8 (negative control) — `hi <Foo/>` has a text sibling, so the region is
-        // NOT standalone (2 cleaned nodes): svelte@5.56.3 emits `from_html("hi <!>", 1)`.
+        // NOT standalone (2 cleaned nodes): svelte@5.56.10 emits `from_html("hi <!>", 1)`.
         let src = "<script>let Foo=1;</script>hi <Foo/>";
         let fs = factories(src);
         assert!(
@@ -6115,7 +6115,7 @@ mod standalone_component_root {
     fn standalone_component_topology_has_no_from_html_or_append() {
         // X8 — the topology of a standalone `<Foo/>` records NO `FromHtml` helper
         // and NO `$.append` (the component mounts against the anchor directly).
-        // EMPIRICALLY confirmed against svelte@5.56.3 (no from_html, no $.append).
+        // EMPIRICALLY confirmed against svelte@5.56.10 (no from_html, no $.append).
         let alloc = Allocator::default();
         let ir = lower("<script>let Foo = 1;</script><Foo/>", &alloc);
         let plan = plan_static_templates(&ir, None);
@@ -6272,7 +6272,7 @@ fn first_fragment_flag(factory: &TemplateFactory) -> Option<TemplateFlag> {
 // references / validate_code / reg_exp_entity), and event-attribute modeling
 // (is_event_attribute / visit_event_attribute / is_capture_event /
 // can_delegate_event). Each W1-W7 case below was ground-truthed against the
-// pinned svelte@5.56.3 compiler; the asserted output is the official output.
+// pinned svelte@5.56.10 compiler; the asserted output is the official output.
 // ===========================================================================
 
 mod official_whitespace_skeleton {
@@ -6308,7 +6308,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w1_adjacent_roots_without_whitespace_have_no_separator() {
-        // svelte@5.56.3: `<a></a><b></b>` → `<a></a><b></b>` (NO inter-root
+        // svelte@5.56.10: `<a></a><b></b>` → `<a></a><b></b>` (NO inter-root
         // space) with the multi-root fragment flag. FAILS against the
         // unconditional-separator `synthesize_region` (which yields
         // `<a></a> <b></b>`).
@@ -6328,7 +6328,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w1_adjacent_roots_with_authored_space_preserve_one_space() {
-        // svelte@5.56.3: `<a></a> <b></b>` → `<a></a> <b></b>` — the AUTHORED
+        // svelte@5.56.10: `<a></a> <b></b>` → `<a></a> <b></b>` — the AUTHORED
         // single space is a significant text root and survives. (Discriminates
         // the authored space from a synthesized one: with the unconditional-
         // separator bug BOTH produce one space here, so this is the companion to
@@ -6343,7 +6343,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w1_three_adjacent_roots_without_whitespace_have_no_separator() {
-        // svelte@5.56.3: `<a></a><b></b><c></c>` → `<a></a><b></b><c></c>`.
+        // svelte@5.56.10: `<a></a><b></b><c></c>` → `<a></a><b></b><c></c>`.
         assert_eq!(
             single_html("<a></a><b></b><c></c>"),
             "<a></a><b></b><c></c>",
@@ -6353,7 +6353,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w2_dynamic_root_after_static_root_is_single_space_no_separator() {
-        // svelte@5.56.3: `<a></a>{x}` → `<a></a> ` — the trailing interpolation
+        // svelte@5.56.10: `<a></a>{x}` → `<a></a> ` — the trailing interpolation
         // is a single-space placeholder and there is NO inter-root separator
         // before it. FAILS against the unconditional separator (`<a></a>  `, two
         // spaces).
@@ -6371,7 +6371,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w2_static_dynamic_static_collapses_interp_to_one_space() {
-        // svelte@5.56.3: `<a></a>{x}<c></c>` → `<a></a> <c></c>` — the middle
+        // svelte@5.56.10: `<a></a>{x}<c></c>` → `<a></a> <c></c>` — the middle
         // interpolation collapses to ONE space between the two static roots, with
         // no extra separators. FAILS against the unconditional separator
         // (`<a></a>   <c></c>`).
@@ -6388,7 +6388,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w3_debug_tag_between_text_does_not_split_into_double_space() {
-        // svelte@5.56.3: `<div>a {@debug v} b</div>` → `<div>a b</div>` — the
+        // svelte@5.56.10: `<div>a {@debug v} b</div>` → `<div>a b</div>` — the
         // {@debug} is a non-rendering node REMOVED by clean_nodes, and the two
         // surrounding text runs `a ` and ` b` merge into a single `a b` (one
         // space). FAILS against a planner that keeps the debug as a run-breaker
@@ -6406,7 +6406,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn w3_const_tag_between_text_merges_runs() {
-        // svelte@5.56.3: `<div>a {@const v = 1} b</div>` → `<div>a b</div>` — same
+        // svelte@5.56.10: `<div>a {@const v = 1} b</div>` → `<div>a b</div>` — same
         // run-merge behavior for a {@const} (also a non-rendering, hoisted node).
         let html = single_html("<div>a {@const v = 1} b</div>");
         assert_eq!(
@@ -6417,7 +6417,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn leading_whitespace_only_root_run_is_dropped() {
-        // svelte@5.56.3: `\n   <div></div>` → `<div></div>` (leading whitespace-
+        // svelte@5.56.10: `\n   <div></div>` → `<div></div>` (leading whitespace-
         // only text dropped). Mirrors clean_nodes' leading regular.shift() loop.
         assert_eq!(
             single_html("\n   <div></div>"),
@@ -6441,7 +6441,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn pure_text_only_region_is_a_seeded_text_node_not_from_html() {
-        // svelte@5.56.3: a region that is a single PURE-text run (`hello`) is
+        // svelte@5.56.10: a region that is a single PURE-text run (`hello`) is
         // created as a SEEDED text node — `$.text('hello')` — NOT a `from_html`
         // clone and NOT a comment anchor. This is a RUNTIME distinction (a text
         // node vs a cloned template). FAILS against a `from_html("hello")` plan.
@@ -6457,7 +6457,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn interpolation_only_region_is_an_unseeded_text_node() {
-        // svelte@5.56.3: a region that is a single interpolation (`{a}`) — or
+        // svelte@5.56.10: a region that is a single interpolation (`{a}`) — or
         // interpolation-only run (`{a}{b}`) — is an UNSEEDED text node `$.text()`
         // (the reactive `$.set_text` fills it), NOT a `from_html` clone and NOT a
         // comment anchor. FAILS against the prior `from_html(" ")` plan (which would
@@ -6490,7 +6490,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn text_plus_interpolation_region_is_an_unseeded_text_node() {
-        // svelte@5.56.3: `hi {a}!` is one text run with an interpolation → an
+        // svelte@5.56.10: `hi {a}!` is one text run with an interpolation → an
         // UNSEEDED `$.text()` (the reactive system fills the whole node), NOT a
         // from_html clone of the static parts.
         let factory = single_factory("<script>let a = $state(1);</script>hi {a}!");
@@ -6503,7 +6503,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn interpolation_with_a_sibling_element_is_from_html_not_a_text_node() {
-        // svelte@5.56.3: once a region has an element/block sibling
+        // svelte@5.56.10: once a region has an element/block sibling
         // (`{a}<div></div>`) it is NO LONGER text-first — it is a `from_html`
         // region (` <div></div>`, fragment-flagged). The text-node factory applies
         // ONLY when the WHOLE region is a single text run.
@@ -6526,7 +6526,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn html_comment_is_dropped_and_does_not_break_a_text_run() {
-        // svelte@5.56.3 (default `preserveComments: false`): an HTML comment is
+        // svelte@5.56.10 (default `preserveComments: false`): an HTML comment is
         // DROPPED from the skeleton — it occupies no DOM position and does NOT break
         // a surrounding text run. `<div>before<!-- c -->after</div>` →
         // `<div>beforeafter</div>` (the two text runs merge). FAILS against a planner
@@ -6544,7 +6544,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn html_comment_between_elements_is_dropped_no_anchor() {
-        // svelte@5.56.3: `<a></a><!-- c --><b></b>` → `<a></a><b></b>` — the comment
+        // svelte@5.56.10: `<a></a><!-- c --><b></b>` → `<a></a><b></b>` — the comment
         // is dropped with NO `<!>` and NO separator. FAILS against a planner that
         // serializes the comment as a `<!>` (`<a></a><!><b></b>`).
         assert_eq!(
@@ -6556,7 +6556,7 @@ mod official_whitespace_skeleton {
 
     #[test]
     fn valueless_boolean_attribute_serializes_with_empty_quoted_value() {
-        // svelte@5.56.3: a valueless boolean attribute is emitted as `name=""` in the
+        // svelte@5.56.10: a valueless boolean attribute is emitted as `name=""` in the
         // cloned skeleton, NOT bare `name`. `<input disabled>` →
         // `<input disabled=""/>`. FAILS against a planner that emits bare ` disabled`.
         assert_eq!(
@@ -6591,7 +6591,7 @@ mod official_entity_decode_attribute {
 
     #[test]
     fn w4_semicolonless_decimal_numeric_entity_decodes() {
-        // svelte@5.56.3: `title="&#65"` (NO trailing `;`) → `A`. The official
+        // svelte@5.56.10: `title="&#65"` (NO trailing `;`) → `A`. The official
         // numeric pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?` makes the `;` OPTIONAL.
         // FAILS against the current numeric decoder which requires a `;`.
         assert_eq!(
@@ -6603,7 +6603,7 @@ mod official_entity_decode_attribute {
 
     #[test]
     fn w4_semicolonless_hex_numeric_entity_decodes() {
-        // svelte@5.56.3: `title="&#x41"` (NO `;`) → `A`.
+        // svelte@5.56.10: `title="&#x41"` (NO `;`) → `A`.
         assert_eq!(
             attr_value("<a title=\"&#x41\">x</a>"),
             "A",
@@ -6613,7 +6613,7 @@ mod official_entity_decode_attribute {
 
     #[test]
     fn w4_semicolonless_numeric_entity_then_text_decodes_and_keeps_text() {
-        // svelte@5.56.3: `title="&#65B"` → `AB` — the numeric run ends at the
+        // svelte@5.56.10: `title="&#65B"` → `AB` — the numeric run ends at the
         // first non-digit and the trailing text is preserved.
         assert_eq!(
             attr_value("<a title=\"&#65B\">x</a>"),
@@ -6624,7 +6624,7 @@ mod official_entity_decode_attribute {
 
     #[test]
     fn w7_legacy_named_entity_blocked_by_following_underscore() {
-        // svelte@5.56.3: `title="&copy_x"` → `&amp;copy_x` — the legacy no-`;`
+        // svelte@5.56.10: `title="&copy_x"` → `&amp;copy_x` — the legacy no-`;`
         // boundary `\b(?!=)` treats `_` as a WORD char, so the `&copy` reference
         // does NOT match (a following word char blocks it). FAILS against the
         // current `is_ascii_alphanumeric()` boundary which EXCLUDES `_` (and so
@@ -6643,7 +6643,7 @@ mod official_entity_decode_attribute {
 
     #[test]
     fn w7_legacy_named_entity_followed_by_space_still_decodes() {
-        // svelte@5.56.3: `title="&copy x"` → `© x` — a following SPACE is a word
+        // svelte@5.56.10: `title="&copy x"` → `© x` — a following SPACE is a word
         // boundary and not `=`, so the legacy `&copy` decodes. (Companion to the
         // `_`-blocked case: confirms the boundary is word-char based, not "any
         // non-`;`".)
@@ -6784,7 +6784,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn w5_onclickcapture_normalizes_to_click_with_capture_not_delegated() {
-        // svelte@5.56.3: `onclickcapture={h}` → `$.event('click', …, true)` — the
+        // svelte@5.56.10: `onclickcapture={h}` → `$.event('click', …, true)` — the
         // event NAME is `click`, capture is true, and it is NOT delegated (uses
         // `$.event`, no `$.delegate([...])` set). FAILS against the current
         // strip-`on`-only lowering (event_type `clickcapture`, no capture, and
@@ -6809,7 +6809,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn w5_plain_onclick_is_click_delegated_not_capture() {
-        // svelte@5.56.3: `onclick={h}` → `$.delegated('click', …)` + `$.delegate`
+        // svelte@5.56.10: `onclick={h}` → `$.delegated('click', …)` + `$.delegate`
         // — name `click`, delegated, NOT capture.
         let alloc = Allocator::default();
         let ir = lower(
@@ -6827,7 +6827,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn w5_ongotpointercapture_is_not_a_capture_event() {
-        // svelte@5.56.3: `ongotpointercapture={h}` → `$.event('gotpointercapture',
+        // svelte@5.56.10: `ongotpointercapture={h}` → `$.event('gotpointercapture',
         // …)` — NOT capture (the name ends in `capture` but `is_capture_event`
         // EXCLUDES `gotpointercapture`/`lostpointercapture`). The event name is
         // kept WHOLE. FAILS against a naive `ends_with("capture")` strip (which
@@ -6848,7 +6848,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn w5_ongotpointercapturecapture_strips_to_gotpointercapture_with_capture() {
-        // svelte@5.56.3: `ongotpointercapturecapture={h}` →
+        // svelte@5.56.10: `ongotpointercapturecapture={h}` →
         // `$.event('gotpointercapture', …, true)` — the OUTER `capture` is
         // stripped (leaving `gotpointercapture`), capture true. This is the tricky
         // double-suffix case `is_capture_event` handles via the exact exclusion.
@@ -6867,7 +6867,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn w6_quoted_single_expression_onclick_is_an_event_not_a_dynamic_attr() {
-        // svelte@5.56.3: `onclick="{() => x()}"` (a QUOTED value with exactly one
+        // svelte@5.56.10: `onclick="{() => x()}"` (a QUOTED value with exactly one
         // expression chunk and no literal text) is treated as an EVENT —
         // `$.delegated('click', …)` + `$.delegate(['click'])`. FAILS against the
         // current lowering which only matches the bare `{expr}` value form and
@@ -6905,7 +6905,7 @@ mod official_event_attribute_modeling {
     fn onclick_with_surrounding_whitespace_is_invalid_event_handler_error() {
         // X3 — `onclick=" {h} "` is a >1-chunk value (`[Text(" "), ExpressionTag,
         // Text(" ")]`), so `is_expression_attribute` is false. Because the name
-        // starts with `on` and is longer than `on`, svelte@5.56.3 raises
+        // starts with `on` and is longer than `on`, svelte@5.56.10 raises
         // `attribute_invalid_event_handler` (EMPIRICALLY confirmed against the
         // pinned compiler). It is NOT lowered as a normal attribute. FAILS against
         // the prior behavior that fell through to a dynamic/mixed attribute.
@@ -6923,7 +6923,7 @@ mod official_event_attribute_modeling {
     #[test]
     fn onclick_with_text_and_expression_is_invalid_event_handler_error() {
         // X3 — `onclick="x{h}"` is a >1-chunk value (`[Text("x"), ExpressionTag]`)
-        // → `attribute_invalid_event_handler` (confirmed against svelte@5.56.3).
+        // → `attribute_invalid_event_handler` (confirmed against svelte@5.56.10).
         let alloc = Allocator::default();
         let result = lower_result(
             "<script>let h = () => {};</script><button onclick=\"x{h}\">y</button>",
@@ -6938,7 +6938,7 @@ mod official_event_attribute_modeling {
     #[test]
     fn onclick_with_two_expressions_is_invalid_event_handler_error() {
         // X3 — `onclick="{h}{h}"` is a >1-chunk value (two ExpressionTags) →
-        // `attribute_invalid_event_handler` (confirmed against svelte@5.56.3).
+        // `attribute_invalid_event_handler` (confirmed against svelte@5.56.10).
         let alloc = Allocator::default();
         let result = lower_result(
             "<script>let h = () => {};</script><button onclick=\"{h}{h}\">y</button>",
@@ -6954,7 +6954,7 @@ mod official_event_attribute_modeling {
     fn onclick_with_plain_text_value_is_invalid_event_handler_error() {
         // X3 — `onclick="text"` is a single Text chunk (not an ExpressionTag), so
         // `is_expression_attribute` is false → `attribute_invalid_event_handler`
-        // (confirmed against svelte@5.56.3).
+        // (confirmed against svelte@5.56.10).
         let alloc = Allocator::default();
         let result = lower_result("<button onclick=\"text\">y</button>", &alloc);
         assert!(
@@ -6967,7 +6967,7 @@ mod official_event_attribute_modeling {
     fn valueless_onclick_is_invalid_event_handler_error() {
         // X3 — a valueless `onclick` (`value === true`) is not an expression
         // attribute, and the name is longer than `on` →
-        // `attribute_invalid_event_handler` (confirmed against svelte@5.56.3).
+        // `attribute_invalid_event_handler` (confirmed against svelte@5.56.10).
         let alloc = Allocator::default();
         let result = lower_result("<button onclick>y</button>", &alloc);
         assert!(
@@ -6981,7 +6981,7 @@ mod official_event_attribute_modeling {
         // X1/X3 boundary — a bare `on` attribute has name length EXACTLY 2, so the
         // `name.length > 2` error gate does NOT fire; `on="text"` is a normal static
         // attribute and `on` valueless is a valueless static attribute (confirmed
-        // against svelte@5.56.3: `<button on="text">` → `from_html`, no event/error).
+        // against svelte@5.56.10: `<button on="text">` → `from_html`, no event/error).
         let alloc = Allocator::default();
         let ir = lower("<button on=\"text\">y</button>", &alloc);
         let has_event = ir.nodes.iter().any(|node| {
@@ -7000,7 +7000,7 @@ mod official_event_attribute_modeling {
         // name.startsWith('on')`, with NO lowercase-only filter and NO non-empty
         // filter. The event name is `name.slice(2)` (capture-normalized). Each row
         // `(attribute_name, expected_event_type)` is EMPIRICALLY confirmed against
-        // svelte@5.56.3 (`$.event('<type>', node, h)`). This FAILS against the prior
+        // svelte@5.56.10 (`$.event('<type>', node, h)`). This FAILS against the prior
         // `name.chars().all(is_ascii_lowercase) && !raw.is_empty()` gate that left
         // `onClick`/`onfoo-bar`/`on`/`on1`/`on_click` as non-events.
         let alloc = Allocator::default();
@@ -7031,7 +7031,7 @@ mod official_event_attribute_modeling {
         // X1 — none of the non-DELEGATED_EVENTS names (`Click` capitalized, `foo1`,
         // `foo-bar`, `''`, `1`, `_click`) are in the delegated set, so they are
         // direct `$.event` listeners, never `$.delegated` (confirmed against
-        // svelte@5.56.3). Only the canonical lowercase `click` delegates.
+        // svelte@5.56.10). Only the canonical lowercase `click` delegates.
         let alloc = Allocator::default();
         for attr_name in ["onClick", "onfoo1", "onfoo-bar", "on", "on1", "on_click"] {
             let src =
@@ -7051,7 +7051,7 @@ mod official_event_attribute_modeling {
         // (`$.delegated('click', …)` + `$.delegate(['click'])`); a LEGACY
         // `on:click={h}` directive is NEVER delegated (`$.event('click', …)`) — the
         // official `OnDirective.js` always passes `delegated=false`. Both are
-        // EMPIRICALLY confirmed against svelte@5.56.3. This FAILS against the prior
+        // EMPIRICALLY confirmed against svelte@5.56.10. This FAILS against the prior
         // `!capture && can_delegate_event(local)` that delegated legacy `on:click`.
         let alloc = Allocator::default();
         let modern = lower(
@@ -7079,7 +7079,7 @@ mod official_event_attribute_modeling {
     fn legacy_on_input_directive_is_not_delegated() {
         // X2 — `on:input={h}` (input IS in DELEGATED_EVENTS) is STILL a direct
         // `$.event('input', …)` because it is a legacy directive (confirmed against
-        // svelte@5.56.3). The delegation decision is form-based, not name-based.
+        // svelte@5.56.10). The delegation decision is form-based, not name-based.
         let alloc = Allocator::default();
         let ir = lower(
             "<script>let h = () => {};</script><input on:input={h}/>",
@@ -7095,7 +7095,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn legacy_on_click_capture_modifier_is_capture_not_delegated() {
-        // svelte@5.56.3: `on:click|capture={h}` → `$.event('click', …, true)` — the
+        // svelte@5.56.10: `on:click|capture={h}` → `$.event('click', …, true)` — the
         // legacy `|capture` modifier sets capture true; a capture handler is NOT
         // delegated. The event NAME stays `click` (the modifier is not part of the
         // name).
@@ -7124,7 +7124,7 @@ mod official_event_attribute_modeling {
     fn capture_event_is_excluded_from_delegated_topology_set() {
         // The delegated-event topology SET must EXCLUDE a capture handler: a
         // `onclickcapture` must not put `click` into `$.delegate([...])`.
-        // svelte@5.56.3 emits no `$.delegate` for a pure-capture component.
+        // svelte@5.56.10 emits no `$.delegate` for a pure-capture component.
         let alloc = Allocator::default();
         let ir = lower(
             "<script>let h = () => {};</script><button onclickcapture={h}>x</button>",
@@ -7147,7 +7147,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn component_event_is_a_forwarded_prop_under_the_original_name_not_an_event() {
-        // svelte@5.56.3: `<Foo onclick={h}/>` forwards the handler as a PLAIN PROP
+        // svelte@5.56.10: `<Foo onclick={h}/>` forwards the handler as a PLAIN PROP
         // keyed by the ORIGINAL attribute name `onclick` (`Foo($$anchor, { onclick:
         // h })`) — it is NOT a DOM event and NEVER delegated. The IR carries it as an
         // `AttrIr::Dynamic { name: "onclick" }`, NOT an `AttrIr::Event`. FAILS against
@@ -7187,7 +7187,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn svelte_element_event_is_a_dynamic_attribute_not_a_dom_event() {
-        // svelte@5.56.3: `<svelte:element this={tag} onclick={h}>` runs the handler
+        // svelte@5.56.10: `<svelte:element this={tag} onclick={h}>` runs the handler
         // through `$.attribute_effect` (a runtime spread), NOT a DOM `$.event`/
         // `$.delegated`. The IR carries the `onclick` as an `AttrIr::Dynamic`
         // attribute (NOT an `AttrIr::Event`), and it is never delegated.
@@ -7219,7 +7219,7 @@ mod official_event_attribute_modeling {
 
     #[test]
     fn window_body_document_events_are_direct_globals_never_delegated() {
-        // svelte@5.56.3: a window/body/document `onclick` is a DIRECT global
+        // svelte@5.56.10: a window/body/document `onclick` is a DIRECT global
         // `$.event('click', $.window|$.document.body|$.document, h)` — NEVER delegated
         // (the official `metadata.delegated` requires a `RegularElement` parent). The
         // IR carries an `AttrIr::Event` with `delegated = false` for each.
@@ -7297,7 +7297,7 @@ mod official_entity_decode_unit_table {
     #[test]
     fn decode_attribute_entities_matches_official_table() {
         // Each row is `(input, official_decoded_value)` ground-truthed against
-        // svelte@5.56.3 `decode_character_references(input, /*is_attr*/ true)`.
+        // svelte@5.56.10 `decode_character_references(input, /*is_attr*/ true)`.
         // (The DECODE step only — re-escaping is a separate step the skeleton
         // serializer applies.) NOTE: `&#10` (line feed) → a space, `&#0` (falsy)
         // → kept literal `&#0`.
@@ -7347,7 +7347,7 @@ mod official_entity_decode_unit_table {
 
     #[test]
     fn decode_runs_exactly_once_amp_protects_inner_reference() {
-        // DECODE-ONCE pin (ground-truthed against svelte@5.56.3
+        // DECODE-ONCE pin (ground-truthed against svelte@5.56.10
         // `decode_character_references('a&amp;#32;b', /*is_attr*/ true)`): the
         // `&amp;` decodes to `&` and the produced `&#32;` stays LITERAL — the
         // single pass never re-scans its own output, so the result is the ONE
@@ -7380,7 +7380,7 @@ mod official_event_name_unit_table {
     #[test]
     fn normalize_event_name_strips_capture_per_official_is_capture_event() {
         // `(raw_name_without_on, (normalized_name, is_capture))` ground-truthed
-        // against svelte@5.56.3 `is_capture_event` + the slice(0,-7) strip.
+        // against svelte@5.56.10 `is_capture_event` + the slice(0,-7) strip.
         let cases: &[(&str, (&str, bool))] = &[
             ("click", ("click", false)),
             ("clickcapture", ("click", true)),
@@ -7408,7 +7408,7 @@ mod official_event_name_unit_table {
     #[test]
     fn can_delegate_event_matches_official_set() {
         // The delegated set (DELEGATED_EVENTS) ground-truthed against
-        // svelte@5.56.3 `can_delegate_event`.
+        // svelte@5.56.10 `can_delegate_event`.
         for name in [
             "beforeinput",
             "click",
@@ -7575,7 +7575,7 @@ mod exact_node_path_goldens {
     }
 }
 
-/// Skeleton parity against official svelte@5.56.3 for the controlled-child
+/// Skeleton parity against official svelte@5.56.10 for the controlled-child
 /// optimization, `{@html}`, attribute source-order/entities, and nested table
 /// structure. Each expected skeleton was ground-truthed against the pinned
 /// compiler; templates are compared as a sorted multiset because the template
@@ -7603,7 +7603,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn sole_each_child_is_controlled_no_anchor() {
-        // svelte@5.56.3: a `{#each}` that is the SOLE child of an element is
+        // svelte@5.56.10: a `{#each}` that is the SOLE child of an element is
         // CONTROLLED — the `<ul>` body is EMPTY (no `<!>` anchor), the each body is
         // its own `<li> </li>` region.
         assert_eq!(
@@ -7616,7 +7616,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn each_with_text_sibling_is_not_controlled_keeps_anchor() {
-        // svelte@5.56.3: a `{#each}` with a sibling text (`x`) is NOT controlled —
+        // svelte@5.56.10: a `{#each}` with a sibling text (`x`) is NOT controlled —
         // the `<ul>` body is `x<!>` (the each keeps its `<!>` anchor).
         assert_eq!(
             sorted_htmls(
@@ -7628,7 +7628,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn sole_html_tag_is_controlled_but_with_text_keeps_anchor() {
-        // svelte@5.56.3: a sole `{@html}` is controlled (`<div></div>`); with a text
+        // svelte@5.56.10: a sole `{@html}` is controlled (`<div></div>`); with a text
         // sibling it keeps its `<!>` anchor (`<div>x<!></div>`).
         assert_eq!(
             sorted_htmls("<script>let h=$state('')</script><div>{@html h}</div>"),
@@ -7642,7 +7642,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn sole_if_block_is_not_controlled_keeps_anchor() {
-        // svelte@5.56.3: an `{#if}` (unlike `{#each}`/`{@html}`) is NOT controlled —
+        // svelte@5.56.10: an `{#if}` (unlike `{#each}`/`{@html}`) is NOT controlled —
         // even as a sole child it keeps its `<!>` anchor (`<div><!></div>`).
         assert_eq!(
             sorted_htmls("<script>let c=$state(true)</script><div>{#if c}<p>x</p>{/if}</div>"),
@@ -7652,7 +7652,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn static_attributes_keep_source_order_and_decode_then_reescape_entities() {
-        // svelte@5.56.3: static attributes are emitted in SOURCE order; an authored
+        // svelte@5.56.10: static attributes are emitted in SOURCE order; an authored
         // attribute entity round-trips through decode-then-reescape (`&quot;` → `"`
         // → `&quot;`).
         assert_eq!(
@@ -7667,7 +7667,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn nested_table_structure_serializes_verbatim() {
-        // svelte@5.56.3: a well-formed nested table serializes structurally verbatim
+        // svelte@5.56.10: a well-formed nested table serializes structurally verbatim
         // (no spurious whitespace text nodes between the structural elements).
         assert_eq!(
             sorted_htmls("<table><tbody><tr><td>x</td></tr></tbody></table>"),
@@ -7677,7 +7677,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn pre_and_textarea_preserve_whitespace_verbatim() {
-        // svelte@5.56.3: a `<pre>` / `<textarea>` preserves ALL of its whitespace
+        // svelte@5.56.10: a `<pre>` / `<textarea>` preserves ALL of its whitespace
         // (leading, trailing, and interior runs) — `preserve_whitespace = true` —
         // while a `<p>` trims edges. FAILS against a planner that always trims.
         assert_eq!(
@@ -7700,7 +7700,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn pre_whitespace_preservation_is_inherited_by_descendants() {
-        // svelte@5.56.3: the `preserve_whitespace` flag is INHERITED — whitespace
+        // svelte@5.56.10: the `preserve_whitespace` flag is INHERITED — whitespace
         // inside a `<code>` nested in a `<pre>` is preserved too.
         assert_eq!(
             sorted_htmls("<pre>  <code>  x  </code>  </pre>"),
@@ -7721,7 +7721,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn custom_element_sets_use_import_node_flag() {
-        // svelte@5.56.3: a CUSTOM element (`<my-widget>`) needs `importNode`, so a
+        // svelte@5.56.10: a CUSTOM element (`<my-widget>`) needs `importNode`, so a
         // SINGLE custom-element root gets flag TEMPLATE_USE_IMPORT_NODE (2) — NOT
         // 1 (no fragment) and NOT absent. FAILS against a planner that only sets the
         // multi-root fragment bit.
@@ -7740,7 +7740,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn video_element_sets_use_import_node_flag() {
-        // svelte@5.56.3: a `<video>` also needs `importNode` (flag 2).
+        // svelte@5.56.10: a `<video>` also needs `importNode` (flag 2).
         assert_eq!(
             flag_bits("<video></video>"),
             Some(TemplateFlag::USE_IMPORT_NODE),
@@ -7750,7 +7750,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn is_attribute_marks_a_customized_built_in_element() {
-        // svelte@5.56.3: an element with an `is="…"` attribute is a customized
+        // svelte@5.56.10: an element with an `is="…"` attribute is a customized
         // built-in (a custom element form) → import-node flag.
         assert_eq!(
             flag_bits("<button is=\"my-button\">x</button>"),
@@ -7761,7 +7761,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn multi_root_with_custom_element_combines_fragment_and_import_node_bits() {
-        // svelte@5.56.3: two custom-element roots → TEMPLATE_FRAGMENT (1) |
+        // svelte@5.56.10: two custom-element roots → TEMPLATE_FRAGMENT (1) |
         // TEMPLATE_USE_IMPORT_NODE (2) = 3. A plain multi-root stays 1.
         assert_eq!(
             flag_bits("<my-a></my-a><my-b></my-b>"),
@@ -7777,7 +7777,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn plain_single_root_has_no_flag() {
-        // svelte@5.56.3: a single plain-HTML root has flag 0 (no trailing argument).
+        // svelte@5.56.10: a single plain-HTML root has flag 0 (no trailing argument).
         assert_eq!(
             flag_bits("<div></div>"),
             None,
@@ -7787,7 +7787,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn custom_element_attributes_are_dropped_from_skeleton_except_is() {
-        // svelte@5.56.3: a CUSTOM element sets its attributes via PROPERTIES at
+        // svelte@5.56.10: a CUSTOM element sets its attributes via PROPERTIES at
         // runtime, so they are NOT in the static skeleton — `<my-widget label="x"
         // foo="y">` → `<my-widget></my-widget>`. The `is` attribute is the one
         // exception (kept for the customized-built-in upgrade): `<div is="my-div"
@@ -7822,7 +7822,7 @@ mod official_controlled_child_and_attr_skeleton {
 
     #[test]
     fn empty_string_class_attribute_is_dropped() {
-        // svelte@5.56.3: a static `class=""` (the EXACTLY empty string) is DROPPED
+        // svelte@5.56.10: a static `class=""` (the EXACTLY empty string) is DROPPED
         // (`<div class="">` → `<div>`). A `class=" "` (a space) is KEPT, and a
         // non-empty/other-name empty attr is kept. FAILS against a planner that
         // always emits the attribute.

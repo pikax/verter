@@ -133,7 +133,7 @@ pub fn state_decl_shape_for_grammar(instance_source: &str, typescript: bool) -> 
             // CONSERVATIVE fail-close: a `$state(undefined)` init whose `undefined` is
             // shadowed by a REACTIVE-RUNE binding (`$state` / `$state.raw` / `$derived`).
             // The correct output depends on how that shadow LOWERS (oracle-verified
-            // against `svelte@5.56.3`):
+            // against `svelte@5.56.10`):
             //   - a LIVE-signal shadow (reassigned as a whole variable → lowers to
             //     `$.state(…)`, read via `$.get`) makes the init read `$.get(undefined)`,
             //     which official proxies → `$.state($.proxy($.get(undefined)))`. Verter
@@ -1049,7 +1049,7 @@ pub(super) fn lower_state_primitive_item(
 }
 
 /// The emitted `$state` / `$state.raw` declaration for an already-RESOLVED write-gated
-/// [`StateLowering`], matching pinned `svelte@5.56.3`:
+/// [`StateLowering`], matching pinned `svelte@5.56.10`:
 ///
 /// - `PlainLet`       → `let o = <init>;`                     (never reactively read)
 /// - `StateSignal`    → `let o = $.state(<init>);`            (primitive, reassigned)

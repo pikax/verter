@@ -142,7 +142,7 @@ const GENERATED_DATA_SOURCE_FILES: &[&str] = &[
     "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
     // The honest Svelte differential-parity divergence allow-list — one
     // `DivergenceRow` per REAL `(fixture, axis)` divergence, GENERATED
-    // from the discovery pass over the pinned svelte@5.56.3 and byte-pinned
+    // from the discovery pass over the pinned svelte@5.56.10 and byte-pinned
     // by `known_divergences_are_real`.
     "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
 ];

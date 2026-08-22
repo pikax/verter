@@ -12,7 +12,7 @@ use super::super::reactive_fold_tristate::{ChunkFold, ConstFoldRefuse, LiveFallb
 // LIVE-falls-back (ledgered); a compile-time-THROW chunk REFUSES; a non-statically-known
 // chunk (a live signal, a `$props()` prop, a member, a call, a sequence) stays a plain live
 // interpolation. This is the tri-state const-fold contract over a faithful port of official
-// `svelte@5.56.3`'s `Evaluation` class (`phases/scope.js`) driven by the
+// `svelte@5.56.10`'s `Evaluation` class (`phases/scope.js`) driven by the
 // `build_template_chunk` evaluate-fold (`shared/utils.js`). Every expected value below was
 // captured from the pinned compiler (the `id="a {expr} b"` form over a demoted
 // `let d = $state(<lit>)`).
@@ -289,7 +289,7 @@ fn non_statically_known_chunks_do_not_fold() {
 // `evaluated.is_defined`: a provably-defined value (`n + 1`, a number; `n > 1`, a
 // boolean) is emitted RAW; an undecided value (`n`, `n.x`, `n && 1`) gets `?? ''`,
 // parenthesized for a `&&`/`||` operand. A MEMOIZED chunk (`$N` slot) is always
-// `Bare`. Verified against pinned svelte@5.56.3 (probe8/probe9/probe10).
+// `Bare`. Verified against pinned svelte@5.56.10 (probe8/probe9/probe10).
 
 fn wrap(expr: &str, is_memoized: bool) -> super::NullishCoalesce {
     // A scope with a LIVE `$state` signal `n` (a `StateSignal`) — the un-folded subject.
@@ -385,7 +385,7 @@ fn memoized_chunks_are_always_bare_coalesce() {
 // ── comprehensive evaluator verification (residual-probe closure) ──
 //
 // Every expected value below is the EXACT folded output of the pinned
-// `svelte@5.56.3` compiler over `id="a {EXPR} b"` (the multi-chunk
+// `svelte@5.56.10` compiler over `id="a {EXPR} b"` (the multi-chunk
 // `build_template_chunk` evaluate-fold) with the matching demoted-`$state`
 // subject — captured by running the pinned compiler and reading the cooked
 // `set_attribute(div, 'id', 'a <V> b')` literal. They lock the faithful port to
@@ -868,7 +868,7 @@ fn delete_of_known_operand_folds_to_true() {
 // Tri-state const-fold contract — the REFUSE family (compile-time throws), the
 // ledgered LIVE-FALLBACK family (known-but-not-byte-exact), and the EAGER
 // `Evaluation` semantics (a throw in a non-selected position still refuses). Each
-// expectation is grounded against pinned svelte@5.56.3's `scope.js` `Evaluation`
+// expectation is grounded against pinned svelte@5.56.10's `scope.js` `Evaluation`
 // (the named throws compile-FAIL official; the live-fallback cases fold to an
 // official literal Verter cannot prove byte-exact cross-platform).
 // ─────────────────────────────────────────────────────────────────────────────

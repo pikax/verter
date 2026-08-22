@@ -51,7 +51,7 @@ use std::path::PathBuf;
 /// read at run time, no `node_modules` dependency).
 const VENDORED_REMOVE_TS_NODES: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/svelte/remove_typescript_nodes.5.56.3.js"
+    "/tests/fixtures/svelte/remove_typescript_nodes.5.56.10.js"
 ));
 
 /// The projection source, embedded for the exhaustive-no-soft-carrier rail.
@@ -262,7 +262,7 @@ struct HandlerCoverage {
 const HANDLER_COVERAGE: &[HandlerCoverage] = &[
     HandlerCoverage {
         handler: "_",
-        oracle_body_fingerprint: "e88c35125e4b5574",
+        oracle_body_fingerprint: "5c3e2e71ad7eadfd",
         axes: &["const_type_annotation"],
     },
     HandlerCoverage {

@@ -3,7 +3,7 @@
 //!
 //! Svelte CSS scoping is a Svelte-OWNED, span-bearing substrate
 //! (`src/svelte/runtime/css/`) — a faithful port of the official
-//! `svelte@5.56.3` scoping semantics operating on byte spans of the original
+//! `svelte@5.56.10` scoping semantics operating on byte spans of the original
 //! component source. The Vue pipeline (`crate::css` — `process_style` /
 //! `apply_scoped_normalized` / `normalize_css` over lightningcss) implements
 //! DIFFERENT scoping semantics and exposes NO byte spans (lightningcss

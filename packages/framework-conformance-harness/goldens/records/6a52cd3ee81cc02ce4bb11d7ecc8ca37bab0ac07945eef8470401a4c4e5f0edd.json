@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+    "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
+    "packageVersion": "5.56.10"
+  },
+  "packageLockSha256": "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
+  "realizedClosureSha256": "af0bc09b425ff3d618c95b9b67f9a6702e16469b63a27abb834d7f169020911a",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "ee86a9cf8bc9cae7749ec4acffd086d22fb6e624",
+    "tree": "1c1041a1a4e22d94ceac63315fdf6b475d2d5a2f",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/legacy-slots.svelte",
+    "sha256": "78696aaa42b1f5398d7f0bc1ab426aaaecfc06cd31eef91afd5a10ccf2aa06b5"
+  },
+  "options": {
+    "generate": "client",
+    "runes": false,
+    "dev": true
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "3275b28294586a5b4a9a6e3ef616b997a696d4a28f7aee4e344ba1148e67dd55",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "f2b6978f7a5c200aa477f8bb8ad886f905f5b24cdd9265ba0c5bea1977752233"
+  },
+  "code": "import 'svelte/internal/disclose-version';\nimport 'svelte/internal/flags/legacy';\n\nLegacy_slots[$.FILENAME] = 'fixtures/svelte/legacy-slots.svelte';\n\nimport * as $ from 'svelte/internal/client';\n\nvar root = $.add_locations($.from_html(`<div class=\"panel\"><header><!></header> <main><!></main></div>`), Legacy_slots[$.FILENAME], [[5, 0, [[6, 2], [9, 2]]]]);\n\nexport default function Legacy_slots($$anchor, $$props) {\n\t$.check_target(new.target);\n\t$.push($$props, false, Legacy_slots);\n\n\tlet title = $.prop($$props, 'title', 8, \"Untitled\");\n\tvar $$exports = { ...$.legacy_api() };\n\tvar div = root();\n\tvar header = $.child(div);\n\tvar node = $.child(header);\n\n\t$.slot(node, $$props, 'header', {}, ($$anchor) => {\n\t\tvar text = $.text();\n\n\t\t$.template_effect(() => $.set_text(text, title()));\n\t\t$.append($$anchor, text);\n\t});\n\n\t$.reset(header);\n\n\tvar main = $.sibling(header, 2);\n\tvar node_1 = $.child(main);\n\n\t$.slot(node_1, $$props, 'default', {}, null);\n\t$.reset(main);\n\t$.reset(div);\n\t$.append($$anchor, div);\n\n\treturn $.pop($$exports);\n}",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "legacy-slots.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  export let title = \"Untitled\";\n</script>\n\n<div class=\"panel\">\n  <header>\n    <slot name=\"header\">{title}</slot>\n  </header>\n  <main>\n    <slot />\n  </main>\n</div>\n"
+    ],
+    "mappings": ";;;;;;;;;wDAAA,CAAC;;;;CACQ,IAAI,AAAA,KAAK,+BAAG,UAAU;;KAG9B,GAAG;KACD,MAAM,WADR,GAAG;oBACD,MAAM;;;;;2CACgB,KAAK;;;;SAD3B,MAAM;;KAGN,IAAI,aAHJ,MAAM;sBAGN,IAAI;;;SAAJ,IAAI;SAJN,GAAG;oBAAH,GAAG;;;AAFI,CAAC"
+  }
+}

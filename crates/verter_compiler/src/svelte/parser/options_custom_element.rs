@@ -1,5 +1,5 @@
 //! The `<svelte:options customElement={EXPR}>` VALUE engine — the faithful port of the official
-//! `svelte@5.56.3` parse pipeline for the expression-valued `customElement` axis
+//! `svelte@5.56.10` parse pipeline for the expression-valued `customElement` axis
 //! (`phases/1-parse/read/expression.js` + `read/options.js`), and the retained typed value it
 //! produces.
 //!
@@ -162,7 +162,7 @@ pub fn resolve_custom_element_expr(
         // expression with acorn during element parsing — BEFORE `read_options` — so a
         // syntactically-malformed `customElement={EXPR}` (including an EMPTY / whitespace-only inner
         // and an incomplete prefix like `1 +`) is `js_parse_error`, NOT a `read_options` code.
-        // (Verified pinned svelte@5.56.3: `{{ tag: }}`, `{<}`, `{}`, `{1 + }` all raise
+        // (Verified pinned svelte@5.56.10: `{{ tag: }}`, `{<}`, `{}`, `{1 + }` all raise
         // `js_parse_error`.)
         return Err("js_parse_error");
     };

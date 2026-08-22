@@ -2,7 +2,7 @@
 //!
 //! `crates/verter_compiler/src/svelte/runtime/entity_table.rs` is the canonical
 //! HTML5 named-character-reference table (~2231 entries) VENDORED from the pinned
-//! official `svelte@5.56.3` compiler's `entities.js` by
+//! official `svelte@5.56.10` compiler's `entities.js` by
 //! `scripts/generate-svelte-entities.mjs` (the SOURCE OF TRUTH). The runtime IR's
 //! static-attribute serializer decodes against it so the `$.from_html` skeleton
 //! matches official EXACTLY.
@@ -38,7 +38,7 @@ fn node_available() -> bool {
 
 /// Whether the pinned svelte `entities.js` (the generator's input) is installed.
 fn pinned_svelte_entities_present(root: &std::path::Path) -> bool {
-    root.join("node_modules/.pnpm/svelte@5.56.3/node_modules/svelte/src/compiler/phases/1-parse/utils/entities.js")
+    root.join("node_modules/.pnpm/svelte@5.56.10/node_modules/svelte/src/compiler/phases/1-parse/utils/entities.js")
         .exists()
 }
 
@@ -54,7 +54,7 @@ fn generated_entity_table_is_byte_equal_to_a_regen() {
     }
     if !pinned_svelte_entities_present(&root) {
         eprintln!(
-            "SKIP svelte_entity_table_freshness: pinned svelte@5.56.3 not installed \
+            "SKIP svelte_entity_table_freshness: pinned svelte@5.56.10 not installed \
              (run `pnpm install`); run on a machine with the pinned dep to exercise the gate"
         );
         return;

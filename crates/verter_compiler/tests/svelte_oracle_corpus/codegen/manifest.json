@@ -1,5 +1,5 @@
 {
-  "svelte_oracle_version": "5.56.3",
+  "svelte_oracle_version": "5.56.10",
   "total": 634,
   "required_shape_axes": [
     "literal",

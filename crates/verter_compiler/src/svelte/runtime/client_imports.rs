@@ -19,7 +19,7 @@ use super::client_codegen_helpers::js_single_quoted;
 ///
 /// One carrier per source `import` DECLARATION (duplicates from the same source stay
 /// separate carriers — official does not merge them), in source order within its
-/// slot. The emission slots mirror official `svelte@5.56.3`: `Module` imports emit
+/// slot. The emission slots mirror official `svelte@5.56.10`: `Module` imports emit
 /// BEFORE the runtime namespace (`import * as $`), `Instance` imports AFTER it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UserImport {

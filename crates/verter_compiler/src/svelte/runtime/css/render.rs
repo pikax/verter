@@ -1,4 +1,4 @@
-//! The scoped-CSS renderer — a faithful port of the official `svelte@5.56.3`
+//! The scoped-CSS renderer — a faithful port of the official `svelte@5.56.10`
 //! `phases/3-transform/css/index.js` (`render_stylesheet` + its zimmerframe
 //! visitors), producing the scoped stylesheet text (the official `css.code`)
 //! by SOURCE-POSITION edits over the ORIGINAL component source.

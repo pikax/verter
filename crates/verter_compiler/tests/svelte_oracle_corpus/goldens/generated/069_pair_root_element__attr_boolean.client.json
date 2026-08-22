@@ -1,7 +1,7 @@
 {
   "slug": "generated/069_pair_root_element__attr_boolean.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

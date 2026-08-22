@@ -5,7 +5,7 @@
 //! `js_parse_error`); this module owns the cross-body families the per-body probe
 //! cannot see.
 //!
-//! Official `svelte@5.56.3` merges both slots into ONE emitted module with the
+//! Official `svelte@5.56.10` merges both slots into ONE emitted module with the
 //! instance scope a CHILD of the module scope (`phases/2-analyze/index.js`). Two
 //! collision families follow (both oracle-probed against the pinned compiler):
 //! - **`declaration_duplicate`** — an INSTANCE import local colliding with a non-`var`

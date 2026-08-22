@@ -1,7 +1,7 @@
 {
   "slug": "memo_deps__class_dir_object_call",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

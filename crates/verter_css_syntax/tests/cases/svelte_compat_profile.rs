@@ -1,6 +1,6 @@
 //! Unit tests for the `svelte_compat` faithful `read/style.js` CSS body reader port.
 //!
-//! Each expectation is grounded against the pinned `svelte@5.56.3` compiler (a `None` here ⇔ the
+//! Each expectation is grounded against the pinned `svelte@5.56.10` compiler (a `None` here ⇔ the
 //! pinned compiler ACCEPTS the style body / reports `style_duplicate` for a duplicate race; a
 //! `Some(code)` ⇔ the pinned compiler throws that exact CSS parse code at `read_style`). The
 //! reader is fed the WHOLE component source + the CSS body's content-start so a nested reader can
@@ -65,7 +65,7 @@ fn multiple_rules_and_at_rule_are_clean() {
 fn nth_child_an_b_of_selector_is_clean() {
     // `:nth-child(2n+1 of .x)` — upstream `REGEX_NTH_OF` includes the `\s+of\s+` arm, so the
     // `<An+B> of <selector>` form PARSES (the `.x` selector reads through the normal loop).
-    // Grounded: pinned svelte@5.56.3 ACCEPTS this CSS.
+    // Grounded: pinned svelte@5.56.10 ACCEPTS this CSS.
     assert_eq!(code("<style>p:nth-child(2n+1 of .x) {}</style>"), None);
 }
 
@@ -98,7 +98,7 @@ fn nth_child_an_b_terminator_lookahead_is_clean() {
 fn nth_child_an_b_offset_with_nbsp_is_clean_like_svelte() {
     // NBSP (U+00A0) around the `+` offset — svelte's `\s*[+-]\s*` matches it; a byte-ASCII scan
     // misses the offset, the selector loop reads `2n␠…` as a digit-leading identifier and throws
-    // `css_expected_identifier`. Oracle-confirmed: svelte@5.56.3 compiles `p:nth-child(2n␠+␠1)` to
+    // `css_expected_identifier`. Oracle-confirmed: svelte@5.56.10 compiles `p:nth-child(2n␠+␠1)` to
     // `p.svelte-…:nth-child(2n + 1){…}` (no throw). Clean here iff the reject reader is
     // codepoint-aware — RED (`Some("css_expected_identifier")`) against a byte-ASCII scan.
     assert_eq!(
@@ -117,11 +117,11 @@ fn nth_child_an_b_offset_with_nbsp_is_clean_like_svelte() {
 // must step whole UTF-8 scalars and build the value with whole chars — a byte-step (`index += 1`)
 // or a byte→char cast (`push(byte as char)`) either PANICS on a multibyte char (`codepoint_at` on
 // a continuation byte / a mid-char `value[len-3..]` slice) or corrupts the value. Oracle-grounded
-// against pinned svelte@5.56.3 (which ACCEPTS the first three and REJECTS the NBSP-only value).
+// against pinned svelte@5.56.10 (which ACCEPTS the first three and REJECTS the NBSP-only value).
 
 #[test]
 fn unquoted_attribute_value_with_non_ascii_char_is_clean_not_a_panic() {
-    // svelte@5.56.3 accepts + scopes `[data-x=café]` and `[lang=中文]`. A byte-advancing
+    // svelte@5.56.10 accepts + scopes `[data-x=café]` and `[lang=中文]`. A byte-advancing
     // `read_attribute_value` lands `codepoint_at` on a UTF-8 continuation byte → char-boundary
     // panic. Clean iff the reader steps whole chars.
     assert_eq!(code("<style>[data-x=café]{color:red}</style>"), None);
@@ -130,7 +130,7 @@ fn unquoted_attribute_value_with_non_ascii_char_is_clean_not_a_panic() {
 
 #[test]
 fn declaration_value_with_non_ascii_before_paren_is_clean_not_a_panic() {
-    // svelte@5.56.3 accepts `a{color:é(foo)}` (marks it unused). The `url(` lookbehind must use
+    // svelte@5.56.10 accepts `a{color:é(foo)}` (marks it unused). The `url(` lookbehind must use
     // `ends_with("url")` (not a byte-index slice `value[len-3..]`, which panics mid-char) and the
     // value must accumulate whole chars (not `byte as char`).
     assert_eq!(code("<style>a{color:é(foo)}</style>"), None);
@@ -144,7 +144,7 @@ fn declaration_value_with_non_ascii_before_paren_is_clean_not_a_panic() {
 // selector loop falls through to `read_identifier`, whose leading-`-?\d` guard rejects the
 // digit-leading negatives → `css_expected_identifier`. A digit-leading `nth_of_len` over-accept
 // would consume `-2` as an nth match and emit NO defect — these rows discriminate that bug
-// (they parse clean against the pre-fix `nth_of_len`). Grounded against pinned svelte@5.56.3:
+// (they parse clean against the pre-fix `nth_of_len`). Grounded against pinned svelte@5.56.10:
 // `(-2)` / `(-2n)` / `(-2n-1)` all throw `css_expected_identifier`.
 #[test]
 fn nth_child_bare_negative_integer_reports_css_expected_identifier() {
@@ -224,7 +224,7 @@ fn html_comment_in_body_is_clean() {
 // ── unterminated comments require the close token (expected_token) ──
 // Upstream `allow_comment_or_whitespace` uses REQUIRED close tokens (`eat('*/', true)` /
 // `eat('-->', true)`): an unterminated CSS comment is `expected_token` AT the read_style parse
-// entry (BEFORE `style_duplicate`). Grounded against pinned svelte@5.56.3.
+// entry (BEFORE `style_duplicate`). Grounded against pinned svelte@5.56.10.
 
 #[test]
 fn unterminated_block_comment_reports_expected_token() {
@@ -260,7 +260,8 @@ fn unterminated_html_comment_reports_expected_token() {
 // `verter_compiler`'s `svelte_parse_defect_exact_codes.rs` for that FULL-GATE negative control,
 // which needs the Svelte parser + official-reject gate this crate does not depend on. So each
 // fixture here CLOSES the `<style>` and opens a quote/value that swallows the close. Grounded
-// against pinned svelte@5.56.3 (each ⇒ `unexpected_eof`).
+// against pinned svelte@5.56.10 (each ⇒ `unexpected_eof`); the parse-parity corpus's `read_style`
+// `single_unexpected_eof_*` rows assert the SAME shapes through the full gate.
 
 /// The CSS code the reader reports for `frag` (a CLOSED-`<style>` fragment) appended after the
 /// §1.2-core scaffold prefix, feeding [`style_body_reject_code`] the whole source so the nested

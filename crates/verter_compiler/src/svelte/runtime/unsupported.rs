@@ -53,7 +53,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
         span: Span,
     },
     /// A `<slot let:x>` producer-side provider `let:` binding. Official
-    /// svelte@5.56.3 ACCEPTS the syntax but ITSELF emits broken output — a
+    /// svelte@5.56.10 ACCEPTS the syntax but ITSELF emits broken output — a
     /// component-instance-scope `const x = $.derived_safe_equal(() =>
     /// $$slotProps.x);` reading an UNDECLARED `$$slotProps` (it is bound only
     /// inside a component slot-content callback), a guaranteed runtime
@@ -215,7 +215,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// An officially-ACCEPTED compile option (or its inline `<svelte:options>`
     /// form) whose feature this backend deliberately does NOT support — a
     /// fail-closed FEATURE refusal that emits NO runtime module (NOT an official
-    /// compile-error: the official `svelte@5.56.3` compiler accepts these). The
+    /// compile-error: the official `svelte@5.56.10` compiler accepts these). The
     /// closed set is `compatibility.componentApi: 4` / `hmr` / `accessors` /
     /// `immutable`; EXPLICIT presence rejects (including a `false` / default-
     /// equivalent value, and a value later masked by an inline override).
@@ -237,7 +237,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// surface this backend does not yet emit, so a non-`html` namespace fails closed
     /// here rather than compiling a component whose namespaced elements would fail
     /// closed one-by-one downstream. A REFUSAL, not an official compile-error (the
-    /// official `svelte@5.56.3` compiler accepts the option).
+    /// official `svelte@5.56.10` compiler accepts the option).
     NamespaceUnsupported {
         /// The requested non-`html` namespace (`svg` / `mathml`).
         namespace: SvelteNamespace,
@@ -375,7 +375,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// REAL lexical scope — to a NON-top-level binding: a `{#each as x}` alias,
     /// a `{#snippet}` parameter, an `{#await then x}` binding, a slot `let:`
     /// local, or a script/expression function parameter shadowing the
-    /// top-level store base. Official `svelte@5.56.3` COMPILE-ERRORS this class
+    /// top-level store base. Official `svelte@5.56.10` COMPILE-ERRORS this class
     /// (`store_invalid_scoped_subscription` — "Cannot subscribe to stores that
     /// are not declared at the top level of the component"); the scope-aware
     /// store classifier rejects it rather than subscribing over the shadowed

@@ -1031,7 +1031,7 @@ fn self_closing_and_proper_void_elements_record_no_close_violation() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The SINGLE parser-wide script-body grammar scan (`script_body_grammar_for_source`)
-// mirrors upstream svelte@5.56.3's `Parser` constructor `regex_lang_attribute` scan +
+// mirrors upstream svelte@5.56.10's `Parser` constructor `regex_lang_attribute` scan +
 // exact `=== 'ts'` compare. Each expectation below was grounded against the pinned
 // compiler (an `ACCEPT` there ⇔ TS grammar / a `js_parse_error` there ⇔ JS grammar for a
 // TS-only body).
@@ -1170,7 +1170,7 @@ fn lang_scan_no_script_is_js() {
 // The regex matches `lang=` as a RAW SUBSTRING anywhere in the open tag — including inside
 // another attribute's quoted value — and the greedy prefix selects the RIGHTMOST viable match.
 // It is NOT an attribute-name-boundary / first-occurrence scan. Each row is grounded against the
-// pinned svelte@5.56.3 compiler.
+// pinned svelte@5.56.10 compiler.
 
 #[test]
 fn lang_scan_data_lang_quoted_value_is_ts() {
@@ -1249,7 +1249,7 @@ fn lang_scan_quoted_gt_between_two_langs_is_an_out_of_finite_scope_grammar_diver
     // `>`, so the OFFICIAL grammar scan selects the EARLIER `lang=js`; this attribute-aware byte
     // scan skips the quoted value and selects the later `lang="ts"` (→ TS). This characterizes that
     // KNOWN internal divergence so a change to the scan is caught. It is UNOBSERVABLE end-to-end —
-    // the source carries TWO `lang=` attributes, so both Verter and pinned svelte@5.56.3 reject it
+    // the source carries TWO `lang=` attributes, so both Verter and pinned svelte@5.56.10 reject it
     // with `attribute_duplicate` (asserted at the gate level in `svelte_parse_defect_exact_codes`),
     // regardless of which grammar the scan would pick. Behavioral parity is met; only the
     // unreachable internal grammar choice differs.

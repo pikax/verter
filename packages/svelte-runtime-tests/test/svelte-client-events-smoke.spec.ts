@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // Behavioral smoke for the native Svelte client regular-element event surface. It
-// mounts Verter's EMITTED modules against the REAL pinned `svelte@5.56.3` client
+// mounts Verter's EMITTED modules against the REAL pinned `svelte@5.56.10` client
 // runtime and asserts the observable runtime behavior of each event registration:
 //   - a non-delegated `$.event` listener attaches + fires (`onfocus`);
 //   - `|once`                 — the handler fires only ONCE across repeated dispatch;

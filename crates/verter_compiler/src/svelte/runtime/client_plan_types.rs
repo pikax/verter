@@ -1394,7 +1394,7 @@ impl AttrValue {
 }
 
 /// A DYNAMIC/mixed `value={…}` on a `bind:group` `<input>` — the structured value plus its
-/// reactivity. The official `bind:group` value topology (svelte@5.56.3):
+/// reactivity. The official `bind:group` value topology (svelte@5.56.10):
 ///
 /// - REACTIVE ⇒ a `var <var>_value;` change-tracker (declared inline in the bind prelude) +
 ///   a guarded `if (<var>_value !== (<var>_value = V)) { <var>.value = (<var>.__value = V)

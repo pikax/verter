@@ -1,5 +1,5 @@
 //! The pure-global call / constant tables of the Svelte client const-fold evaluator — a
-//! faithful, COMPLETE port of official `svelte@5.56.3`'s `globals` + `global_constants`
+//! faithful, COMPLETE port of official `svelte@5.56.10`'s `globals` + `global_constants`
 //! tables (`phases/scope.js`), reworked to the tri-state const-fold contract. The
 //! tables stay separate from `reactive_fold.rs` so data and evaluation logic remain
 //! focused; the parent module's `evaluate_call` / `global_constant_member` arms consult

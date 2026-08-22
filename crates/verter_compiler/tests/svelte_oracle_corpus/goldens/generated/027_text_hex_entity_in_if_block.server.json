@@ -1,7 +1,7 @@
 {
   "slug": "generated/027_text_hex_entity_in_if_block.svelte",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

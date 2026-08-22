@@ -90,7 +90,7 @@ pub(super) struct ClientModulePlan<'a> {
     /// SEPARATE from [`requires_legacy_init`](Self::requires_legacy_init) by
     /// design — the two reasons must never re-collapse into one boolean: a
     /// bare-`$:` component (and an exports-only custom element) opens the frame
-    /// WITHOUT the legacy init hook (oracle-verified against svelte@5.56.3).
+    /// WITHOUT the legacy init hook (oracle-verified against svelte@5.56.10).
     pub(super) opens_context_frame: bool,
     /// Whether the LEGACY instance-init hook (`$.init()`) is warranted — the
     /// official needs-context analysis fact ALONE (an unsafe imported call /
@@ -122,7 +122,7 @@ pub(super) struct ClientModulePlan<'a> {
     /// component-context frame is driven by its own reasons (the needs-context
     /// triggers — an imported call / `new` / unsafe member — a `$:` statement,
     /// or `$$exports`), NEVER by store presence — a clean local store emits
-    /// setup/cleanup with NO frame (oracle-verified against svelte@5.56.3).
+    /// setup/cleanup with NO frame (oracle-verified against svelte@5.56.10).
     pub(super) has_store_subscriptions: bool,
     /// The custom-element module-epilogue payload (`customElements.define(tag,
     /// $.create_custom_element(…))` / the bare create statement) — `Some` iff the
@@ -599,7 +599,7 @@ impl<'a> SupportedClientIr<'a> {
         let ce_exports = if custom_element.is_some() {
             // The LEGACY CE setter takes NO default parameter (`set label($$value)`)
             // — only the runes accessor carries the `$$value = <default>` form
-            // (oracle-verified against svelte@5.56.3).
+            // (oracle-verified against svelte@5.56.10).
             super::client_custom_element::build_ce_export_accessors(
                 ce_members,
                 if legacy_mode {

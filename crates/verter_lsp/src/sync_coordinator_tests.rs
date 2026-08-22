@@ -2182,8 +2182,8 @@ fn install_svelte_at(root: &std::path::Path, manifest: &str) {
     std::fs::write(dir.join("elements.d.ts"), "export interface E {}\n").expect("elements");
 }
 
-const USABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
-const UNUSABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
+const USABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.10","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+const UNUSABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.10","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
 
 /// `did_open` and `did_change` both route through this coordinator, and this is
 /// the set it hands the client. An unusable `svelte` install must be explained

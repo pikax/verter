@@ -1,7 +1,7 @@
 {
   "slug": "generated/086_pair_root_mathml__attr_spread.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

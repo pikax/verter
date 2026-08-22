@@ -435,7 +435,7 @@ impl<'a> ClientEmitter<'a> {
     /// Format ONE DOM-value/property bind call from its typed routing — the
     /// DATA-DRIVEN emit (no per-name match arm pile), as a BARE call expression
     /// (no indent, no terminating `;` — the [`Self::render_bind_bare`] carrier
-    /// contract). The shape follows the pinned `svelte@5.56.3` forms exactly:
+    /// contract). The shape follows the pinned `svelte@5.56.10` forms exactly:
     /// - get/set helpers: `$.bind_value(el, () => GET, ($$value) => SET)`,
     ///   `$.bind_select_value` / `$.bind_checked` / `$.bind_current_time` /
     ///   `$.bind_paused` / `$.bind_content_editable('name', el, get, set)`;

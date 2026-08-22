@@ -1,8 +1,8 @@
 //! Svelte compatibility validation profile — a VALIDATION-ONLY reproduction of the official
-//! `svelte@5.56.3` CSS body reader's PARSE control flow (`phases/1-parse/read/style.js` + the
+//! `svelte@5.56.10` CSS body reader's PARSE control flow (`phases/1-parse/read/style.js` + the
 //! `Parser` byte primitives in `phases/1-parse/index.js`).
 //!
-//! This is not the crate's general CSS Syntax Module Level 3 grammar: `svelte@5.56.3` hand-rolls
+//! This is not the crate's general CSS Syntax Module Level 3 grammar: `svelte@5.56.10` hand-rolls
 //! its own CSS reader with its own GRAMMAR-ORDER control flow (which production is attempted in
 //! what order, matching upstream's exact reader sequence and error priority) and its own
 //! error-code taxonomy. The reader's TOKEN-LEVEL scanning runs over [`crate::lexer::Lexer`]:
@@ -71,7 +71,7 @@
 //! Upstream's `element.js` calls `read_style` — which PARSES the `<style>` CSS body via a full
 //! CSS reader and can THROW a parse error — BEFORE `if (current.css) e.style_duplicate(start)`.
 //! So a malformed CSS body in the 2nd `<style>` wins the first-error race over `style_duplicate`,
-//! and a consumer reproducing `svelte@5.56.3`'s diagnostics must report the EXACT upstream CSS
+//! and a consumer reproducing `svelte@5.56.10`'s diagnostics must report the EXACT upstream CSS
 //! parse code for that race. Verter's Svelte official-reject gate
 //! (`verter_compiler::svelte::runtime::official_reject`) reserves a probe at the `read_style`
 //! position; [`style_body_reject_code`] is what fills that slot.
@@ -800,7 +800,7 @@ impl<'a> CssParser<'a> {
     /// NOT an nth match (it falls through the selector loop to `read_identifier`, which rejects a
     /// digit-leading `-?\d` as `css_expected_identifier`), while `-2n+1` / `-n+2` ARE the negative
     /// arm. A generic-optional-sign reader would over-accept `-2` / `-2n` / `-2n-1` and emit no
-    /// reject — diverging from pinned `svelte@5.56.3`.
+    /// reject — diverging from pinned `svelte@5.56.10`.
     fn nth_of_len(&self) -> Option<usize> {
         let rest = &self.src[self.index()..];
         let j = if rest.starts_with(b"even") {

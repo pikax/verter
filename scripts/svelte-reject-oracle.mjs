@@ -3,7 +3,7 @@
  *
  * Compiles every committed reject-corpus `.svelte` fixture under
  * `crates/verter_compiler/tests/svelte_oracle_corpus/rejects/block4_core/` through
- * the PINNED official `svelte@5.56.3` compiler (client backend) and emits a JSON map
+ * the PINNED official `svelte@5.56.10` compiler (client backend) and emits a JSON map
  * `{ "<fixture-basename>": "<official-error-code>" | "ACCEPT" }` on stdout.
  *
  * The Rust freshness gate (`svelte_client_official_reject_matrix.rs`, behind the

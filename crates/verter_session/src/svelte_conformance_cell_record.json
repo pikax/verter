@@ -2,9 +2,9 @@
   "cells": {
     "svelte/basic-runes__client__runes1__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -42,9 +42,9 @@
     },
     "svelte/basic-runes__client__runes1__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -84,9 +84,9 @@
     },
     "svelte/basic-runes__server__runes1__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -118,9 +118,9 @@
     },
     "svelte/basic-runes__server__runes1__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -152,9 +152,9 @@
     },
     "svelte/legacy-slots__client__runes0__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -192,9 +192,9 @@
     },
     "svelte/legacy-slots__client__runes0__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -234,9 +234,9 @@
     },
     "svelte/legacy-slots__server__runes0__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -268,9 +268,9 @@
     },
     "svelte/legacy-slots__server__runes0__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -302,9 +302,9 @@
     },
     "svelte/props-events__client__runes1__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -342,9 +342,9 @@
     },
     "svelte/props-events__client__runes1__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -384,9 +384,9 @@
     },
     "svelte/props-events__server__runes1__dev0": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {
@@ -418,9 +418,9 @@
     },
     "svelte/props-events__server__runes1__dev1": {
       "officialDomain": {
-        "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
-        "packageVersion": "5.56.8",
-        "tree": "63390158bfe8f997c474e35215a4fa627194c229",
+        "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+        "packageVersion": "5.56.10",
+        "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
         "upstream": "https://github.com/sveltejs/svelte"
       },
       "outcome": {

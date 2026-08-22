@@ -1,7 +1,7 @@
 {
   "slug": "generated/154_text_root_named_entity.svelte",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

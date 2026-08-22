@@ -29,7 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The pinned official Svelte version — the single oracle pin. */
-export const SVELTE_ORACLE_VERSION = "5.56.3";
+export const SVELTE_ORACLE_VERSION = "5.56.10";
 
 /**
  * Derive semantic-comment signatures for raw emitted modules through the one
@@ -764,7 +764,7 @@ function extractForwardedPropEvents(code) {
  *
  * The `value` field is the VALUE chunk-topology of the assigned RHS (the official
  * `cannot_be_set_statically` writes are a DIRECT property assignment in
- * `5.56.3` — `input.defaultValue = 'x'` or a `$.template_effect(() =>
+ * `5.56.10` — `input.defaultValue = 'x'` or a `$.template_effect(() =>
  * input.defaultValue = `a ${x ?? ''} b`)`, NOT a `$.set_default_value` helper).
  * A static-literal RHS reduces to `['literal']`; a mixed template-literal RHS
  * (`a {x} b`) reduces to its literal/expr alternation `['literal','expr','literal']`;

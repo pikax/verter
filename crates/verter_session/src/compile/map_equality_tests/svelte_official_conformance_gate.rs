@@ -845,7 +845,7 @@ fn the_client_source_map_currently_carries_only_these_authored_coordinates() {
 /// CONFORMANCE TARGET — the `{#each}` flags argument equals the official value.
 ///
 /// For `{#each items as item (item)}` in runes mode the pinned official
-/// `svelte@5.56.8` compiler emits `$.each(ul, 20, …)` —
+/// `svelte@5.56.10` compiler emits `$.each(ul, 20, …)` —
 /// `EACH_IS_CONTROLLED | EACH_ITEM_IMMUTABLE`, with `EACH_ITEM_REACTIVE` (bit
 /// `1`, `.oracle-checkouts/svelte/packages/svelte/src/constants.js:1`) CLEAR.
 /// The bit is the block's reactivity/effect topology, which the
@@ -877,7 +877,7 @@ fn each_flags_for_a_keyed_runes_each_match_the_official_compiler() {
 /// instance script publishes a runtime module.
 ///
 /// `props-events.svelte` reads its props from a function in the instance script
-/// (`ontoggle?.(!disabled)`), which the pinned official `svelte@5.56.8` compiler
+/// (`ontoggle?.(!disabled)`), which the pinned official `svelte@5.56.10` compiler
 /// ACCEPTS. The shipped route must therefore publish a module for it, importing
 /// the client runtime — the prop-usage gate refuses WRITES only.
 ///

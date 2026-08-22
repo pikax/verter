@@ -678,7 +678,7 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // transparent — the RECEIVER (`($state).snapshot(x)`) and the WHOLE CALLEE
         // (`($state.snapshot)(x)`), at any nesting depth — official's ESTree AST has
         // no paren nodes, so every spelling is the same call (oracle-verified accepts
-        // against `svelte@5.56.3`), and the rewriter's callee matcher peels the SAME
+        // against `svelte@5.56.10`), and the rewriter's callee matcher peels the SAME
         // way, so the scan model and the `$.snapshot` rewrite agree. Only the CALLED
         // form reaches here; an UNCALLED `$state.snapshot` (value position, however
         // parenthesized) has no enclosing call, so it reaches
@@ -686,7 +686,7 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         //
         // A MALFORMED call — ZERO args / >=2 args (official `rune_invalid_arguments_length`)
         // or a SPREAD arg (official `rune_invalid_spread`), both oracle-verified against
-        // `svelte@5.56.3` at every paren position — must FAIL CLOSED as an advanced rune
+        // `svelte@5.56.10` at every paren position — must FAIL CLOSED as an advanced rune
         // rather than slip past the exemption into a raw `$.snapshot()` / `$.snapshot(a, b)`
         // / `$.snapshot(...o)` miscompile: record the `$state.snapshot` refusal
         // (first-found wins, so it is the reported surface) and STILL scan the

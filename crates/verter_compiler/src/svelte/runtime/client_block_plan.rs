@@ -25,7 +25,7 @@ use super::ir::{
 };
 use super::unsupported::UnsupportedSvelteRuntimeSurface;
 
-// The official `svelte@5.56.3` EACH flag bits (`src/compiler/.../constants.js`).
+// The official `svelte@5.56.10` EACH flag bits (`src/compiler/.../constants.js`).
 const EACH_ITEM_REACTIVE: u8 = 1;
 const EACH_INDEX_REACTIVE: u8 = 2;
 /// The official `EACH_IS_CONTROLLED` bit: the `{#each}` is the SOLE child of a regular

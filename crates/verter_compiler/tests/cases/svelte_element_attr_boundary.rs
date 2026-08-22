@@ -187,7 +187,7 @@ const HTML_TAG_UNIVERSE: &[&str] = &[
     "wbr",
 ];
 
-/// The full Svelte `RESERVED_WORDS` set (svelte@5.56.3 `src/utils.js`) — a
+/// The full Svelte `RESERVED_WORDS` set (svelte@5.56.10 `src/utils.js`) — a
 /// reserved-word HTML tag fails closed at the element gate (it is not in the
 /// allowlist, and a reserved word additionally routes to the `5v` naming refusal). A
 /// committed copy keeps the corpus hermetic; the source-of-truth is the production
@@ -863,7 +863,7 @@ fn shorthand_bind_value_emits_bind_value_and_is_byte_equivalent_to_explicit() {
     // shorthand `<input bind:value />` (bound expression synthesized as the `value`
     // identifier) must emit the SAME `$.bind_value(input, () => $.get(value),
     // ($$value) => $.set(value, $$value))` two-way binding as the explicit
-    // `bind:value={value}` — official `svelte@5.56.3` parity. (RED against a tree
+    // `bind:value={value}` — official `svelte@5.56.10` parity. (RED against a tree
     // that drops the shorthand binding op to nothing, OR mis-shapes the getter/
     // setter.)
     let shorthand = "<script>let value = $state(\"\");</script>\n<input bind:value />\n<button onclick={() => value = \"x\"}>{value}</button>\n";
@@ -1067,7 +1067,7 @@ fn html_tag_universe_is_complete() {
 
 // ── Freshness: the DOM attribute/property tables stay pinned to svelte ───────────
 
-/// The committed `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.3 `src/utils.js`), mirrored
+/// The committed `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.10 `src/utils.js`), mirrored
 /// here so the freshness check is a self-contained boundary (the production copy in
 /// `client_allowlist.rs` is module-private). The production `is_dom_property` is
 /// exercised against the same membership by the in-crate unit tests.
@@ -1103,7 +1103,7 @@ const DOM_BOOLEAN_ATTRIBUTES: &[&str] = &[
 ];
 
 /// The committed `ATTRIBUTE_ALIASES` VALUES (the camelCase property names) from
-/// svelte@5.56.3 `src/utils.js` (`class` is intentionally absent).
+/// svelte@5.56.10 `src/utils.js` (`class` is intentionally absent).
 const ATTRIBUTE_ALIAS_VALUES: &[&str] = &[
     "formNoValidate",
     "isMap",
@@ -1125,7 +1125,7 @@ const ATTRIBUTE_ALIAS_VALUES: &[&str] = &[
 fn live_svelte_utils() -> Option<String> {
     use std::path::PathBuf;
     let utils = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../node_modules/.pnpm/svelte@5.56.3/node_modules/svelte/src/utils.js");
+        .join("../../node_modules/.pnpm/svelte@5.56.10/node_modules/svelte/src/utils.js");
     std::fs::read_to_string(utils).ok()
 }
 

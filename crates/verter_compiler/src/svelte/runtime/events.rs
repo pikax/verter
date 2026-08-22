@@ -1,5 +1,5 @@
 //! The Svelte-5 event-attribute policy (a faithful port of the official
-//! `svelte@5.56.3` event helpers).
+//! `svelte@5.56.10` event helpers).
 //!
 //! Ports:
 //! - `is_capture_event` (`src/utils.js`): a name is a capture-phase handler iff
@@ -78,7 +78,7 @@ pub fn is_capture_event(name: &str) -> bool {
 /// `passive: true` (`visit_event_attribute` passes `is_passive_event(name) ? true :
 /// undefined`); the legacy `on:` directive form derives passive from its
 /// `|passive` / `|nonpassive` modifiers ONLY (it does NOT consult this set — verified
-/// against svelte@5.56.3: `on:touchstart={h}` emits no passive arg).
+/// against svelte@5.56.10: `on:touchstart={h}` emits no passive arg).
 const PASSIVE_EVENTS: &[&str] = &["touchstart", "touchmove"];
 
 /// Whether `event_name` is a passive-by-default event (the official
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn is_passive_event_matches_official_passive_set() {
         // The passive-by-default set (PASSIVE_EVENTS) ground-truthed against
-        // svelte@5.56.3 `is_passive_event` — exactly `touchstart` / `touchmove`.
+        // svelte@5.56.10 `is_passive_event` — exactly `touchstart` / `touchmove`.
         assert!(is_passive_event("touchstart"));
         assert!(is_passive_event("touchmove"));
         // Every other event type (including the other touch / delegated events) is

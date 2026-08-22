@@ -1,5 +1,5 @@
 //! The Svelte CSS scoping analysis — a faithful port of the official
-//! `svelte@5.56.3` `phases/2-analyze/css/css-analyze.js` (the zimmerframe
+//! `svelte@5.56.10` `phases/2-analyze/css/css-analyze.js` (the zimmerframe
 //! visitor walk), `phases/2-analyze/css/utils.js` (`is_global` /
 //! `is_unscoped_pseudo_class` / `is_outer_global`), and `phases/css.js`
 //! (`is_keyframes_node` / `remove_css_prefix`).

@@ -1239,7 +1239,7 @@ export function checkBuildPrerequisites(opts) {
 // canonical gate run (see `ARCHIVE_FEATURES` below, which turns the feature on for the archived suite).
 // Among them is the ENTIRE `compile::map_equality_tests::svelte_official_conformance_gate` /
 // `_matrix` suite — the tests that actually compare Verter's Svelte output against the pinned official
-// `svelte@5.56.8` oracle. Once the feature is on, those tests spawn `node bin/check-candidate.mjs`
+// `svelte@5.56.10` oracle. Once the feature is on, those tests spawn `node bin/check-candidate.mjs`
 // (`crates/verter_session/src/compile/map_equality_tests/bf2_full_axis_gate.rs`), which calls
 // `ensureOracleDomain(framework)` (`packages/framework-conformance-harness/src/oracle-install.mjs`) to
 // realize each oracle (`vue`, `svelte`) OFFLINE from `.oracle-npm-cache` — a GITIGNORED local cache

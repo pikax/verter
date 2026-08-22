@@ -1,5 +1,5 @@
 //! The Svelte selector-to-template matcher — a faithful port of the official
-//! `svelte@5.56.3` `phases/2-analyze/css/css-prune.js` (`prune`,
+//! `svelte@5.56.10` `phases/2-analyze/css/css-prune.js` (`prune`,
 //! `apply_selector` BACKWARD, `apply_combinator`,
 //! `relative_selector_might_apply_to_node`, `attribute_matches`,
 //! `test_attribute`, and the DOM-neighborhood helpers) plus the

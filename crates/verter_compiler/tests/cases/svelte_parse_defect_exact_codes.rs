@@ -1,5 +1,5 @@
 //! INDEPENDENT EXACT-CODE RAIL: the Svelte official-reject gate must report the EXACT
-//! official `svelte@5.56.3` diagnostic code for every multi-defect / ordering-sensitive
+//! official `svelte@5.56.10` diagnostic code for every multi-defect / ordering-sensitive
 //! parse fixture — asserted against a HARDCODED expected-code table independently confirmed
 //! by running the pinned compiler, NOT derived from the parser's own public facts.
 //!
@@ -9,7 +9,7 @@
 //! `ParsedSvelte` facts the gate consumes, so it cannot catch a WRONG fact code or a MISSING
 //! fact rail (a defect that should be a parser fact but is routed code-less / dropped). This
 //! file closes that gap: each expected code below was grounded by executing
-//! `svelte@5.56.3` over the exact source, so the assertion fails if the gate reports the
+//! `svelte@5.56.10` over the exact source, so the assertion fails if the gate reports the
 //! wrong code OR fails to mint the fact at all.
 //!
 //! Covers the per-`<script>` minting order (attribute-duplicate → body-parse → source-order
@@ -24,7 +24,7 @@ use verter_compiler::svelte::runtime::official_reject_gate;
 const BUTTON: &str = "<button onclick={() => c++}>{c}</button>";
 
 /// The EXACT official code the real gate reports for `source` (panics if the gate ACCEPTS —
-/// every fixture here is a genuine reject confirmed against pinned svelte@5.56.3).
+/// every fixture here is a genuine reject confirmed against pinned svelte@5.56.10).
 fn gate_code(source: &str) -> &'static str {
     let parsed = parse_svelte(source);
     official_reject_gate(source, &parsed)
@@ -37,7 +37,7 @@ fn assert_code(name: &str, source: &str, expected: &str) {
     let got = gate_code(source);
     assert_eq!(
         got, expected,
-        "{name}: gate reports `{got}`, but svelte@5.56.3 rejects this source with `{expected}`:\n{source}"
+        "{name}: gate reports `{got}`, but svelte@5.56.10 rejects this source with `{expected}`:\n{source}"
     );
 }
 
@@ -249,7 +249,7 @@ fn duplicate_style_beats_later_stray_close() {
 //      first-error race over the duplicate. Verter reserves a `StyleBodyProbe` at the
 //      `read_style` position and fills it with a faithful CSS-body reader; a clean / empty
 //      body lets the later `style_duplicate` fact win. (All codes grounded against pinned
-//      svelte@5.56.3.)
+//      svelte@5.56.10.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -344,7 +344,7 @@ fn bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof() {
 //      options attributes in source order (the FIRST faulting attribute wins) and then
 //      `disallow_children`. These are PARSE/finalization errors with exact upstream codes —
 //      minted as `OptionsInvalid` parse facts at the finalization position (after every
-//      template/script/style fact). (All codes grounded against pinned svelte@5.56.3.)
+//      template/script/style fact). (All codes grounded against pinned svelte@5.56.10.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -639,7 +639,7 @@ fn options_valid_customelement_string_is_not_an_options_reject() {
 // ─────────────────────────────────────────────────────────────────────────────
 // (F3 customElement={EXPR}) The expression-valued `customElement` axis is reserved by the
 //     parser and FILLED by the gate via OXC — the expression's AST decides the exact code.
-//     (Grounded against pinned svelte@5.56.3.)
+//     (Grounded against pinned svelte@5.56.10.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -778,7 +778,7 @@ fn options_malformed_customelement_expr_js_parse_error_beats_a_later_template_de
     // A SYNTACTICALLY-malformed `customElement={<}` raises `js_parse_error` during the
     // `<svelte:options>` ELEMENT parse (upstream's `read_expression`), which is BEFORE a LATER
     // template defect (a stray `</div>`). So the `js_parse_error` wins — NOT the stray close.
-    // (Verified pinned svelte@5.56.3: this source → `js_parse_error`.)
+    // (Verified pinned svelte@5.56.10: this source → `js_parse_error`.)
     assert_code(
         "options_ce_malformed_then_stray",
         &format!("<svelte:options customElement={{<}} />\n</div>\n{BUTTON}\n"),
@@ -796,7 +796,7 @@ fn options_malformed_customelement_expr_js_parse_error_beats_a_later_template_de
 fn options_malformed_customelement_expr_js_parse_error_loses_to_an_earlier_template_defect() {
     // An EARLIER stray `</div>` (a template parse defect discovered first in the forward pass)
     // beats the customElement `js_parse_error` that follows it → `element_invalid_closing_tag`.
-    // (Verified pinned svelte@5.56.3.)
+    // (Verified pinned svelte@5.56.10.)
     assert_code(
         "options_stray_then_ce_malformed",
         &format!("</div>\n<svelte:options customElement={{<}} />\n{BUTTON}\n"),
@@ -809,7 +809,7 @@ fn options_customelement_validation_fault_loses_to_a_later_template_defect() {
     // A VALID-but-invalid `customElement={42}` (→ `svelte_options_invalid_customelement`) is a
     // `read_options` VALIDATION fault raised at FINALIZATION (after the whole template parse), so
     // it loses to a LATER stray `</div>` (which the validation fault could only beat if it rode the
-    // element source position — it does NOT). (Verified pinned svelte@5.56.3:
+    // element source position — it does NOT). (Verified pinned svelte@5.56.10:
     // `element_invalid_closing_tag`.)
     assert_code(
         "options_ce_validation_then_stray",
@@ -831,7 +831,7 @@ fn options_customelement_parse_fault_at_attribute_position_beats_a_later_duplica
     // `read_expression` DURING the attribute loop), which precedes the LATER duplicate `foo foo`.
     // So the `js_parse_error` wins over `attribute_duplicate`. A finalization-positioned parse fault
     // (drawn AFTER the whole open tag) would WRONGLY lose to the duplicate minted in the loop.
-    // (Verified pinned svelte@5.56.3: `js_parse_error`.)
+    // (Verified pinned svelte@5.56.10: `js_parse_error`.)
     assert_code(
         "options_ce_empty_then_dup",
         &format!("<svelte:options customElement={{}} foo foo />\n{BUTTON}\n"),
@@ -881,7 +881,7 @@ fn options_clean_customelement_expr_lets_a_later_duplicate_attr_win() {
 //     fault still beats its OWN duplicate mint. (A single first-customElement parse-order
 //     latch WRONGLY rode every later customElement fault on the FIRST customElement's
 //     position, jumping ahead of duplicates minted between the two.) Every code below was
-//     verified FIRST-HAND against pinned svelte@5.56.3.
+//     verified FIRST-HAND against pinned svelte@5.56.10.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1011,7 +1011,7 @@ fn quoted_gt_between_two_langs_rejects_with_attribute_duplicate_both_directions(
     // `lang=` attributes makes the internal grammar scan diverge from the official regex (Verter's
     // attribute-aware scan crosses the quoted `>`, the regex stops at it). That divergence is
     // UNOBSERVABLE end-to-end — the source carries TWO `lang=` attributes, so the gate rejects with
-    // `attribute_duplicate` in BOTH directions, byte-identically to pinned svelte@5.56.3. This is
+    // `attribute_duplicate` in BOTH directions, byte-identically to pinned svelte@5.56.10. This is
     // the end-to-end behavioral-parity lock for the ledgered corner.
     assert_code(
         "quoted_gt_then_lang_ts_dup",
@@ -1094,7 +1094,7 @@ fn lang_ts_lowercase_body_with_type_annotation_is_not_a_body_parse_error() {
 //      `lang="TS"` / `lang="tsx"` / `lang="typescript"` are NOT TS — a TS-only body under
 //      any of those parses as JS ⇒ `js_parse_error`. A plain first script using TS syntax
 //      PLUS a later `lang="ts"` script makes the WHOLE parse TS ⇒ that body parses clean.
-//      (Confirmed against pinned svelte@5.56.3.)
+//      (Confirmed against pinned svelte@5.56.10.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]

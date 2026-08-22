@@ -378,7 +378,7 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// Emit a TEXT-FIRST region body — the official `svelte@5.56.3` topology for a region
+    /// Emit a TEXT-FIRST region body — the official `svelte@5.56.10` topology for a region
     /// whose whole cleaned sequence is a SINGLE text run (a lone static text, or one-or-more
     /// accepted interpolations, with no element/block sibling). It is the in-closure form,
     /// NOT a hoisted clone factory:
@@ -732,7 +732,7 @@ impl<'a> ClientEmitter<'a> {
     /// `$.await(node, () => PROMISE, PENDING, THEN, CATCH);` — trailing absent callbacks
     /// are omitted; a middle-absent slot carries the official per-slot sentinel: an absent
     /// PENDING is `null`, an absent THEN before a following catch is `void 0` (matching
-    /// `svelte@5.56.3`'s `$.await(node, get, null, void 0, catch)` for the no-then shapes).
+    /// `svelte@5.56.10`'s `$.await(node, get, null, void 0, catch)` for the no-then shapes).
     ///
     /// The branch closures are EMITTED (their DOM vars allocated) in TEMPLATE-HOIST order
     /// (`then`, `catch`, `pending` — matching the post-order factory allocation) into
@@ -759,7 +759,7 @@ impl<'a> ClientEmitter<'a> {
         // Call-arg order: pending (0), then (1), catch (2). Trailing absent slots are
         // omitted; a MIDDLE-absent slot carries the official per-position sentinel — an
         // absent PENDING is `null`, an absent THEN (only ever middle-absent when a catch
-        // follows) is `void 0` (svelte@5.56.3's `$.await(node, get, null|pending, void 0,
+        // follows) is `void 0` (svelte@5.56.10's `$.await(node, get, null|pending, void 0,
         // catch)` no-then shapes). The catch slot is never a middle (it is last or omitted).
         let slots = [pending_closure, then_closure, catch_closure];
         let last = slots.iter().rposition(Option::is_some).unwrap_or(0);

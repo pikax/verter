@@ -2,7 +2,7 @@
   "name": "@verter/framework-conformance-harness",
   "version": "0.0.0",
   "private": true,
-  "description": "Hermetic, test-only official-core conformance harness for the exact pinned Vue 3.6.0-rc.5 and Svelte 5.56.8 compiler/runtime domains. Generates immutable goldens from the exact official pins, offline, and compares candidate output against them structurally. Never a production dependency; never a runtime.",
+  "description": "Hermetic, test-only official-core conformance harness for the exact pinned Vue 3.6.0-rc.5 and Svelte 5.56.10 compiler/runtime domains. Generates immutable goldens from the exact official pins, offline, and compares candidate output against them structurally. Never a production dependency; never a runtime.",
   "type": "module",
   "scripts": {
     "generate-goldens": "node bin/generate-goldens.mjs",

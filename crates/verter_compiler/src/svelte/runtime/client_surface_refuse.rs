@@ -42,7 +42,7 @@ pub(super) fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
             }
         }
         // CHILD-position `{@attach}` (`<div>{@attach fn}</div>`) — the official
-        // `expected_tag` parse reject (attribute-position-only in `svelte@5.56.3`).
+        // `expected_tag` parse reject (attribute-position-only in `svelte@5.56.10`).
         // The element-position `<div {@attach fn}>` is the supported attachment.
         TagIr::Attach { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: "attach",
@@ -210,7 +210,7 @@ pub(super) fn refuse_invalid_animate_placement(
 /// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /
 /// `<option>`) whose INTERIOR content is not the supported `bind:value` host shape.
 ///
-/// The DOM-bind backend emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.3`
+/// The DOM-bind backend emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.10`
 /// oracle proves: a `<textarea bind:value>` is cleared EMPTY (`$.remove_textarea_child`
 /// strips its content), and a `<select bind:value>` carries STATIC `<option>`
 /// children (`<select><option>a</option></select>`). The official compiler gives
@@ -332,7 +332,7 @@ pub(super) fn special_label(kind: SpecialKind) -> &'static str {
 /// `svelte_self_invalid_placement` rule. A `<svelte:self>` may only appear inside an
 /// `{#if}` / `{#each}` / `{#snippet}` block or a slot passed to a component; at the
 /// component ROOT (or nested only in elements at the root, or inside an `{#await}` /
-/// `{#key}` block with no valid ancestor) the official `svelte@5.56.3` compiler
+/// `{#key}` block with no valid ancestor) the official `svelte@5.56.10` compiler
 /// HARD-ERRORS. Verter fails closed rather than emitting the recursive self-call for an
 /// input the official rejects.
 ///

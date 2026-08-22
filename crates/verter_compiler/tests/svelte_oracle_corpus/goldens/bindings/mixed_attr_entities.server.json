@@ -1,7 +1,7 @@
 {
   "slug": "bindings/mixed_attr_entities.svelte",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

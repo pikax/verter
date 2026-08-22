@@ -510,7 +510,7 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
         &[
             (
                 "/workspace/node_modules/svelte/package.json",
-                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
             ),
             (
                 "/workspace/node_modules/svelte/index.d.ts",

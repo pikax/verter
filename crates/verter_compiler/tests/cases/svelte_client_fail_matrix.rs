@@ -366,7 +366,7 @@ const FAIL_MATRIX: &[FailRow] = &[
     // (`bind_this_component` removed — a component `bind:this` is the 5f-a surface and now
     // emits `$.bind_this(Child(...), set, get)`.)
     // ── runtime-unsupported DEDICATED-helper binds (fail closed at the runtime router) ──
-    // Each of these has a real IDE contract row whose OFFICIAL svelte@5.56.3 helper is a
+    // Each of these has a real IDE contract row whose OFFICIAL svelte@5.56.10 helper is a
     // DEDICATED helper (a generic `$.bind_property` form would emit RUNTIME-BROKEN output
     // — the wrong helper). The native client runtime does not emit these yet, so the
     // contract records the REAL official helper + `RuntimeSupport::Unsupported` and the
@@ -420,7 +420,7 @@ const FAIL_MATRIX: &[FailRow] = &[
     // emit it yet — so the contract records the real `Property` official helper +
     // `RuntimeSupport::Unsupported` and the runtime router fails it closed (refusal rides
     // support, NOT the emittable helper identity). Each host is the name's
-    // empirically-pinned `binding_properties.valid_elements` member (svelte@5.56.3
+    // empirically-pinned `binding_properties.valid_elements` member (svelte@5.56.10
     // `phases/bindings.js`) that is ALSO in the client element allowlist — so the row
     // is reachable (it fails at the BIND gate, not the element gate). `naturalWidth` /
     // `naturalHeight` are `<img>`-only and `<img>` is NOT allowlisted, so they are
@@ -600,7 +600,7 @@ const FAIL_MATRIX: &[FailRow] = &[
     // spread co-located with an event / `bind:` / `let:` stays fail-closed above.)
     // ── 5f-c lifecycle-directive fail-closed boundary ─────────────────────
     FailRow {
-        // CHILD-form `{@attach}` (`<div>{@attach fn}</div>`) — official `svelte@5.56.3`
+        // CHILD-form `{@attach}` (`<div>{@attach fn}</div>`) — official `svelte@5.56.10`
         // REJECTS it at parse (`expected_tag`): `{@attach}` is attribute-position-only.
         // Verter keeps the child-form `TagIr::Attach` fail-closed (`refuse_tag`), while
         // the ELEMENT-position `<div {@attach fn}>` is the accepted form (the positive
@@ -1202,7 +1202,7 @@ const FAIL_MATRIX: &[FailRow] = &[
     },
     // ── TypeScript value constructs rejected by pinned Svelte ────────────
     FailRow {
-        // Pinned svelte@5.56.3 rejects runtime-emitting TypeScript enums without
+        // Pinned svelte@5.56.10 rejects runtime-emitting TypeScript enums without
         // preprocessing (`typescript_invalid_feature`). Verter retains its typed
         // fail-closed carrier and never emits a divergent enum transform.
         name: "lang_ts_enum",
@@ -1283,7 +1283,7 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-paragraph-autoclose",
     },
     // ── `{@render …(…spread)}` — a SPREAD argument in a render tag ───────────
-    // Official `svelte@5.56.3` HARD-ERRORS (`render_tag_invalid_spread_argument`:
+    // Official `svelte@5.56.10` HARD-ERRORS (`render_tag_invalid_spread_argument`:
     // "cannot use spread arguments in {@render ...} tags"). Verter must FAIL CLOSED
     // rather than silently DROP the spread args and emit a wrong-arity `$.snippet`
     // call. The refusal is NARROW: a non-spread render arg (`{@render row(item)}`)
@@ -1330,7 +1330,7 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-component",
     },
     // ── `<svelte:self>` at INVALID (root) placement ─────────────────────────
-    // Official `svelte@5.56.3` HARD-ERRORS (`svelte_self_invalid_placement`:
+    // Official `svelte@5.56.10` HARD-ERRORS (`svelte_self_invalid_placement`:
     // "<svelte:self> can only exist inside {#if}/{#each}/{#snippet} blocks or slots
     // passed to components"). A ROOT `<svelte:self>` (bare or `bind:this`) has NO
     // allowed enclosing context — Verter must FAIL CLOSED rather than emit the
@@ -1536,7 +1536,7 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     // ── `$host` DEGENERATE-UNBOUND residue (well-formed, admitted, un-bound) ──
-    // Official `svelte@5.56.3` rewrites every ADMITTED `$host()` to
+    // Official `svelte@5.56.10` rewrites every ADMITTED `$host()` to
     // `$$props.$$host`, but binds the `$$props` PARAMETER only when an
     // independent props-parameter trigger exists: a REAL props binder
     // (`$props()` / `$bindable(...)` / legacy prop) or a `needs_context`
@@ -2021,7 +2021,7 @@ fn generated_event_handler_expression_kinds_land_on_boundary() {
 fn generated_effect_shapes_land_on_boundary() {
     // INVERTED (was `generated_effect_shapes_all_fail_closed`): a WELL-FORMED
     // top-level `$effect(arg)` statement is SUPPORTED for EVERY single-argument
-    // shape — oracle-verified against svelte@5.56.3: each accepts as
+    // shape — oracle-verified against svelte@5.56.10: each accepts as
     // `$.user_effect(<arg passthrough>)` (an identifier / call / member /
     // conditional argument flows through verbatim modulo signal rewrites; the
     // undeclared `f` / `o` are runtime globals official also passes through).

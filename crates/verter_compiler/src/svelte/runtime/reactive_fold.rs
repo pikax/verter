@@ -1,5 +1,5 @@
 //! Constant folding for the Svelte client mixed-template emitter — a faithful port of
-//! official `svelte@5.56.3`'s constant evaluator (`scope.evaluate`, the `Evaluation`
+//! official `svelte@5.56.10`'s constant evaluator (`scope.evaluate`, the `Evaluation`
 //! class in `phases/scope.js`) driving the `build_template_chunk` fold (`phases/
 //! 3-transform/client/visitors/shared/utils.js`).
 //!
@@ -38,7 +38,7 @@ pub(super) use super::reactive_fold_tristate::{ChunkFold, ConstFoldRefuse, LiveF
 /// Folding applies ONLY inside the MULTI-chunk template path (the caller routes a
 /// single-chunk quoted value through the single-expression path, matching official's
 /// `build_attribute_value` `value.length === 1` branch which does NOT evaluate-fold). This
-/// is a faithful port of official `svelte@5.56.3`'s constant evaluator: the `Evaluation`
+/// is a faithful port of official `svelte@5.56.10`'s constant evaluator: the `Evaluation`
 /// class in `phases/scope.js` (`scope.evaluate`) driven by the fold in
 /// `phases/3-transform/client/visitors/shared/utils.js` (`build_template_chunk`),
 /// including its EAGERNESS — both logical operands and both conditional branches are

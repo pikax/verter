@@ -3,7 +3,7 @@
 //!
 //! This module owns the CSS DOMAIN of the Svelte runtime pipeline. It is
 //! fully separate from the Vue style pipeline (`crate::css`) — the Svelte
-//! scoping semantics are a faithful port of the official `svelte@5.56.3`
+//! scoping semantics are a faithful port of the official `svelte@5.56.10`
 //! compiler (`phases/1-parse/read/style.js`, `phases/2-analyze/css/*`,
 //! `phases/css.js`), operating on byte spans of the ORIGINAL component
 //! source so downstream source-position edits map exactly.
@@ -96,7 +96,7 @@ pub struct AnalyzedStyleBody {
     /// matcher verdicts land later, in the completion stage).
     ast: StyleSheet,
     /// Shared syntax authority used for trust/completeness admission. The
-    /// Svelte-specific AST remains temporarily for exact 5.56.3 behavior.
+    /// Svelte-specific AST remains temporarily for exact 5.56.10 behavior.
     syntax: StyleSyntaxIr,
     /// The analyzer facts (keyframes / global collection).
     analysis: analyze::CssAnalysis,

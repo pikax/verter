@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+    "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
+    "packageVersion": "5.56.10"
+  },
+  "packageLockSha256": "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
+  "realizedClosureSha256": "af0bc09b425ff3d618c95b9b67f9a6702e16469b63a27abb834d7f169020911a",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "01c6e12b4e0ad5c41a493d13b180f1432943204a",
+    "tree": "d87148edb0cc8a961e75cc29b74917c6977cf86b",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/props-events.svelte",
+    "sha256": "aaf0db6149de44d2d24727155d449a9034757c61bac689a61b72f2274a5d41e1"
+  },
+  "options": {
+    "generate": "client",
+    "runes": true,
+    "dev": true
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "de0e7ce13f6003ff174d8cd7ca6a4ad158df4d30e13c115f26d919d6ae822857",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "f988bcb9d5804b3cf117746b362ba739686ddb2188d1160cc34a22d3dcd4a018"
+  },
+  "code": "import 'svelte/internal/disclose-version';\n\nProps_events[$.FILENAME] = 'fixtures/svelte/props-events.svelte';\n\nimport * as $ from 'svelte/internal/client';\n\nvar root = $.add_locations($.from_html(`<button> </button>`), Props_events[$.FILENAME], [[9, 0]]);\n\nexport default function Props_events($$anchor, $$props) {\n\t$.check_target(new.target);\n\t$.push($$props, true, Props_events);\n\n\tlet disabled = $.prop($$props, 'disabled', 3, false);\n\n\tfunction onClick() {\n\t\t$$props.ontoggle?.(!disabled());\n\t}\n\n\tvar $$exports = { ...$.legacy_api() };\n\tvar button = root();\n\tvar text = $.child(button, true);\n\n\t$.reset(button);\n\n\t$.template_effect(() => {\n\t\tbutton.disabled = disabled();\n\t\t$.set_text(text, $$props.label);\n\t});\n\n\t$.delegated('click', button, onClick);\n\t$.append($$anchor, button);\n\n\treturn $.pop($$exports);\n}\n\n$.delegate(['click']);",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "props-events.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  let { label, disabled = false, ontoggle } = $props();\n\n  function onClick() {\n    ontoggle?.(!disabled);\n  }\n</script>\n\n<button {disabled} onclick={onClick}>{label}</button>\n"
+    ],
+    "mappings": ";;;;;;;;wDAAA,CAAC;;;;CACC,IAAI,AAAS,QAAQ,kCAAG,KAAK;;CAE7B,QAAQ,CAAC,OAAO,GAAG,CAAC;sBACN,QAAQ;CACtB,CAAC;;;KAGF,MAAM;oBAAN,MAAM;;SAAN,MAAM;;;EAAN,MAAM,YAAE,QAAQ;;;;sBAAhB,MAAM,EAAqB,OAAO;oBAAlC,MAAM;;;AAFC,CAAC;;"
+  }
+}

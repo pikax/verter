@@ -121,7 +121,7 @@ export async function hydrateVue(ssrHtml, clientCode) {
  *
  * MISMATCH DETECTION. Svelte has no single always-on equivalent of Vue's
  * hydration warning, and no one signal covers every mismatch class its
- * runtime can produce (read from the pinned 5.56.8 client runtime,
+ * runtime can produce (read from the pinned 5.56.10 client runtime,
  * internal/client/render.js + dom/hydration.js), so the runner combines
  * the three REAL signals that together do:
  *

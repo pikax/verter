@@ -1,4 +1,4 @@
-//! The css scope-hash derivation (the official `svelte@5.56.3` default
+//! The css scope-hash derivation (the official `svelte@5.56.10` default
 //! `cssHash` input rule over the shared djb2 hash).
 
 /// The official default css-hash: `svelte-${hash(filename === '(unknown)' ?
@@ -41,7 +41,7 @@ mod tests {
             "svelte-c4vjvh"
         );
         // Known djb2 vectors (pinned against the official `hash()` run on
-        // `svelte@5.56.3`): the filename input dominates when present…
+        // `svelte@5.56.10`): the filename input dominates when present…
         assert_eq!(
             css_scope_hash(Some("App.svelte"), "ignored"),
             "svelte-n50uah"
@@ -65,7 +65,7 @@ mod tests {
         // The official `state.js` normalizes `\` -> `/` before the default
         // `cssHash` reads the filename, so a Windows-style path hashes
         // IDENTICALLY to its POSIX form (cross-platform-deterministic). Oracle:
-        // svelte@5.56.3 hashes both `src\Foo.svelte` and `src/Foo.svelte` to
+        // svelte@5.56.10 hashes both `src\Foo.svelte` and `src/Foo.svelte` to
         // `svelte-1ghgqhn`. Against the pre-fix verbatim hash the backslash
         // path produced a DIFFERENT (wrong) hash — this discriminates.
         assert_eq!(

@@ -107,7 +107,7 @@ flowchart LR
 ## Experimental Svelte compiler
 
 Verter includes an experimental native Svelte client compiler tested against
-the pinned `svelte@5.56.3` runtime. It is not presented as a general drop-in
+the pinned `svelte@5.56.10` runtime. It is not presented as a general drop-in
 replacement for the official compiler: supported client behavior is covered by
 runtime and official-oracle tests, while unsupported runtime or server-output
 surfaces fail closed with typed diagnostics. Published benchmark evidence is

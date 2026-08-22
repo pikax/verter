@@ -80,7 +80,7 @@ pub enum BindHostScope {
 }
 
 /// The ACCEPTED TARGET-EXPRESSION shape policy for a bind name — which expression
-/// forms official `svelte@5.56.3` admits as the bound target.
+/// forms official `svelte@5.56.10` admits as the bound target.
 ///
 /// Most binds accept BOTH an lvalue (an `Identifier` / `MemberExpression`) AND a
 /// two-element function-pair `{get, set}` (a `SequenceExpression`). `bind:group` is
@@ -101,7 +101,7 @@ pub enum BindTargetPolicy {
     /// count) is an official reject carrying [`official_code`](Self::IdentifierOrMemberOnly::official_code).
     /// Currently only `bind:group`.
     IdentifierOrMemberOnly {
-        /// The EXACT official `svelte@5.56.3` diagnostic code a `SequenceExpression`
+        /// The EXACT official `svelte@5.56.10` diagnostic code a `SequenceExpression`
         /// target on this bind mirrors (`bind_group_invalid_expression`).
         official_code: &'static str,
     },
@@ -111,7 +111,7 @@ pub enum BindTargetPolicy {
 /// backend emits (or the generic `$.bind_property` form). A STATIC enum (not a hot
 /// tag-string splitter) so the runtime emit path is a DATA-DRIVEN match over a proven
 /// helper fact, never a name-string dispatch. Each variant maps to exactly one pinned
-/// `svelte@5.56.3` client helper shape.
+/// `svelte@5.56.10` client helper shape.
 ///
 /// This is the CLOSED set of helpers the native client runtime can emit. It is carried
 /// on [`RuntimeBindRouting`] (the routing the emitter consumes), so a routing can ONLY
@@ -173,7 +173,7 @@ pub enum RuntimeHelper {
     ActiveElement,
 }
 
-/// The OFFICIAL `svelte@5.56.3` runtime helper IDENTITY for a bind-CONTRACT ROW — the
+/// The OFFICIAL `svelte@5.56.10` runtime helper IDENTITY for a bind-CONTRACT ROW — the
 /// machine-readable fact of which `$.bind_*` / `bind_property` form the official compiler
 /// emits, INDEPENDENT of whether the native client runtime currently emits it (that is the
 /// orthogonal [`RuntimeSupport`] axis). Splitting helper IDENTITY from support STATUS keeps
@@ -370,7 +370,7 @@ pub struct BindContract {
     /// `{get, set}` (`SequenceExpression`) target is admitted, or rejected with an
     /// official code (only `bind:group`). Consumed by the official-reject gate.
     pub target_policy: BindTargetPolicy,
-    /// The OFFICIAL `svelte@5.56.3` runtime helper IDENTITY — which `$.bind_*` /
+    /// The OFFICIAL `svelte@5.56.10` runtime helper IDENTITY — which `$.bind_*` /
     /// `bind_property` form the official compiler emits, preserved even for rows the native
     /// runtime does not yet emit. Contract/runtime column (the orthogonal support status is
     /// [`Self::support`]).
@@ -501,7 +501,7 @@ pub fn bind_target_policy(name: &str, tag: &str) -> BindTargetPolicy {
 /// the IDE) but ARE real runtime binds with dedicated helpers — AND the wide
 /// `bind:` family (every [`SVELTE_BIND_CONTRACTS`] row), so the runtime has ONE
 /// routing authority. The element host (`textarea` vs `select` vs `input`) selects the
-/// `value` helper, matching the pinned `svelte@5.56.3` shapes.
+/// `value` helper, matching the pinned `svelte@5.56.10` shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeBindRouting {
     /// The `$.bind_*` helper / `bind_property` form to emit.

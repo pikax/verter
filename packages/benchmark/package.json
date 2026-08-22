@@ -38,7 +38,7 @@
     "@vue/compiler-sfc": "3.6.0-rc.5",
     "@vue/language-server": "^3.3.2",
     "magic-string": "^0.30.21",
-    "svelte": "5.56.3",
+    "svelte": "5.56.10",
     "tinybench": "^6.0.2",
     "vue": "3.6.0-rc.5",
     "vue-component-meta": "^3.3.2"

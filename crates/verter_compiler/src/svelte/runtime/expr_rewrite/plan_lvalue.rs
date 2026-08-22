@@ -116,7 +116,7 @@ impl BindingOccurrenceCollector<'_> {
     /// identifier AND roots at a `$props()` prop (plain or bindable). A
     /// `lang="ts"` script admits the chain: TypeScript erasure and the reactive
     /// mutation edits compose on the same source transform. A plain script
-    /// fails closed because official svelte@5.56.3 rejects TypeScript syntax
+    /// fails closed because official svelte@5.56.10 rejects TypeScript syntax
     /// there. A chain rooting at a non-prop binding keeps its existing `Member`
     /// classification. Structural over parsed OXC nodes; shadow-aware via
     /// [`Self::signal_kind`]; the key inspection is the recursive

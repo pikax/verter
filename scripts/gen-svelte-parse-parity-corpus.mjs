@@ -4,7 +4,7 @@
  * Verter's Svelte tokenizer is intentionally infallible / recovery-based: it never
  * panics and always emits a faithful tree, even on malformed markup. That recovery is
  * correct for the IDE projection (it owns its own error recovery), but for the CLIENT
- * runtime the contract is "Verter emits a `Main` ⇔ official `svelte@5.56.3` ACCEPTS the
+ * runtime the contract is "Verter emits a `Main` ⇔ official `svelte@5.56.10` ACCEPTS the
  * same source". A recovery point that ACCEPTS markup official REJECTS would emit a
  * divergent module — a behavioral divergence. Hand-auditing the recovery points has
  * repeatedly missed leaks, so this generator mechanically ENUMERATES malformed (and
@@ -768,7 +768,7 @@ function enumerateReadStyleParseEntry(add) {
   // pre-empts it) yet its CSS body opens an UNTERMINATED QUOTE that SWALLOWS the literal `</style>`
   // text — so the reader runs PAST the close to true EOF (a quote closes only on a matching quote,
   // never on markup). So each row CLOSES the `<style>` and opens a quote/value swallowing the close.
-  // Grounded against pinned svelte@5.56.3 (each ⇒ `unexpected_eof`), one per distinct raise-site.
+  // Grounded against pinned svelte@5.56.10 (each ⇒ `unexpected_eof`), one per distinct raise-site.
   const eofBodies = [
     // `read_value` opens a `"` that swallows `</style>`; the value reader runs to EOF.
     ["value_open_quote_swallows_close", '<style>.a { content: "x</style>'],
@@ -782,7 +782,7 @@ function enumerateReadStyleParseEntry(add) {
   // open quote swallows its `</style>` and runs to EOF — the second body's `unexpected_eof` is the
   // only defect (the never-reached `style_duplicate` loses the first-error race), proving the EOF
   // parse-entry code arbitrates against the duplicate timing exactly like the other parse-entry
-  // codes above. Grounded: pinned svelte@5.56.3 ⇒ `unexpected_eof`.
+  // codes above. Grounded: pinned svelte@5.56.10 ⇒ `unexpected_eof`.
   add(
     "read_style",
     "second_unexpected_eof_open_quote_beats_duplicate",

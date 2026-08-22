@@ -2,7 +2,7 @@
 //!
 //! A DETERMINISTIC generated differential harness: the committed generated
 //! corpus (`tests/svelte_oracle_corpus/{fixtures,goldens}/generated`, produced by
-//! `scripts/gen-svelte-diff-corpus.mjs`) pins the official `svelte@5.56.3`
+//! `scripts/gen-svelte-diff-corpus.mjs`) pins the official `svelte@5.56.10`
 //! NORMALIZED topology across a combinatorial axis enumeration, and this matrix
 //! projects Verter's runtime IR into the SAME normalized schema and diffs them.
 //!

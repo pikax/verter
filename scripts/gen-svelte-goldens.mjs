@@ -2,7 +2,7 @@
 /**
  * Generator — Svelte helper-topology reference goldens.
  *
- * Runs the PINNED official `svelte@5.56.3` compiler over the vendored
+ * Runs the PINNED official `svelte@5.56.10` compiler over the vendored
  * `.svelte` corpus and writes committed, NORMALIZED golden files. The goldens
  * are the pinned Svelte reference the drift gate and the native runtime
  * codegen conformance gates compare against. Cosmetic JS CARRIER formatting
@@ -478,7 +478,7 @@ const FIXTURE_COMPILE_OPTIONS = {
   // element-emission surface), so only the html-namespace tree fixture exists.
   "options/fragments_tree_html.svelte": { fragments: "tree" },
   // The per-option EMISSION oracle fixtures (A#7): each pins the emitted-output
-  // difference of ONE `5m` compile option against its svelte@5.56.3 golden.
+  // difference of ONE `5m` compile option against its svelte@5.56.10 golden.
   // `fragments: 'tree'` over the SAME source as `namespace_html_default` (the
   // default `$.from_html` baseline) — the `$.from_html` vs `$.from_tree` diff.
   "options/fragments_tree_pair.svelte": { fragments: "tree" },

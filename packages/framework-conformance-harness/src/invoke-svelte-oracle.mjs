@@ -1,4 +1,4 @@
-// Hermetic invocation of the pinned official Svelte 5.56.8 compiler
+// Hermetic invocation of the pinned official Svelte 5.56.10 compiler
 // (`svelte/compiler`). Never writes an expectation; only produces a raw
 // compilation artifact for the caller (golden generator or comparator).
 //

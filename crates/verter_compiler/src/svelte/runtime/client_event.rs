@@ -33,7 +33,7 @@ pub(super) fn render_event_registration(
 }
 
 /// Render the effect-wrapped registration for a NON-DELEGATED event on a `use:`
-/// action host — the official `$.effect(() => $.event(…));` statement (svelte@5.56.3
+/// action host — the official `$.effect(() => $.event(…));` statement (svelte@5.56.10
 /// wraps each such event in its OWN init-domain effect so the listener re-registers
 /// in action order; delegated events and action-less elements keep the bare form).
 /// The inner call is the SAME [`render_event_call`] rendering the bare registration

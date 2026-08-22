@@ -581,7 +581,7 @@ struct ScriptSubscriptionScan<'a> {
 /// blocks, and computed member keys) for any `IdentifierReference` whose name is
 /// [`is_subscription_shaped`]. Verbatim class-body lowering
 /// ([`super::instance_items::SupportedInstanceScriptItem::StoreClassDecl`]) cannot
-/// rewrite such a reference the way official `svelte@5.56.3` does (an inner `$a`
+/// rewrite such a reference the way official `svelte@5.56.10` does (an inner `$a`
 /// read → `$a()`, an inner `$a = v` write → `$.store_set(a, v)`), so a class
 /// carrying one fails closed. A `$`-named METHOD / PROPERTY KEY is an
 /// `IdentifierName`, NOT an `IdentifierReference`, so it is correctly not tripped.

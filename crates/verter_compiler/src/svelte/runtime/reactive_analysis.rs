@@ -184,7 +184,7 @@ pub fn class_value_needs_clsx(kind: UnwrappedRootKind) -> bool {
 /// (`ImportedValue` / `ComponentImport`) counts as state for the same
 /// `!is_known` reason (imports are live bindings): `disabled={x}` from an
 /// import joins the `$.template_effect`, read plain (oracle-verified against
-/// svelte@5.56.3). It also drives the
+/// svelte@5.56.10). It also drives the
 /// `deps > 0` half of the reactive-text `has_call` memoize rule. Reuses the
 /// shared free-reference collector + the scope resolver, so a shadowing local is
 /// not counted; a prop / tracking const / import is NOT a signal (it emits
@@ -222,7 +222,7 @@ pub(super) fn expr_references_signal(
 ///    does NOT count, so `onclick={() => x}` is a plain prop init (`has_state = false`)
 ///    while `b={x}` / `depth={depth - 1}` are reactive.
 /// 2. A `{#snippet}` NAME reference counts as state (a snippet passed as a prop emits
-///    the getter `get tmpl() { return tmpl; }`, matching the pinned svelte@5.56.3
+///    the getter `get tmpl() { return tmpl; }`, matching the pinned svelte@5.56.10
 ///    snippet-prop shape).
 /// 3. It includes the BINDING-IMPURITY half ([`expr_has_binding_impurity`], official
 ///    `MemberExpression.js`'s `!is_pure` plus the mutation rule): a member rooted at
@@ -234,7 +234,7 @@ pub(super) fn expr_references_signal(
 ///    covers binding-rooted mutations, not only member reads. A write to a GLOBAL /
 ///    undeclared target (`failed={globalThis.x = 1}` / `failed={foo = 1}`) stays a plain
 ///    init. The scan does NOT descend into nested function bodies, so `{() => obj.x}`
-///    stays a plain init (rule 1 is preserved). Verified against pinned svelte@5.56.3
+///    stays a plain init (rule 1 is preserved). Verified against pinned svelte@5.56.10
 ///    (component + boundary emit identically).
 ///
 /// Consumes the expression's STORED reference facts for the synchronous-read
@@ -747,7 +747,7 @@ impl BindingImpurityScan<'_> {
             // `globalThis[obj.y]++`, `[foo = obj.y] = g`, `({ [obj.y]: foo } = g)` are all
             // stateful, while `globalThis[gk] = 1` over a GLOBAL key stays plain). Nested
             // function bodies are never descended, so a mutation inside `{() => obj.x = 1}`
-            // is not reached and stays a plain init. Verified against pinned svelte@5.56.3.
+            // is not reached and stays a plain init. Verified against pinned svelte@5.56.10.
             Expression::AssignmentExpression(a) => {
                 if self.assignment_target_roots_at_binding(&a.left) {
                     self.found = true;

@@ -5,7 +5,7 @@
 //! EMITS the right module for a supported input; the fail-closed breadth matrix
 //! (`svelte_client_fail_matrix.rs`) proves Verter REFUSES an unsupported FEATURE. This
 //! matrix proves the MISSING quadrant: a §1.2-core-shaped input the official
-//! `svelte@5.56.3` compiler COMPILE-ERRORS (a duplicate / mis-`context`-ed `<script>`,
+//! `svelte@5.56.10` compiler COMPILE-ERRORS (a duplicate / mis-`context`-ed `<script>`,
 //! a `$`-prefixed binding, a duplicate declaration, a global `$foo` / `$$foo`
 //! reference, an invalid HTML placement, a rune-arity error, a duplicate attribute, an
 //! invalid `<svelte:options>`) must ALSO fail closed in Verter — never an emitted
@@ -23,7 +23,7 @@
 //! - EXACT-RULE: every reject row maps to its declared `CoreOfficialValidationRule`,
 //!   and every `CoreOfficialValidationRule::ALL` variant has ≥1 corpus row (exhaustive
 //!   coverage).
-//! - FRESHNESS (behind `svelte-oracle`): the PINNED `svelte@5.56.3` STILL rejects each
+//! - FRESHNESS (behind `svelte-oracle`): the PINNED `svelte@5.56.10` STILL rejects each
 //!   committed row with its recorded `official_code`.
 //!
 //! There is NO `KNOWN_ACCEPTED_INVALID` allowlist — a row Verter accepts is a hard
@@ -432,7 +432,7 @@ mod freshness {
     }
 
     /// Run the reject oracle (`scripts/svelte-reject-oracle.mjs`) through the PINNED
-    /// `svelte@5.56.3` compiler, returning a `{ name → official-code | "ACCEPT" }` map.
+    /// `svelte@5.56.10` compiler, returning a `{ name → official-code | "ACCEPT" }` map.
     /// Opting into `--features svelte-oracle` asserts the live toolchain is present, so
     /// a missing / failing node run is a HARD failure here (never a silent skip).
     fn run_reject_oracle() -> BTreeMap<String, String> {
@@ -509,7 +509,7 @@ mod freshness {
         }
         assert!(
             wrong.is_empty(),
-            "reject-corpus rows that drifted from the pinned svelte@5.56.3 compiler:\n{}",
+            "reject-corpus rows that drifted from the pinned svelte@5.56.10 compiler:\n{}",
             wrong.join("\n")
         );
     }

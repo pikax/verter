@@ -244,7 +244,7 @@ pub(super) struct BindingOccurrenceCollector<'s> {
     member_write_target_spans: rustc_hash::FxHashSet<(u32, u32)>,
     /// The spans of the static-member READS that are the ENTIRE right-hand side of
     /// a PLAIN `=` (`sink = rest.y`, paren-transparent) — kept VERBATIM alongside
-    /// the write targets. Official svelte@5.56.3 (`Identifier.js`) de-localizes
+    /// the write targets. Official svelte@5.56.10 (`Identifier.js`) de-localizes
     /// `rest.KEY` in every read position EXCEPT when its grand-parent is an
     /// Assignment/Update (a COARSE position guard, NOT a read/write split); `=`
     /// returns `right` unchanged, so a bare `rest.KEY` RHS stays local while `+=` /
@@ -797,7 +797,7 @@ impl BindingOccurrenceCollector<'_> {
             // `$.update_store(c, $c())`, `$c--` → `$.update_store(c, $c(), -1)`,
             // `++$c` → `$.update_pre_store(c, $c())`, `--$c` →
             // `$.update_pre_store(c, $c(), -1)` (the official prefix/decrement
-            // forms — oracle-verified against svelte@5.56.3).
+            // forms — oracle-verified against svelte@5.56.10).
             ClientLvalue::StoreIdent { name } => {
                 let base = &name[1..];
                 let helper = if update.prefix {

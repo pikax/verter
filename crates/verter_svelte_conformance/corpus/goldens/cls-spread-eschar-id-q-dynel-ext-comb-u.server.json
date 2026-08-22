@@ -1,7 +1,7 @@
 {
   "slug": "cls-spread-eschar-id-q-dynel-ext-comb-u",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

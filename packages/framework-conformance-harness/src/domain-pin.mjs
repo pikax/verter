@@ -65,14 +65,14 @@ export const VUE_DOMAIN = Object.freeze({
 export const SVELTE_DOMAIN = Object.freeze({
   framework: "svelte",
   upstream: "https://github.com/sveltejs/svelte",
-  tag: "svelte@5.56.8",
-  tagObject: "a49603bbb50f948fd0c2bf5c55582a8f89b4d91c",
-  commit: "44a7813730579b94004e182e5a67aab27aa9d2a6",
-  tree: "63390158bfe8f997c474e35215a4fa627194c229",
-  packageVersion: "5.56.8",
+  tag: "svelte@5.56.10",
+  tagObject: "75870e2a3e643af19fb7baabf754875942464510",
+  commit: "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+  tree: "b7ced8028848a6c63bd8ff04177a43223ec89518",
+  packageVersion: "5.56.10",
   directPackages: Object.freeze({
     svelte:
-      "sha512-PY8LOw7xP6c8IOiVqdo0sbbZVYhXRSfklOQLAUyGBKqjTX0wx/z4l/9J+PmBpmlLnxzEb1NqltxQ5/wZme/Cmg==",
+      "sha512-Lcxbj8I/KAbpY+VjtY4ENQBV0dDCipfGAhqb51XQZ67CIQqXgsv/8dPkbILaj4Fb6/b6JAEM/PIVbILXgDQy2g==",
   }),
   // See VUE_DOMAIN.oracleLoadSpecifiers for the field contract. Real
   // callers this inventory is derived from:
@@ -96,6 +96,6 @@ export const SVELTE_DOMAIN = Object.freeze({
 export const EVIDENCE_LOCK_DIGESTS = Object.freeze({
   vuePackageLockSha256: "4c3cc2fb175c4cba390e319aeae04dce6252ac818a2045f8383a040b488430a2",
   vueClosureSha256: "6af174230488ff2d6d054550d81f3a96218c137046abf37a9dc9d27639d9ea07",
-  sveltePackageLockSha256: "0c27c9fc7bed24be3fd7a546b55b6ee5858b244a57613390a213fdb454b92ce2",
-  svelteClosureSha256: "3dc4209c2911700de92858e350ddda2e6f5f333874a2eb330125ee808910dbce",
+  sveltePackageLockSha256: "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
+  svelteClosureSha256: "01e810a3c8ea5a286915071ebb04af86c1b735b1f9ef7b5db5f7605312c7a3e2",
 });
